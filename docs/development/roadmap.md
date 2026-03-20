@@ -6,42 +6,45 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.20.3 — Core Gateway
+## v0.20.3 — Core Gateway + Local Provider Backends
 
-Foundation: inference types, provider trait, routing, caching, token budgets, HTTP client.
+Foundation: inference types, provider trait, routing, caching, token budgets, HTTP client, axum server, and local provider backends.
 
 ### Core types
-- [ ] `InferenceRequest` / `InferenceResponse` with OpenAI-compatible serialisation
-- [ ] `Message`, `Role`, `TokenUsage` for multi-turn conversations
-- [ ] `ModelInfo` with parameter count, context length, provider
-- [ ] `TranscriptionRequest` / `TranscriptionResponse` for speech-to-text
+- [x] `InferenceRequest` / `InferenceResponse` with OpenAI-compatible serialisation
+- [x] `Message`, `Role`, `TokenUsage` for multi-turn conversations
+- [x] `ModelInfo` with parameter count, context length, provider
+- [x] `TranscriptionRequest` / `TranscriptionResponse` for speech-to-text
 
 ### Provider framework
-- [ ] `LlmProvider` trait (infer, infer_stream, list_models, health_check)
-- [ ] `ProviderType` enum (14 backends)
-- [ ] `is_local()` / `supports_streaming()` capability queries
+- [x] `LlmProvider` trait (infer, infer_stream, list_models, health_check)
+- [x] `ProviderType` enum (14 backends)
+- [x] `is_local()` / `supports_streaming()` capability queries
 
 ### Routing
-- [ ] `Router` with Priority, RoundRobin, LowestLatency, Direct strategies
-- [ ] Model pattern matching (glob: `llama*`, `gpt-*`)
-- [ ] Disabled provider filtering
+- [x] `Router` with Priority, RoundRobin, LowestLatency, Direct strategies
+- [x] Model pattern matching (glob: `llama*`, `gpt-*`)
+- [x] Disabled provider filtering
 
 ### Middleware
-- [ ] `ResponseCache` with TTL, DashMap, max entries
-- [ ] `TokenBudget` with named pools, reserve/commit/release lifecycle
+- [x] `ResponseCache` with TTL, DashMap, max entries
+- [x] `TokenBudget` with named pools, reserve/commit/release lifecycle
 
 ### Client
-- [ ] `HooshClient` HTTP client for downstream consumers
-- [ ] `/v1/chat/completions`, `/v1/models`, `/v1/health`
+- [x] `HooshClient` HTTP client for downstream consumers
+- [x] `/v1/chat/completions`, `/v1/models`, `/v1/health`
+
+### Server
+- [x] axum HTTP server with OpenAI-compatible endpoints
+- [x] `/v1/chat/completions` (streaming SSE + non-streaming JSON)
+- [x] `/v1/models`, `/v1/health`, `/v1/health/providers`
+- [x] `/v1/tokens/check`, `/v1/tokens/reserve`, `/v1/tokens/report`, `/v1/tokens/pools`
+- [x] CORS, graceful shutdown
 
 ### CLI
-- [ ] `hoosh serve --port 8088`
-- [ ] `hoosh models` / `hoosh health` / `hoosh info`
-- [ ] `hoosh infer --model llama3 "prompt"`
-
----
-
-## v0.5.0 — Local Provider Backends
+- [x] `hoosh serve --port 8088`
+- [x] `hoosh models` / `hoosh health` / `hoosh info`
+- [x] `hoosh infer --model llama3 "prompt"`
 
 ### Ollama
 - [ ] REST API client (`/api/chat`, `/api/generate`)
@@ -68,7 +71,7 @@ Foundation: inference types, provider trait, routing, caching, token budgets, HT
 
 ---
 
-## v0.6.0 — Remote Provider Backends
+## v0.21.3 — Remote Provider Backends
 
 ### OpenAI
 - [ ] Chat completions (streaming + non-streaming)
@@ -92,7 +95,7 @@ Foundation: inference types, provider trait, routing, caching, token budgets, HT
 
 ---
 
-## v0.7.0 — Speech-to-Text (Whisper)
+## v0.22.3 — Speech-to-Text (Whisper)
 
 ### whisper.cpp integration
 - [ ] Rust bindings via `whisper-rs` (feature-gated)
@@ -111,27 +114,22 @@ Foundation: inference types, provider trait, routing, caching, token budgets, HT
 
 ---
 
-## v0.8.0 — HTTP Server & OpenAI Compatibility
-
-### axum server
-- [ ] Full OpenAI-compatible `/v1/chat/completions` (streaming SSE)
-- [ ] `/v1/models` listing across all providers
-- [ ] `/v1/embeddings` pass-through
-- [ ] CORS, Bearer token auth, rate limiting middleware
-
-### Token budget API
-- [ ] `/v1/tokens/check`, `/v1/tokens/reserve`, `/v1/tokens/report`
-- [ ] `/v1/tokens/pools` listing
-- [ ] Per-agent budget enforcement
+## v0.23.3 — Configuration & Server Hardening
 
 ### Configuration
 - [ ] TOML config file for provider routes, budgets, cache settings
 - [ ] Hot-reload config without restart
 - [ ] Environment variable overrides
 
+### Server
+- [ ] `/v1/embeddings` pass-through
+- [ ] Bearer token auth middleware
+- [ ] Rate limiting middleware
+- [ ] Per-agent budget enforcement in request pipeline
+
 ---
 
-## v0.9.0 — Advanced Features
+## v0.24.3 — Advanced Features
 
 ### Caching improvements
 - [ ] Semantic cache (embedding similarity, not just exact match)
@@ -149,7 +147,7 @@ Foundation: inference types, provider trait, routing, caching, token budgets, HT
 - [ ] Speculative decoding hints
 - [ ] Prompt compression for long conversations
 
-### Cert pinning
+### Security
 - [ ] TLS certificate pinning for remote providers
 - [ ] mTLS for local provider communication
 

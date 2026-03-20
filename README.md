@@ -239,12 +239,11 @@ budget.report("agent-123", 2000, 1847);
 
 | Version | Milestone | Key features |
 |---------|-----------|--------------|
-| **0.20.3** | Core gateway | Inference types, provider trait, routing, caching, token budgets, HTTP client |
-| **0.5.0** | Local backends | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, hardware-aware placement |
-| **0.6.0** | Remote backends | OpenAI, Anthropic, DeepSeek, Mistral, Groq, Google, health monitoring |
-| **0.7.0** | Speech-to-text | whisper.cpp integration, transcription API, tarang integration |
-| **0.8.0** | HTTP server | Full axum server, OpenAI-compatible SSE, config file, hot-reload |
-| **0.9.0** | Advanced | Semantic cache, cost tracking, Prometheus metrics, cert pinning |
+| **0.20.3** | Core gateway + local backends | Inference types, provider trait, routing, caching, token budgets, HTTP client, axum server, Ollama, llama.cpp, Synapse, LM Studio, LocalAI, hardware-aware placement |
+| **0.21.3** | Remote backends | OpenAI, Anthropic, DeepSeek, Mistral, Groq, Google, health monitoring |
+| **0.22.3** | Speech-to-text | whisper.cpp integration, transcription API, tarang integration |
+| **0.23.3** | Config & hardening | TOML config, hot-reload, embeddings pass-through, auth, rate limiting |
+| **0.24.3** | Advanced | Semantic cache, cost tracking, Prometheus metrics, TLS pinning |
 | **1.0.0** | Stable API | Frozen traits, 90%+ coverage, conformance tests, semver-checks |
 
 Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
