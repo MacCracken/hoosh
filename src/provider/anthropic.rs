@@ -8,13 +8,14 @@ use tokio::sync::mpsc;
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo, Role, TokenUsage};
 use crate::provider::{LlmProvider, ProviderType};
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Anthropic provider using the Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    api_version: String,
 }
 
 impl AnthropicProvider {
@@ -33,6 +34,8 @@ impl AnthropicProvider {
                 .unwrap_or_default(),
             base_url: url,
             api_key,
+            api_version: std::env::var("ANTHROPIC_API_VERSION")
+                .unwrap_or_else(|_| DEFAULT_ANTHROPIC_VERSION.to_string()),
         }
     }
 
@@ -41,7 +44,7 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let mut rb = rb.header("anthropic-version", ANTHROPIC_VERSION);
+        let mut rb = rb.header("anthropic-version", &self.api_version);
         if let Some(key) = &self.api_key {
             rb = rb.header("x-api-key", key);
         }
@@ -268,7 +271,7 @@ impl LlmProvider for AnthropicProvider {
         if let Some(key) = &self.api_key {
             rb = rb.header("x-api-key", key);
         }
-        rb = rb.header("anthropic-version", ANTHROPIC_VERSION);
+        rb = rb.header("anthropic-version", &self.api_version);
         match rb.send().await {
             Ok(resp) => {
                 // Any response (including 400/401/422) means the endpoint is reachable

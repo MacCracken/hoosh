@@ -33,6 +33,8 @@ pub mod whisper;
 pub mod anthropic;
 #[cfg(feature = "deepseek")]
 pub mod deepseek;
+#[cfg(feature = "grok")]
+pub mod grok;
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(feature = "mistral")]
@@ -193,6 +195,8 @@ impl ProviderRegistry {
                 &route.base_url,
                 api_key,
             ))),
+            #[cfg(feature = "grok")]
+            ProviderType::Grok => Some(Arc::new(grok::GrokProvider::new(&route.base_url, api_key))),
             _ => None,
         };
 

@@ -41,7 +41,8 @@ impl WhisperProvider {
         &self,
         request: &TranscriptionRequest,
     ) -> anyhow::Result<TranscriptionResponse> {
-        let samples = decode_audio(&request.audio)?;
+        let decoded = decode_audio(&request.audio)?;
+        let samples = &decoded.samples;
 
         let mut state = self
             .ctx
@@ -71,7 +72,7 @@ impl WhisperProvider {
         );
 
         state
-            .full(params, &samples)
+            .full(params, samples)
             .map_err(|e| anyhow::anyhow!("whisper transcription failed: {e:?}"))?;
 
         let mut text_parts = Vec::new();
@@ -92,7 +93,7 @@ impl WhisperProvider {
             .unwrap_or("unknown")
             .to_string();
 
-        let duration_secs = samples.len() as f64 / 16000.0;
+        let duration_secs = samples.len() as f64 / decoded.sample_rate.max(1) as f64;
 
         Ok(TranscriptionResponse {
             text: text_parts.join("").trim().to_string(),
@@ -116,9 +117,14 @@ impl WhisperProvider {
     }
 }
 
-/// Decode raw audio bytes (WAV) into 16kHz mono f32 samples.
-fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
-    // Simple WAV decoder — expects 16-bit PCM WAV
+/// Decoded WAV audio data.
+struct DecodedAudio {
+    samples: Vec<f32>,
+    sample_rate: u32,
+}
+
+/// Decode raw audio bytes (WAV) into f32 samples + sample rate.
+fn decode_audio(data: &[u8]) -> anyhow::Result<DecodedAudio> {
     if data.len() < 44 {
         return Err(anyhow::anyhow!("audio data too short for WAV header"));
     }
@@ -126,13 +132,21 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
         return Err(anyhow::anyhow!("not a WAV file"));
     }
 
-    // Find data chunk
+    let mut sample_rate: u32 = 16000; // default fallback
+
+    // Parse chunks
     let mut pos = 12;
     while pos + 8 < data.len() {
         let chunk_id = &data[pos..pos + 4];
         let chunk_size =
             u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
                 as usize;
+
+        if chunk_id == b"fmt " && chunk_size >= 16 && pos + 8 + 16 <= data.len() {
+            // Parse sample rate from fmt chunk (bytes 12-15 of chunk data)
+            let fmt_data = &data[pos + 8..pos + 8 + chunk_size.min(data.len() - pos - 8)];
+            sample_rate = u32::from_le_bytes([fmt_data[4], fmt_data[5], fmt_data[6], fmt_data[7]]);
+        }
 
         if chunk_id == b"data" {
             let audio_data = &data[pos + 8..pos + 8 + chunk_size.min(data.len() - pos - 8)];
@@ -142,13 +156,15 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
                     audio_data.len()
                 ));
             }
-            // Convert i16 PCM to f32
             let mut samples = Vec::with_capacity(audio_data.len() / 2);
             for chunk in audio_data.chunks_exact(2) {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
                 samples.push(sample as f32 / 32768.0);
             }
-            return Ok(samples);
+            return Ok(DecodedAudio {
+                samples,
+                sample_rate,
+            });
         }
 
         // Advance past chunk, checking for overflow
@@ -156,7 +172,6 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
             return Err(anyhow::anyhow!("malformed WAV: chunk size overflow"));
         };
         pos = next_pos;
-        // Align to even boundary
         if !chunk_size.is_multiple_of(2) {
             pos += 1;
         }
@@ -202,9 +217,10 @@ mod tests {
         wav.extend_from_slice(&0i16.to_le_bytes()); // sample 1
         wav.extend_from_slice(&16384i16.to_le_bytes()); // sample 2
 
-        let samples = decode_audio(&wav).unwrap();
-        assert_eq!(samples.len(), 2);
-        assert!((samples[0] - 0.0).abs() < f32::EPSILON);
-        assert!((samples[1] - 0.5).abs() < 0.001);
+        let decoded = decode_audio(&wav).unwrap();
+        assert_eq!(decoded.samples.len(), 2);
+        assert!((decoded.samples[0] - 0.0).abs() < f32::EPSILON);
+        assert!((decoded.samples[1] - 0.5).abs() < 0.001);
+        assert_eq!(decoded.sample_rate, 16000);
     }
 }

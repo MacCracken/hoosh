@@ -280,6 +280,24 @@ async fn chat_completions(
     if req.model.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "model field is required").into_response();
     }
+    if let Some(temp) = req.temperature {
+        if !(0.0..=2.0).contains(&temp) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("temperature must be between 0.0 and 2.0, got {temp}"),
+            )
+            .into_response();
+        }
+    }
+    if let Some(tp) = req.top_p {
+        if !(0.0..=1.0).contains(&tp) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("top_p must be between 0.0 and 1.0, got {tp}"),
+            )
+            .into_response();
+        }
+    }
 
     // Find a route for this model
     let route = match state.router.select(&req.model) {

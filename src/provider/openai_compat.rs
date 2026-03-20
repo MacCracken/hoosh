@@ -229,13 +229,18 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     if data == "[DONE]" {
                         return;
                     }
-                    if let Ok(chunk) = serde_json::from_str::<OaiStreamChunk>(data) {
-                        for choice in &chunk.choices {
-                            if let Some(content) = &choice.delta.content
-                                && !content.is_empty()
-                                && tx.send(Ok(content.clone())).await.is_err()
-                            {
-                                return;
+                    match serde_json::from_str::<OaiStreamChunk>(data) {
+                        Err(e) => {
+                            tracing::warn!("malformed SSE chunk from provider: {e}");
+                        }
+                        Ok(chunk) => {
+                            for choice in &chunk.choices {
+                                if let Some(content) = &choice.delta.content
+                                    && !content.is_empty()
+                                    && tx.send(Ok(content.clone())).await.is_err()
+                                {
+                                    return;
+                                }
                             }
                         }
                     }

@@ -38,6 +38,18 @@ impl CacheEntry {
     }
 }
 
+/// Build a cache key from model + messages hash to avoid collisions.
+pub fn cache_key(model: &str, messages: &[crate::inference::Message]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut hasher);
+    for m in messages {
+        std::mem::discriminant(&m.role).hash(&mut hasher);
+        m.content.hash(&mut hasher);
+    }
+    format!("{}:{:016x}", model, hasher.finish())
+}
+
 /// Thread-safe response cache with TTL eviction.
 pub struct ResponseCache {
     entries: DashMap<String, CacheEntry>,

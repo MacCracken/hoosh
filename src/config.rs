@@ -173,7 +173,15 @@ impl HooshConfig {
     /// Load configuration from a TOML file.
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path.as_ref())?;
-        let config: HooshConfig = toml::from_str(&contents)?;
+        let config: HooshConfig = toml::from_str(&contents).map_err(|e| {
+            // Redact error details that might contain API keys
+            let msg = e.to_string();
+            if msg.contains("api_key") {
+                anyhow::anyhow!("failed to parse config: TOML syntax error near api_key field")
+            } else {
+                anyhow::anyhow!("failed to parse config: {e}")
+            }
+        })?;
         Ok(config)
     }
 
