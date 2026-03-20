@@ -427,6 +427,126 @@ bind = "0.0.0.0"
     }
 
     #[test]
+    fn parse_with_budgets() {
+        let toml = r#"
+[[budgets]]
+name = "default"
+capacity = 100000
+
+[[budgets]]
+name = "agents"
+capacity = 50000
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.budgets.len(), 2);
+        assert_eq!(config.budgets[0].name, "default");
+        assert_eq!(config.budgets[0].capacity, 100000);
+    }
+
+    #[test]
+    fn parse_with_whisper_and_tts() {
+        let toml = r#"
+[whisper]
+model = "models/ggml-base.en.bin"
+
+[tts]
+url = "http://localhost:5500"
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.whisper.model.as_deref(),
+            Some("models/ggml-base.en.bin")
+        );
+        assert_eq!(config.tts.url.as_deref(), Some("http://localhost:5500"));
+    }
+
+    #[test]
+    fn into_server_config_with_budgets() {
+        let toml = r#"
+[[budgets]]
+name = "pool1"
+capacity = 5000
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let sc = config.into_server_config(None, None);
+        assert_eq!(sc.budget_pools.len(), 1);
+        assert_eq!(sc.budget_pools[0].name, "pool1");
+        assert_eq!(sc.budget_pools[0].capacity, 5000);
+    }
+
+    #[test]
+    fn into_server_config_with_whisper_tts() {
+        let toml = r#"
+[whisper]
+model = "model.bin"
+
+[tts]
+url = "http://tts:5500"
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let sc = config.into_server_config(None, None);
+        assert_eq!(sc.whisper_model.as_deref(), Some("model.bin"));
+        assert_eq!(sc.tts_model.as_deref(), Some("http://tts:5500"));
+    }
+
+    #[test]
+    fn into_server_config_all_strategies() {
+        for (strategy_str, _) in [
+            ("priority", "Priority"),
+            ("round_robin", "RoundRobin"),
+            ("lowest_latency", "LowestLatency"),
+            ("direct", "Direct"),
+        ] {
+            let toml = format!("[server]\nstrategy = \"{strategy_str}\"");
+            let config: HooshConfig = toml::from_str(&toml).unwrap();
+            let sc = config.into_server_config(None, None);
+            // Just verify it doesn't panic
+            let _ = sc.strategy;
+        }
+    }
+
+    #[test]
+    fn all_default_base_urls_covered() {
+        let types = [
+            (ProviderType::Ollama, "http://localhost:11434"),
+            (ProviderType::LlamaCpp, "http://localhost:8080"),
+            (ProviderType::Synapse, "http://localhost:5000"),
+            (ProviderType::LmStudio, "http://localhost:1234"),
+            (ProviderType::LocalAi, "http://localhost:8080"),
+            (ProviderType::OpenAi, "https://api.openai.com"),
+            (ProviderType::Anthropic, "https://api.anthropic.com"),
+            (ProviderType::DeepSeek, "https://api.deepseek.com"),
+            (ProviderType::Mistral, "https://api.mistral.ai"),
+            (ProviderType::Groq, "https://api.groq.com/openai"),
+            (ProviderType::OpenRouter, "https://openrouter.ai/api"),
+            (
+                ProviderType::Google,
+                "https://generativelanguage.googleapis.com",
+            ),
+            (ProviderType::Grok, "https://api.x.ai"),
+            (ProviderType::Whisper, "http://localhost:8080"),
+        ];
+        for (pt, expected) in types {
+            assert_eq!(default_base_url(pt), expected, "mismatch for {pt}");
+        }
+    }
+
+    #[test]
+    fn provider_with_max_tokens_limit() {
+        let toml = r#"
+[[providers]]
+type = "OpenAi"
+api_key = "sk-test"
+max_tokens_limit = 4096
+models = ["gpt-*"]
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.providers[0].max_tokens_limit, Some(4096));
+        let routes = config.routes();
+        assert_eq!(routes[0].max_tokens_limit, Some(4096));
+    }
+
+    #[test]
     fn provider_defaults() {
         let toml = r#"
 [[providers]]

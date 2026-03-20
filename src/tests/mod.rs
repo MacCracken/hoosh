@@ -528,6 +528,121 @@ mod mock_server {
         }
     }
 
+    /// Mock Anthropic server.
+    #[cfg(feature = "anthropic")]
+    mod anthropic_mock {
+        use axum::{Json, Router, routing::post};
+        use serde_json::json;
+        use tokio::net::TcpListener;
+
+        use crate::inference::InferenceRequest;
+        use crate::provider::LlmProvider;
+        use crate::provider::anthropic::AnthropicProvider;
+
+        async fn start_mock_anthropic() -> String {
+            async fn mock_messages(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+                let model = body["model"].as_str().unwrap_or("claude-sonnet-4-20250514");
+                Json(json!({
+                    "id": "msg-mock",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Anthropic mock response"}],
+                    "model": model,
+                    "usage": {"input_tokens": 15, "output_tokens": 8}
+                }))
+            }
+
+            let app = Router::new().route("/v1/messages", post(mock_messages));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://127.0.0.1:{}", addr.port())
+        }
+
+        #[tokio::test]
+        async fn anthropic_infer() {
+            let base_url = start_mock_anthropic().await;
+            let provider = AnthropicProvider::new(&base_url, Some("sk-ant-test".into()));
+
+            let req = InferenceRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                prompt: "Hello".into(),
+                system: Some("Be helpful.".into()),
+                max_tokens: Some(100),
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Anthropic mock response");
+            assert_eq!(resp.provider, "anthropic");
+            assert_eq!(resp.usage.prompt_tokens, 15);
+            assert_eq!(resp.usage.completion_tokens, 8);
+            assert_eq!(resp.usage.total_tokens, 23);
+        }
+
+        #[tokio::test]
+        async fn anthropic_infer_with_messages() {
+            use crate::inference::{Message, Role};
+            let base_url = start_mock_anthropic().await;
+            let provider = AnthropicProvider::new(&base_url, Some("key".into()));
+
+            let req = InferenceRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                messages: vec![
+                    Message {
+                        role: Role::System,
+                        content: "Be concise.".into(),
+                    },
+                    Message {
+                        role: Role::User,
+                        content: "Hi".into(),
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: "Hello!".into(),
+                    },
+                    Message {
+                        role: Role::User,
+                        content: "More".into(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Anthropic mock response");
+        }
+
+        #[tokio::test]
+        async fn anthropic_list_models() {
+            let provider = AnthropicProvider::new("http://unused", None);
+            let models = provider.list_models().await.unwrap();
+            assert!(models.len() >= 3);
+            assert!(models.iter().any(|m| m.id.contains("opus")));
+        }
+
+        #[tokio::test]
+        async fn anthropic_health_reachable() {
+            let base_url = start_mock_anthropic().await;
+            let provider = AnthropicProvider::new(&base_url, Some("key".into()));
+            // Mock returns 200 on POST /v1/messages, so health should pass
+            let healthy = provider.health_check().await.unwrap();
+            assert!(healthy);
+        }
+
+        #[tokio::test]
+        async fn anthropic_health_no_key() {
+            let provider = AnthropicProvider::new("http://unused", None);
+            let healthy = provider.health_check().await.unwrap();
+            assert!(!healthy);
+        }
+
+        #[tokio::test]
+        async fn anthropic_health_unreachable() {
+            let provider = AnthropicProvider::new("http://127.0.0.1:1", Some("key".into()));
+            let healthy = provider.health_check().await.unwrap();
+            assert!(!healthy);
+        }
+    }
+
     /// Test the thin wrapper providers against the mock OAI server.
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
@@ -601,6 +716,97 @@ mod mock_server {
         assert_eq!(resp.provider, "synapse");
     }
 
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn openai_remote_provider_infer() {
+        use crate::provider::openai_remote::OpenAiProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "gpt-4".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "openai");
+    }
+
+    #[cfg(feature = "deepseek")]
+    #[tokio::test]
+    async fn deepseek_provider_infer() {
+        use crate::provider::deepseek::DeepSeekProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = DeepSeekProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "deepseek-chat".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.provider, "deepseek");
+    }
+
+    #[cfg(feature = "mistral")]
+    #[tokio::test]
+    async fn mistral_provider_infer() {
+        use crate::provider::mistral::MistralProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = MistralProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "mistral-large".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.provider, "mistral");
+    }
+
+    #[cfg(feature = "groq")]
+    #[tokio::test]
+    async fn groq_provider_infer() {
+        use crate::provider::groq::GroqProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = GroqProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.provider, "groq");
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[tokio::test]
+    async fn openrouter_provider_infer() {
+        use crate::provider::openrouter::OpenRouterProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenRouterProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "meta/llama3".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.provider, "openrouter");
+    }
+
+    #[cfg(feature = "grok")]
+    #[tokio::test]
+    async fn grok_provider_infer() {
+        use crate::provider::grok::GrokProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = GrokProvider::new(&base_url, None);
+        let req = InferenceRequest {
+            model: "grok-2".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.provider, "grok");
+    }
+
     /// Test list_models and health_check through thin wrappers.
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
@@ -613,6 +819,83 @@ mod mock_server {
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
 
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn openai_list_models_and_health() {
+        use crate::provider::openai_remote::OpenAiProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiProvider::new(&base_url, None);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "groq")]
+    #[tokio::test]
+    async fn groq_list_models_and_health() {
+        use crate::provider::groq::GroqProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = GroqProvider::new(&base_url, None);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "deepseek")]
+    #[tokio::test]
+    async fn deepseek_list_models_and_health() {
+        use crate::provider::deepseek::DeepSeekProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = DeepSeekProvider::new(&base_url, None);
+        assert_eq!(provider.list_models().await.unwrap().len(), 2);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "mistral")]
+    #[tokio::test]
+    async fn mistral_health() {
+        use crate::provider::mistral::MistralProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = MistralProvider::new(&base_url, None);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[tokio::test]
+    async fn openrouter_health() {
+        use crate::provider::openrouter::OpenRouterProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenRouterProvider::new(&base_url, None);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "grok")]
+    #[tokio::test]
+    async fn grok_health() {
+        use crate::provider::grok::GrokProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = GrokProvider::new(&base_url, None);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "lmstudio")]
+    #[tokio::test]
+    async fn lmstudio_health() {
+        use crate::provider::lmstudio::LmStudioProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = LmStudioProvider::new(&base_url);
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "localai")]
+    #[tokio::test]
+    async fn localai_health() {
+        use crate::provider::localai::LocalAiProvider;
+        let base_url = start_mock_oai_server().await;
+        let provider = LocalAiProvider::new(&base_url);
         assert!(provider.health_check().await.unwrap());
     }
 }
@@ -1202,5 +1485,144 @@ mod e2e {
         assert!(!tokens.is_empty(), "should receive tokens");
         let full = tokens.join("");
         assert_eq!(full, "Hello world!");
+    }
+
+    // --- Server validation tests ---
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_validation_empty_model() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_validation_empty_messages() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_validation_bad_temperature() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 5.0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_validation_bad_top_p() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "top_p": -0.5
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_validation_nonexistent_pool() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "pool": "does-not-exist"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_no_provider_for_model() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+        // wildcard route matches everything, so use a server with restricted patterns
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec!["only-this*".into()],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+                max_tokens_limit: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig::default(),
+            budget_pools: vec![TokenPool::new("default", 10_000_000)],
+            whisper_model: None,
+            tts_model: None,
+        };
+        let app = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let http = reqwest::Client::new();
+        let resp = http
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "unmatched-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
     }
 }

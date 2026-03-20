@@ -179,4 +179,91 @@ mod tests {
         assert_eq!(cfg.ttl_secs, 300);
         assert!(cfg.enabled);
     }
+
+    #[test]
+    fn cache_eviction_at_capacity() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 3,
+            ttl_secs: 300,
+            enabled: true,
+        });
+        cache.insert("a".into(), "1".into());
+        cache.insert("b".into(), "2".into());
+        cache.insert("c".into(), "3".into());
+        assert_eq!(cache.len(), 3);
+        // This should trigger eviction
+        cache.insert("d".into(), "4".into());
+        assert!(cache.len() <= 3);
+        // New entry should be present
+        assert!(cache.get("d").is_some());
+    }
+
+    #[test]
+    fn cache_ttl_expiry() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 100,
+            ttl_secs: 0, // expire immediately
+            enabled: true,
+        });
+        cache.insert("key".into(), "value".into());
+        // Entry should be expired
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(cache.get("key").is_none());
+    }
+
+    #[test]
+    fn cache_key_different_models() {
+        use crate::inference::{Message, Role};
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hello".into(),
+        }];
+        let k1 = super::cache_key("llama3", &msgs);
+        let k2 = super::cache_key("gpt-4", &msgs);
+        assert_ne!(k1, k2);
+        assert!(k1.starts_with("llama3:"));
+        assert!(k2.starts_with("gpt-4:"));
+    }
+
+    #[test]
+    fn cache_key_different_messages() {
+        use crate::inference::{Message, Role};
+        let msgs1 = vec![Message {
+            role: Role::User,
+            content: "hello".into(),
+        }];
+        let msgs2 = vec![Message {
+            role: Role::User,
+            content: "world".into(),
+        }];
+        let k1 = super::cache_key("model", &msgs1);
+        let k2 = super::cache_key("model", &msgs2);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_same_request() {
+        use crate::inference::{Message, Role};
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hello".into(),
+        }];
+        let k1 = super::cache_key("model", &msgs);
+        let k2 = super::cache_key("model", &msgs);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn evict_expired_removes_stale() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 100,
+            ttl_secs: 0,
+            enabled: true,
+        });
+        cache.insert("a".into(), "1".into());
+        cache.insert("b".into(), "2".into());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        cache.evict_expired();
+        assert!(cache.is_empty());
+    }
 }
