@@ -3,8 +3,6 @@
 //! Supports local TTS via an HTTP backend (e.g. openedai-speech, piper-http)
 //! or remote APIs (OpenAI /v1/audio/speech). The TTS endpoint is OpenAI-compatible.
 
-use std::path::PathBuf;
-
 use crate::inference::{SpeechRequest, SpeechResponse};
 
 /// TTS provider that calls an HTTP TTS backend.
