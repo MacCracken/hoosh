@@ -75,6 +75,19 @@ impl ResponseCache {
         // Evict if at capacity
         if self.entries.len() >= self.config.max_entries {
             self.evict_expired();
+            // If still at capacity after evicting expired, drop oldest entries
+            if self.entries.len() >= self.config.max_entries {
+                let to_remove = self.entries.len() - self.config.max_entries + 1;
+                let keys: Vec<String> = self
+                    .entries
+                    .iter()
+                    .take(to_remove)
+                    .map(|e| e.key().clone())
+                    .collect();
+                for key in keys {
+                    self.entries.remove(&key);
+                }
+            }
         }
         self.entries.insert(
             key,

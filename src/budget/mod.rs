@@ -30,7 +30,8 @@ impl TokenPool {
 
     /// Available tokens (capacity - used - reserved).
     pub fn available(&self) -> u64 {
-        self.capacity.saturating_sub(self.used + self.reserved)
+        self.capacity
+            .saturating_sub(self.used.saturating_add(self.reserved))
     }
 
     /// Whether the pool can accommodate `tokens` more.

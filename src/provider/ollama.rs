@@ -23,7 +23,11 @@ impl OllamaProvider {
             url.trim_end_matches('/').to_string()
         };
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             base_url: url,
         }
     }
@@ -121,8 +125,18 @@ impl LlmProvider for OllamaProvider {
             "messages": messages,
             "stream": false,
         });
+        let mut options = serde_json::Map::new();
         if let Some(temp) = request.temperature {
-            body["options"] = serde_json::json!({"temperature": temp});
+            options.insert("temperature".into(), serde_json::json!(temp));
+        }
+        if let Some(tp) = request.top_p {
+            options.insert("top_p".into(), serde_json::json!(tp));
+        }
+        if let Some(max) = request.max_tokens {
+            options.insert("num_predict".into(), serde_json::json!(max));
+        }
+        if !options.is_empty() {
+            body["options"] = serde_json::Value::Object(options);
         }
 
         let start = Instant::now();
@@ -166,8 +180,18 @@ impl LlmProvider for OllamaProvider {
             "messages": messages,
             "stream": true,
         });
+        let mut options = serde_json::Map::new();
         if let Some(temp) = request.temperature {
-            body["options"] = serde_json::json!({"temperature": temp});
+            options.insert("temperature".into(), serde_json::json!(temp));
+        }
+        if let Some(tp) = request.top_p {
+            options.insert("top_p".into(), serde_json::json!(tp));
+        }
+        if let Some(max) = request.max_tokens {
+            options.insert("num_predict".into(), serde_json::json!(max));
+        }
+        if !options.is_empty() {
+            body["options"] = serde_json::Value::Object(options);
         }
 
         let resp = self
@@ -193,6 +217,12 @@ impl LlmProvider for OllamaProvider {
                         return;
                     }
                 };
+                if buf.len() + chunk.len() > 1024 * 1024 {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("NDJSON line exceeded 1MB limit")))
+                        .await;
+                    return;
+                }
                 buf.push_str(&String::from_utf8_lossy(&chunk));
 
                 // NDJSON: each line is a complete JSON object

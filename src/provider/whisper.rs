@@ -151,7 +151,11 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
             return Ok(samples);
         }
 
-        pos += 8 + chunk_size;
+        // Advance past chunk, checking for overflow
+        let Some(next_pos) = pos.checked_add(8).and_then(|p| p.checked_add(chunk_size)) else {
+            return Err(anyhow::anyhow!("malformed WAV: chunk size overflow"));
+        };
+        pos = next_pos;
         // Align to even boundary
         if !chunk_size.is_multiple_of(2) {
             pos += 1;

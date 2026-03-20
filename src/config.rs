@@ -135,7 +135,15 @@ impl Default for CacheSection {
 fn resolve_api_key(raw: &Option<String>) -> Option<String> {
     let raw = raw.as_ref()?;
     if let Some(var_name) = raw.strip_prefix('$') {
-        std::env::var(var_name).ok()
+        match std::env::var(var_name) {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!(
+                    "API key env var ${var_name} is not set — provider will have no API key"
+                );
+                None
+            }
+        }
     } else {
         Some(raw.clone())
     }

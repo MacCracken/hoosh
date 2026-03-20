@@ -193,6 +193,14 @@ impl HooshClient {
                         return;
                     }
                 };
+                if buf.len() + chunk.len() > 1024 * 1024 {
+                    let _ = tx
+                        .send(Err(HooshError::Provider(
+                            "SSE line exceeded 1MB limit".into(),
+                        )))
+                        .await;
+                    return;
+                }
                 buf.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(pos) = buf.find('\n') {

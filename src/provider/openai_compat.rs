@@ -23,7 +23,11 @@ impl OpenAiCompatibleProvider {
         provider_type: ProviderType,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             provider_type,
@@ -200,6 +204,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         return;
                     }
                 };
+                // Guard against unbounded buffer growth
+                if buf.len() + chunk.len() > 1024 * 1024 {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("SSE line exceeded 1MB limit")))
+                        .await;
+                    return;
+                }
                 buf.push_str(&String::from_utf8_lossy(&chunk));
 
                 // Process complete SSE lines

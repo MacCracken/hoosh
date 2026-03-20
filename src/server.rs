@@ -170,6 +170,36 @@ fn default_pool_name() -> String {
     "default".into()
 }
 
+/// Drop guard that reports token budget when a stream ends (including on client disconnect).
+struct StreamBudgetGuard {
+    state: Arc<AppState>,
+    pool: String,
+    estimated: u64,
+    actual: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for StreamBudgetGuard {
+    fn drop(&mut self) {
+        let actual = self.actual.load(std::sync::atomic::Ordering::Relaxed);
+        match self.state.budget.try_lock() {
+            Ok(mut budget) => budget.report(&self.pool, self.estimated, actual),
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                e.into_inner().report(&self.pool, self.estimated, actual);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // Lock is contended — spawn a task to report asynchronously
+                let state = self.state.clone();
+                let pool = self.pool.clone();
+                let estimated = self.estimated;
+                tokio::spawn(async move {
+                    let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
+                    budget.report(&pool, estimated, actual);
+                });
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // Fields consumed by future provider backends
 struct ChatMessage {
@@ -353,17 +383,27 @@ async fn chat_completions(
             }
         };
 
-        // Report budget after stream completes
+        // Use a shared counter so the drop guard can report even on disconnect
+        let token_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let token_count_clone = token_count.clone();
         let state_clone = state.clone();
         let pool_clone = pool_name.clone();
 
+        // Drop guard: reports budget when stream ends (including on client disconnect)
+        let budget_guard = StreamBudgetGuard {
+            state: state_clone,
+            pool: pool_clone,
+            estimated: estimated_tokens,
+            actual: token_count_clone,
+        };
+
         let s = async_stream::stream! {
+            let _guard = budget_guard;
             let mut rx = rx;
-            let mut token_count: u64 = 0;
             while let Some(result) = rx.recv().await {
                 match result {
                     Ok(token) => {
-                        token_count += 1;
+                        token_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let chunk = serde_json::json!({
                             "id": &id,
                             "object": "chat.completion.chunk",
@@ -397,10 +437,6 @@ async fn chat_completions(
             });
             yield Ok(Event::default().data(done_chunk.to_string()));
             yield Ok(Event::default().data("[DONE]"));
-
-            // Report actual token usage
-            let mut budget = state_clone.budget.lock().unwrap_or_else(|e| e.into_inner());
-            budget.report(&pool_clone, estimated_tokens, token_count);
         };
 
         return Sse::new(s).keep_alive(KeepAlive::default()).into_response();
