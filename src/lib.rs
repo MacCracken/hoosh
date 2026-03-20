@@ -45,6 +45,7 @@ pub mod error;
 pub mod inference;
 pub mod provider;
 pub mod router;
+pub mod server;
 
 pub use budget::{TokenBudget, TokenPool};
 pub use cache::ResponseCache;

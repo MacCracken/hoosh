@@ -10,6 +10,8 @@
 //!   hoosh --version
 
 use clap::{Parser, Subcommand};
+use hoosh::client::HooshClient;
+use hoosh::server::ServerConfig;
 
 #[derive(Parser)]
 #[command(name = "hoosh", version, about = "AI inference gateway")]
@@ -30,7 +32,11 @@ enum Commands {
         bind: String,
     },
     /// List available models across all providers
-    Models,
+    Models {
+        /// hoosh server URL
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        server: String,
+    },
     /// Run a one-shot inference
     Infer {
         /// Model identifier
@@ -41,14 +47,22 @@ enum Commands {
         /// Stream output token by token
         #[arg(long)]
         stream: bool,
+        /// hoosh server URL
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        server: String,
     },
     /// Check health of all configured providers
-    Health,
+    Health {
+        /// hoosh server URL
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        server: String,
+    },
     /// Show system info (providers, hardware, config)
     Info,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,39 +75,67 @@ fn main() {
 
     match cli.command {
         Commands::Serve { port, bind } => {
-            println!(
-                "hoosh v{} — AI inference gateway",
-                env!("CARGO_PKG_VERSION")
-            );
-            println!("Listening on {}:{}", bind, port);
-            println!(
-                "OpenAI-compatible API: http://{}:{}/v1/chat/completions",
-                bind, port
-            );
-            println!("(server not yet implemented — scaffold only)");
+            let config = ServerConfig {
+                bind,
+                port,
+                ..Default::default()
+            };
+            hoosh::server::run(config).await?;
         }
-        Commands::Models => {
-            println!("(model listing not yet implemented — scaffold only)");
+        Commands::Models { server } => {
+            let client = HooshClient::new(&server);
+            match client.list_models().await {
+                Ok(models) => {
+                    if models.is_empty() {
+                        println!("No models available.");
+                    } else {
+                        for m in &models {
+                            println!(
+                                "  {} (provider: {}, available: {})",
+                                m.id, m.provider, m.available
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to hoosh server at {}: {}", server, e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Infer {
             model,
             prompt,
-            stream,
+            stream: _,
+            server,
         } => {
-            println!(
-                "Infer: model={}, stream={}, prompt=\"{}\"",
+            let client = HooshClient::new(&server);
+            let req = hoosh::InferenceRequest {
                 model,
-                stream,
-                if prompt.len() > 60 {
-                    format!("{}...", &prompt[..60])
-                } else {
-                    prompt
+                prompt,
+                ..Default::default()
+            };
+            match client.infer(&req).await {
+                Ok(resp) => println!("{}", resp.text),
+                Err(e) => {
+                    eprintln!("Inference failed: {}", e);
+                    std::process::exit(1);
                 }
-            );
-            println!("(inference not yet implemented — scaffold only)");
+            }
         }
-        Commands::Health => {
-            println!("(health check not yet implemented — scaffold only)");
+        Commands::Health { server } => {
+            let client = HooshClient::new(&server);
+            match client.health().await {
+                Ok(true) => println!("hoosh server at {} is healthy", server),
+                Ok(false) => {
+                    println!("hoosh server at {} is unhealthy", server);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Health check failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Info => {
             println!("hoosh v{}", env!("CARGO_PKG_VERSION"));
@@ -110,13 +152,12 @@ fn main() {
                 println!();
             }
 
-            println!("Configured providers:");
-            println!("  (provider configuration not yet loaded — scaffold only)");
-
             #[cfg(feature = "whisper")]
-            println!("\nSpeech-to-text: whisper.cpp (enabled)");
+            println!("Speech-to-text: whisper.cpp (enabled)");
             #[cfg(not(feature = "whisper"))]
-            println!("\nSpeech-to-text: disabled (enable 'whisper' feature)");
+            println!("Speech-to-text: disabled (enable 'whisper' feature)");
         }
     }
+
+    Ok(())
 }
