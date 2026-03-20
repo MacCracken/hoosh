@@ -26,12 +26,20 @@ pub struct HooshConfig {
     pub budgets: Vec<BudgetPoolSection>,
     #[serde(default)]
     pub whisper: WhisperSection,
+    #[serde(default)]
+    pub tts: TtsSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WhisperSection {
     /// Path to whisper model file (e.g. "models/ggml-base.en.bin").
     pub model: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TtsSection {
+    /// URL of the TTS backend (e.g. "http://localhost:5500" for openedai-speech).
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,6 +216,7 @@ impl HooshConfig {
                 providers: Vec::new(),
                 budgets: Vec::new(),
                 whisper: WhisperSection::default(),
+                tts: TtsSection::default(),
             }
         }
     }
@@ -265,6 +274,7 @@ impl HooshConfig {
             },
             budget_pools,
             whisper_model: self.whisper.model,
+            tts_model: self.tts.url,
         }
     }
 }

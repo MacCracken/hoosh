@@ -28,6 +28,10 @@ pub mod synapse;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
+// Text-to-speech
+#[cfg(feature = "piper")]
+pub mod tts;
+
 // Remote providers
 #[cfg(feature = "anthropic")]
 pub mod anthropic;

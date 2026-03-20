@@ -734,6 +734,8 @@ mod server_wiring {
             providers,
             #[cfg(feature = "whisper")]
             whisper: None,
+            #[cfg(feature = "piper")]
+            tts: None,
         })
     }
 
@@ -953,6 +955,7 @@ mod e2e {
                 TokenPool::new("limited", 50),
             ],
             whisper_model: None,
+            tts_model: None,
         };
 
         let app = crate::server::build_app(config);
@@ -1023,6 +1026,7 @@ mod e2e {
             cache_config: CacheConfig::default(),
             budget_pools: vec![TokenPool::new("default", u64::MAX)],
             whisper_model: None,
+            tts_model: None,
         };
 
         let app = crate::server::build_app(config);

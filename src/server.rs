@@ -31,6 +31,8 @@ pub struct AppState {
     pub providers: ProviderRegistry,
     #[cfg(feature = "whisper")]
     pub whisper: Option<std::sync::Arc<crate::provider::whisper::WhisperProvider>>,
+    #[cfg(feature = "piper")]
+    pub tts: Option<std::sync::Arc<crate::provider::tts::TtsProvider>>,
 }
 
 /// Server configuration.
@@ -43,6 +45,8 @@ pub struct ServerConfig {
     pub budget_pools: Vec<TokenPool>,
     /// Path to whisper model file (e.g. "models/ggml-base.en.bin").
     pub whisper_model: Option<String>,
+    /// Path to piper TTS model config (e.g. "models/en_US-lessac-medium.onnx.json").
+    pub tts_model: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -55,6 +59,7 @@ impl Default for ServerConfig {
             cache_config: CacheConfig::default(),
             budget_pools: Vec::new(),
             whisper_model: None,
+            tts_model: None,
         }
     }
 }
@@ -93,6 +98,12 @@ pub fn build_app(config: ServerConfig) -> Router {
         }
     });
 
+    #[cfg(feature = "piper")]
+    let tts = config.tts_model.as_ref().map(|url| {
+        tracing::info!("TTS backend configured: {url}");
+        std::sync::Arc::new(crate::provider::tts::TtsProvider::new(url, None))
+    });
+
     let state = Arc::new(AppState {
         router: hoosh_router::Router::new(config.routes, config.strategy),
         cache: ResponseCache::new(config.cache_config),
@@ -100,6 +111,8 @@ pub fn build_app(config: ServerConfig) -> Router {
         providers,
         #[cfg(feature = "whisper")]
         whisper,
+        #[cfg(feature = "piper")]
+        tts,
     });
 
     // API routes with 1MB body limit
@@ -121,6 +134,13 @@ pub fn build_app(config: ServerConfig) -> Router {
     #[cfg(feature = "whisper")]
     {
         app = app.route("/v1/audio/transcriptions", post(transcribe));
+    }
+    #[cfg(feature = "piper")]
+    {
+        app = app.route("/v1/audio/speech", post(text_to_speech));
+    }
+    #[cfg(any(feature = "whisper", feature = "piper"))]
+    {
         app = app.layer(DefaultBodyLimit::max(50 * 1024 * 1024));
     }
 
@@ -822,6 +842,65 @@ async fn transcribe(
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Transcription error: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text-to-speech: /v1/audio/speech (OpenAI-compatible)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "piper")]
+async fn text_to_speech(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::inference::SpeechRequest>,
+) -> impl IntoResponse {
+    let tts = match &state.tts {
+        Some(t) => t.clone(),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TTS model not loaded. Set tts_model in config.",
+            )
+            .into_response();
+        }
+    };
+
+    if req.input.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "input text is required").into_response();
+    }
+    if req.input.len() > 4096 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("input too long: {} chars (max 4096)", req.input.len()),
+        )
+        .into_response();
+    }
+    if !(0.25..=4.0).contains(&req.speed) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("speed must be between 0.25 and 4.0, got {}", req.speed),
+        )
+        .into_response();
+    }
+
+    match tts.synthesize(&req).await {
+        Ok(result) => {
+            let content_type = match result.format.as_str() {
+                "pcm" => "audio/pcm",
+                _ => "audio/wav",
+            };
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, content_type)],
+                result.audio,
+            )
+                .into_response()
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("TTS synthesis error: {e}"),
         )
         .into_response(),
     }

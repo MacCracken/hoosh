@@ -68,6 +68,20 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8088")]
         server: String,
     },
+    /// Synthesize speech from text (text-to-speech)
+    Speak {
+        /// Text to speak
+        text: String,
+        /// Output audio file
+        #[arg(short, long, default_value = "output.wav")]
+        output: String,
+        /// Speech speed (0.25-4.0)
+        #[arg(long, default_value = "1.0")]
+        speed: f32,
+        /// hoosh server URL
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        server: String,
+    },
     /// Show system info (providers, hardware, config)
     Info,
 }
@@ -208,6 +222,41 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Speak {
+            text,
+            output,
+            speed,
+            server,
+        } => {
+            let client = reqwest::Client::new();
+            let url = format!("{}/v1/audio/speech", server.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "input": text,
+                "speed": speed,
+                "response_format": "wav",
+            });
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let audio = resp.bytes().await.unwrap_or_default();
+                        std::fs::write(&output, &audio).unwrap_or_else(|e| {
+                            eprintln!("Failed to write {output}: {e}");
+                            std::process::exit(1);
+                        });
+                        println!("Audio saved to {output} ({} bytes)", audio.len());
+                    } else {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        eprintln!("TTS failed ({status}): {body}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to hoosh server at {server}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Info => {
             println!("hoosh v{}", env!("CARGO_PKG_VERSION"));
             println!();
@@ -258,6 +307,11 @@ async fn main() -> anyhow::Result<()> {
             println!("Speech-to-text: whisper.cpp (enabled)");
             #[cfg(not(feature = "whisper"))]
             println!("Speech-to-text: disabled (enable 'whisper' feature)");
+
+            #[cfg(feature = "piper")]
+            println!("Text-to-speech: piper TTS (enabled)");
+            #[cfg(not(feature = "piper"))]
+            println!("Text-to-speech: disabled (enable 'piper' feature)");
         }
     }
 

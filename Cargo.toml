@@ -29,6 +29,8 @@ synapse = []
 grok = []
 # Speech-to-text (whisper.cpp bindings)
 whisper = ["dep:whisper-rs"]
+# Text-to-speech (piper TTS, ONNX-based)
+piper = []
 # Hardware detection for model placement
 hwaccel = ["dep:ai-hwaccel"]
 
@@ -74,6 +76,9 @@ ai-hwaccel = { version = "0.19", optional = true, default-features = false, feat
 
 # Speech-to-text
 whisper-rs = { version = "0.16", optional = true }
+
+# Text-to-speech (piper support planned — deps have upstream compat issues)
+# piper-rs = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

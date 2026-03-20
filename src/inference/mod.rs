@@ -111,6 +111,45 @@ pub struct TranscriptionSegment {
     pub end_secs: f64,
 }
 
+/// Text-to-speech request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechRequest {
+    /// Text to synthesize.
+    pub input: String,
+    /// Voice name or ID.
+    #[serde(default = "default_voice")]
+    pub voice: String,
+    /// Speech speed multiplier (0.25–4.0).
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    /// Output format: "wav", "pcm".
+    #[serde(default = "default_audio_format")]
+    pub response_format: String,
+}
+
+fn default_voice() -> String {
+    "default".into()
+}
+fn default_speed() -> f32 {
+    1.0
+}
+fn default_audio_format() -> String {
+    "wav".into()
+}
+
+/// Text-to-speech response (audio bytes).
+#[derive(Debug, Clone)]
+pub struct SpeechResponse {
+    /// Raw audio data.
+    pub audio: Vec<u8>,
+    /// Audio format (e.g. "wav").
+    pub format: String,
+    /// Sample rate in Hz.
+    pub sample_rate: u32,
+    /// Duration in seconds.
+    pub duration_secs: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

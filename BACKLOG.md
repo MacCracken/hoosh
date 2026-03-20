@@ -6,10 +6,7 @@ Audit rounds completed: 3. Backlog cleared except one feature request.
 
 ## Remaining Items
 
-### L7: TTS (text-to-speech) support
-- **Issue**: Whisper handles STT but no TTS counterpart exists.
-- **Fix**: Add TTS provider trait and endpoint (`/v1/audio/speech`) matching OpenAI's API.
-- **Status**: Feature request — requires new provider trait, endpoint, and audio encoding.
+None. Backlog cleared.
 
 ## Resolved Items
 
@@ -37,3 +34,4 @@ Audit rounds completed: 3. Backlog cleared except one feature request.
 | L11 | Whisper hardcoded 16kHz | Parses sample rate from WAV fmt chunk |
 | L12 | Unsafe env var in tests | Accepted (single-threaded test) |
 | L13 | Missing env var silent | Added `tracing::warn!` on unresolved `$ENV_VAR` |
+| L7 | TTS support | Implemented: `TtsProvider` (HTTP backend), `/v1/audio/speech` endpoint, `hoosh speak` CLI, config `[tts]` section, `SpeechRequest`/`SpeechResponse` types. Feature-gated behind `piper`. Piper ONNX dep has upstream ort compat issues — using HTTP backend pattern instead (works with openedai-speech, OpenAI API, or any compatible TTS server). |
