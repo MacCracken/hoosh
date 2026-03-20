@@ -48,3 +48,26 @@ impl LlmProvider for LocalAiProvider {
         ProviderType::LocalAi
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_url() {
+        let p = LocalAiProvider::new("");
+        assert_eq!(p.inner.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn custom_url() {
+        let p = LocalAiProvider::new("http://ai-server:3000");
+        assert_eq!(p.inner.base_url(), "http://ai-server:3000");
+    }
+
+    #[test]
+    fn provider_type_is_localai() {
+        let p = LocalAiProvider::new("");
+        assert_eq!(p.provider_type(), ProviderType::LocalAi);
+    }
+}

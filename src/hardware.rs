@@ -96,3 +96,62 @@ impl HardwareManager {
         lines
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_creates_manager() {
+        let hw = HardwareManager::detect();
+        // Should not panic — detection works even without GPUs
+        let _ = hw.has_accelerator();
+        let _ = hw.total_accelerator_memory();
+    }
+
+    #[test]
+    fn summary_is_nonempty() {
+        let hw = HardwareManager::detect();
+        let lines = hw.summary();
+        assert!(!lines.is_empty());
+        // Without GPUs in CI, should say "No hardware accelerators detected"
+        // With GPUs, should list them — either way, at least one line
+    }
+
+    #[test]
+    fn recommend_placement_defaults_to_ollama() {
+        let hw = HardwareManager::detect();
+        let rec = hw.recommend_placement(7_000_000_000, &[]);
+        assert_eq!(rec.provider, "ollama");
+        assert!(rec.estimated_memory_bytes > 0);
+    }
+
+    #[test]
+    fn recommend_placement_uses_first_available() {
+        let hw = HardwareManager::detect();
+        let providers = vec!["localai".to_string(), "llamacpp".to_string()];
+        let rec = hw.recommend_placement(7_000_000_000, &providers);
+        // Without VRAM it should pick the first available
+        if !hw.has_accelerator() {
+            assert_eq!(rec.provider, "localai");
+            assert!(!rec.fits_in_vram);
+        }
+    }
+
+    #[test]
+    fn placement_recommendation_fields() {
+        let rec = PlacementRecommendation {
+            provider: "ollama".into(),
+            quantization: Some("Q4_K_M".into()),
+            estimated_memory_bytes: 4_000_000_000,
+            fits_in_vram: true,
+        };
+        assert_eq!(rec.provider, "ollama");
+        assert_eq!(rec.quantization.as_deref(), Some("Q4_K_M"));
+        assert!(rec.fits_in_vram);
+
+        // Clone works
+        let rec2 = rec.clone();
+        assert_eq!(rec2.estimated_memory_bytes, 4_000_000_000);
+    }
+}

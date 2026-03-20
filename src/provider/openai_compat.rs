@@ -274,3 +274,144 @@ impl LlmProvider for OpenAiCompatibleProvider {
         self.provider_type
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::Message;
+
+    #[test]
+    fn build_body_from_prompt() {
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hello".into(),
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Hello");
+        assert_eq!(body["model"], "llama3");
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn build_body_from_prompt_with_system() {
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hello".into(),
+            system: Some("You are helpful.".into()),
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are helpful.");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "Hello");
+    }
+
+    #[test]
+    fn build_body_from_messages() {
+        let req = InferenceRequest {
+            model: "gpt-4".into(),
+            messages: vec![
+                Message {
+                    role: Role::System,
+                    content: "Be concise.".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "Hi".into(),
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: "Hello!".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "Hello!");
+    }
+
+    #[test]
+    fn build_body_optional_params() {
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hi".into(),
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stream: true,
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        assert_eq!(body["max_tokens"], 100);
+        assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < f64::EPSILON);
+        assert!((body["top_p"].as_f64().unwrap() - 0.9).abs() < f64::EPSILON);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn build_body_no_optional_params() {
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[test]
+    fn provider_creation() {
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            None,
+            ProviderType::LlamaCpp,
+        );
+        assert_eq!(p.base_url(), "http://localhost:8080");
+        assert_eq!(p.provider_type(), ProviderType::LlamaCpp);
+    }
+
+    #[test]
+    fn provider_strips_trailing_slash() {
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080/",
+            Some("sk-test".into()),
+            ProviderType::OpenAi,
+        );
+        assert_eq!(p.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn provider_preserves_api_key() {
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            Some("sk-secret".into()),
+            ProviderType::OpenAi,
+        );
+        assert!(p.api_key.is_some());
+        assert_eq!(p.api_key.as_deref(), Some("sk-secret"));
+    }
+
+    #[test]
+    fn provider_no_api_key() {
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            None,
+            ProviderType::LlamaCpp,
+        );
+        assert!(p.api_key.is_none());
+    }
+}

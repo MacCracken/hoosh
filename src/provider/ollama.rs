@@ -262,3 +262,136 @@ impl LlmProvider for OllamaProvider {
         ProviderType::Ollama
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::Message;
+
+    #[test]
+    fn default_url() {
+        let p = OllamaProvider::new("");
+        assert_eq!(p.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn custom_url() {
+        let p = OllamaProvider::new("http://my-ollama:9999");
+        assert_eq!(p.base_url, "http://my-ollama:9999");
+    }
+
+    #[test]
+    fn strips_trailing_slash() {
+        let p = OllamaProvider::new("http://localhost:11434/");
+        assert_eq!(p.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn provider_type_is_ollama() {
+        let p = OllamaProvider::new("");
+        assert_eq!(p.provider_type(), ProviderType::Ollama);
+    }
+
+    #[test]
+    fn messages_from_prompt() {
+        let req = InferenceRequest {
+            prompt: "Hello".into(),
+            ..Default::default()
+        };
+        let msgs = build_messages(&req);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Hello");
+    }
+
+    #[test]
+    fn messages_from_prompt_with_system() {
+        let req = InferenceRequest {
+            prompt: "Hello".into(),
+            system: Some("Be helpful.".into()),
+            ..Default::default()
+        };
+        let msgs = build_messages(&req);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "Be helpful.");
+        assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[test]
+    fn messages_from_conversation() {
+        let req = InferenceRequest {
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: "Hi".into(),
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: "Hello!".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "How are you?".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let msgs = build_messages(&req);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"], "How are you?");
+    }
+
+    #[test]
+    fn response_deserialization() {
+        let json = r#"{
+            "message": {"content": "Hello world"},
+            "eval_count": 5,
+            "prompt_eval_count": 10
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.message.unwrap().content.unwrap(),
+            "Hello world"
+        );
+        assert_eq!(resp.eval_count, Some(5));
+        assert_eq!(resp.prompt_eval_count, Some(10));
+    }
+
+    #[test]
+    fn response_deserialization_minimal() {
+        let json = r#"{"message": null}"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.message.is_none());
+        assert!(resp.eval_count.is_none());
+    }
+
+    #[test]
+    fn stream_line_deserialization() {
+        let json = r#"{"message": {"content": "tok"}, "done": false}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert!(!line.done);
+        assert_eq!(line.message.unwrap().content.unwrap(), "tok");
+    }
+
+    #[test]
+    fn stream_line_done() {
+        let json = r#"{"message": {"content": ""}, "done": true, "eval_count": 42, "prompt_eval_count": 10}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert!(line.done);
+        assert_eq!(line.eval_count, Some(42));
+    }
+
+    #[test]
+    fn tags_response_deserialization() {
+        let json = r#"{"models": [{"name": "llama3:latest", "size": 4000000000}, {"name": "mistral:7b"}]}"#;
+        let resp: OllamaTagsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.models.len(), 2);
+        assert_eq!(resp.models[0].name, "llama3:latest");
+        assert_eq!(resp.models[0].size, Some(4000000000));
+        assert!(resp.models[1].size.is_none());
+    }
+}

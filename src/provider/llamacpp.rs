@@ -48,3 +48,26 @@ impl LlmProvider for LlamaCppProvider {
         ProviderType::LlamaCpp
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_url() {
+        let p = LlamaCppProvider::new("");
+        assert_eq!(p.inner.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn custom_url() {
+        let p = LlamaCppProvider::new("http://gpu-box:9999");
+        assert_eq!(p.inner.base_url(), "http://gpu-box:9999");
+    }
+
+    #[test]
+    fn provider_type_is_llamacpp() {
+        let p = LlamaCppProvider::new("");
+        assert_eq!(p.provider_type(), ProviderType::LlamaCpp);
+    }
+}

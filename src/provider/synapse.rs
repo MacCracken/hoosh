@@ -64,3 +64,26 @@ impl LlmProvider for SynapseProvider {
         ProviderType::Synapse
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_url() {
+        let p = SynapseProvider::new("");
+        assert_eq!(p.inner.base_url(), "http://localhost:5000");
+    }
+
+    #[test]
+    fn custom_url() {
+        let p = SynapseProvider::new("http://synapse:7000");
+        assert_eq!(p.inner.base_url(), "http://synapse:7000");
+    }
+
+    #[test]
+    fn provider_type_is_synapse() {
+        let p = SynapseProvider::new("");
+        assert_eq!(p.provider_type(), ProviderType::Synapse);
+    }
+}

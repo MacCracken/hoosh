@@ -114,3 +114,629 @@ fn error_types() {
     };
     assert!(err.to_string().contains("42"));
 }
+
+// ---------------------------------------------------------------------------
+// ProviderRegistry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_registry_empty() {
+    let registry = ProviderRegistry::new();
+    assert!(registry.is_empty());
+    assert_eq!(registry.len(), 0);
+}
+
+#[test]
+fn provider_registry_default() {
+    let registry = ProviderRegistry::default();
+    assert!(registry.is_empty());
+}
+
+#[test]
+fn provider_registry_get_missing() {
+    let registry = ProviderRegistry::new();
+    assert!(registry
+        .get(ProviderType::Ollama, "http://localhost:11434")
+        .is_none());
+}
+
+#[cfg(feature = "ollama")]
+#[test]
+fn provider_registry_register_ollama() {
+    use crate::router::ProviderRoute;
+    let mut registry = ProviderRegistry::new();
+    let route = ProviderRoute {
+        provider: ProviderType::Ollama,
+        priority: 1,
+        model_patterns: vec!["llama*".into()],
+        enabled: true,
+        base_url: "http://localhost:11434".into(),
+    };
+    registry.register_from_route(&route);
+    assert_eq!(registry.len(), 1);
+    assert!(!registry.is_empty());
+
+    let provider = registry
+        .get(ProviderType::Ollama, "http://localhost:11434")
+        .unwrap();
+    assert_eq!(provider.provider_type(), ProviderType::Ollama);
+}
+
+#[cfg(feature = "ollama")]
+#[test]
+fn provider_registry_dedup() {
+    use crate::router::ProviderRoute;
+    let mut registry = ProviderRegistry::new();
+    let route = ProviderRoute {
+        provider: ProviderType::Ollama,
+        priority: 1,
+        model_patterns: vec![],
+        enabled: true,
+        base_url: "http://localhost:11434".into(),
+    };
+    registry.register_from_route(&route);
+    registry.register_from_route(&route);
+    assert_eq!(registry.len(), 1);
+}
+
+#[cfg(all(feature = "ollama", feature = "llamacpp"))]
+#[test]
+fn provider_registry_multiple_providers() {
+    use crate::router::ProviderRoute;
+    let mut registry = ProviderRegistry::new();
+    registry.register_from_route(&ProviderRoute {
+        provider: ProviderType::Ollama,
+        priority: 1,
+        model_patterns: vec![],
+        enabled: true,
+        base_url: "http://localhost:11434".into(),
+    });
+    registry.register_from_route(&ProviderRoute {
+        provider: ProviderType::LlamaCpp,
+        priority: 2,
+        model_patterns: vec![],
+        enabled: true,
+        base_url: "http://localhost:8080".into(),
+    });
+    assert_eq!(registry.len(), 2);
+
+    // Different base_urls for same type = different entries
+    registry.register_from_route(&ProviderRoute {
+        provider: ProviderType::Ollama,
+        priority: 1,
+        model_patterns: vec![],
+        enabled: true,
+        base_url: "http://other-host:11434".into(),
+    });
+    assert_eq!(registry.len(), 3);
+}
+
+#[test]
+fn provider_registry_unrecognized_type_not_registered() {
+    use crate::router::ProviderRoute;
+    let mut registry = ProviderRegistry::new();
+    // Whisper is not handled by register_from_route
+    let route = ProviderRoute {
+        provider: ProviderType::Whisper,
+        priority: 1,
+        model_patterns: vec![],
+        enabled: true,
+        base_url: "http://localhost:9999".into(),
+    };
+    registry.register_from_route(&route);
+    assert!(registry.is_empty());
+}
+
+#[test]
+fn provider_registry_all_iterator() {
+    let registry = ProviderRegistry::new();
+    assert_eq!(registry.all().count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Mock HTTP server integration tests
+// ---------------------------------------------------------------------------
+
+/// Spin up a fake OpenAI-compatible server and test providers against it.
+mod mock_server {
+    use axum::{Json, Router, routing::{get, post}};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    use crate::inference::InferenceRequest;
+    use crate::provider::LlmProvider;
+    use crate::provider::openai_compat::OpenAiCompatibleProvider;
+    use crate::provider::ProviderType;
+
+    /// Start a mock server that responds to OpenAI-compatible endpoints.
+    /// Returns the base URL (e.g. "http://127.0.0.1:PORT").
+    async fn start_mock_oai_server() -> String {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(mock_chat_completions))
+            .route("/v1/models", get(mock_models));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    async fn mock_chat_completions(
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let model = body["model"].as_str().unwrap_or("mock-model");
+        let stream = body["stream"].as_bool().unwrap_or(false);
+
+        // We only handle non-streaming in this mock
+        assert!(!stream, "mock does not handle streaming");
+
+        Json(json!({
+            "id": "chatcmpl-mock123",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Mock response from server"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }))
+    }
+
+    async fn mock_models() -> Json<serde_json::Value> {
+        Json(json!({
+            "object": "list",
+            "data": [
+                {"id": "mock-model-1", "object": "model", "owned_by": "mock"},
+                {"id": "mock-model-2", "object": "model", "owned_by": "mock"}
+            ]
+        }))
+    }
+
+    #[tokio::test]
+    async fn openai_compat_infer() {
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiCompatibleProvider::new(
+            &base_url,
+            None,
+            ProviderType::LlamaCpp,
+        );
+
+        let req = InferenceRequest {
+            model: "test-model".into(),
+            prompt: "Hello".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.model, "test-model");
+        assert_eq!(resp.usage.prompt_tokens, 10);
+        assert_eq!(resp.usage.completion_tokens, 5);
+        assert_eq!(resp.usage.total_tokens, 15);
+        assert_eq!(resp.provider, "llamacpp");
+        assert!(resp.latency_ms < 5000);
+    }
+
+    #[tokio::test]
+    async fn openai_compat_infer_with_messages() {
+        use crate::inference::{Message, Role};
+
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiCompatibleProvider::new(
+            &base_url,
+            None,
+            ProviderType::LocalAi,
+        );
+
+        let req = InferenceRequest {
+            model: "chat-model".into(),
+            messages: vec![
+                Message { role: Role::System, content: "Be helpful.".into() },
+                Message { role: Role::User, content: "Hi".into() },
+            ],
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "localai");
+    }
+
+    #[tokio::test]
+    async fn openai_compat_list_models() {
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiCompatibleProvider::new(
+            &base_url,
+            None,
+            ProviderType::LmStudio,
+        );
+
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "mock-model-1");
+        assert_eq!(models[0].provider, "mock");
+        assert_eq!(models[1].id, "mock-model-2");
+        assert!(models[0].available);
+    }
+
+    #[tokio::test]
+    async fn openai_compat_health_check() {
+        let base_url = start_mock_oai_server().await;
+        let provider = OpenAiCompatibleProvider::new(
+            &base_url,
+            None,
+            ProviderType::LlamaCpp,
+        );
+
+        let healthy = provider.health_check().await.unwrap();
+        assert!(healthy);
+    }
+
+    #[tokio::test]
+    async fn openai_compat_health_check_unreachable() {
+        let provider = OpenAiCompatibleProvider::new(
+            "http://127.0.0.1:1",
+            None,
+            ProviderType::LlamaCpp,
+        );
+        // Should return an error (connection refused), not panic
+        let result = provider.health_check().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn openai_compat_infer_unreachable() {
+        let provider = OpenAiCompatibleProvider::new(
+            "http://127.0.0.1:1",
+            None,
+            ProviderType::LlamaCpp,
+        );
+        let req = InferenceRequest {
+            model: "test".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let result = provider.infer(&req).await;
+        assert!(result.is_err());
+    }
+
+    /// Start a mock Ollama server and test the Ollama provider.
+    #[cfg(feature = "ollama")]
+    mod ollama_mock {
+        use axum::{Json, Router, routing::{get, post}};
+        use serde_json::json;
+        use tokio::net::TcpListener;
+
+        use crate::inference::InferenceRequest;
+        use crate::provider::LlmProvider;
+        use crate::provider::ollama::OllamaProvider;
+
+        async fn start_mock_ollama() -> String {
+            let app = Router::new()
+                .route("/api/chat", post(mock_chat))
+                .route("/api/tags", get(mock_tags));
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            format!("http://127.0.0.1:{}", addr.port())
+        }
+
+        async fn mock_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let stream = body["stream"].as_bool().unwrap_or(false);
+            assert!(!stream, "mock does not handle streaming");
+
+            Json(json!({
+                "message": {"role": "assistant", "content": "Ollama mock reply"},
+                "eval_count": 8,
+                "prompt_eval_count": 12
+            }))
+        }
+
+        async fn mock_tags() -> Json<serde_json::Value> {
+            Json(json!({
+                "models": [
+                    {"name": "llama3:latest", "size": 4_000_000_000_i64},
+                    {"name": "mistral:7b"}
+                ]
+            }))
+        }
+
+        #[tokio::test]
+        async fn ollama_infer() {
+            let base_url = start_mock_ollama().await;
+            let provider = OllamaProvider::new(&base_url);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Ollama mock reply");
+            assert_eq!(resp.model, "llama3");
+            assert_eq!(resp.usage.prompt_tokens, 12);
+            assert_eq!(resp.usage.completion_tokens, 8);
+            assert_eq!(resp.usage.total_tokens, 20);
+            assert_eq!(resp.provider, "ollama");
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_with_temperature() {
+            let base_url = start_mock_ollama().await;
+            let provider = OllamaProvider::new(&base_url);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                prompt: "Hello".into(),
+                temperature: Some(0.3),
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Ollama mock reply");
+        }
+
+        #[tokio::test]
+        async fn ollama_list_models() {
+            let base_url = start_mock_ollama().await;
+            let provider = OllamaProvider::new(&base_url);
+
+            let models = provider.list_models().await.unwrap();
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].id, "llama3:latest");
+            assert_eq!(models[0].parameters, Some(4000000000));
+            assert_eq!(models[0].provider, "ollama");
+            assert!(models[0].available);
+            assert_eq!(models[1].id, "mistral:7b");
+            assert!(models[1].parameters.is_none());
+        }
+
+        #[tokio::test]
+        async fn ollama_health_check() {
+            let base_url = start_mock_ollama().await;
+            let provider = OllamaProvider::new(&base_url);
+
+            let healthy = provider.health_check().await.unwrap();
+            assert!(healthy);
+        }
+
+        #[tokio::test]
+        async fn ollama_health_check_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1");
+            let result = provider.health_check().await;
+            assert!(result.is_err());
+        }
+    }
+
+    /// Test the thin wrapper providers against the mock OAI server.
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn llamacpp_provider_infer() {
+        use crate::provider::llamacpp::LlamaCppProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = LlamaCppProvider::new(&base_url);
+
+        let req = InferenceRequest {
+            model: "my-gguf".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "llamacpp");
+    }
+
+    #[cfg(feature = "lmstudio")]
+    #[tokio::test]
+    async fn lmstudio_provider_infer() {
+        use crate::provider::lmstudio::LmStudioProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = LmStudioProvider::new(&base_url);
+
+        let req = InferenceRequest {
+            model: "lm-model".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "lmstudio");
+    }
+
+    #[cfg(feature = "localai")]
+    #[tokio::test]
+    async fn localai_provider_infer() {
+        use crate::provider::localai::LocalAiProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = LocalAiProvider::new(&base_url);
+
+        let req = InferenceRequest {
+            model: "local-model".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "localai");
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_provider_infer() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = SynapseProvider::new(&base_url);
+
+        let req = InferenceRequest {
+            model: "synapse-model".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "synapse");
+    }
+
+    /// Test list_models and health_check through thin wrappers.
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn llamacpp_list_models_and_health() {
+        use crate::provider::llamacpp::LlamaCppProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = LlamaCppProvider::new(&base_url);
+
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+
+        assert!(provider.health_check().await.unwrap());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server-level integration tests (AppState wiring)
+// ---------------------------------------------------------------------------
+
+mod server_wiring {
+    use std::sync::Arc;
+
+    use crate::budget::TokenBudget;
+    use crate::cache::{CacheConfig, ResponseCache};
+    use crate::provider::{ProviderRegistry, ProviderType};
+    use crate::router::{self as hoosh_router, ProviderRoute, RoutingStrategy};
+    use crate::server::AppState;
+
+    fn make_state(routes: Vec<ProviderRoute>) -> Arc<AppState> {
+        let mut providers = ProviderRegistry::new();
+        for route in &routes {
+            if route.enabled {
+                providers.register_from_route(route);
+            }
+        }
+        Arc::new(AppState {
+            router: hoosh_router::Router::new(routes, RoutingStrategy::Priority),
+            cache: ResponseCache::new(CacheConfig::default()),
+            budget: std::sync::Mutex::new(TokenBudget::new()),
+            providers,
+        })
+    }
+
+    #[test]
+    fn app_state_empty_routes() {
+        let state = make_state(vec![]);
+        assert_eq!(state.router.routes().len(), 0);
+        assert!(state.providers.is_empty());
+    }
+
+    #[cfg(feature = "ollama")]
+    #[test]
+    fn app_state_registers_ollama() {
+        let state = make_state(vec![ProviderRoute {
+            provider: ProviderType::Ollama,
+            priority: 1,
+            model_patterns: vec!["llama*".into()],
+            enabled: true,
+            base_url: "http://localhost:11434".into(),
+        }]);
+        assert_eq!(state.providers.len(), 1);
+        assert!(state
+            .providers
+            .get(ProviderType::Ollama, "http://localhost:11434")
+            .is_some());
+    }
+
+    #[cfg(feature = "ollama")]
+    #[test]
+    fn app_state_disabled_route_not_registered() {
+        let state = make_state(vec![ProviderRoute {
+            provider: ProviderType::Ollama,
+            priority: 1,
+            model_patterns: vec![],
+            enabled: false,
+            base_url: "http://localhost:11434".into(),
+        }]);
+        assert!(state.providers.is_empty());
+        // But the route is still in the router
+        assert_eq!(state.router.routes().len(), 1);
+    }
+
+    #[cfg(all(feature = "ollama", feature = "llamacpp", feature = "lmstudio"))]
+    #[test]
+    fn app_state_multiple_providers() {
+        let state = make_state(vec![
+            ProviderRoute {
+                provider: ProviderType::Ollama,
+                priority: 1,
+                model_patterns: vec!["llama*".into()],
+                enabled: true,
+                base_url: "http://localhost:11434".into(),
+            },
+            ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 2,
+                model_patterns: vec!["gguf-*".into()],
+                enabled: true,
+                base_url: "http://localhost:8080".into(),
+            },
+            ProviderRoute {
+                provider: ProviderType::LmStudio,
+                priority: 3,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: "http://localhost:1234".into(),
+            },
+        ]);
+        assert_eq!(state.providers.len(), 3);
+        assert_eq!(state.router.routes().len(), 3);
+    }
+
+    #[test]
+    fn app_state_route_selection_still_works() {
+        let state = make_state(vec![
+            ProviderRoute {
+                provider: ProviderType::Ollama,
+                priority: 1,
+                model_patterns: vec!["llama*".into()],
+                enabled: true,
+                base_url: "http://localhost:11434".into(),
+            },
+            ProviderRoute {
+                provider: ProviderType::OpenAi,
+                priority: 2,
+                model_patterns: vec!["gpt-*".into()],
+                enabled: true,
+                base_url: "https://api.openai.com".into(),
+            },
+        ]);
+
+        let route = state.router.select("llama3").unwrap();
+        assert_eq!(route.provider, ProviderType::Ollama);
+
+        let route = state.router.select("gpt-4o").unwrap();
+        assert_eq!(route.provider, ProviderType::OpenAi);
+
+        // OpenAI is a remote provider — not registered by our local registry
+        assert!(state
+            .providers
+            .get(ProviderType::OpenAi, "https://api.openai.com")
+            .is_none());
+    }
+}

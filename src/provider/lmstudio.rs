@@ -48,3 +48,26 @@ impl LlmProvider for LmStudioProvider {
         ProviderType::LmStudio
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_url() {
+        let p = LmStudioProvider::new("");
+        assert_eq!(p.inner.base_url(), "http://localhost:1234");
+    }
+
+    #[test]
+    fn custom_url() {
+        let p = LmStudioProvider::new("http://workstation:5555");
+        assert_eq!(p.inner.base_url(), "http://workstation:5555");
+    }
+
+    #[test]
+    fn provider_type_is_lmstudio() {
+        let p = LmStudioProvider::new("");
+        assert_eq!(p.provider_type(), ProviderType::LmStudio);
+    }
+}
