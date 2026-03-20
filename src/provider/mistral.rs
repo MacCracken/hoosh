@@ -28,7 +28,10 @@ impl LlmProvider for MistralProvider {
     async fn infer(&self, request: &InferenceRequest) -> anyhow::Result<InferenceResponse> {
         self.inner.infer(request).await
     }
-    async fn infer_stream(&self, request: InferenceRequest) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<String>>> {
+    async fn infer_stream(
+        &self,
+        request: InferenceRequest,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<String>>> {
         self.inner.infer_stream(request).await
     }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {

@@ -136,10 +136,7 @@ impl LlmProvider for OllamaProvider {
         let oai: OllamaChatResponse = resp.json().await?;
         let latency = start.elapsed().as_millis() as u64;
 
-        let text = oai
-            .message
-            .and_then(|m| m.content)
-            .unwrap_or_default();
+        let text = oai.message.and_then(|m| m.content).unwrap_or_default();
 
         let completion_tokens = oai.eval_count.unwrap_or(0);
         let prompt_tokens = oai.prompt_eval_count.unwrap_or(0);
@@ -208,14 +205,12 @@ impl LlmProvider for OllamaProvider {
                     }
                     match serde_json::from_str::<OllamaStreamLine>(&line) {
                         Ok(parsed) => {
-                            if let Some(msg) = &parsed.message {
-                                if let Some(content) = &msg.content {
-                                    if !content.is_empty() {
-                                        if tx.send(Ok(content.clone())).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
+                            if let Some(msg) = &parsed.message
+                                && let Some(content) = &msg.content
+                                && !content.is_empty()
+                                && tx.send(Ok(content.clone())).await.is_err()
+                            {
+                                return;
                             }
                             if parsed.done {
                                 return;
@@ -353,10 +348,7 @@ mod tests {
             "prompt_eval_count": 10
         }"#;
         let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            resp.message.unwrap().content.unwrap(),
-            "Hello world"
-        );
+        assert_eq!(resp.message.unwrap().content.unwrap(), "Hello world");
         assert_eq!(resp.eval_count, Some(5));
         assert_eq!(resp.prompt_eval_count, Some(10));
     }

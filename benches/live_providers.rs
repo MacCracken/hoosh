@@ -6,7 +6,7 @@
 //! Requires Ollama running on localhost:11434 with at least one model pulled.
 //! Skips gracefully if Ollama is not reachable.
 
-use criterion::{Criterion, criterion_group, criterion_main, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use hoosh::inference::{InferenceRequest, Message, Role};
 use hoosh::provider::LlmProvider;
@@ -130,7 +130,9 @@ fn bench_ollama_infer_multiturn(c: &mut Criterion) {
             },
             Message {
                 role: Role::Assistant,
-                content: "Rust is a systems programming language focused on safety and performance.".into(),
+                content:
+                    "Rust is a systems programming language focused on safety and performance."
+                        .into(),
             },
             Message {
                 role: Role::User,
@@ -201,9 +203,7 @@ fn bench_ollama_stream_throughput(c: &mut Criterion) {
 fn bench_hwaccel_detect(c: &mut Criterion) {
     use hoosh::hardware::HardwareManager;
 
-    c.bench_function("hwaccel_detect", |b| {
-        b.iter(|| HardwareManager::detect())
-    });
+    c.bench_function("hwaccel_detect", |b| b.iter(|| HardwareManager::detect()));
 }
 
 #[cfg(feature = "hwaccel")]
@@ -211,9 +211,7 @@ fn bench_hwaccel_summary(c: &mut Criterion) {
     use hoosh::hardware::HardwareManager;
 
     let hw = HardwareManager::detect();
-    c.bench_function("hwaccel_summary", |b| {
-        b.iter(|| hw.summary())
-    });
+    c.bench_function("hwaccel_summary", |b| b.iter(|| hw.summary()));
 }
 
 #[cfg(feature = "hwaccel")]

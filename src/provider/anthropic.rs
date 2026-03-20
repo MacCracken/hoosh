@@ -202,16 +202,13 @@ impl LlmProvider for AnthropicProvider {
                         return;
                     }
                     if let Ok(event) = serde_json::from_str::<StreamEvent>(data) {
-                        if event.event_type == "content_block_delta" {
-                            if let Some(delta) = &event.delta {
-                                if let Some(text) = &delta.text {
-                                    if !text.is_empty() {
-                                        if tx.send(Ok(text.clone())).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
+                        if event.event_type == "content_block_delta"
+                            && let Some(delta) = &event.delta
+                            && let Some(text) = &delta.text
+                            && !text.is_empty()
+                            && tx.send(Ok(text.clone())).await.is_err()
+                        {
+                            return;
                         }
                         if event.event_type == "message_stop" {
                             return;
@@ -321,10 +318,22 @@ mod tests {
         let req = InferenceRequest {
             model: "claude-sonnet-4-20250514".into(),
             messages: vec![
-                Message { role: Role::System, content: "Be concise.".into() },
-                Message { role: Role::User, content: "Hi".into() },
-                Message { role: Role::Assistant, content: "Hello!".into() },
-                Message { role: Role::User, content: "More".into() },
+                Message {
+                    role: Role::System,
+                    content: "Be concise.".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "Hi".into(),
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: "Hello!".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "More".into(),
+                },
             ],
             max_tokens: Some(500),
             ..Default::default()
@@ -363,7 +372,8 @@ mod tests {
 
     #[test]
     fn stream_event_deserialization() {
-        let json = r#"{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello"}}"#;
+        let json =
+            r#"{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello"}}"#;
         let event: StreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "content_block_delta");
         assert_eq!(event.delta.unwrap().text.as_deref(), Some("Hello"));

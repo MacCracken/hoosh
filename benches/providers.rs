@@ -65,11 +65,7 @@ fn bench_registry_lookup(c: &mut Criterion) {
 fn bench_provider_construction(c: &mut Criterion) {
     c.bench_function("openai_compat_new", |b| {
         b.iter(|| {
-            OpenAiCompatibleProvider::new(
-                "http://localhost:8080",
-                None,
-                ProviderType::LlamaCpp,
-            )
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp)
         })
     });
 
@@ -136,7 +132,11 @@ fn bench_request_serialization(c: &mut Criterion) {
         model: "llama3".into(),
         messages: (0..10)
             .map(|i| Message {
-                role: if i % 2 == 0 { Role::User } else { Role::Assistant },
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
                 content: format!("Message number {} with some content to serialize.", i),
             })
             .collect(),

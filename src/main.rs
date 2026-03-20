@@ -91,10 +91,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 HooshConfig::load_or_default()
             };
-            let server_config = hoosh_config.into_server_config(
-                bind.as_deref(),
-                port,
-            );
+            let server_config = hoosh_config.into_server_config(bind.as_deref(), port);
             hoosh::server::run(server_config).await?;
         }
         Commands::Models { server } => {
@@ -193,7 +190,10 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(text) = body["text"].as_str() {
                             println!("{text}");
                         } else {
-                            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&body).unwrap_or_default()
+                            );
                         }
                     } else {
                         let status = resp.status();
@@ -220,8 +220,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("{line}");
                 }
                 if hw.has_accelerator() {
-                    let mem_gb =
-                        hw.total_accelerator_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let mem_gb = hw.total_accelerator_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
                     println!("  Total accelerator memory: {mem_gb:.1} GB");
                 }
                 println!();

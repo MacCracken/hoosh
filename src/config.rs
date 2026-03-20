@@ -215,7 +215,11 @@ impl HooshConfig {
     }
 
     /// Convert to ServerConfig, merging CLI overrides.
-    pub fn into_server_config(self, bind_override: Option<&str>, port_override: Option<u16>) -> ServerConfig {
+    pub fn into_server_config(
+        self,
+        bind_override: Option<&str>,
+        port_override: Option<u16>,
+    ) -> ServerConfig {
         let routes = self.routes();
         let strategy = match self.server.strategy {
             StrategyValue::Priority => RoutingStrategy::Priority,
@@ -230,9 +234,7 @@ impl HooshConfig {
             .collect();
 
         ServerConfig {
-            bind: bind_override
-                .map(String::from)
-                .unwrap_or(self.server.bind),
+            bind: bind_override.map(String::from).unwrap_or(self.server.bind),
             port: port_override.unwrap_or(self.server.port),
             routes,
             strategy,
@@ -293,7 +295,10 @@ models = ["gpt-*"]
         assert_eq!(config.providers.len(), 2);
         assert_eq!(config.providers[0].provider_type, ProviderType::Ollama);
         assert_eq!(config.providers[1].provider_type, ProviderType::OpenAi);
-        assert_eq!(config.providers[1].api_key.as_deref(), Some("$OPENAI_API_KEY"));
+        assert_eq!(
+            config.providers[1].api_key.as_deref(),
+            Some("$OPENAI_API_KEY")
+        );
     }
 
     #[test]
@@ -347,10 +352,22 @@ models = ["gpt-*"]
 
     #[test]
     fn default_base_urls() {
-        assert_eq!(default_base_url(ProviderType::Ollama), "http://localhost:11434");
-        assert_eq!(default_base_url(ProviderType::OpenAi), "https://api.openai.com");
-        assert_eq!(default_base_url(ProviderType::Anthropic), "https://api.anthropic.com");
-        assert_eq!(default_base_url(ProviderType::Groq), "https://api.groq.com/openai");
+        assert_eq!(
+            default_base_url(ProviderType::Ollama),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            default_base_url(ProviderType::OpenAi),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            default_base_url(ProviderType::Anthropic),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            default_base_url(ProviderType::Groq),
+            "https://api.groq.com/openai"
+        );
     }
 
     #[test]

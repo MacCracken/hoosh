@@ -220,12 +220,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     }
                     if let Ok(chunk) = serde_json::from_str::<OaiStreamChunk>(data) {
                         for choice in &chunk.choices {
-                            if let Some(content) = &choice.delta.content {
-                                if !content.is_empty() {
-                                    if tx.send(Ok(content.clone())).await.is_err() {
-                                        return;
-                                    }
-                                }
+                            if let Some(content) = &choice.delta.content
+                                && !content.is_empty()
+                                && tx.send(Ok(content.clone())).await.is_err()
+                            {
+                                return;
                             }
                         }
                     }
@@ -375,11 +374,8 @@ mod tests {
 
     #[test]
     fn provider_creation() {
-        let p = OpenAiCompatibleProvider::new(
-            "http://localhost:8080",
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let p =
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp);
         assert_eq!(p.base_url(), "http://localhost:8080");
         assert_eq!(p.provider_type(), ProviderType::LlamaCpp);
     }
@@ -407,11 +403,8 @@ mod tests {
 
     #[test]
     fn provider_no_api_key() {
-        let p = OpenAiCompatibleProvider::new(
-            "http://localhost:8080",
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let p =
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp);
         assert!(p.api_key.is_none());
     }
 }

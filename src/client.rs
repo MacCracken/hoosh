@@ -214,12 +214,11 @@ impl HooshClient {
                     }
                     if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
                         for choice in &chunk.choices {
-                            if let Some(content) = &choice.delta.content {
-                                if !content.is_empty() {
-                                    if tx.send(Ok(content.clone())).await.is_err() {
-                                        return;
-                                    }
-                                }
+                            if let Some(content) = &choice.delta.content
+                                && !content.is_empty()
+                                && tx.send(Ok(content.clone())).await.is_err()
+                            {
+                                return;
                             }
                         }
                     }

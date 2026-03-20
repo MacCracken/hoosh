@@ -137,9 +137,11 @@ fn provider_registry_default() {
 #[test]
 fn provider_registry_get_missing() {
     let registry = ProviderRegistry::new();
-    assert!(registry
-        .get(ProviderType::Ollama, "http://localhost:11434")
-        .is_none());
+    assert!(
+        registry
+            .get(ProviderType::Ollama, "http://localhost:11434")
+            .is_none()
+    );
 }
 
 #[cfg(feature = "ollama")]
@@ -247,14 +249,17 @@ fn provider_registry_all_iterator() {
 
 /// Spin up a fake OpenAI-compatible server and test providers against it.
 mod mock_server {
-    use axum::{Json, Router, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
     use serde_json::json;
     use tokio::net::TcpListener;
 
     use crate::inference::InferenceRequest;
     use crate::provider::LlmProvider;
-    use crate::provider::openai_compat::OpenAiCompatibleProvider;
     use crate::provider::ProviderType;
+    use crate::provider::openai_compat::OpenAiCompatibleProvider;
 
     /// Start a mock server that responds to OpenAI-compatible endpoints.
     /// Returns the base URL (e.g. "http://127.0.0.1:PORT").
@@ -272,9 +277,7 @@ mod mock_server {
         format!("http://127.0.0.1:{}", addr.port())
     }
 
-    async fn mock_chat_completions(
-        Json(body): Json<serde_json::Value>,
-    ) -> Json<serde_json::Value> {
+    async fn mock_chat_completions(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
         let model = body["model"].as_str().unwrap_or("mock-model");
         let stream = body["stream"].as_bool().unwrap_or(false);
 
@@ -314,11 +317,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_infer() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(
-            &base_url,
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp);
 
         let req = InferenceRequest {
             model: "test-model".into(),
@@ -341,17 +340,19 @@ mod mock_server {
         use crate::inference::{Message, Role};
 
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(
-            &base_url,
-            None,
-            ProviderType::LocalAi,
-        );
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LocalAi);
 
         let req = InferenceRequest {
             model: "chat-model".into(),
             messages: vec![
-                Message { role: Role::System, content: "Be helpful.".into() },
-                Message { role: Role::User, content: "Hi".into() },
+                Message {
+                    role: Role::System,
+                    content: "Be helpful.".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "Hi".into(),
+                },
             ],
             temperature: Some(0.5),
             max_tokens: Some(100),
@@ -365,11 +366,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_list_models() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(
-            &base_url,
-            None,
-            ProviderType::LmStudio,
-        );
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LmStudio);
 
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
@@ -382,11 +379,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_health_check() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(
-            &base_url,
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp);
 
         let healthy = provider.health_check().await.unwrap();
         assert!(healthy);
@@ -394,11 +387,8 @@ mod mock_server {
 
     #[tokio::test]
     async fn openai_compat_health_check_unreachable() {
-        let provider = OpenAiCompatibleProvider::new(
-            "http://127.0.0.1:1",
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let provider =
+            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp);
         // Should return an error (connection refused), not panic
         let result = provider.health_check().await;
         assert!(result.is_err());
@@ -406,11 +396,8 @@ mod mock_server {
 
     #[tokio::test]
     async fn openai_compat_infer_unreachable() {
-        let provider = OpenAiCompatibleProvider::new(
-            "http://127.0.0.1:1",
-            None,
-            ProviderType::LlamaCpp,
-        );
+        let provider =
+            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp);
         let req = InferenceRequest {
             model: "test".into(),
             prompt: "Hi".into(),
@@ -423,7 +410,10 @@ mod mock_server {
     /// Start a mock Ollama server and test the Ollama provider.
     #[cfg(feature = "ollama")]
     mod ollama_mock {
-        use axum::{Json, Router, routing::{get, post}};
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
         use serde_json::json;
         use tokio::net::TcpListener;
 
@@ -647,7 +637,10 @@ mod live {
         use crate::provider::ollama::OllamaProvider;
         let provider = OllamaProvider::new("http://127.0.0.1:11434");
         let models = provider.list_models().await.unwrap();
-        assert!(!models.is_empty(), "Ollama should have at least one model pulled");
+        assert!(
+            !models.is_empty(),
+            "Ollama should have at least one model pulled"
+        );
         for m in &models {
             println!("  model: {} (size: {:?})", m.id, m.parameters);
         }
@@ -670,8 +663,10 @@ mod live {
         };
         let resp = provider.infer(&req).await.unwrap();
         println!("  response: {}", resp.text);
-        println!("  tokens: prompt={}, completion={}, total={}",
-            resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens);
+        println!(
+            "  tokens: prompt={}, completion={}, total={}",
+            resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens
+        );
         println!("  latency: {}ms", resp.latency_ms);
 
         assert!(!resp.text.is_empty());
@@ -729,6 +724,8 @@ mod server_wiring {
             cache: ResponseCache::new(CacheConfig::default()),
             budget: std::sync::Mutex::new(TokenBudget::new()),
             providers,
+            #[cfg(feature = "whisper")]
+            whisper: None,
         })
     }
 
@@ -751,10 +748,12 @@ mod server_wiring {
             api_key: None,
         }]);
         assert_eq!(state.providers.len(), 1);
-        assert!(state
-            .providers
-            .get(ProviderType::Ollama, "http://localhost:11434")
-            .is_some());
+        assert!(
+            state
+                .providers
+                .get(ProviderType::Ollama, "http://localhost:11434")
+                .is_some()
+        );
     }
 
     #[cfg(feature = "ollama")]
@@ -835,15 +834,19 @@ mod server_wiring {
 
         // OpenAI is now registered as a remote provider
         #[cfg(feature = "openai")]
-        assert!(state
-            .providers
-            .get(ProviderType::OpenAi, "https://api.openai.com")
-            .is_some());
+        assert!(
+            state
+                .providers
+                .get(ProviderType::OpenAi, "https://api.openai.com")
+                .is_some()
+        );
         #[cfg(not(feature = "openai"))]
-        assert!(state
-            .providers
-            .get(ProviderType::OpenAi, "https://api.openai.com")
-            .is_none());
+        assert!(
+            state
+                .providers
+                .get(ProviderType::OpenAi, "https://api.openai.com")
+                .is_none()
+        );
     }
 }
 
@@ -852,7 +855,10 @@ mod server_wiring {
 // ---------------------------------------------------------------------------
 
 mod e2e {
-    use axum::{Json, Router, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
     use serde_json::json;
     use tokio::net::TcpListener;
 
@@ -1063,8 +1069,12 @@ mod e2e {
         // Initial state
         let pools: Vec<serde_json::Value> = client
             .get(format!("{hoosh_url}/v1/tokens/pools"))
-            .send().await.unwrap()
-            .json().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let default_pool = pools.iter().find(|p| p["name"] == "default").unwrap();
         assert_eq!(default_pool["used"], 0);
 
@@ -1076,14 +1086,20 @@ mod e2e {
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_tokens": 100
             }))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status().as_u16(), 200);
 
         // Pool should show actual usage (mock returns total_tokens=15)
         let pools: Vec<serde_json::Value> = client
             .get(format!("{hoosh_url}/v1/tokens/pools"))
-            .send().await.unwrap()
-            .json().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let default_pool = pools.iter().find(|p| p["name"] == "default").unwrap();
         assert_eq!(default_pool["used"], 15);
         assert_eq!(default_pool["reserved"], 0);

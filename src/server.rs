@@ -123,11 +123,7 @@ pub fn build_app(config: ServerConfig) -> Router {
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.bind, config.port);
     let app = build_app(config);
-    tracing::info!(
-        "hoosh v{} listening on {}",
-        env!("CARGO_PKG_VERSION"),
-        addr
-    );
+    tracing::info!("hoosh v{} listening on {}", env!("CARGO_PKG_VERSION"), addr);
     tracing::info!("OpenAI-compatible API: http://{}/v1/chat/completions", addr);
 
     let listener = TcpListener::bind(&addr).await?;
@@ -295,18 +291,18 @@ async fn chat_completions(
     let pool_name = req.pool.clone();
     {
         let mut budget = state.budget.lock().unwrap();
-        if let Some(pool) = budget.get_pool(&pool_name) {
-            if !pool.can_reserve(estimated_tokens) {
-                let remaining = pool.available();
-                return error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "Token budget exceeded: pool '{}' has {} tokens remaining, requested {}",
-                        pool_name, remaining, estimated_tokens
-                    ),
-                )
-                .into_response();
-            }
+        if let Some(pool) = budget.get_pool(&pool_name)
+            && !pool.can_reserve(estimated_tokens)
+        {
+            let remaining = pool.available();
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Token budget exceeded: pool '{}' has {} tokens remaining, requested {}",
+                    pool_name, remaining, estimated_tokens
+                ),
+            )
+            .into_response();
         }
         budget.reserve(&pool_name, estimated_tokens);
     }

@@ -19,7 +19,8 @@ impl WhisperProvider {
         let path = model_path.as_ref().to_path_buf();
         let params = WhisperContextParameters::new();
         let ctx = WhisperContext::new_with_params(
-            path.to_str().ok_or_else(|| anyhow::anyhow!("invalid model path"))?,
+            path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid model path"))?,
             params,
         )
         .map_err(|e| anyhow::anyhow!("failed to load whisper model: {e:?}"))?;
@@ -36,7 +37,10 @@ impl WhisperProvider {
     }
 
     /// Transcribe audio. Runs synchronously (call via spawn_blocking for async).
-    pub fn transcribe(&self, request: &TranscriptionRequest) -> anyhow::Result<TranscriptionResponse> {
+    pub fn transcribe(
+        &self,
+        request: &TranscriptionRequest,
+    ) -> anyhow::Result<TranscriptionResponse> {
         let samples = decode_audio(&request.audio)?;
 
         let mut state = self
@@ -60,39 +64,30 @@ impl WhisperProvider {
             params.set_token_timestamps(true);
         }
 
-        params.set_n_threads(std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4));
+        params.set_n_threads(
+            std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(4),
+        );
 
         state
             .full(params, &samples)
             .map_err(|e| anyhow::anyhow!("whisper transcription failed: {e:?}"))?;
 
-        let n_segments = state
-            .full_n_segments()
-            .map_err(|e| anyhow::anyhow!("failed to get segments: {e:?}"))?;
-
         let mut text_parts = Vec::new();
         let mut segments = Vec::new();
 
-        for i in 0..n_segments {
-            let seg_text = state
-                .full_get_segment_text_lossy(i)
-                .map_err(|e| anyhow::anyhow!("failed to get segment text: {e:?}"))?;
-            let t0 = state
-                .full_get_segment_t0(i)
-                .map_err(|e| anyhow::anyhow!("failed to get segment t0: {e:?}"))?;
-            let t1 = state
-                .full_get_segment_t1(i)
-                .map_err(|e| anyhow::anyhow!("failed to get segment t1: {e:?}"))?;
-
+        for segment in state.as_iter() {
+            let seg_text = segment.to_string();
             text_parts.push(seg_text.clone());
             segments.push(TranscriptionSegment {
                 text: seg_text,
-                start_secs: t0 as f64 / 100.0,
-                end_secs: t1 as f64 / 100.0,
+                start_secs: segment.start_timestamp() as f64 / 100.0,
+                end_secs: segment.end_timestamp() as f64 / 100.0,
             });
         }
 
-        let lang_id = state.full_lang_id_from_state().unwrap_or(0);
+        let lang_id = state.full_lang_id_from_state();
         let language = whisper_rs::get_lang_str(lang_id)
             .unwrap_or("unknown")
             .to_string();
@@ -135,12 +130,9 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
     let mut pos = 12;
     while pos + 8 < data.len() {
         let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]) as usize;
+        let chunk_size =
+            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize;
 
         if chunk_id == b"data" {
             let audio_data = &data[pos + 8..pos + 8 + chunk_size.min(data.len() - pos - 8)];
@@ -155,7 +147,7 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
 
         pos += 8 + chunk_size;
         // Align to even boundary
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             pos += 1;
         }
     }
