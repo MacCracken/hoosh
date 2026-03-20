@@ -100,6 +100,9 @@ pub struct ProviderSection {
     /// Whether this provider is enabled. Defaults to true.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Maximum tokens per request for this provider.
+    #[serde(default)]
+    pub max_tokens_limit: Option<u32>,
 }
 
 fn default_bind() -> String {
@@ -225,6 +228,7 @@ impl HooshConfig {
                     enabled: p.enabled,
                     base_url,
                     api_key: resolve_api_key(&p.api_key),
+                    max_tokens_limit: p.max_tokens_limit,
                 }
             })
             .collect()

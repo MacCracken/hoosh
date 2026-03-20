@@ -34,6 +34,9 @@ pub struct ProviderRoute {
     /// API key (for remote providers). Resolved from env var if prefixed with `$`.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Maximum tokens this provider supports per request.
+    #[serde(default)]
+    pub max_tokens_limit: Option<u32>,
 }
 
 /// The router manages provider selection and fallback.
@@ -112,6 +115,7 @@ mod tests {
             enabled: true,
             base_url: "http://localhost".into(),
             api_key: None,
+            max_tokens_limit: None,
         }
     }
 

@@ -178,7 +178,16 @@ impl HooshClient {
             .error_for_status()
             .map_err(|e| HooshError::Provider(e.to_string()))?;
 
-        let (tx, rx) = mpsc::channel(64);
+        if let Some(ct) = resp.headers().get("content-type") {
+            let ct_str = ct.to_str().unwrap_or("");
+            if !ct_str.contains("text/event-stream") && !ct_str.contains("application/json") {
+                return Err(HooshError::Provider(format!(
+                    "expected SSE stream, got Content-Type: {ct_str}"
+                )));
+            }
+        }
+
+        let (tx, rx) = mpsc::channel(256);
 
         tokio::spawn(async move {
             use futures::StreamExt;

@@ -1,5 +1,6 @@
 //! Response caching for inference results.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -27,7 +28,7 @@ impl Default for CacheConfig {
 }
 
 struct CacheEntry {
-    value: String,
+    value: Arc<String>,
     created: Instant,
     ttl: Duration,
 }
@@ -66,7 +67,7 @@ impl ResponseCache {
     }
 
     /// Look up a cached response by key.
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<Arc<String>> {
         if !self.config.enabled {
             return None;
         }
@@ -104,7 +105,7 @@ impl ResponseCache {
         self.entries.insert(
             key,
             CacheEntry {
-                value,
+                value: Arc::new(value),
                 created: Instant::now(),
                 ttl: Duration::from_secs(self.config.ttl_secs),
             },
@@ -140,7 +141,7 @@ mod tests {
     fn cache_insert_get() {
         let cache = ResponseCache::new(CacheConfig::default());
         cache.insert("key1".into(), "value1".into());
-        assert_eq!(cache.get("key1"), Some("value1".into()));
+        assert_eq!(cache.get("key1").as_deref(), Some(&"value1".to_string()));
         assert_eq!(cache.len(), 1);
     }
 

@@ -59,6 +59,7 @@ fn router_selects_provider() {
             enabled: true,
             base_url: "http://localhost:11434".into(),
             api_key: None,
+            max_tokens_limit: None,
         },
         ProviderRoute {
             provider: ProviderType::OpenAi,
@@ -67,6 +68,7 @@ fn router_selects_provider() {
             enabled: true,
             base_url: "https://api.openai.com".into(),
             api_key: None,
+            max_tokens_limit: None,
         },
     ];
     let router = Router::new(routes, RoutingStrategy::Priority);
@@ -101,7 +103,7 @@ fn token_budget_lifecycle() {
 fn cache_basic() {
     let cache = ResponseCache::new(crate::cache::CacheConfig::default());
     cache.insert("prompt-hash".into(), "cached response".into());
-    assert_eq!(cache.get("prompt-hash").unwrap(), "cached response");
+    assert_eq!(&*cache.get("prompt-hash").unwrap(), "cached response");
     assert!(cache.get("missing").is_none());
 }
 
@@ -156,6 +158,7 @@ fn provider_registry_register_ollama() {
         enabled: true,
         base_url: "http://localhost:11434".into(),
         api_key: None,
+        max_tokens_limit: None,
     };
     registry.register_from_route(&route);
     assert_eq!(registry.len(), 1);
@@ -179,6 +182,7 @@ fn provider_registry_dedup() {
         enabled: true,
         base_url: "http://localhost:11434".into(),
         api_key: None,
+        max_tokens_limit: None,
     };
     registry.register_from_route(&route);
     registry.register_from_route(&route);
@@ -197,6 +201,7 @@ fn provider_registry_multiple_providers() {
         enabled: true,
         base_url: "http://localhost:11434".into(),
         api_key: None,
+        max_tokens_limit: None,
     });
     registry.register_from_route(&ProviderRoute {
         provider: ProviderType::LlamaCpp,
@@ -205,6 +210,7 @@ fn provider_registry_multiple_providers() {
         enabled: true,
         base_url: "http://localhost:8080".into(),
         api_key: None,
+        max_tokens_limit: None,
     });
     assert_eq!(registry.len(), 2);
 
@@ -216,6 +222,7 @@ fn provider_registry_multiple_providers() {
         enabled: true,
         base_url: "http://other-host:11434".into(),
         api_key: None,
+        max_tokens_limit: None,
     });
     assert_eq!(registry.len(), 3);
 }
@@ -232,6 +239,7 @@ fn provider_registry_unrecognized_type_not_registered() {
         enabled: true,
         base_url: "http://localhost:9999".into(),
         api_key: None,
+        max_tokens_limit: None,
     };
     registry.register_from_route(&route);
     assert!(registry.is_empty());
@@ -746,6 +754,7 @@ mod server_wiring {
             enabled: true,
             base_url: "http://localhost:11434".into(),
             api_key: None,
+            max_tokens_limit: None,
         }]);
         assert_eq!(state.providers.len(), 1);
         assert!(
@@ -766,6 +775,7 @@ mod server_wiring {
             enabled: false,
             base_url: "http://localhost:11434".into(),
             api_key: None,
+            max_tokens_limit: None,
         }]);
         assert!(state.providers.is_empty());
         // But the route is still in the router
@@ -783,6 +793,7 @@ mod server_wiring {
                 enabled: true,
                 base_url: "http://localhost:11434".into(),
                 api_key: None,
+                max_tokens_limit: None,
             },
             ProviderRoute {
                 provider: ProviderType::LlamaCpp,
@@ -791,6 +802,7 @@ mod server_wiring {
                 enabled: true,
                 base_url: "http://localhost:8080".into(),
                 api_key: None,
+                max_tokens_limit: None,
             },
             ProviderRoute {
                 provider: ProviderType::LmStudio,
@@ -799,6 +811,7 @@ mod server_wiring {
                 enabled: true,
                 base_url: "http://localhost:1234".into(),
                 api_key: None,
+                max_tokens_limit: None,
             },
         ]);
         assert_eq!(state.providers.len(), 3);
@@ -815,6 +828,7 @@ mod server_wiring {
                 enabled: true,
                 base_url: "http://localhost:11434".into(),
                 api_key: None,
+                max_tokens_limit: None,
             },
             ProviderRoute {
                 provider: ProviderType::OpenAi,
@@ -823,6 +837,7 @@ mod server_wiring {
                 enabled: true,
                 base_url: "https://api.openai.com".into(),
                 api_key: None,
+                max_tokens_limit: None,
             },
         ]);
 
@@ -926,6 +941,7 @@ mod e2e {
                 enabled: true,
                 base_url: backend_url.to_string(),
                 api_key: None,
+                max_tokens_limit: None,
             }],
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig {
@@ -1001,6 +1017,7 @@ mod e2e {
                 enabled: true,
                 base_url: backend,
                 api_key: None,
+                max_tokens_limit: None,
             }],
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
@@ -1103,5 +1120,83 @@ mod e2e {
         let default_pool = pools.iter().find(|p| p["name"] == "default").unwrap();
         assert_eq!(default_pool["used"], 15);
         assert_eq!(default_pool["reserved"], 0);
+    }
+
+    /// Mock backend that supports SSE streaming.
+    async fn start_mock_streaming_backend() -> String {
+        async fn mock_stream_chat(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+            let model = body["model"].as_str().unwrap_or("mock-model").to_owned();
+            let stream = body["stream"].as_bool().unwrap_or(false);
+
+            if !stream {
+                return Json(json!({
+                    "id": "chatcmpl-e2e",
+                    "object": "chat.completion",
+                    "model": &model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "non-stream"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+                })).into_response();
+            }
+
+            let s = async_stream::stream! {
+                let tokens = ["Hello", " ", "world", "!"];
+                for token in &tokens {
+                    let chunk = json!({
+                        "id": "chatcmpl-stream-mock",
+                        "object": "chat.completion.chunk",
+                        "model": &model,
+                        "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": serde_json::Value::Null}]
+                    });
+                    yield Ok::<_, std::convert::Infallible>(
+                        axum::response::sse::Event::default().data(chunk.to_string())
+                    );
+                }
+                let done_chunk = json!({
+                    "id": "chatcmpl-stream-mock",
+                    "object": "chat.completion.chunk",
+                    "model": &model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                yield Ok(axum::response::sse::Event::default().data(done_chunk.to_string()));
+                yield Ok(axum::response::sse::Event::default().data("[DONE]"));
+            };
+
+            axum::response::sse::Sse::new(s).into_response()
+        }
+
+        use axum::response::IntoResponse;
+        let app = Router::new()
+            .route("/v1/chat/completions", post(mock_stream_chat))
+            .route("/v1/models", get(mock_models));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_streaming() {
+        let backend = start_mock_streaming_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+
+        let req = crate::InferenceRequest {
+            model: "mock-model".into(),
+            prompt: "Hello".into(),
+            stream: true,
+            ..Default::default()
+        };
+        let mut rx = client.infer_stream(&req).await.unwrap();
+        let mut tokens = Vec::new();
+        while let Some(result) = rx.recv().await {
+            tokens.push(result.unwrap());
+        }
+        assert!(!tokens.is_empty(), "should receive tokens");
+        let full = tokens.join("");
+        assert_eq!(full, "Hello world!");
     }
 }

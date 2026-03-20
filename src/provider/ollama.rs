@@ -202,7 +202,7 @@ impl LlmProvider for OllamaProvider {
             .await?
             .error_for_status()?;
 
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(256);
 
         tokio::spawn(async move {
             use futures::StreamExt;

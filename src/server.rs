@@ -102,8 +102,8 @@ pub fn build_app(config: ServerConfig) -> Router {
         whisper,
     });
 
-    #[allow(unused_mut)]
-    let mut app = Router::new()
+    // API routes with 1MB body limit
+    let api_routes = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
         .route("/v1/health", get(health))
@@ -111,16 +111,20 @@ pub fn build_app(config: ServerConfig) -> Router {
         .route("/v1/tokens/check", post(tokens_check))
         .route("/v1/tokens/reserve", post(tokens_reserve))
         .route("/v1/tokens/report", post(tokens_report))
-        .route("/v1/tokens/pools", get(tokens_pools));
+        .route("/v1/tokens/pools", get(tokens_pools))
+        .layer(DefaultBodyLimit::max(1024 * 1024)); // 1 MB for JSON API
 
+    #[allow(unused_mut)]
+    let mut app = Router::new().merge(api_routes);
+
+    // Audio routes with 50MB body limit
     #[cfg(feature = "whisper")]
     {
         app = app.route("/v1/audio/transcriptions", post(transcribe));
+        app = app.layer(DefaultBodyLimit::max(50 * 1024 * 1024));
     }
 
-    app.layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB max body (for audio uploads)
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+    app.layer(CorsLayer::permissive()).with_state(state)
 }
 
 /// Start the hoosh HTTP server.
@@ -266,6 +270,9 @@ async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
+    let request_id = uuid::Uuid::new_v4();
+    tracing::info!(request_id = %request_id, model = %req.model, "chat_completions");
+
     // Input validation
     if req.messages.len() > 256 {
         return error_response(
@@ -330,6 +337,19 @@ async fn chat_completions(
         }
     };
 
+    // Enforce provider-level max_tokens limit
+    let max_tokens = match (req.max_tokens, route.max_tokens_limit) {
+        (Some(requested), Some(limit)) if requested > limit => {
+            tracing::warn!(
+                "clamping max_tokens from {} to provider limit {}",
+                requested,
+                limit
+            );
+            Some(limit)
+        }
+        (requested, _) => requested,
+    };
+
     // Convert ChatRequest → InferenceRequest
     let inference_req = InferenceRequest {
         model: req.model.clone(),
@@ -347,14 +367,14 @@ async fn chat_completions(
                 content: m.content.clone(),
             })
             .collect(),
-        max_tokens: req.max_tokens,
+        max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
         stream: req.stream,
     };
 
     // Token budget: validate pool exists, then atomically reserve
-    let estimated_tokens = req.max_tokens.unwrap_or(1024) as u64;
+    let estimated_tokens = max_tokens.unwrap_or(1024) as u64;
     let pool_name = req.pool.clone();
     {
         let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
@@ -457,7 +477,9 @@ async fn chat_completions(
             yield Ok(Event::default().data("[DONE]"));
         };
 
-        return Sse::new(s).keep_alive(KeepAlive::default()).into_response();
+        return Sse::new(s)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .into_response();
     }
 
     // Non-streaming
@@ -746,8 +768,24 @@ async fn tokens_pools(State(state): State<Arc<AppState>>) -> Json<Vec<TokenPool>
 #[cfg(feature = "whisper")]
 async fn transcribe(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    // Validate content type — accept audio/* or application/octet-stream
+    if let Some(ct) = headers.get("content-type") {
+        let ct_str = ct.to_str().unwrap_or("");
+        if !ct_str.starts_with("audio/")
+            && !ct_str.starts_with("application/octet-stream")
+            && !ct_str.starts_with("multipart/form-data")
+        {
+            return error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("expected audio/* content type, got: {ct_str}"),
+            )
+            .into_response();
+        }
+    }
+
     let whisper = match &state.whisper {
         Some(w) => w.clone(),
         None => {

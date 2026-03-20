@@ -25,6 +25,7 @@ fn make_routes(n: usize) -> Vec<ProviderRoute> {
             enabled: true,
             base_url: format!("http://provider-{}:{}", i, 8080 + i),
             api_key: None,
+            max_tokens_limit: None,
         })
         .collect()
 }
