@@ -143,14 +143,31 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "hwaccel")]
             {
-                let registry = ai_hwaccel::AcceleratorRegistry::detect();
+                let hw = hoosh::hardware::HardwareManager::detect();
                 println!("Hardware:");
-                for p in registry.all_profiles() {
-                    let mem_gb = p.memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                    println!("  {} ({:.1} GB)", p.accelerator, mem_gb);
+                for line in hw.summary() {
+                    println!("{line}");
+                }
+                if hw.has_accelerator() {
+                    let mem_gb =
+                        hw.total_accelerator_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+                    println!("  Total accelerator memory: {mem_gb:.1} GB");
                 }
                 println!();
             }
+
+            println!("Providers:");
+            #[cfg(feature = "ollama")]
+            println!("  ollama (enabled)");
+            #[cfg(feature = "llamacpp")]
+            println!("  llamacpp (enabled)");
+            #[cfg(feature = "synapse")]
+            println!("  synapse (enabled)");
+            #[cfg(feature = "lmstudio")]
+            println!("  lmstudio (enabled)");
+            #[cfg(feature = "localai")]
+            println!("  localai (enabled)");
+            println!();
 
             #[cfg(feature = "whisper")]
             println!("Speech-to-text: whisper.cpp (enabled)");

@@ -13,7 +13,7 @@ categories = ["science", "web-programming::http-server"]
 
 [features]
 default = ["all-providers", "hwaccel"]
-all-providers = ["ollama", "llamacpp", "openai", "anthropic", "deepseek", "mistral", "groq", "openrouter", "lmstudio", "localai"]
+all-providers = ["ollama", "llamacpp", "openai", "anthropic", "deepseek", "mistral", "groq", "openrouter", "lmstudio", "localai", "synapse"]
 # Individual LLM providers
 ollama = []
 llamacpp = []
@@ -25,6 +25,7 @@ groq = []
 openrouter = []
 lmstudio = []
 localai = []
+synapse = []
 # Speech-to-text (whisper.cpp bindings)
 whisper = ["dep:whisper-rs"]
 # Hardware detection for model placement

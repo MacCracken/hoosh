@@ -42,6 +42,8 @@ pub mod budget;
 pub mod cache;
 pub mod client;
 pub mod error;
+#[cfg(feature = "hwaccel")]
+pub mod hardware;
 pub mod inference;
 pub mod provider;
 pub mod router;
@@ -52,7 +54,7 @@ pub use cache::ResponseCache;
 pub use client::HooshClient;
 pub use error::HooshError;
 pub use inference::{InferenceRequest, InferenceResponse, ModelInfo};
-pub use provider::{LlmProvider, ProviderType};
+pub use provider::{LlmProvider, ProviderRegistry, ProviderType};
 pub use router::Router;
 
 #[cfg(test)]

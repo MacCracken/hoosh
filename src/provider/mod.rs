@@ -1,10 +1,27 @@
 //! LLM provider trait and type registry.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
+use crate::router::ProviderRoute;
+
+// Provider backend modules (feature-gated)
+pub mod openai_compat;
+
+#[cfg(feature = "ollama")]
+pub mod ollama;
+#[cfg(feature = "llamacpp")]
+pub mod llamacpp;
+#[cfg(feature = "synapse")]
+pub mod synapse;
+#[cfg(feature = "lmstudio")]
+pub mod lmstudio;
+#[cfg(feature = "localai")]
+pub mod localai;
 
 /// Trait for LLM inference providers.
 #[async_trait::async_trait]
@@ -89,6 +106,83 @@ impl fmt::Display for ProviderType {
             Self::OpenRouter => write!(f, "openrouter"),
             Self::Whisper => write!(f, "whisper"),
         }
+    }
+}
+
+/// Registry of live provider instances, keyed by (type, base_url).
+pub struct ProviderRegistry {
+    providers: HashMap<(ProviderType, String), Arc<dyn LlmProvider>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+        }
+    }
+
+    /// Construct and register a provider from a route's type + base_url.
+    pub fn register_from_route(&mut self, route: &ProviderRoute) {
+        let key = (route.provider, route.base_url.clone());
+        if self.providers.contains_key(&key) {
+            return;
+        }
+
+        let provider: Option<Arc<dyn LlmProvider>> = match route.provider {
+            #[cfg(feature = "ollama")]
+            ProviderType::Ollama => {
+                Some(Arc::new(ollama::OllamaProvider::new(&route.base_url)))
+            }
+            #[cfg(feature = "llamacpp")]
+            ProviderType::LlamaCpp => {
+                Some(Arc::new(llamacpp::LlamaCppProvider::new(&route.base_url)))
+            }
+            #[cfg(feature = "synapse")]
+            ProviderType::Synapse => {
+                Some(Arc::new(synapse::SynapseProvider::new(&route.base_url)))
+            }
+            #[cfg(feature = "lmstudio")]
+            ProviderType::LmStudio => {
+                Some(Arc::new(lmstudio::LmStudioProvider::new(&route.base_url)))
+            }
+            #[cfg(feature = "localai")]
+            ProviderType::LocalAi => {
+                Some(Arc::new(localai::LocalAiProvider::new(&route.base_url)))
+            }
+            _ => None,
+        };
+
+        if let Some(p) = provider {
+            self.providers.insert(key, p);
+        }
+    }
+
+    /// Look up a provider by type and base_url.
+    pub fn get(&self, provider_type: ProviderType, base_url: &str) -> Option<Arc<dyn LlmProvider>> {
+        self.providers
+            .get(&(provider_type, base_url.to_string()))
+            .cloned()
+    }
+
+    /// Number of registered providers.
+    pub fn len(&self) -> usize {
+        self.providers.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
+    /// All registered providers.
+    pub fn all(&self) -> impl Iterator<Item = &Arc<dyn LlmProvider>> {
+        self.providers.values()
+    }
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

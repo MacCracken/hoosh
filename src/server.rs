@@ -12,13 +12,14 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 use crate::budget::{TokenBudget, TokenPool};
 use crate::cache::{CacheConfig, ResponseCache};
+use crate::inference::{InferenceRequest, Message, Role};
+use crate::provider::ProviderRegistry;
 use crate::router::{self as hoosh_router, ProviderRoute, RoutingStrategy};
 
 /// Shared server state.
@@ -26,6 +27,7 @@ pub struct AppState {
     pub router: hoosh_router::Router,
     pub cache: ResponseCache,
     pub budget: std::sync::Mutex<TokenBudget>,
+    pub providers: ProviderRegistry,
 }
 
 /// Server configuration.
@@ -51,10 +53,19 @@ impl Default for ServerConfig {
 
 /// Start the hoosh HTTP server.
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
+    let mut providers = ProviderRegistry::new();
+    for route in &config.routes {
+        if route.enabled {
+            providers.register_from_route(route);
+        }
+    }
+    tracing::info!("{} provider backend(s) registered", providers.len());
+
     let state = Arc::new(AppState {
         router: hoosh_router::Router::new(config.routes, config.strategy),
         cache: ResponseCache::new(config.cache_config),
         budget: std::sync::Mutex::new(TokenBudget::new()),
+        providers,
     });
 
     let app = Router::new()
@@ -180,7 +191,7 @@ async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    // Check if we have a provider for this model
+    // Find a route for this model
     let route = match state.router.select(&req.model) {
         Some(r) => r,
         None => {
@@ -195,49 +206,134 @@ async fn chat_completions(
         }
     };
 
+    // Look up the live provider backend
+    let provider = match state.providers.get(route.provider, &route.base_url) {
+        Some(p) => p,
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Provider '{}' matched for model '{}' but no backend is registered. \
+                     Is the '{}' feature enabled?",
+                    route.provider, req.model, route.provider
+                ),
+            )
+            .into_response();
+        }
+    };
+
+    // Convert ChatRequest → InferenceRequest
+    let inference_req = InferenceRequest {
+        model: req.model.clone(),
+        prompt: String::new(),
+        system: None,
+        messages: req
+            .messages
+            .iter()
+            .map(|m| Message {
+                role: match m.role.as_str() {
+                    "system" => Role::System,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User,
+                },
+                content: m.content.clone(),
+            })
+            .collect(),
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stream: req.stream,
+    };
+
     if req.stream {
-        // Return SSE stream with a single done event (no provider backends yet)
+        // Streaming response via SSE
         let model = req.model.clone();
-        let provider = route.provider.to_string();
-        let s = stream::iter(vec![
-            Ok::<_, std::convert::Infallible>(
-                Event::default().data(format!(
-                    "{{\"id\":\"chatcmpl-stub\",\"object\":\"chat.completion.chunk\",\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"[hoosh] Provider '{}' matched but no backend implementation yet.\"}},\"finish_reason\":\"stop\"}}]}}",
-                    model, provider
-                )),
-            ),
-            Ok(Event::default().data("[DONE]")),
-        ]);
+        let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+        let rx = match provider.infer_stream(inference_req).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Inference error: {e}"),
+                )
+                .into_response();
+            }
+        };
+
+        let s = async_stream::stream! {
+            let mut rx = rx;
+            while let Some(result) = rx.recv().await {
+                match result {
+                    Ok(token) => {
+                        let chunk = serde_json::json!({
+                            "id": &id,
+                            "object": "chat.completion.chunk",
+                            "model": &model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": token},
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        yield Ok::<_, std::convert::Infallible>(
+                            Event::default().data(chunk.to_string())
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("stream error: {e}");
+                        break;
+                    }
+                }
+            }
+            // Final chunk with finish_reason
+            let done_chunk = serde_json::json!({
+                "id": &id,
+                "object": "chat.completion.chunk",
+                "model": &model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }]
+            });
+            yield Ok(Event::default().data(done_chunk.to_string()));
+            yield Ok(Event::default().data("[DONE]"));
+        };
+
         return Sse::new(s).keep_alive(KeepAlive::default()).into_response();
     }
 
-    // Non-streaming stub response
-    let provider = route.provider.to_string();
-    let resp = ChatCompletionResponse {
-        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-        object: "chat.completion",
-        created: chrono::Utc::now().timestamp(),
-        model: req.model.clone(),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatResponseMessage {
-                role: "assistant",
-                content: format!(
-                    "[hoosh] Provider '{}' matched for model '{}', but no backend implementation yet. \
-                     This confirms routing works — provider backends ship in v0.5.0+.",
-                    provider, req.model
-                ),
-            },
-            finish_reason: "stop",
-        }],
-        usage: ChatUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
-    };
-
-    (StatusCode::OK, Json(resp)).into_response()
+    // Non-streaming
+    match provider.infer(&inference_req).await {
+        Ok(result) => {
+            let resp = ChatCompletionResponse {
+                id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+                object: "chat.completion",
+                created: chrono::Utc::now().timestamp(),
+                model: result.model.clone(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: ChatResponseMessage {
+                        role: "assistant",
+                        content: result.text,
+                    },
+                    finish_reason: "stop",
+                }],
+                usage: ChatUsage {
+                    prompt_tokens: result.usage.prompt_tokens,
+                    completion_tokens: result.usage.completion_tokens,
+                    total_tokens: result.usage.total_tokens,
+                },
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Inference error: {e}"),
+        )
+        .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,20 +354,48 @@ struct ModelObject {
 }
 
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
-    // List model patterns from configured routes (no live provider queries yet)
     let mut models = Vec::new();
+
+    // Query live providers for real model lists
     for route in state.router.routes() {
         if !route.enabled {
             continue;
         }
-        for pattern in &route.model_patterns {
-            models.push(ModelObject {
-                id: pattern.clone(),
-                object: "model",
-                owned_by: route.provider.to_string(),
-            });
+        if let Some(provider) = state.providers.get(route.provider, &route.base_url) {
+            match provider.list_models().await {
+                Ok(live_models) => {
+                    for m in live_models {
+                        models.push(ModelObject {
+                            id: m.id,
+                            object: "model",
+                            owned_by: m.provider,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to list models from {}: {e}", route.provider);
+                    // Fall back to configured patterns
+                    for pattern in &route.model_patterns {
+                        models.push(ModelObject {
+                            id: pattern.clone(),
+                            object: "model",
+                            owned_by: route.provider.to_string(),
+                        });
+                    }
+                }
+            }
+        } else {
+            // No live backend — show configured patterns
+            for pattern in &route.model_patterns {
+                models.push(ModelObject {
+                    id: pattern.clone(),
+                    object: "model",
+                    owned_by: route.provider.to_string(),
+                });
+            }
         }
     }
+
     Json(ModelsResponse {
         object: "list",
         data: models,
@@ -302,23 +426,34 @@ struct ProviderHealth {
     provider: String,
     base_url: String,
     enabled: bool,
-    // No live health checks yet — backends aren't implemented
-    status: &'static str,
+    status: String,
 }
 
 async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<ProviderHealth>> {
-    let providers: Vec<ProviderHealth> = state
-        .router
-        .routes()
-        .iter()
-        .map(|r| ProviderHealth {
-            provider: r.provider.to_string(),
-            base_url: r.base_url.clone(),
-            enabled: r.enabled,
-            status: if r.enabled { "unknown" } else { "disabled" },
-        })
-        .collect();
-    Json(providers)
+    let mut results = Vec::new();
+
+    for route in state.router.routes() {
+        let status = if !route.enabled {
+            "disabled".to_string()
+        } else if let Some(provider) = state.providers.get(route.provider, &route.base_url) {
+            match provider.health_check().await {
+                Ok(true) => "healthy".to_string(),
+                Ok(false) => "unhealthy".to_string(),
+                Err(e) => format!("error: {e}"),
+            }
+        } else {
+            "no_backend".to_string()
+        };
+
+        results.push(ProviderHealth {
+            provider: route.provider.to_string(),
+            base_url: route.base_url.clone(),
+            enabled: route.enabled,
+            status,
+        });
+    }
+
+    Json(results)
 }
 
 // ---------------------------------------------------------------------------
