@@ -88,12 +88,60 @@ impl HardwareManager {
         let mut lines = Vec::new();
         for p in self.registry.all_profiles() {
             let mem_gb = p.memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-            lines.push(format!("  {} ({:.1} GB)", p.accelerator, mem_gb));
+            let mut detail = format!("  {} ({:.1} GB", p.accelerator, mem_gb);
+
+            // Show free VRAM if available
+            if let Some(free) = p.memory_free_bytes
+                && free > 0
+            {
+                let free_gb = free as f64 / (1024.0 * 1024.0 * 1024.0);
+                detail.push_str(&format!(", {free_gb:.1} GB free"));
+            }
+
+            // Show bandwidth if available
+            if let Some(bw) = p.memory_bandwidth_gbps
+                && bw > 0.0
+            {
+                detail.push_str(&format!(", {bw:.0} GB/s"));
+            }
+
+            detail.push(')');
+
+            // Show power/thermal if available
+            let temp = p.temperature_c.unwrap_or(0);
+            let power = p.power_watts.unwrap_or(0.0);
+            let util = p.gpu_utilization_percent.unwrap_or(0);
+            if temp > 0 || power > 0.0 {
+                let mut extras = Vec::new();
+                if temp > 0 {
+                    extras.push(format!("{temp}°C"));
+                }
+                if power > 0.0 {
+                    extras.push(format!("{power:.0}W"));
+                }
+                if util > 0 {
+                    extras.push(format!("{util}% util"));
+                }
+                detail.push_str(&format!(" [{}]", extras.join(", ")));
+            }
+
+            lines.push(detail);
         }
         if lines.is_empty() {
             lines.push("  No hardware accelerators detected".into());
         }
+
+        // Show warnings from detection
+        for w in self.registry.warnings() {
+            lines.push(format!("  warning: {w}"));
+        }
+
         lines
+    }
+
+    /// Access the underlying registry for advanced queries.
+    pub fn registry(&self) -> &AcceleratorRegistry {
+        &self.registry
     }
 }
 
