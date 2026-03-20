@@ -12,6 +12,7 @@ use crate::router::ProviderRoute;
 // Provider backend modules (feature-gated)
 pub mod openai_compat;
 
+// Local providers
 #[cfg(feature = "ollama")]
 pub mod ollama;
 #[cfg(feature = "llamacpp")]
@@ -22,6 +23,20 @@ pub mod synapse;
 pub mod lmstudio;
 #[cfg(feature = "localai")]
 pub mod localai;
+
+// Remote providers
+#[cfg(feature = "openai")]
+pub mod openai_remote;
+#[cfg(feature = "anthropic")]
+pub mod anthropic;
+#[cfg(feature = "deepseek")]
+pub mod deepseek;
+#[cfg(feature = "mistral")]
+pub mod mistral;
+#[cfg(feature = "groq")]
+pub mod groq;
+#[cfg(feature = "openrouter")]
+pub mod openrouter;
 
 /// Trait for LLM inference providers.
 #[async_trait::async_trait]
@@ -128,7 +143,9 @@ impl ProviderRegistry {
             return;
         }
 
+        let api_key = route.api_key.clone();
         let provider: Option<Arc<dyn LlmProvider>> = match route.provider {
+            // Local providers
             #[cfg(feature = "ollama")]
             ProviderType::Ollama => {
                 Some(Arc::new(ollama::OllamaProvider::new(&route.base_url)))
@@ -148,6 +165,31 @@ impl ProviderRegistry {
             #[cfg(feature = "localai")]
             ProviderType::LocalAi => {
                 Some(Arc::new(localai::LocalAiProvider::new(&route.base_url)))
+            }
+            // Remote providers
+            #[cfg(feature = "openai")]
+            ProviderType::OpenAi => {
+                Some(Arc::new(openai_remote::OpenAiProvider::new(&route.base_url, api_key)))
+            }
+            #[cfg(feature = "anthropic")]
+            ProviderType::Anthropic => {
+                Some(Arc::new(anthropic::AnthropicProvider::new(&route.base_url, api_key)))
+            }
+            #[cfg(feature = "deepseek")]
+            ProviderType::DeepSeek => {
+                Some(Arc::new(deepseek::DeepSeekProvider::new(&route.base_url, api_key)))
+            }
+            #[cfg(feature = "mistral")]
+            ProviderType::Mistral => {
+                Some(Arc::new(mistral::MistralProvider::new(&route.base_url, api_key)))
+            }
+            #[cfg(feature = "groq")]
+            ProviderType::Groq => {
+                Some(Arc::new(groq::GroqProvider::new(&route.base_url, api_key)))
+            }
+            #[cfg(feature = "openrouter")]
+            ProviderType::OpenRouter => {
+                Some(Arc::new(openrouter::OpenRouterProvider::new(&route.base_url, api_key)))
             }
             _ => None,
         };

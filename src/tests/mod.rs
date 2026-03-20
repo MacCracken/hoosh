@@ -58,6 +58,7 @@ fn router_selects_provider() {
             model_patterns: vec!["llama*".into()],
             enabled: true,
             base_url: "http://localhost:11434".into(),
+            api_key: None,
         },
         ProviderRoute {
             provider: ProviderType::OpenAi,
@@ -65,6 +66,7 @@ fn router_selects_provider() {
             model_patterns: vec!["gpt-*".into()],
             enabled: true,
             base_url: "https://api.openai.com".into(),
+            api_key: None,
         },
     ];
     let router = Router::new(routes, RoutingStrategy::Priority);
@@ -151,6 +153,7 @@ fn provider_registry_register_ollama() {
         model_patterns: vec!["llama*".into()],
         enabled: true,
         base_url: "http://localhost:11434".into(),
+        api_key: None,
     };
     registry.register_from_route(&route);
     assert_eq!(registry.len(), 1);
@@ -173,6 +176,7 @@ fn provider_registry_dedup() {
         model_patterns: vec![],
         enabled: true,
         base_url: "http://localhost:11434".into(),
+        api_key: None,
     };
     registry.register_from_route(&route);
     registry.register_from_route(&route);
@@ -190,6 +194,7 @@ fn provider_registry_multiple_providers() {
         model_patterns: vec![],
         enabled: true,
         base_url: "http://localhost:11434".into(),
+        api_key: None,
     });
     registry.register_from_route(&ProviderRoute {
         provider: ProviderType::LlamaCpp,
@@ -197,6 +202,7 @@ fn provider_registry_multiple_providers() {
         model_patterns: vec![],
         enabled: true,
         base_url: "http://localhost:8080".into(),
+        api_key: None,
     });
     assert_eq!(registry.len(), 2);
 
@@ -207,6 +213,7 @@ fn provider_registry_multiple_providers() {
         model_patterns: vec![],
         enabled: true,
         base_url: "http://other-host:11434".into(),
+        api_key: None,
     });
     assert_eq!(registry.len(), 3);
 }
@@ -222,6 +229,7 @@ fn provider_registry_unrecognized_type_not_registered() {
         model_patterns: vec![],
         enabled: true,
         base_url: "http://localhost:9999".into(),
+        api_key: None,
     };
     registry.register_from_route(&route);
     assert!(registry.is_empty());
@@ -740,6 +748,7 @@ mod server_wiring {
             model_patterns: vec!["llama*".into()],
             enabled: true,
             base_url: "http://localhost:11434".into(),
+            api_key: None,
         }]);
         assert_eq!(state.providers.len(), 1);
         assert!(state
@@ -757,6 +766,7 @@ mod server_wiring {
             model_patterns: vec![],
             enabled: false,
             base_url: "http://localhost:11434".into(),
+            api_key: None,
         }]);
         assert!(state.providers.is_empty());
         // But the route is still in the router
@@ -773,6 +783,7 @@ mod server_wiring {
                 model_patterns: vec!["llama*".into()],
                 enabled: true,
                 base_url: "http://localhost:11434".into(),
+                api_key: None,
             },
             ProviderRoute {
                 provider: ProviderType::LlamaCpp,
@@ -780,6 +791,7 @@ mod server_wiring {
                 model_patterns: vec!["gguf-*".into()],
                 enabled: true,
                 base_url: "http://localhost:8080".into(),
+                api_key: None,
             },
             ProviderRoute {
                 provider: ProviderType::LmStudio,
@@ -787,6 +799,7 @@ mod server_wiring {
                 model_patterns: vec![],
                 enabled: true,
                 base_url: "http://localhost:1234".into(),
+                api_key: None,
             },
         ]);
         assert_eq!(state.providers.len(), 3);
@@ -802,6 +815,7 @@ mod server_wiring {
                 model_patterns: vec!["llama*".into()],
                 enabled: true,
                 base_url: "http://localhost:11434".into(),
+                api_key: None,
             },
             ProviderRoute {
                 provider: ProviderType::OpenAi,
@@ -809,6 +823,7 @@ mod server_wiring {
                 model_patterns: vec!["gpt-*".into()],
                 enabled: true,
                 base_url: "https://api.openai.com".into(),
+                api_key: None,
             },
         ]);
 
@@ -818,7 +833,13 @@ mod server_wiring {
         let route = state.router.select("gpt-4o").unwrap();
         assert_eq!(route.provider, ProviderType::OpenAi);
 
-        // OpenAI is a remote provider — not registered by our local registry
+        // OpenAI is now registered as a remote provider
+        #[cfg(feature = "openai")]
+        assert!(state
+            .providers
+            .get(ProviderType::OpenAi, "https://api.openai.com")
+            .is_some());
+        #[cfg(not(feature = "openai"))]
         assert!(state
             .providers
             .get(ProviderType::OpenAi, "https://api.openai.com")

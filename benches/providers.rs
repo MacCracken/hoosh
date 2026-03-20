@@ -24,6 +24,7 @@ fn make_routes(n: usize) -> Vec<ProviderRoute> {
             model_patterns: vec![format!("model-{}*", i)],
             enabled: true,
             base_url: format!("http://provider-{}:{}", i, 8080 + i),
+            api_key: None,
         })
         .collect()
 }

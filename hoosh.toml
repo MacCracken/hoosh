@@ -1,0 +1,59 @@
+# hoosh configuration
+# See BENCHMARKS.md for performance data.
+
+[server]
+bind = "127.0.0.1"
+port = 8088
+strategy = "priority"
+
+[cache]
+max_entries = 1000
+ttl_secs = 300
+enabled = true
+
+# --- Local providers ---
+
+[[providers]]
+type = "Ollama"
+# base_url = "http://localhost:11434"  # default
+priority = 1
+models = ["llama*", "mistral*", "qwen*", "phi*", "gemma*"]
+
+# [[providers]]
+# type = "LlamaCpp"
+# base_url = "http://localhost:8080"
+# priority = 2
+# models = ["gguf-*"]
+
+# --- Remote providers ---
+# Set API keys via environment variables for security.
+
+# [[providers]]
+# type = "OpenAi"
+# api_key = "$OPENAI_API_KEY"
+# priority = 10
+# models = ["gpt-*", "o1-*", "o3-*"]
+
+# [[providers]]
+# type = "Anthropic"
+# api_key = "$ANTHROPIC_API_KEY"
+# priority = 10
+# models = ["claude-*"]
+
+# [[providers]]
+# type = "DeepSeek"
+# api_key = "$DEEPSEEK_API_KEY"
+# priority = 15
+# models = ["deepseek-*"]
+
+# [[providers]]
+# type = "Groq"
+# api_key = "$GROQ_API_KEY"
+# priority = 5
+# models = ["llama*", "mixtral*"]
+
+# [[providers]]
+# type = "OpenRouter"
+# api_key = "$OPENROUTER_API_KEY"
+# priority = 20
+# models = ["*"]  # catch-all fallback

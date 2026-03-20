@@ -11,7 +11,7 @@
 
 use clap::{Parser, Subcommand};
 use hoosh::client::HooshClient;
-use hoosh::server::ServerConfig;
+use hoosh::config::HooshConfig;
 
 #[derive(Parser)]
 #[command(name = "hoosh", version, about = "AI inference gateway")]
@@ -24,12 +24,15 @@ struct Cli {
 enum Commands {
     /// Start the inference gateway server
     Serve {
-        /// Port to listen on
-        #[arg(short, long, default_value = "8088")]
-        port: u16,
-        /// Bind address
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
+        /// Port to listen on (overrides config file)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Bind address (overrides config file)
+        #[arg(long)]
+        bind: Option<String>,
+        /// Path to config file (default: hoosh.toml)
+        #[arg(short, long)]
+        config: Option<String>,
     },
     /// List available models across all providers
     Models {
@@ -74,13 +77,17 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { port, bind } => {
-            let config = ServerConfig {
-                bind,
-                port,
-                ..Default::default()
+        Commands::Serve { port, bind, config } => {
+            let hoosh_config = if let Some(path) = config {
+                HooshConfig::load(&path)?
+            } else {
+                HooshConfig::load_or_default()
             };
-            hoosh::server::run(config).await?;
+            let server_config = hoosh_config.into_server_config(
+                bind.as_deref(),
+                port,
+            );
+            hoosh::server::run(server_config).await?;
         }
         Commands::Models { server } => {
             let client = HooshClient::new(&server);
@@ -156,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
                 println!();
             }
 
-            println!("Providers:");
+            println!("Local providers:");
             #[cfg(feature = "ollama")]
             println!("  ollama (enabled)");
             #[cfg(feature = "llamacpp")]
@@ -167,6 +174,21 @@ async fn main() -> anyhow::Result<()> {
             println!("  lmstudio (enabled)");
             #[cfg(feature = "localai")]
             println!("  localai (enabled)");
+            println!();
+
+            println!("Remote providers:");
+            #[cfg(feature = "openai")]
+            println!("  openai (enabled)");
+            #[cfg(feature = "anthropic")]
+            println!("  anthropic (enabled)");
+            #[cfg(feature = "deepseek")]
+            println!("  deepseek (enabled)");
+            #[cfg(feature = "mistral")]
+            println!("  mistral (enabled)");
+            #[cfg(feature = "groq")]
+            println!("  groq (enabled)");
+            #[cfg(feature = "openrouter")]
+            println!("  openrouter (enabled)");
             println!();
 
             #[cfg(feature = "whisper")]

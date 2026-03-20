@@ -31,6 +31,9 @@ pub struct ProviderRoute {
     pub enabled: bool,
     /// Base URL for this provider.
     pub base_url: String,
+    /// API key (for remote providers). Resolved from env var if prefixed with `$`.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// The router manages provider selection and fallback.
@@ -108,6 +111,7 @@ mod tests {
             model_patterns: patterns.into_iter().map(String::from).collect(),
             enabled: true,
             base_url: "http://localhost".into(),
+            api_key: None,
         }
     }
 

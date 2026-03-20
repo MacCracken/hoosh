@@ -41,6 +41,7 @@
 pub mod budget;
 pub mod cache;
 pub mod client;
+pub mod config;
 pub mod error;
 #[cfg(feature = "hwaccel")]
 pub mod hardware;

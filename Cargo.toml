@@ -62,11 +62,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Config
+toml = "0.8"
+
 # Caching
 dashmap = "6"
 
 # Hardware detection
-ai-hwaccel = { version = "0.19", optional = true, default-features = false }
+ai-hwaccel = { version = "0.19", optional = true, default-features = false, features = ["vulkan", "rocm", "cuda"] }
 
 # Speech-to-text
 whisper-rs = { version = "0.13", optional = true }
