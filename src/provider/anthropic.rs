@@ -252,20 +252,21 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn health_check(&self) -> anyhow::Result<bool> {
-        // Try a minimal request — Anthropic has no dedicated health endpoint
-        if self.api_key.is_none() {
-            return Ok(false);
-        }
+        // HEAD request to check reachability without consuming tokens
         let url = format!("{}/v1/messages", self.base_url);
-        let body = serde_json::json!({
-            "model": "claude-haiku-4-20250514",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        });
-        let rb = self.build_request(self.client.post(&url).json(&body));
-        let resp = rb.send().await?;
-        // 200 or 401 both mean the endpoint is reachable
-        Ok(resp.status().is_success() || resp.status().as_u16() == 401)
+        let mut rb = self.client.post(&url).header("content-length", "0");
+        if let Some(key) = &self.api_key {
+            rb = rb.header("x-api-key", key);
+        }
+        rb = rb.header("anthropic-version", ANTHROPIC_VERSION);
+        match rb.send().await {
+            Ok(resp) => {
+                // Any response (including 400/401/422) means the endpoint is reachable
+                let status = resp.status().as_u16();
+                Ok(status != 404 && status != 502 && status != 503)
+            }
+            Err(_) => Ok(false),
+        }
     }
 
     fn provider_type(&self) -> ProviderType {

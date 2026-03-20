@@ -50,7 +50,7 @@ impl TokenPool {
     /// Commit reserved tokens as used (after inference completes).
     pub fn commit(&mut self, reserved: u64, actual: u64) {
         self.reserved = self.reserved.saturating_sub(reserved);
-        self.used += actual;
+        self.used = self.used.saturating_add(actual);
     }
 
     /// Release reserved tokens without using them (on failure/cancel).

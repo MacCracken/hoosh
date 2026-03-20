@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::{
     Json, Router,
     extract::State,
@@ -70,7 +71,8 @@ pub fn build_app(config: ServerConfig) -> Router {
 
     let mut budget = TokenBudget::new();
     if !config.budget_pools.iter().any(|p| p.name == "default") {
-        budget.add_pool(TokenPool::new("default", u64::MAX));
+        // 10M tokens default — reasonable for local use, explicit config for production
+        budget.add_pool(TokenPool::new("default", 10_000_000));
     }
     for pool in config.budget_pools {
         budget.add_pool(pool);
@@ -116,7 +118,9 @@ pub fn build_app(config: ServerConfig) -> Router {
         app = app.route("/v1/audio/transcriptions", post(transcribe));
     }
 
-    app.layer(CorsLayer::permissive()).with_state(state)
+    app.layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB max body (for audio uploads)
+        .layer(CorsLayer::permissive())
+        .with_state(state)
 }
 
 /// Start the hoosh HTTP server.
@@ -232,6 +236,21 @@ async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
+    // Input validation
+    if req.messages.len() > 256 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!("Too many messages: {} (max 256)", req.messages.len()),
+        )
+        .into_response();
+    }
+    if req.messages.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "messages array is empty").into_response();
+    }
+    if req.model.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "model field is required").into_response();
+    }
+
     // Find a route for this model
     let route = match state.router.select(&req.model) {
         Some(r) => r,
@@ -286,23 +305,31 @@ async fn chat_completions(
         stream: req.stream,
     };
 
-    // Token budget: reserve estimated tokens before inference
+    // Token budget: validate pool exists, then atomically reserve
     let estimated_tokens = req.max_tokens.unwrap_or(1024) as u64;
     let pool_name = req.pool.clone();
     {
-        let mut budget = state.budget.lock().unwrap();
-        if let Some(pool) = budget.get_pool(&pool_name)
-            && !pool.can_reserve(estimated_tokens)
-        {
-            let remaining = pool.available();
-            return error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Token budget exceeded: pool '{}' has {} tokens remaining, requested {}",
-                    pool_name, remaining, estimated_tokens
-                ),
-            )
-            .into_response();
+        let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
+        match budget.get_pool(&pool_name) {
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("Token pool '{}' does not exist", pool_name),
+                )
+                .into_response();
+            }
+            Some(pool) if !pool.can_reserve(estimated_tokens) => {
+                let remaining = pool.available();
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Token budget exceeded: pool '{}' has {} tokens remaining, requested {}",
+                        pool_name, remaining, estimated_tokens
+                    ),
+                )
+                .into_response();
+            }
+            _ => {}
         }
         budget.reserve(&pool_name, estimated_tokens);
     }
@@ -316,7 +343,7 @@ async fn chat_completions(
             Ok(rx) => rx,
             Err(e) => {
                 // Release reservation on error
-                let mut budget = state.budget.lock().unwrap();
+                let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
                 budget.report(&pool_name, estimated_tokens, 0);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -372,7 +399,7 @@ async fn chat_completions(
             yield Ok(Event::default().data("[DONE]"));
 
             // Report actual token usage
-            let mut budget = state_clone.budget.lock().unwrap();
+            let mut budget = state_clone.budget.lock().unwrap_or_else(|e| e.into_inner());
             budget.report(&pool_clone, estimated_tokens, token_count);
         };
 
@@ -385,7 +412,7 @@ async fn chat_completions(
             // Report actual usage to budget
             let actual = result.usage.total_tokens as u64;
             {
-                let mut budget = state.budget.lock().unwrap();
+                let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
                 budget.report(&pool_name, estimated_tokens, actual);
             }
 
@@ -412,7 +439,7 @@ async fn chat_completions(
         }
         Err(e) => {
             // Release reservation on error
-            let mut budget = state.budget.lock().unwrap();
+            let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
             budget.report(&pool_name, estimated_tokens, 0);
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -563,7 +590,7 @@ async fn tokens_check(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TokenCheckRequest>,
 ) -> impl IntoResponse {
-    let budget = state.budget.lock().unwrap();
+    let budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
     match budget.get_pool(&req.pool) {
         Some(pool) => (
             StatusCode::OK,
@@ -597,7 +624,7 @@ async fn tokens_reserve(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TokenReserveRequest>,
 ) -> impl IntoResponse {
-    let mut budget = state.budget.lock().unwrap();
+    let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
     let reserved = budget.reserve(&req.pool, req.tokens);
     match budget.get_pool(&req.pool) {
         Some(pool) => (
@@ -633,7 +660,7 @@ async fn tokens_report(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TokenReportRequest>,
 ) -> impl IntoResponse {
-    let mut budget = state.budget.lock().unwrap();
+    let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
     budget.report(&req.pool, req.reserved, req.actual);
     match budget.get_pool(&req.pool) {
         Some(pool) => (
@@ -653,7 +680,7 @@ async fn tokens_report(
 }
 
 async fn tokens_pools(State(state): State<Arc<AppState>>) -> Json<Vec<TokenPool>> {
-    let budget = state.budget.lock().unwrap();
+    let budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
     let pools: Vec<TokenPool> = budget.pools().values().cloned().collect();
     Json(pools)
 }

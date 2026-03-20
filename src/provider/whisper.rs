@@ -136,6 +136,12 @@ fn decode_audio(data: &[u8]) -> anyhow::Result<Vec<f32>> {
 
         if chunk_id == b"data" {
             let audio_data = &data[pos + 8..pos + 8 + chunk_size.min(data.len() - pos - 8)];
+            if audio_data.len() % 2 != 0 {
+                return Err(anyhow::anyhow!(
+                    "audio data has odd byte count ({}), expected 16-bit PCM samples",
+                    audio_data.len()
+                ));
+            }
             // Convert i16 PCM to f32
             let mut samples = Vec::with_capacity(audio_data.len() / 2);
             for chunk in audio_data.chunks_exact(2) {
