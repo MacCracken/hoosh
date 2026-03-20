@@ -846,3 +846,244 @@ mod server_wiring {
             .is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end server tests (full HTTP stack with mock backend)
+// ---------------------------------------------------------------------------
+
+mod e2e {
+    use axum::{Json, Router, routing::{get, post}};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    use crate::budget::TokenPool;
+    use crate::cache::CacheConfig;
+    use crate::client::HooshClient;
+    use crate::provider::ProviderType;
+    use crate::router::{ProviderRoute, RoutingStrategy};
+    use crate::server::ServerConfig;
+
+    /// Start a mock OpenAI-compatible backend and return its URL.
+    async fn start_mock_backend() -> String {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(mock_chat))
+            .route("/v1/models", get(mock_models));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    async fn mock_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        let model = body["model"].as_str().unwrap_or("mock-model");
+        let stream = body["stream"].as_bool().unwrap_or(false);
+        assert!(!stream, "mock does not support streaming");
+
+        Json(json!({
+            "id": "chatcmpl-e2e",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "E2E mock response"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }))
+    }
+
+    async fn mock_models() -> Json<serde_json::Value> {
+        Json(json!({
+            "object": "list",
+            "data": [
+                {"id": "mock-model", "object": "model", "owned_by": "mock"}
+            ]
+        }))
+    }
+
+    /// Start hoosh server pointing at a mock backend, return the hoosh URL.
+    async fn start_hoosh(backend_url: &str) -> String {
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend_url.to_string(),
+                api_key: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                TokenPool::new("default", 100_000),
+                TokenPool::new("limited", 50),
+            ],
+        };
+
+        let app = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_health() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+
+        assert!(client.health().await.unwrap());
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_list_models() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+
+        let models = client.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "mock-model");
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_infer() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+
+        let req = crate::InferenceRequest {
+            model: "mock-model".into(),
+            prompt: "Hello".into(),
+            ..Default::default()
+        };
+        let resp = client.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "E2E mock response");
+        assert_eq!(resp.usage.total_tokens, 15);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_infer_no_matching_model() {
+        let backend = start_mock_backend().await;
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec!["llama*".into()],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig::default(),
+            budget_pools: vec![TokenPool::new("default", u64::MAX)],
+        };
+
+        let app = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = HooshClient::new(format!("http://127.0.0.1:{}", addr.port()));
+        let req = crate::InferenceRequest {
+            model: "gpt-4".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let result = client.infer(&req).await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_budget_enforcement() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+
+        let client = reqwest::Client::new();
+        // "limited" pool has 50 tokens — requesting 1024 should fail
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "pool": "limited"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 429);
+
+        // Small request should succeed
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+                "pool": "limited"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_budget_tracks_usage() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+
+        // Initial state
+        let pools: Vec<serde_json::Value> = client
+            .get(format!("{hoosh_url}/v1/tokens/pools"))
+            .send().await.unwrap()
+            .json().await.unwrap();
+        let default_pool = pools.iter().find(|p| p["name"] == "default").unwrap();
+        assert_eq!(default_pool["used"], 0);
+
+        // Inference
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 100
+            }))
+            .send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Pool should show actual usage (mock returns total_tokens=15)
+        let pools: Vec<serde_json::Value> = client
+            .get(format!("{hoosh_url}/v1/tokens/pools"))
+            .send().await.unwrap()
+            .json().await.unwrap();
+        let default_pool = pools.iter().find(|p| p["name"] == "default").unwrap();
+        assert_eq!(default_pool["used"], 15);
+        assert_eq!(default_pool["reserved"], 0);
+    }
+}

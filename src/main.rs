@@ -113,20 +113,46 @@ async fn main() -> anyhow::Result<()> {
         Commands::Infer {
             model,
             prompt,
-            stream: _,
+            stream,
             server,
         } => {
             let client = HooshClient::new(&server);
             let req = hoosh::InferenceRequest {
                 model,
                 prompt,
+                stream,
                 ..Default::default()
             };
-            match client.infer(&req).await {
-                Ok(resp) => println!("{}", resp.text),
-                Err(e) => {
-                    eprintln!("Inference failed: {}", e);
-                    std::process::exit(1);
+            if stream {
+                use std::io::Write;
+                match client.infer_stream(&req).await {
+                    Ok(mut rx) => {
+                        while let Some(result) = rx.recv().await {
+                            match result {
+                                Ok(token) => {
+                                    print!("{token}");
+                                    std::io::stdout().flush().ok();
+                                }
+                                Err(e) => {
+                                    eprintln!("\nStream error: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("Inference failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                match client.infer(&req).await {
+                    Ok(resp) => println!("{}", resp.text),
+                    Err(e) => {
+                        eprintln!("Inference failed: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }

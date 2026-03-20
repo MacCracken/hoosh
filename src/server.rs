@@ -53,8 +53,8 @@ impl Default for ServerConfig {
     }
 }
 
-/// Start the hoosh HTTP server.
-pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
+/// Build the axum Router from a ServerConfig. Useful for testing.
+pub fn build_app(config: ServerConfig) -> Router {
     let mut providers = ProviderRegistry::new();
     for route in &config.routes {
         if route.enabled {
@@ -64,7 +64,6 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     tracing::info!("{} provider backend(s) registered", providers.len());
 
     let mut budget = TokenBudget::new();
-    // Always ensure a "default" pool exists
     if !config.budget_pools.iter().any(|p| p.name == "default") {
         budget.add_pool(TokenPool::new("default", u64::MAX));
     }
@@ -80,22 +79,23 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         providers,
     });
 
-    let app = Router::new()
-        // OpenAI-compatible endpoints
+    Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
-        // Health
         .route("/v1/health", get(health))
         .route("/v1/health/providers", get(health_providers))
-        // Token budget
         .route("/v1/tokens/check", post(tokens_check))
         .route("/v1/tokens/reserve", post(tokens_reserve))
         .route("/v1/tokens/report", post(tokens_report))
         .route("/v1/tokens/pools", get(tokens_pools))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state)
+}
 
+/// Start the hoosh HTTP server.
+pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.bind, config.port);
+    let app = build_app(config);
     tracing::info!(
         "hoosh v{} listening on {}",
         env!("CARGO_PKG_VERSION"),
