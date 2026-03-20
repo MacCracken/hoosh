@@ -1,0 +1,58 @@
+//! Hoosh — AI inference gateway for Rust.
+//!
+//! Multi-provider LLM routing, local model serving, speech-to-text, and
+//! token budget management. OpenAI-compatible HTTP API.
+//!
+//! > **Name**: Hoosh (Persian: هوش) — intelligence, the word for AI.
+//!
+//! # Architecture
+//!
+//! ```text
+//! Clients (tarang, daimon, agnoshi, consumer apps)
+//!     │
+//!     ▼
+//! Router (provider selection, load balancing, fallback)
+//!     │
+//!     ├──▶ Local backends (Ollama, llama.cpp, Synapse, whisper.cpp)
+//!     │
+//!     └──▶ Remote APIs (OpenAI, Anthropic, DeepSeek, Mistral, Groq, ...)
+//!           │
+//!           ▼
+//!     Cache ◀── Rate Limiter ◀── Token Budget
+//! ```
+//!
+//! # Quick start
+//!
+//! ```rust,no_run
+//! use hoosh::{InferenceRequest, HooshClient};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let client = HooshClient::new("http://localhost:8088");
+//! let response = client.infer(&InferenceRequest {
+//!     model: "llama3".into(),
+//!     prompt: "Explain Rust ownership in one sentence.".into(),
+//!     ..Default::default()
+//! }).await?;
+//! println!("{}", response.text);
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod budget;
+pub mod cache;
+pub mod client;
+pub mod error;
+pub mod inference;
+pub mod provider;
+pub mod router;
+
+pub use budget::{TokenBudget, TokenPool};
+pub use cache::ResponseCache;
+pub use client::HooshClient;
+pub use error::HooshError;
+pub use inference::{InferenceRequest, InferenceResponse, ModelInfo};
+pub use provider::{LlmProvider, ProviderType};
+pub use router::Router;
+
+#[cfg(test)]
+mod tests;

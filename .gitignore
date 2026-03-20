@@ -1,0 +1,37 @@
+# Build artifacts
+/target/
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debugging
+*.pdb
+core
+core.*
+
+# Coverage
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# Benchmark output
+criterion/
+
+# Environment / secrets
+.env
+.env.*
+
+# Model weights (downloaded at runtime, not tracked)
+models/
+*.bin
+*.gguf
+*.onnx
