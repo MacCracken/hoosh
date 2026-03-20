@@ -79,3 +79,11 @@ tokio-test = "0.4"
 [[bench]]
 name = "routing"
 harness = false
+
+[[bench]]
+name = "providers"
+harness = false
+
+[[bench]]
+name = "live_providers"
+harness = false

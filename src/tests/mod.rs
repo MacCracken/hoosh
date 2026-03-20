@@ -615,6 +615,91 @@ mod mock_server {
 // Server-level integration tests (AppState wiring)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Live provider tests (require running backends — run with `cargo test -- --ignored`)
+// ---------------------------------------------------------------------------
+
+mod live {
+    use crate::inference::InferenceRequest;
+    use crate::provider::LlmProvider;
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    #[ignore] // Requires `ollama serve` running on localhost:11434
+    async fn ollama_live_health() {
+        use crate::provider::ollama::OllamaProvider;
+        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        assert!(provider.health_check().await.unwrap());
+    }
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    #[ignore]
+    async fn ollama_live_list_models() {
+        use crate::provider::ollama::OllamaProvider;
+        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let models = provider.list_models().await.unwrap();
+        assert!(!models.is_empty(), "Ollama should have at least one model pulled");
+        for m in &models {
+            println!("  model: {} (size: {:?})", m.id, m.parameters);
+        }
+    }
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    #[ignore]
+    async fn ollama_live_infer() {
+        use crate::provider::ollama::OllamaProvider;
+        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let models = provider.list_models().await.unwrap();
+        assert!(!models.is_empty());
+
+        let req = InferenceRequest {
+            model: models[0].id.clone(),
+            prompt: "Say hello in one word.".into(),
+            max_tokens: Some(10),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        println!("  response: {}", resp.text);
+        println!("  tokens: prompt={}, completion={}, total={}",
+            resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens);
+        println!("  latency: {}ms", resp.latency_ms);
+
+        assert!(!resp.text.is_empty());
+        assert_eq!(resp.provider, "ollama");
+        assert!(resp.usage.total_tokens > 0);
+    }
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    #[ignore]
+    async fn ollama_live_stream() {
+        use crate::provider::ollama::OllamaProvider;
+        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let models = provider.list_models().await.unwrap();
+        assert!(!models.is_empty());
+
+        let req = InferenceRequest {
+            model: models[0].id.clone(),
+            prompt: "Count to 3.".into(),
+            max_tokens: Some(20),
+            stream: true,
+            ..Default::default()
+        };
+        let mut rx = provider.infer_stream(req).await.unwrap();
+        let mut tokens = Vec::new();
+        while let Some(result) = rx.recv().await {
+            let token = result.unwrap();
+            tokens.push(token);
+        }
+        assert!(!tokens.is_empty(), "Should receive at least one token");
+        let full = tokens.join("");
+        println!("  streamed: {full}");
+        assert!(!full.is_empty());
+    }
+}
+
 mod server_wiring {
     use std::sync::Arc;
 
