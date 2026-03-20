@@ -11,6 +11,16 @@ max_entries = 1000
 ttl_secs = 300
 enabled = true
 
+# --- Token budget pools ---
+
+[[budgets]]
+name = "default"
+capacity = 100000
+
+[[budgets]]
+name = "testing"
+capacity = 500
+
 # --- Local providers ---
 
 [[providers]]

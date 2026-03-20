@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::budget::TokenPool;
 use crate::cache::CacheConfig;
 use crate::provider::ProviderType;
 use crate::router::{ProviderRoute, RoutingStrategy};
@@ -21,6 +22,16 @@ pub struct HooshConfig {
     pub cache: CacheSection,
     #[serde(default)]
     pub providers: Vec<ProviderSection>,
+    #[serde(default)]
+    pub budgets: Vec<BudgetPoolSection>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BudgetPoolSection {
+    /// Pool name (e.g. "default", "agent-1").
+    pub name: String,
+    /// Maximum tokens allowed in this pool.
+    pub capacity: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +179,7 @@ impl HooshConfig {
                 server: ServerSection::default(),
                 cache: CacheSection::default(),
                 providers: Vec::new(),
+                budgets: Vec::new(),
             }
         }
     }
@@ -202,6 +214,12 @@ impl HooshConfig {
             StrategyValue::LowestLatency => RoutingStrategy::LowestLatency,
             StrategyValue::Direct => RoutingStrategy::Direct,
         };
+        let budget_pools = self
+            .budgets
+            .iter()
+            .map(|b| TokenPool::new(&b.name, b.capacity))
+            .collect();
+
         ServerConfig {
             bind: bind_override
                 .map(String::from)
@@ -214,6 +232,7 @@ impl HooshConfig {
                 ttl_secs: self.cache.ttl_secs,
                 enabled: self.cache.enabled,
             },
+            budget_pools,
         }
     }
 }

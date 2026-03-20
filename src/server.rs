@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub routes: Vec<ProviderRoute>,
     pub strategy: RoutingStrategy,
     pub cache_config: CacheConfig,
+    pub budget_pools: Vec<TokenPool>,
 }
 
 impl Default for ServerConfig {
@@ -47,6 +48,7 @@ impl Default for ServerConfig {
             routes: Vec::new(),
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
+            budget_pools: Vec::new(),
         }
     }
 }
@@ -61,10 +63,20 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     }
     tracing::info!("{} provider backend(s) registered", providers.len());
 
+    let mut budget = TokenBudget::new();
+    // Always ensure a "default" pool exists
+    if !config.budget_pools.iter().any(|p| p.name == "default") {
+        budget.add_pool(TokenPool::new("default", u64::MAX));
+    }
+    for pool in config.budget_pools {
+        budget.add_pool(pool);
+    }
+    tracing::info!("{} token pool(s) configured", budget.pools().len());
+
     let state = Arc::new(AppState {
         router: hoosh_router::Router::new(config.routes, config.strategy),
         cache: ResponseCache::new(config.cache_config),
-        budget: std::sync::Mutex::new(TokenBudget::new()),
+        budget: std::sync::Mutex::new(budget),
         providers,
     });
 
@@ -111,7 +123,6 @@ async fn shutdown_signal() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields consumed by future provider backends
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
@@ -123,6 +134,13 @@ struct ChatRequest {
     top_p: Option<f64>,
     #[serde(default)]
     stream: bool,
+    /// Token budget pool name (defaults to "default").
+    #[serde(default = "default_pool_name")]
+    pool: String,
+}
+
+fn default_pool_name() -> String {
+    "default".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +263,27 @@ async fn chat_completions(
         stream: req.stream,
     };
 
+    // Token budget: reserve estimated tokens before inference
+    let estimated_tokens = req.max_tokens.unwrap_or(1024) as u64;
+    let pool_name = req.pool.clone();
+    {
+        let mut budget = state.budget.lock().unwrap();
+        if let Some(pool) = budget.get_pool(&pool_name) {
+            if !pool.can_reserve(estimated_tokens) {
+                let remaining = pool.available();
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Token budget exceeded: pool '{}' has {} tokens remaining, requested {}",
+                        pool_name, remaining, estimated_tokens
+                    ),
+                )
+                .into_response();
+            }
+        }
+        budget.reserve(&pool_name, estimated_tokens);
+    }
+
     if req.stream {
         // Streaming response via SSE
         let model = req.model.clone();
@@ -253,6 +292,9 @@ async fn chat_completions(
         let rx = match provider.infer_stream(inference_req).await {
             Ok(rx) => rx,
             Err(e) => {
+                // Release reservation on error
+                let mut budget = state.budget.lock().unwrap();
+                budget.report(&pool_name, estimated_tokens, 0);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Inference error: {e}"),
@@ -261,11 +303,17 @@ async fn chat_completions(
             }
         };
 
+        // Report budget after stream completes
+        let state_clone = state.clone();
+        let pool_clone = pool_name.clone();
+
         let s = async_stream::stream! {
             let mut rx = rx;
+            let mut token_count: u64 = 0;
             while let Some(result) = rx.recv().await {
                 match result {
                     Ok(token) => {
+                        token_count += 1;
                         let chunk = serde_json::json!({
                             "id": &id,
                             "object": "chat.completion.chunk",
@@ -299,6 +347,10 @@ async fn chat_completions(
             });
             yield Ok(Event::default().data(done_chunk.to_string()));
             yield Ok(Event::default().data("[DONE]"));
+
+            // Report actual token usage
+            let mut budget = state_clone.budget.lock().unwrap();
+            budget.report(&pool_clone, estimated_tokens, token_count);
         };
 
         return Sse::new(s).keep_alive(KeepAlive::default()).into_response();
@@ -307,6 +359,13 @@ async fn chat_completions(
     // Non-streaming
     match provider.infer(&inference_req).await {
         Ok(result) => {
+            // Report actual usage to budget
+            let actual = result.usage.total_tokens as u64;
+            {
+                let mut budget = state.budget.lock().unwrap();
+                budget.report(&pool_name, estimated_tokens, actual);
+            }
+
             let resp = ChatCompletionResponse {
                 id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                 object: "chat.completion",
@@ -328,11 +387,16 @@ async fn chat_completions(
             };
             (StatusCode::OK, Json(resp)).into_response()
         }
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Inference error: {e}"),
-        )
-        .into_response(),
+        Err(e) => {
+            // Release reservation on error
+            let mut budget = state.budget.lock().unwrap();
+            budget.report(&pool_name, estimated_tokens, 0);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Inference error: {e}"),
+            )
+            .into_response()
+        }
     }
 }
 
