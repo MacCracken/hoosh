@@ -24,6 +24,14 @@ pub struct HooshConfig {
     pub providers: Vec<ProviderSection>,
     #[serde(default)]
     pub budgets: Vec<BudgetPoolSection>,
+    #[serde(default)]
+    pub whisper: WhisperSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WhisperSection {
+    /// Path to whisper model file (e.g. "models/ggml-base.en.bin").
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +188,7 @@ impl HooshConfig {
                 cache: CacheSection::default(),
                 providers: Vec::new(),
                 budgets: Vec::new(),
+                whisper: WhisperSection::default(),
             }
         }
     }
@@ -233,6 +242,7 @@ impl HooshConfig {
                 enabled: self.cache.enabled,
             },
             budget_pools,
+            whisper_model: self.whisper.model,
         }
     }
 }

@@ -24,6 +24,10 @@ pub mod lmstudio;
 #[cfg(feature = "localai")]
 pub mod localai;
 
+// Speech-to-text
+#[cfg(feature = "whisper")]
+pub mod whisper;
+
 // Remote providers
 #[cfg(feature = "openai")]
 pub mod openai_remote;
@@ -143,6 +147,7 @@ impl ProviderRegistry {
             return;
         }
 
+        #[allow(unused_variables)]
         let api_key = route.api_key.clone();
         let provider: Option<Arc<dyn LlmProvider>> = match route.provider {
             // Local providers

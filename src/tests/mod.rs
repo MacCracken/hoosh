@@ -930,6 +930,7 @@ mod e2e {
                 TokenPool::new("default", 100_000),
                 TokenPool::new("limited", 50),
             ],
+            whisper_model: None,
         };
 
         let app = crate::server::build_app(config);
@@ -998,6 +999,7 @@ mod e2e {
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
             budget_pools: vec![TokenPool::new("default", u64::MAX)],
+            whisper_model: None,
         };
 
         let app = crate::server::build_app(config);

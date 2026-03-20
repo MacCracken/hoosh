@@ -28,6 +28,8 @@ pub struct AppState {
     pub cache: ResponseCache,
     pub budget: std::sync::Mutex<TokenBudget>,
     pub providers: ProviderRegistry,
+    #[cfg(feature = "whisper")]
+    pub whisper: Option<std::sync::Arc<crate::provider::whisper::WhisperProvider>>,
 }
 
 /// Server configuration.
@@ -38,6 +40,8 @@ pub struct ServerConfig {
     pub strategy: RoutingStrategy,
     pub cache_config: CacheConfig,
     pub budget_pools: Vec<TokenPool>,
+    /// Path to whisper model file (e.g. "models/ggml-base.en.bin").
+    pub whisper_model: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +53,7 @@ impl Default for ServerConfig {
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
             budget_pools: Vec::new(),
+            whisper_model: None,
         }
     }
 }
@@ -72,14 +77,31 @@ pub fn build_app(config: ServerConfig) -> Router {
     }
     tracing::info!("{} token pool(s) configured", budget.pools().len());
 
+    #[cfg(feature = "whisper")]
+    let whisper = config.whisper_model.as_ref().and_then(|path| {
+        match crate::provider::whisper::WhisperProvider::new(path) {
+            Ok(w) => {
+                tracing::info!("whisper model loaded: {path}");
+                Some(std::sync::Arc::new(w))
+            }
+            Err(e) => {
+                tracing::warn!("failed to load whisper model '{path}': {e}");
+                None
+            }
+        }
+    });
+
     let state = Arc::new(AppState {
         router: hoosh_router::Router::new(config.routes, config.strategy),
         cache: ResponseCache::new(config.cache_config),
         budget: std::sync::Mutex::new(budget),
         providers,
+        #[cfg(feature = "whisper")]
+        whisper,
     });
 
-    Router::new()
+    #[allow(unused_mut)]
+    let mut app = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
         .route("/v1/health", get(health))
@@ -87,9 +109,14 @@ pub fn build_app(config: ServerConfig) -> Router {
         .route("/v1/tokens/check", post(tokens_check))
         .route("/v1/tokens/reserve", post(tokens_reserve))
         .route("/v1/tokens/report", post(tokens_report))
-        .route("/v1/tokens/pools", get(tokens_pools))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .route("/v1/tokens/pools", get(tokens_pools));
+
+    #[cfg(feature = "whisper")]
+    {
+        app = app.route("/v1/audio/transcriptions", post(transcribe));
+    }
+
+    app.layer(CorsLayer::permissive()).with_state(state)
 }
 
 /// Start the hoosh HTTP server.
@@ -633,4 +660,54 @@ async fn tokens_pools(State(state): State<Arc<AppState>>) -> Json<Vec<TokenPool>
     let budget = state.budget.lock().unwrap();
     let pools: Vec<TokenPool> = budget.pools().values().cloned().collect();
     Json(pools)
+}
+
+// ---------------------------------------------------------------------------
+// Speech-to-text: /v1/audio/transcriptions (OpenAI-compatible)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "whisper")]
+async fn transcribe(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let whisper = match &state.whisper {
+        Some(w) => w.clone(),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Whisper model not loaded. Set whisper_model in config.",
+            )
+            .into_response();
+        }
+    };
+
+    let request = crate::inference::TranscriptionRequest {
+        audio: body.to_vec(),
+        language: None,
+        word_timestamps: false,
+    };
+
+    match whisper.transcribe_async(request).await {
+        Ok(result) => {
+            let resp = serde_json::json!({
+                "text": result.text,
+                "language": result.language,
+                "duration": result.duration_secs,
+                "segments": result.segments.iter().map(|s| {
+                    serde_json::json!({
+                        "text": s.text,
+                        "start": s.start_secs,
+                        "end": s.end_secs,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Transcription error: {e}"),
+        )
+        .into_response(),
+    }
 }

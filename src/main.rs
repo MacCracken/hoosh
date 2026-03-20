@@ -60,6 +60,14 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8088")]
         server: String,
     },
+    /// Transcribe an audio file (speech-to-text)
+    Transcribe {
+        /// Path to audio file (WAV)
+        file: String,
+        /// hoosh server URL
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        server: String,
+    },
     /// Show system info (providers, hardware, config)
     Info,
 }
@@ -166,6 +174,36 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     eprintln!("Health check failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Transcribe { file, server } => {
+            let audio = std::fs::read(&file).unwrap_or_else(|e| {
+                eprintln!("Failed to read '{}': {}", file, e);
+                std::process::exit(1);
+            });
+
+            let client = reqwest::Client::new();
+            let url = format!("{}/v1/audio/transcriptions", server.trim_end_matches('/'));
+            match client.post(&url).body(audio).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                        if let Some(text) = body["text"].as_str() {
+                            println!("{text}");
+                        } else {
+                            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                        }
+                    } else {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        eprintln!("Transcription failed ({status}): {body}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to hoosh server at {server}: {e}");
                     std::process::exit(1);
                 }
             }
