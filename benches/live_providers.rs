@@ -203,7 +203,7 @@ fn bench_ollama_stream_throughput(c: &mut Criterion) {
 fn bench_hwaccel_detect(c: &mut Criterion) {
     use hoosh::hardware::HardwareManager;
 
-    c.bench_function("hwaccel_detect", |b| b.iter(|| HardwareManager::detect()));
+    c.bench_function("hwaccel_detect", |b| b.iter(HardwareManager::detect));
 }
 
 #[cfg(feature = "hwaccel")]

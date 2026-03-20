@@ -1586,8 +1586,7 @@ mod e2e {
     #[tokio::test]
     async fn e2e_no_provider_for_model() {
         let backend = start_mock_backend().await;
-        let hoosh_url = start_hoosh(&backend).await;
-        let client = HooshClient::new(&hoosh_url);
+        let _hoosh_url = start_hoosh(&backend).await;
         // wildcard route matches everything, so use a server with restricted patterns
         let config = ServerConfig {
             bind: "127.0.0.1".into(),
