@@ -10,50 +10,11 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 All items complete. See CHANGELOG.md for details.
 
-- [x] Core types (InferenceRequest, InferenceResponse, Message, Role, ModelInfo)
-- [x] LlmProvider trait + ProviderType enum (14 backends)
-- [x] Router (Priority, RoundRobin, LowestLatency, Direct)
-- [x] ResponseCache with TTL + forced eviction
-- [x] TokenBudget with named pools + reserve/commit/release
-- [x] HooshClient (infer, infer_stream, list_models, health)
-- [x] axum server with OpenAI-compatible API
-- [x] 5 local providers (Ollama, llama.cpp, Synapse, LM Studio, LocalAI)
-- [x] 7 remote providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, OpenRouter, Grok)
-- [x] Hardware-aware placement (ai-hwaccel with vulkan/rocm/cuda)
-- [x] TOML config file (hoosh.toml)
-- [x] Whisper STT (whisper-rs, /v1/audio/transcriptions)
-- [x] TTS endpoint (/v1/audio/speech via HTTP backend)
-- [x] CLI (serve, models, health, info, infer, infer --stream, transcribe, speak)
-- [x] Token budget integration in request pipeline
-- [x] 3 security audit rounds, all CRITICAL/HIGH fixed
-- [x] 185 tests, benchmarks, cargo-deny
-
 ---
 
-## v0.21.3 — Server Hardening & Observability
+## v0.21.4 — Server Hardening, Observability & Messaging ✅
 
 All items complete. See CHANGELOG.md for details.
-
-### Authentication & security
-- [x] Bearer token auth middleware
-- [x] Per-provider rate limiting middleware (sliding window RPM)
-- [x] TLS certificate pinning for remote providers
-- [x] mTLS for local provider communication
-
-### Observability
-- [x] Prometheus metrics endpoint (`/metrics`)
-- [x] OpenTelemetry trace propagation (feature-gated: `otel`)
-- [x] Per-provider cost tracking (token × price) — ported from secureyeoman's cost-calculator pattern
-- [x] Request/response audit log — HMAC-SHA256 linked chain, ported from secureyeoman's sy-audit pattern
-
-### Hardware acceleration
-- [x] Review ai-hwaccel 0.21.x updates for improved integration — no breaking changes; new LazyRegistry, DiskCachedRegistry, cost module available
-
-### Server improvements
-- [x] `/v1/embeddings` pass-through
-- [x] Hot-reload config without restart (SIGHUP + `POST /v1/admin/reload`)
-- [x] Periodic health checks with automatic failover (3-strike unhealthy marking)
-- [x] Latency tracking for LowestLatency routing
 
 ---
 

@@ -44,6 +44,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - Audit `/v1/audit` endpoint uses single-lock `snapshot()` instead of 3 separate lock acquisitions
 - Health checker failure handling deduplicated into `handle_check_failure()` helper
 
+### Security
+- Auth token comparison uses constant-time SHA-256 digest comparison (no length leak)
+- Pre-hash auth tokens at startup — 1 hash per request instead of 2N
+- Config `Debug` impls redact `api_key`, `signing_key`, and auth `tokens`
+- TLS cert pinning failure logs error instead of silently degrading
+- Inference error messages sanitized — internal details logged, generic message to clients
+- Health endpoint no longer exposes raw provider errors (internal IPs/hostnames)
+- Model name validation rejects control characters and limits length to 256
+- Audit signing key supports `$ENV_VAR` resolution
+- Cost reset records an audit entry
+- Startup warning when authentication is disabled
+- Unrecognized provider type logs warning during registration
+- `prometheus` upgraded 0.13 → 0.14 (fixes RUSTSEC-2024-0437 in transitive `protobuf` dependency)
+
+### Performance
+- SSE streaming uses reusable `String` buffer with `write!` instead of `serde_json::json!` per token
+- Audit chain crypto (SHA-256, HMAC) moved outside mutex — lock only held for append
+- Audit `generate_id()` uses `uuid::Uuid::new_v4()` (consistent with codebase)
+- Router `LowestLatency` uses O(n) min scan instead of O(n log n) sort
+- `StrategyValue` → `RoutingStrategy` uses `From` impl (eliminates duplicate match blocks)
+- `CostTracker::all_with_total()` single-pass method replaces two iterations
+- `StreamBudgetGuard` now records metrics and events on stream end (previously missed)
+- Removed dead `ProviderType` import hack in events.rs
+
+### Testing
+- 328 tests (up from 187), 78.9% line coverage
+- E2E integration tests: streaming SSE, embeddings pass-through, auth enforcement, health failover, Ollama native flow, full observability verification
+- Mock servers: Ollama (chat, tags, embed, streaming), Synapse (infer, list, health, training, catalog)
+- Unit tests: audit chain (100%), health checker (81%), router (98%), queue (83%), auth (100%), rate limiter (87%), cost tracker (90%), metrics (98%)
+
 ## [0.21.3] — 2026-03-21
 
 ### Added
