@@ -277,18 +277,14 @@ fn bench_e2e_gateway_overhead(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     // Direct to Ollama (baseline)
-    group.bench_with_input(
-        BenchmarkId::new("direct_ollama", &model),
-        &req,
-        |b, req| b.iter(|| rt.block_on(ollama_direct.infer(req)).unwrap()),
-    );
+    group.bench_with_input(BenchmarkId::new("direct_ollama", &model), &req, |b, req| {
+        b.iter(|| rt.block_on(ollama_direct.infer(req)).unwrap())
+    });
 
     // Through hoosh server (gateway overhead = this - baseline)
-    group.bench_with_input(
-        BenchmarkId::new("through_hoosh", &model),
-        &req,
-        |b, req| b.iter(|| rt.block_on(client.infer(req)).unwrap()),
-    );
+    group.bench_with_input(BenchmarkId::new("through_hoosh", &model), &req, |b, req| {
+        b.iter(|| rt.block_on(client.infer(req)).unwrap())
+    });
 
     group.finish();
 }

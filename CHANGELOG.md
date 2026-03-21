@@ -2,6 +2,60 @@
 
 All notable changes to hoosh are documented here.
 
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versioning: [Semantic Versioning](https://semver.org/).
+
+## [0.21.3] — 2026-03-21
+
+### Added
+- **End-to-end benchmark suite** (`benches/e2e.rs`) — 8 benchmark groups measuring full round-trip: HooshClient → hoosh server → Ollama → response
+  - `e2e_health_check`, `e2e_list_models`, `e2e_infer` (short/medium)
+  - `e2e_connection` — cold (new client) vs warm (pooled) connection comparison
+  - `e2e_concurrent` — 1/4/8/16 parallel requests through shared client
+  - `e2e_gateway_overhead` — direct Ollama vs through hoosh (isolates gateway cost)
+  - `e2e_stream` — streaming inference through hoosh SSE proxy
+  - `e2e_sequential` — 3 back-to-back requests (simulates agent loop)
+- **Connection tuning tests** — 5 new tests for pooled connection reuse, concurrent requests, and tuned provider creation
+- **Documentation infrastructure**
+  - `docs/development/performance.md` — dedicated performance doc with all benchmark results, connection tuning table, hot-path analysis, and update instructions
+  - `docs/index.md` — documentation portal linking all docs
+  - `docs/decisions/001-http-gateway.md` — ADR explaining HTTP gateway design choice
+  - `CONTRIBUTING.md` — development workflow, code style, commit conventions, provider guide
+- **Makefile targets** — `bench`, `vet`, `coverage`, `release` (matching agnosai/dhvani/ranga)
+- **CI benchmark job** — runs synthetic benchmarks on every push/PR, uploads criterion artifacts (30-day retention)
+
+### Changed
+- **HTTP/2 support** — added `http2` feature to reqwest for multiplexed connections
+- **Connection pooling tuned on all HTTP clients** (HooshClient, OllamaProvider, OpenAiCompatibleProvider, AnthropicProvider, TtsProvider):
+  - `TCP_NODELAY` — disables Nagle's algorithm, eliminates up to 40ms batching delay per request
+  - `tcp_keepalive(60s)` — OS-level keepalive probes prevent connection drops
+  - `pool_idle_timeout(600s)` — keep connections alive 10 min (was reqwest default 90s)
+  - `pool_max_idle_per_host(32)` — allow more concurrent pooled connections
+  - `http2_adaptive_window(true)` — adaptive flow control for multiplexed requests
+- **HooshClient** now uses a tuned `reqwest::Client::builder()` instead of bare `reqwest::Client::new()`
+- **BENCHMARKS.md** — added e2e results, connection reuse data, concurrency scaling, gateway overhead measurements
+- **Makefile** — added `bench`, `vet`, `coverage`, `release`, `clean` targets; `check` now includes `deny`
+
+### Performance
+- Gateway overhead through hoosh: **~0 ms** (within measurement noise of direct Ollama)
+- Warm connection reuse: **52 µs** (2.9x faster than cold 151 µs)
+- 16 concurrent health checks: **306 µs total** (19 µs per request)
+- Sequential 3-request agent loop: **1.32 s** (48% improvement over first run baseline)
+- Streaming through hoosh: **1.46 s** for 50 tokens (23% improvement)
+
+## [0.20.4] — 2026-03-21
+
+### Added
+- Benchmark suite with Criterion: routing, providers, live_providers
+- `BENCHMARKS.md` — performance matrix with hardware specs and results
+- `scripts/version-bump.sh` — version management script
+- `VERSION` file — single source of truth for version
+- `.github/workflows/ci.yml` — CI pipeline (check, security, deny, test, msrv, coverage)
+- `.github/workflows/release.yml` — tag-triggered release (cross-compile, crates.io publish, GitHub release)
+
+### Changed
+- Bug fixes and stability improvements
+
 ## [0.20.3] — 2026-03-20
 
 ### Core Gateway
@@ -121,5 +175,4 @@ All notable changes to hoosh are documented here.
 - `deny.toml` — cargo-deny for license/advisory/ban checks
 - `hoosh.toml` — example config with Ollama + budget pools
 - `BENCHMARKS.md` — performance matrix with hardware specs
-- `BACKLOG.md` — engineering backlog (cleared)
 - Feature flags: ollama, llamacpp, synapse, lmstudio, localai, openai, anthropic, deepseek, mistral, groq, openrouter, grok, whisper, piper, hwaccel

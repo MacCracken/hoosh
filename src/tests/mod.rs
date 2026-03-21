@@ -1693,8 +1693,8 @@ mod e2e {
     /// Verify tuned OllamaProvider creates successfully.
     #[test]
     fn ollama_provider_tuned_creation() {
-        use crate::provider::ollama::OllamaProvider;
         use crate::provider::LlmProvider;
+        use crate::provider::ollama::OllamaProvider;
 
         let p = OllamaProvider::new("http://localhost:11434");
         // Provider created with tuned client settings — verify it doesn't panic
@@ -1704,8 +1704,8 @@ mod e2e {
     /// Verify tuned OpenAiCompatibleProvider creates successfully.
     #[test]
     fn openai_compat_provider_tuned_creation() {
-        use crate::provider::openai_compat::OpenAiCompatibleProvider;
         use crate::provider::LlmProvider;
+        use crate::provider::openai_compat::OpenAiCompatibleProvider;
 
         let p = OpenAiCompatibleProvider::new(
             "http://localhost:8080",
@@ -1728,9 +1728,10 @@ mod e2e {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let client = std::sync::Arc::new(
-            HooshClient::new(format!("http://127.0.0.1:{}", addr.port()))
-        );
+        let client = std::sync::Arc::new(HooshClient::new(format!(
+            "http://127.0.0.1:{}",
+            addr.port()
+        )));
 
         // Fire 10 concurrent health checks through the same pooled client
         let mut handles = Vec::new();
