@@ -30,6 +30,10 @@ pub struct HooshConfig {
     pub tts: TtsSection,
     #[serde(default)]
     pub audit: AuditSection,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub telemetry: TelemetrySection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -60,6 +64,26 @@ fn default_audit_max() -> usize {
     10_000
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct TelemetrySection {
+    /// OTLP endpoint (e.g. "http://localhost:4317"). Enables OpenTelemetry when set.
+    pub otlp_endpoint: Option<String>,
+    /// Service name for traces. Defaults to "hoosh".
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_service_name() -> String {
+    "hoosh".into()
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuthConfig {
+    /// Bearer tokens that are allowed to access the API.
+    #[serde(default)]
+    pub tokens: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BudgetPoolSection {
     /// Pool name (e.g. "default", "agent-1").
@@ -76,6 +100,9 @@ pub struct ServerSection {
     pub port: u16,
     #[serde(default)]
     pub strategy: StrategyValue,
+    /// Health check interval in seconds. 0 = disabled. Defaults to 30.
+    #[serde(default = "default_health_interval")]
+    pub health_check_interval_secs: u64,
 }
 
 impl Default for ServerSection {
@@ -84,6 +111,7 @@ impl Default for ServerSection {
             bind: default_bind(),
             port: default_port(),
             strategy: StrategyValue::default(),
+            health_check_interval_secs: default_health_interval(),
         }
     }
 }
@@ -129,6 +157,16 @@ pub struct ProviderSection {
     /// Maximum tokens per request for this provider.
     #[serde(default)]
     pub max_tokens_limit: Option<u32>,
+    /// Maximum requests per minute for this provider.
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    /// Paths to PEM certificates to pin for this provider's TLS.
+    #[serde(default)]
+    pub tls_pinned_certs: Vec<String>,
+    /// Path to client certificate for mTLS.
+    pub client_cert: Option<String>,
+    /// Path to client key for mTLS.
+    pub client_key: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -148,6 +186,9 @@ fn default_true() -> bool {
 }
 fn default_priority() -> u32 {
     10
+}
+fn default_health_interval() -> u64 {
+    30
 }
 
 impl Default for CacheSection {
@@ -236,6 +277,8 @@ impl HooshConfig {
                 whisper: WhisperSection::default(),
                 tts: TtsSection::default(),
                 audit: AuditSection::default(),
+                auth: AuthConfig::default(),
+                telemetry: TelemetrySection::default(),
             }
         }
     }
@@ -249,6 +292,18 @@ impl HooshConfig {
                     .base_url
                     .clone()
                     .unwrap_or_else(|| default_base_url(p.provider_type).into());
+                let tls_config = if !p.tls_pinned_certs.is_empty()
+                    || p.client_cert.is_some()
+                    || p.client_key.is_some()
+                {
+                    Some(crate::provider::TlsConfig {
+                        pinned_certs: p.tls_pinned_certs.clone(),
+                        client_cert: p.client_cert.clone(),
+                        client_key: p.client_key.clone(),
+                    })
+                } else {
+                    None
+                };
                 ProviderRoute {
                     provider: p.provider_type,
                     priority: p.priority,
@@ -257,6 +312,8 @@ impl HooshConfig {
                     base_url,
                     api_key: resolve_api_key(&p.api_key),
                     max_tokens_limit: p.max_tokens_limit,
+                    rate_limit_rpm: p.rate_limit_rpm,
+                    tls_config,
                 }
             })
             .collect()
@@ -267,6 +324,7 @@ impl HooshConfig {
         self,
         bind_override: Option<&str>,
         port_override: Option<u16>,
+        config_path: Option<String>,
     ) -> ServerConfig {
         let routes = self.routes();
         let strategy = match self.server.strategy {
@@ -297,6 +355,11 @@ impl HooshConfig {
             audit_enabled: self.audit.enabled,
             audit_signing_key: self.audit.signing_key,
             audit_max_entries: self.audit.max_entries,
+            auth_tokens: self.auth.tokens,
+            otlp_endpoint: self.telemetry.otlp_endpoint,
+            telemetry_service_name: self.telemetry.service_name,
+            health_check_interval_secs: self.server.health_check_interval_secs,
+            config_path,
         }
     }
 }
@@ -430,7 +493,7 @@ port = 9000
 bind = "0.0.0.0"
 "#;
         let config: HooshConfig = toml::from_str(toml).unwrap();
-        let sc = config.into_server_config(Some("127.0.0.1"), Some(8080));
+        let sc = config.into_server_config(Some("127.0.0.1"), Some(8080), None);
         assert_eq!(sc.bind, "127.0.0.1");
         assert_eq!(sc.port, 8080);
     }
@@ -443,7 +506,7 @@ port = 9000
 bind = "0.0.0.0"
 "#;
         let config: HooshConfig = toml::from_str(toml).unwrap();
-        let sc = config.into_server_config(None, None);
+        let sc = config.into_server_config(None, None, None);
         assert_eq!(sc.bind, "0.0.0.0");
         assert_eq!(sc.port, 9000);
     }
@@ -490,7 +553,7 @@ name = "pool1"
 capacity = 5000
 "#;
         let config: HooshConfig = toml::from_str(toml).unwrap();
-        let sc = config.into_server_config(None, None);
+        let sc = config.into_server_config(None, None, None);
         assert_eq!(sc.budget_pools.len(), 1);
         assert_eq!(sc.budget_pools[0].name, "pool1");
         assert_eq!(sc.budget_pools[0].capacity, 5000);
@@ -506,7 +569,7 @@ model = "model.bin"
 url = "http://tts:5500"
 "#;
         let config: HooshConfig = toml::from_str(toml).unwrap();
-        let sc = config.into_server_config(None, None);
+        let sc = config.into_server_config(None, None, None);
         assert_eq!(sc.whisper_model.as_deref(), Some("model.bin"));
         assert_eq!(sc.tts_model.as_deref(), Some("http://tts:5500"));
     }
@@ -521,7 +584,7 @@ url = "http://tts:5500"
         ] {
             let toml = format!("[server]\nstrategy = \"{strategy_str}\"");
             let config: HooshConfig = toml::from_str(&toml).unwrap();
-            let sc = config.into_server_config(None, None);
+            let sc = config.into_server_config(None, None, None);
             // Just verify it doesn't panic
             let _ = sc.strategy;
         }

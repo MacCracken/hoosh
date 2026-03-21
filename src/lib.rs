@@ -45,10 +45,17 @@ pub mod client;
 pub mod config;
 pub mod cost;
 pub mod error;
+pub mod events;
 #[cfg(feature = "hwaccel")]
 pub mod hardware;
+pub mod health;
+#[cfg(feature = "otel")]
+pub mod telemetry;
 pub mod inference;
+pub mod metrics;
+pub mod middleware;
 pub mod provider;
+pub mod queue;
 pub mod router;
 pub mod server;
 

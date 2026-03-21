@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// DeepSeek API provider (default: `https://api.deepseek.com`).
 pub struct DeepSeekProvider {
@@ -10,7 +10,11 @@ pub struct DeepSeekProvider {
 }
 
 impl DeepSeekProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://api.deepseek.com".to_string()
@@ -18,7 +22,7 @@ impl DeepSeekProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::DeepSeek),
+            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::DeepSeek, tls_config),
         }
     }
 }
@@ -51,13 +55,13 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = DeepSeekProvider::new("", Some("sk-test".into()));
+        let p = DeepSeekProvider::new("", Some("sk-test".into()), None);
         assert_eq!(p.inner.base_url(), "https://api.deepseek.com");
     }
 
     #[test]
     fn provider_type_is_deepseek() {
-        let p = DeepSeekProvider::new("", None);
+        let p = DeepSeekProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::DeepSeek);
     }
 }

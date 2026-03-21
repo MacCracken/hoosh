@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// LocalAI provider (default: `http://localhost:8080`).
 pub struct LocalAiProvider {
@@ -10,7 +10,7 @@ pub struct LocalAiProvider {
 }
 
 impl LocalAiProvider {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, tls_config: Option<&TlsConfig>) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "http://localhost:8080".to_string()
@@ -18,7 +18,7 @@ impl LocalAiProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::LocalAi),
+            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::LocalAi, tls_config),
         }
     }
 }
@@ -55,19 +55,19 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = LocalAiProvider::new("");
+        let p = LocalAiProvider::new("", None);
         assert_eq!(p.inner.base_url(), "http://localhost:8080");
     }
 
     #[test]
     fn custom_url() {
-        let p = LocalAiProvider::new("http://ai-server:3000");
+        let p = LocalAiProvider::new("http://ai-server:3000", None);
         assert_eq!(p.inner.base_url(), "http://ai-server:3000");
     }
 
     #[test]
     fn provider_type_is_localai() {
-        let p = LocalAiProvider::new("");
+        let p = LocalAiProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::LocalAi);
     }
 }

@@ -26,6 +26,8 @@ fn make_routes(n: usize) -> Vec<ProviderRoute> {
             base_url: format!("http://provider-{}:{}", i, 8080 + i),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         })
         .collect()
 }
@@ -66,7 +68,7 @@ fn bench_registry_lookup(c: &mut Criterion) {
 fn bench_provider_construction(c: &mut Criterion) {
     c.bench_function("openai_compat_new", |b| {
         b.iter(|| {
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp)
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None)
         })
     });
 
@@ -76,6 +78,7 @@ fn bench_provider_construction(c: &mut Criterion) {
                 "http://localhost:8080/",
                 Some("sk-test-key-12345".into()),
                 ProviderType::OpenAi,
+                None,
             )
         })
     });
@@ -294,7 +297,7 @@ capacity = 500000
     c.bench_function("config_to_server_config", |b| {
         b.iter(|| {
             let config: hoosh::config::HooshConfig = toml::from_str(full_toml).unwrap();
-            config.into_server_config(None, None)
+            config.into_server_config(None, None, None)
         })
     });
 }

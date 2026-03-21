@@ -35,6 +35,8 @@ whisper = ["dep:whisper-rs"]
 piper = []
 # Hardware detection for model placement
 hwaccel = ["dep:ai-hwaccel"]
+# OpenTelemetry trace propagation
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
 [[bin]]
 name = "hoosh"
@@ -73,6 +75,15 @@ toml = "0.8"
 # Caching
 dashmap = "6"
 
+# Hot-reload
+arc-swap = "1"
+
+# Queue & messaging
+majra = { version = "0.21.3", default-features = true }
+
+# Metrics
+prometheus = "0.13"
+
 # Audit logging
 hmac = "0.12"
 sha2 = "0.10"
@@ -84,6 +95,12 @@ ai-hwaccel = { version = "0.21.3", optional = true, default-features = false, fe
 
 # Speech-to-text
 whisper-rs = { version = "0.16", optional = true }
+
+# OpenTelemetry (feature-gated)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
 
 # Text-to-speech (piper support planned — deps have upstream compat issues)
 # piper-rs = { version = "0.1", optional = true }

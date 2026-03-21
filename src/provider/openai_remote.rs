@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// OpenAI API provider (default: `https://api.openai.com`).
 pub struct OpenAiProvider {
@@ -10,7 +10,11 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://api.openai.com".to_string()
@@ -18,7 +22,7 @@ impl OpenAiProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::OpenAi),
+            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::OpenAi, tls_config),
         }
     }
 }
@@ -55,19 +59,19 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = OpenAiProvider::new("", Some("sk-test".into()));
+        let p = OpenAiProvider::new("", Some("sk-test".into()), None);
         assert_eq!(p.inner.base_url(), "https://api.openai.com");
     }
 
     #[test]
     fn custom_url() {
-        let p = OpenAiProvider::new("https://custom.openai.azure.com", Some("key".into()));
+        let p = OpenAiProvider::new("https://custom.openai.azure.com", Some("key".into()), None);
         assert_eq!(p.inner.base_url(), "https://custom.openai.azure.com");
     }
 
     #[test]
     fn provider_type_is_openai() {
-        let p = OpenAiProvider::new("", None);
+        let p = OpenAiProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::OpenAi);
     }
 }

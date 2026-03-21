@@ -26,12 +26,20 @@ use crate::router::{self as hoosh_router, ProviderRoute, RoutingStrategy};
 
 /// Shared server state.
 pub struct AppState {
-    pub router: hoosh_router::Router,
+    pub router: std::sync::RwLock<hoosh_router::Router>,
+    /// Path to config file for hot-reload. None = reload disabled.
+    pub config_path: Option<String>,
     pub cache: ResponseCache,
     pub budget: std::sync::Mutex<TokenBudget>,
     pub providers: ProviderRegistry,
     pub cost_tracker: Arc<CostTracker>,
     pub audit: Option<Arc<crate::audit::AuditChain>>,
+    pub auth_tokens: Vec<String>,
+    pub rate_limiter: Arc<crate::middleware::rate_limit::RateLimitRegistry>,
+    pub event_bus: Arc<crate::events::EventBus>,
+    pub inference_queue: Arc<crate::queue::InferenceQueue>,
+    pub health_map: crate::health::HealthMap,
+    pub heartbeat: Arc<majra::heartbeat::ConcurrentHeartbeatTracker>,
     #[cfg(feature = "whisper")]
     pub whisper: Option<std::sync::Arc<crate::provider::whisper::WhisperProvider>>,
     #[cfg(feature = "piper")]
@@ -56,6 +64,16 @@ pub struct ServerConfig {
     pub audit_signing_key: Option<String>,
     /// Max audit entries to keep in memory.
     pub audit_max_entries: usize,
+    /// Bearer tokens for authentication. Empty = auth disabled.
+    pub auth_tokens: Vec<String>,
+    /// OTLP endpoint — enables OpenTelemetry when set (requires `otel` feature).
+    pub otlp_endpoint: Option<String>,
+    /// Service name for OpenTelemetry traces.
+    pub telemetry_service_name: String,
+    /// Health check interval in seconds. 0 = disabled. Defaults to 30.
+    pub health_check_interval_secs: u64,
+    /// Path to config file for hot-reload. None = reload disabled.
+    pub config_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -72,18 +90,25 @@ impl Default for ServerConfig {
             audit_enabled: false,
             audit_signing_key: None,
             audit_max_entries: 10_000,
+            auth_tokens: Vec::new(),
+            otlp_endpoint: None,
+            telemetry_service_name: "hoosh".into(),
+            health_check_interval_secs: 30,
+            config_path: None,
         }
     }
 }
 
 /// Build the axum Router from a ServerConfig. Useful for testing.
-pub fn build_app(config: ServerConfig) -> Router {
+/// Returns both the axum Router and the shared AppState for SIGHUP reload.
+pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     let mut providers = ProviderRegistry::new();
     for route in &config.routes {
         if route.enabled {
             providers.register_from_route(route);
         }
     }
+    crate::metrics::set_providers_configured(providers.len() as i64);
     tracing::info!("{} provider backend(s) registered", providers.len());
 
     let mut budget = TokenBudget::new();
@@ -135,18 +160,86 @@ pub fn build_app(config: ServerConfig) -> Router {
         None
     };
 
+    // Build per-provider rate limiter from route config
+    let rate_limiter = Arc::new(crate::middleware::rate_limit::RateLimitRegistry::new());
+    for route in &config.routes {
+        if route.enabled
+            && let Some(rpm) = route.rate_limit_rpm {
+                let key = format!("{}:{}", route.provider, route.base_url);
+                rate_limiter.configure(&key, rpm);
+                tracing::info!("rate limit: {} → {} rpm", key, rpm);
+            }
+    }
+
+    // Create event bus and inference queue
+    let event_bus = Arc::new(crate::events::new_event_bus());
+    let inference_queue = Arc::new(crate::queue::InferenceQueue::new());
+
+    // Create the health map, heartbeat tracker, and wire into the router
+    let health_map = crate::health::new_health_map();
+    let heartbeat = Arc::new(majra::heartbeat::ConcurrentHeartbeatTracker::new(
+        majra::heartbeat::HeartbeatConfig {
+            suspect_after: std::time::Duration::from_secs(30),
+            offline_after: std::time::Duration::from_secs(90),
+            eviction_policy: None,
+        },
+    ));
+    // Register all enabled providers with the heartbeat tracker
+    for route in &config.routes {
+        if route.enabled {
+            let node_id = format!("{}:{}", route.provider, route.base_url);
+            heartbeat.register(
+                &node_id,
+                serde_json::json!({"provider": route.provider.to_string(), "base_url": &route.base_url}),
+            );
+        }
+    }
+    let routes_for_checker = config.routes.clone();
+    let health_interval = config.health_check_interval_secs;
+    let mut router = hoosh_router::Router::new(config.routes, config.strategy);
+    router.set_health_map(health_map.clone());
+
     let state = Arc::new(AppState {
-        router: hoosh_router::Router::new(config.routes, config.strategy),
+        router: std::sync::RwLock::new(router),
+        config_path: config.config_path,
         cache: ResponseCache::new(config.cache_config),
         budget: std::sync::Mutex::new(budget),
         providers,
         cost_tracker,
         audit,
+        auth_tokens: config.auth_tokens,
+        rate_limiter,
+        event_bus: event_bus.clone(),
+        inference_queue,
+        health_map: health_map.clone(),
+        heartbeat: heartbeat.clone(),
         #[cfg(feature = "whisper")]
         whisper,
         #[cfg(feature = "piper")]
         tts,
     });
+
+    // Spawn background health checker if enabled
+    if health_interval > 0 {
+        let mut checker_providers = ProviderRegistry::new();
+        for route in &routes_for_checker {
+            if route.enabled {
+                checker_providers.register_from_route(route);
+            }
+        }
+        let _health_handle = crate::health::spawn_health_checker(
+            Arc::new(checker_providers),
+            routes_for_checker,
+            health_map,
+            health_interval,
+            event_bus,
+            heartbeat,
+        );
+        tracing::info!(
+            "background health checker started (interval: {}s)",
+            health_interval
+        );
+    }
 
     // API routes with 1MB body limit
     let api_routes = Router::new()
@@ -154,6 +247,7 @@ pub fn build_app(config: ServerConfig) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/health", get(health))
         .route("/v1/health/providers", get(health_providers))
+        .route("/v1/health/heartbeat", get(health_heartbeat))
         .route("/v1/tokens/check", post(tokens_check))
         .route("/v1/tokens/reserve", post(tokens_reserve))
         .route("/v1/tokens/report", post(tokens_report))
@@ -162,10 +256,12 @@ pub fn build_app(config: ServerConfig) -> Router {
         .route("/v1/costs", get(costs_get))
         .route("/v1/costs/reset", post(costs_reset))
         .route("/v1/audit", get(audit_log))
+        .route("/v1/admin/reload", post(admin_reload))
+        .route("/v1/queue/status", get(queue_status))
         .layer(DefaultBodyLimit::max(1024 * 1024)); // 1 MB for JSON API
 
     #[allow(unused_mut)]
-    let mut app = api_routes;
+    let mut app = api_routes.route("/metrics", get(prometheus_metrics));
 
     // Audio routes with 50MB body limit
     #[cfg(feature = "whisper")]
@@ -181,15 +277,39 @@ pub fn build_app(config: ServerConfig) -> Router {
         app = app.layer(DefaultBodyLimit::max(50 * 1024 * 1024));
     }
 
-    app.layer(CorsLayer::permissive()).with_state(state)
+    let router = app
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::auth::auth_middleware,
+        ))
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    (router, state)
 }
 
 /// Start the hoosh HTTP server.
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.bind, config.port);
-    let app = build_app(config);
+    let (app, app_state) = build_app(config);
     tracing::info!("hoosh v{} listening on {}", env!("CARGO_PKG_VERSION"), addr);
     tracing::info!("OpenAI-compatible API: http://{}/v1/chat/completions", addr);
+
+    // Spawn SIGHUP listener for hot-reload
+    if let Some(config_path) = app_state.config_path.clone() {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            let mut sig = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::hangup(),
+            )
+            .expect("failed to register SIGHUP handler");
+            loop {
+                sig.recv().await;
+                tracing::info!("SIGHUP received, reloading config from {}", config_path);
+                reload_config(&state, &config_path);
+            }
+        });
+    }
 
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
@@ -204,6 +324,84 @@ async fn shutdown_signal() {
         .await
         .expect("failed to listen for ctrl+c");
     tracing::info!("shutting down");
+}
+
+// ---------------------------------------------------------------------------
+// Hot-reload: config reload without restart
+// ---------------------------------------------------------------------------
+
+fn reload_config(state: &Arc<AppState>, config_path: &str) {
+    match crate::config::HooshConfig::load(config_path) {
+        Ok(config) => {
+            let routes = config.routes();
+            let strategy = match config.server.strategy {
+                crate::config::StrategyValue::Priority => RoutingStrategy::Priority,
+                crate::config::StrategyValue::RoundRobin => RoutingStrategy::RoundRobin,
+                crate::config::StrategyValue::LowestLatency => RoutingStrategy::LowestLatency,
+                crate::config::StrategyValue::Direct => RoutingStrategy::Direct,
+            };
+
+            // Note: provider re-registration requires mutable access.
+            // Only the router is hot-reloaded; provider backends persist.
+
+            // Swap router atomically
+            let mut router = state.router.write().unwrap();
+            router.reload(routes, strategy);
+            router.set_health_map(state.health_map.clone());
+
+            tracing::info!("config reloaded: {} routes", router.routes().len());
+        }
+        Err(e) => {
+            tracing::error!("config reload failed: {e}");
+        }
+    }
+}
+
+async fn admin_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Some(path) = &state.config_path {
+        reload_config(&state, path);
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "reloaded"})),
+        )
+            .into_response()
+    } else {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "no config path configured for reload",
+        )
+        .into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Queue status: /v1/queue/status
+// ---------------------------------------------------------------------------
+
+async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "queued": state.inference_queue.len(),
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus metrics: /metrics
+// ---------------------------------------------------------------------------
+
+async fn prometheus_metrics() -> impl IntoResponse {
+    let body = crate::metrics::gather();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +562,7 @@ async fn chat_completions(
     }
 
     // Find a route for this model
-    let route = match state.router.select(&req.model) {
+    let route = match state.router.read().unwrap().select(&req.model).cloned() {
         Some(r) => r,
         None => {
             return error_response(
@@ -377,6 +575,19 @@ async fn chat_completions(
             .into_response();
         }
     };
+
+    // Per-provider rate limit check
+    let rate_key = format!("{}:{}", route.provider, route.base_url);
+    if !state.rate_limiter.check(&rate_key) {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Rate limit exceeded for provider '{}'. Please try again later.",
+                route.provider
+            ),
+        )
+        .into_response();
+    }
 
     // Look up the live provider backend
     let provider = match state.providers.get(route.provider, &route.base_url) {
@@ -569,6 +780,8 @@ async fn chat_completions(
             // Report latency for routing decisions
             state
                 .router
+                .read()
+                .unwrap()
                 .report_latency(route.provider, &route.base_url, result.latency_ms);
 
             // Report actual usage to budget
@@ -586,6 +799,27 @@ async fn chat_completions(
                 &result.usage,
             );
             tracing::debug!(cost_usd = cost, model = %result.model, "request cost");
+
+            // Record metrics
+            crate::metrics::record_request(
+                &result.provider,
+                &result.model,
+                "success",
+                result.latency_ms as f64 / 1000.0,
+                result.usage.prompt_tokens,
+                result.usage.completion_tokens,
+            );
+
+            // Publish inference completed event
+            state.event_bus.publish(
+                crate::events::topics::INFERENCE,
+                crate::events::ProviderEvent::InferenceCompleted {
+                    provider: result.provider.clone(),
+                    model: result.model.clone(),
+                    latency_ms: result.latency_ms,
+                    tokens: result.usage.total_tokens,
+                },
+            );
 
             // Record audit event for successful inference
             if let Some(ref audit) = state.audit {
@@ -625,6 +859,16 @@ async fn chat_completions(
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(e) => {
+            // Publish inference failed event
+            state.event_bus.publish(
+                crate::events::topics::ERRORS,
+                crate::events::ProviderEvent::InferenceFailed {
+                    provider: route.provider.to_string(),
+                    model: req.model.clone(),
+                    error: e.to_string(),
+                },
+            );
+
             // Record audit event for inference error
             if let Some(ref audit) = state.audit {
                 audit.record(
@@ -636,6 +880,16 @@ async fn chat_completions(
                     None,
                 );
             }
+
+            // Record error metrics
+            crate::metrics::record_request(
+                &route.provider.to_string(),
+                &req.model,
+                "error",
+                0.0,
+                0,
+                0,
+            );
 
             // Release reservation on error
             let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
@@ -669,8 +923,11 @@ struct ModelObject {
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
     let mut models = Vec::new();
 
+    // Clone routes so we don't hold the lock across awaits
+    let routes: Vec<_> = state.router.read().unwrap().routes().to_vec();
+
     // Query live providers for real model lists
-    for route in state.router.routes() {
+    for route in &routes {
         if !route.enabled {
             continue;
         }
@@ -730,7 +987,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        providers_configured: state.router.routes().len(),
+        providers_configured: state.router.read().unwrap().routes().len(),
     })
 }
 
@@ -740,15 +997,33 @@ struct ProviderHealth {
     base_url: String,
     enabled: bool,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consecutive_failures: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
 }
 
 async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<ProviderHealth>> {
     let mut results = Vec::new();
 
-    for route in state.router.routes() {
+    // Clone routes so we don't hold the lock across awaits
+    let routes: Vec<_> = state.router.read().unwrap().routes().to_vec();
+
+    for route in &routes {
+        let key = (route.provider, route.base_url.clone());
+        let bg_state = state.health_map.get(&key);
+
         let status = if !route.enabled {
             "disabled".to_string()
+        } else if let Some(ref hs) = bg_state {
+            // Use background health check state if available
+            if hs.is_healthy {
+                "healthy".to_string()
+            } else {
+                "unhealthy".to_string()
+            }
         } else if let Some(provider) = state.providers.get(route.provider, &route.base_url) {
+            // Fall back to on-demand check if no background state
             match provider.health_check().await {
                 Ok(true) => "healthy".to_string(),
                 Ok(false) => "unhealthy".to_string(),
@@ -763,10 +1038,21 @@ async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<Provid
             base_url: route.base_url.clone(),
             enabled: route.enabled,
             status,
+            consecutive_failures: bg_state.as_ref().map(|s| s.consecutive_failures),
+            last_error: bg_state.as_ref().and_then(|s| s.last_error.clone()),
         });
     }
 
     Json(results)
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat fleet stats: /v1/health/heartbeat
+// ---------------------------------------------------------------------------
+
+async fn health_heartbeat(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stats = state.heartbeat.fleet_stats();
+    (StatusCode::OK, Json(stats)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,7 +1361,7 @@ async fn embeddings(
     Json(req): Json<crate::inference::EmbeddingsRequest>,
 ) -> impl IntoResponse {
     // Find a route for this model
-    let route = match state.router.select(&req.model) {
+    let route = match state.router.read().unwrap().select(&req.model).cloned() {
         Some(r) => r,
         None => {
             return error_response(

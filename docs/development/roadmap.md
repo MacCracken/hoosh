@@ -32,15 +32,17 @@ All items complete. See CHANGELOG.md for details.
 
 ## v0.21.3 — Server Hardening & Observability
 
+All items complete. See CHANGELOG.md for details.
+
 ### Authentication & security
-- [ ] Bearer token auth middleware
-- [ ] Per-provider rate limiting middleware
-- [ ] TLS certificate pinning for remote providers
-- [ ] mTLS for local provider communication
+- [x] Bearer token auth middleware
+- [x] Per-provider rate limiting middleware (sliding window RPM)
+- [x] TLS certificate pinning for remote providers
+- [x] mTLS for local provider communication
 
 ### Observability
-- [ ] Prometheus metrics endpoint (`/metrics`)
-- [ ] OpenTelemetry trace propagation
+- [x] Prometheus metrics endpoint (`/metrics`)
+- [x] OpenTelemetry trace propagation (feature-gated: `otel`)
 - [x] Per-provider cost tracking (token × price) — ported from secureyeoman's cost-calculator pattern
 - [x] Request/response audit log — HMAC-SHA256 linked chain, ported from secureyeoman's sy-audit pattern
 
@@ -49,8 +51,8 @@ All items complete. See CHANGELOG.md for details.
 
 ### Server improvements
 - [x] `/v1/embeddings` pass-through
-- [ ] Hot-reload config without restart
-- [ ] Periodic health checks with automatic failover
+- [x] Hot-reload config without restart (SIGHUP + `POST /v1/admin/reload`)
+- [x] Periodic health checks with automatic failover (3-strike unhealthy marking)
 - [x] Latency tracking for LowestLatency routing
 
 ---

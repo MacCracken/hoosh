@@ -41,6 +41,12 @@ pub struct ProviderRoute {
     /// Maximum tokens this provider supports per request.
     #[serde(default)]
     pub max_tokens_limit: Option<u32>,
+    /// Maximum requests per minute for this provider.
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    /// TLS configuration for this provider.
+    #[serde(skip)]
+    pub tls_config: Option<crate::provider::TlsConfig>,
 }
 
 /// The router manages provider selection and fallback.
@@ -49,6 +55,7 @@ pub struct Router {
     strategy: RoutingStrategy,
     round_robin_index: std::sync::atomic::AtomicUsize,
     latencies: Arc<DashMap<(ProviderType, String), AtomicU64>>,
+    health_status: Option<crate::health::HealthMap>,
 }
 
 impl Router {
@@ -60,6 +67,30 @@ impl Router {
             strategy,
             round_robin_index: std::sync::atomic::AtomicUsize::new(0),
             latencies: Arc::new(DashMap::new()),
+            health_status: None,
+        }
+    }
+
+    /// Set the health map for background health check filtering.
+    pub fn set_health_map(&mut self, map: crate::health::HealthMap) {
+        self.health_status = Some(map);
+    }
+
+    /// Check if a provider is considered healthy.
+    /// A provider is healthy if:
+    /// - No health map is set (backward compatible), OR
+    /// - Not in the health map (not checked yet = assume healthy), OR
+    /// - Entry shows `is_healthy: true`
+    fn is_provider_healthy(&self, provider: ProviderType, base_url: &str) -> bool {
+        match &self.health_status {
+            None => true,
+            Some(map) => {
+                let key = (provider, base_url.to_string());
+                match map.get(&key) {
+                    None => true,
+                    Some(state) => state.is_healthy,
+                }
+            }
         }
     }
 
@@ -68,7 +99,11 @@ impl Router {
         let candidates: Vec<&ProviderRoute> = self
             .routes
             .iter()
-            .filter(|r| r.enabled && self.matches_model(r, model))
+            .filter(|r| {
+                r.enabled
+                    && self.matches_model(r, model)
+                    && self.is_provider_healthy(r.provider, &r.base_url)
+            })
             .collect();
 
         if candidates.is_empty() {
@@ -110,6 +145,15 @@ impl Router {
             .or_insert_with(|| AtomicU64::new(latency_ms));
     }
 
+    /// Replace routes and strategy atomically.
+    pub fn reload(&mut self, mut routes: Vec<ProviderRoute>, strategy: RoutingStrategy) {
+        routes.sort_by_key(|r| r.priority);
+        self.routes = routes;
+        self.strategy = strategy;
+        self.round_robin_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// All configured routes.
     pub fn routes(&self) -> &[ProviderRoute] {
         &self.routes
@@ -144,6 +188,8 @@ mod tests {
             base_url: "http://localhost".into(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         }
     }
 
@@ -216,6 +262,8 @@ mod tests {
             base_url: base_url.to_string(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         }
     }
 
@@ -268,5 +316,134 @@ mod tests {
 
         let selected = router.select("any-model").unwrap();
         assert_eq!(selected.provider, ProviderType::LlamaCpp);
+    }
+
+    #[test]
+    fn select_no_health_map_allows_all() {
+        // Backward compatibility: no health map set means all providers allowed
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 2, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        assert!(router.select("any-model").is_some());
+        assert_eq!(router.select("any-model").unwrap().provider, ProviderType::Ollama);
+    }
+
+    #[test]
+    fn select_filters_unhealthy_providers() {
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 2, vec![]),
+        ];
+        let mut router = Router::new(routes, RoutingStrategy::Priority);
+
+        let health_map = crate::health::new_health_map();
+        // Mark Ollama as unhealthy
+        health_map.insert(
+            (ProviderType::Ollama, "http://localhost".to_string()),
+            crate::health::ProviderHealthState {
+                is_healthy: false,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 3,
+                last_error: Some("connection refused".into()),
+            },
+        );
+        router.set_health_map(health_map);
+
+        // Should skip Ollama and pick LlamaCpp
+        let selected = router.select("any-model").unwrap();
+        assert_eq!(selected.provider, ProviderType::LlamaCpp);
+    }
+
+    #[test]
+    fn select_unchecked_provider_assumed_healthy() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let mut router = Router::new(routes, RoutingStrategy::Priority);
+
+        // Set health map but don't add any entries — unchecked providers assumed healthy
+        let health_map = crate::health::new_health_map();
+        router.set_health_map(health_map);
+
+        assert!(router.select("any-model").is_some());
+    }
+
+    #[test]
+    fn select_all_unhealthy_returns_none() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let mut router = Router::new(routes, RoutingStrategy::Priority);
+
+        let health_map = crate::health::new_health_map();
+        health_map.insert(
+            (ProviderType::Ollama, "http://localhost".to_string()),
+            crate::health::ProviderHealthState {
+                is_healthy: false,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 5,
+                last_error: Some("down".into()),
+            },
+        );
+        router.set_health_map(health_map);
+
+        assert!(router.select("any-model").is_none());
+    }
+
+    #[test]
+    fn reload_changes_routes() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec!["llama*"])];
+        let mut router = Router::new(routes, RoutingStrategy::Priority);
+        assert_eq!(router.routes().len(), 1);
+        assert!(router.select("llama3").is_some());
+        assert!(router.select("gpt-4o").is_none());
+
+        // Reload with a different set of routes
+        let new_routes = vec![
+            make_route(ProviderType::OpenAi, 1, vec!["gpt-*"]),
+            make_route(ProviderType::LlamaCpp, 2, vec!["gguf-*"]),
+        ];
+        router.reload(new_routes, RoutingStrategy::RoundRobin);
+        assert_eq!(router.routes().len(), 2);
+        assert!(router.select("gpt-4o").is_some());
+        assert!(router.select("llama3").is_none());
+    }
+
+    #[test]
+    fn reload_resets_round_robin_index() {
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 1, vec![]),
+        ];
+        let mut router = Router::new(routes, RoutingStrategy::RoundRobin);
+
+        // Advance the round-robin index
+        let _ = router.select("any");
+        let _ = router.select("any");
+        let _ = router.select("any");
+
+        // Reload — index should reset to 0
+        let new_routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 1, vec![]),
+        ];
+        router.reload(new_routes, RoutingStrategy::RoundRobin);
+
+        // After reload, first select should pick index 0
+        let first = router.select("any").unwrap().provider;
+        let second = router.select("any").unwrap().provider;
+        assert_ne!(first, second, "round-robin should alternate after reload");
+    }
+
+    #[test]
+    fn rwlock_concurrent_reads() {
+        use std::sync::{Arc, RwLock};
+
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Arc::new(RwLock::new(Router::new(routes, RoutingStrategy::Priority)));
+
+        // Multiple concurrent readers should not block
+        let r1 = router.read().unwrap();
+        let r2 = router.read().unwrap();
+        assert_eq!(r1.routes().len(), 1);
+        assert_eq!(r2.routes().len(), 1);
     }
 }

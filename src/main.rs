@@ -86,8 +86,8 @@ enum Commands {
     Info,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Set up the default tracing subscriber (fmt to stderr with env filter).
+fn init_default_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -95,17 +95,69 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+}
 
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // For non-Serve commands, init tracing immediately.
+    // Serve defers tracing init so it can optionally add an OpenTelemetry layer.
+    if !matches!(cli.command, Commands::Serve { .. }) {
+        init_default_tracing();
+    }
 
     match cli.command {
         Commands::Serve { port, bind, config } => {
+            let config_path = config.clone();
             let hoosh_config = if let Some(path) = config {
                 HooshConfig::load(&path)?
             } else {
                 HooshConfig::load_or_default()
             };
-            let server_config = hoosh_config.into_server_config(bind.as_deref(), port);
+            let server_config =
+                hoosh_config.into_server_config(bind.as_deref(), port, config_path);
+
+            // Set up tracing — with OpenTelemetry layer when the feature and
+            // endpoint are both present, otherwise plain fmt.
+            #[cfg(feature = "otel")]
+            let _otel_guard = {
+                if let Some(ref endpoint) = server_config.otlp_endpoint {
+                    let mut guard = hoosh::telemetry::init_otel(
+                        endpoint,
+                        &server_config.telemetry_service_name,
+                    )?;
+                    if let Some(otel_layer) = guard.layer() {
+                        use tracing_subscriber::layer::SubscriberExt;
+                        use tracing_subscriber::util::SubscriberInitExt;
+                        tracing_subscriber::registry()
+                            .with(otel_layer)
+                            .with(
+                                tracing_subscriber::fmt::layer()
+                                    .with_writer(std::io::stderr),
+                            )
+                            .with(
+                                tracing_subscriber::EnvFilter::try_from_default_env()
+                                    .unwrap_or_else(|_| {
+                                        tracing_subscriber::EnvFilter::new("info")
+                                    }),
+                            )
+                            .init();
+                        tracing::info!(endpoint, "OpenTelemetry tracing enabled");
+                        Some(guard)
+                    } else {
+                        init_default_tracing();
+                        None
+                    }
+                } else {
+                    init_default_tracing();
+                    None::<hoosh::telemetry::OtelGuard>
+                }
+            };
+
+            #[cfg(not(feature = "otel"))]
+            init_default_tracing();
+
             hoosh::server::run(server_config).await?;
         }
         Commands::Models { server } => {

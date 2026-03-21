@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// Synapse provider (default: `http://localhost:5000`).
 pub struct SynapseProvider {
@@ -10,7 +10,7 @@ pub struct SynapseProvider {
 }
 
 impl SynapseProvider {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, tls_config: Option<&TlsConfig>) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "http://localhost:5000".to_string()
@@ -18,7 +18,7 @@ impl SynapseProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::Synapse),
+            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::Synapse, tls_config),
         }
     }
 
@@ -71,19 +71,19 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = SynapseProvider::new("");
+        let p = SynapseProvider::new("", None);
         assert_eq!(p.inner.base_url(), "http://localhost:5000");
     }
 
     #[test]
     fn custom_url() {
-        let p = SynapseProvider::new("http://synapse:7000");
+        let p = SynapseProvider::new("http://synapse:7000", None);
         assert_eq!(p.inner.base_url(), "http://synapse:7000");
     }
 
     #[test]
     fn provider_type_is_synapse() {
-        let p = SynapseProvider::new("");
+        let p = SynapseProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::Synapse);
     }
 }

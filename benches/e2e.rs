@@ -33,7 +33,7 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Spin up a hoosh server with Ollama configured, return the HooshClient and port.
 fn start_hoosh_server(rt: &tokio::runtime::Runtime) -> Option<(HooshClient, u16)> {
     // First check Ollama is available
-    let ollama = OllamaProvider::new("http://127.0.0.1:11434");
+    let ollama = OllamaProvider::new("http://127.0.0.1:11434", None);
     let healthy = rt.block_on(ollama.health_check()).ok()?;
     if !healthy {
         return None;
@@ -54,8 +54,8 @@ priority = 1
 models = ["*"]
 "#;
     let config: HooshConfig = toml::from_str(config_toml).unwrap();
-    let server_config = config.into_server_config(None, None);
-    let app = hoosh::server::build_app(server_config);
+    let server_config = config.into_server_config(None, None, None);
+    let (app, _state) = hoosh::server::build_app(server_config);
 
     let (port_tx, port_rx) = std::sync::mpsc::channel();
 
@@ -89,7 +89,7 @@ models = ["*"]
 /// Get the first available model from Ollama.
 #[cfg(feature = "ollama")]
 fn first_model(rt: &tokio::runtime::Runtime) -> Option<String> {
-    let ollama = OllamaProvider::new("http://127.0.0.1:11434");
+    let ollama = OllamaProvider::new("http://127.0.0.1:11434", None);
     let models = rt.block_on(ollama.list_models()).ok()?;
     models.first().map(|m| m.id.clone())
 }
@@ -263,7 +263,7 @@ fn bench_e2e_gateway_overhead(c: &mut Criterion) {
     };
 
     // Measure direct Ollama vs through-hoosh to isolate gateway overhead
-    let ollama_direct = OllamaProvider::new("http://127.0.0.1:11434");
+    let ollama_direct = OllamaProvider::new("http://127.0.0.1:11434", None);
     let req = InferenceRequest {
         model: model.clone(),
         prompt: "Say hi.".into(),

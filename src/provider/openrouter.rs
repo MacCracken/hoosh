@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// OpenRouter API provider (default: `https://openrouter.ai/api`).
 pub struct OpenRouterProvider {
@@ -10,7 +10,11 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://openrouter.ai/api".to_string()
@@ -18,7 +22,7 @@ impl OpenRouterProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::OpenRouter),
+            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::OpenRouter, tls_config),
         }
     }
 }
@@ -51,13 +55,13 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = OpenRouterProvider::new("", Some("sk-or-test".into()));
+        let p = OpenRouterProvider::new("", Some("sk-or-test".into()), None);
         assert_eq!(p.inner.base_url(), "https://openrouter.ai/api");
     }
 
     #[test]
     fn provider_type_is_openrouter() {
-        let p = OpenRouterProvider::new("", None);
+        let p = OpenRouterProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::OpenRouter);
     }
 }

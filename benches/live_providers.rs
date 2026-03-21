@@ -25,7 +25,7 @@ fn runtime() -> tokio::runtime::Runtime {
 #[cfg(feature = "ollama")]
 fn ollama_if_available() -> Option<(OllamaProvider, String)> {
     let rt = runtime();
-    let provider = OllamaProvider::new("http://127.0.0.1:11434");
+    let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
     let healthy = rt.block_on(provider.health_check()).ok()?;
     if !healthy {
         return None;

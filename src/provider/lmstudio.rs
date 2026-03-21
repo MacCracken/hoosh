@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// LM Studio provider (default: `http://localhost:1234`).
 pub struct LmStudioProvider {
@@ -10,7 +10,7 @@ pub struct LmStudioProvider {
 }
 
 impl LmStudioProvider {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, tls_config: Option<&TlsConfig>) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "http://localhost:1234".to_string()
@@ -18,7 +18,7 @@ impl LmStudioProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::LmStudio),
+            inner: OpenAiCompatibleProvider::new(url, None, ProviderType::LmStudio, tls_config),
         }
     }
 }
@@ -55,19 +55,19 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = LmStudioProvider::new("");
+        let p = LmStudioProvider::new("", None);
         assert_eq!(p.inner.base_url(), "http://localhost:1234");
     }
 
     #[test]
     fn custom_url() {
-        let p = LmStudioProvider::new("http://workstation:5555");
+        let p = LmStudioProvider::new("http://workstation:5555", None);
         assert_eq!(p.inner.base_url(), "http://workstation:5555");
     }
 
     #[test]
     fn provider_type_is_lmstudio() {
-        let p = LmStudioProvider::new("");
+        let p = LmStudioProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::LmStudio);
     }
 }

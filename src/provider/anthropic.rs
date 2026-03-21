@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo, Role, TokenUsage};
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig, build_provider_client};
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -19,7 +19,11 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://api.anthropic.com".to_string()
@@ -27,16 +31,7 @@ impl AnthropicProvider {
             url.trim_end_matches('/').to_string()
         };
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .tcp_keepalive(std::time::Duration::from_secs(60))
-                .pool_idle_timeout(std::time::Duration::from_secs(600))
-                .pool_max_idle_per_host(32)
-                .http2_adaptive_window(true)
-                .build()
-                .unwrap_or_default(),
+            client: build_provider_client(tls_config),
             base_url: url,
             api_key,
             api_version: std::env::var("ANTHROPIC_API_VERSION")
@@ -308,19 +303,19 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = AnthropicProvider::new("", Some("sk-ant-test".into()));
+        let p = AnthropicProvider::new("", Some("sk-ant-test".into()), None);
         assert_eq!(p.base_url(), "https://api.anthropic.com");
     }
 
     #[test]
     fn custom_url() {
-        let p = AnthropicProvider::new("https://proxy.example.com", None);
+        let p = AnthropicProvider::new("https://proxy.example.com", None, None);
         assert_eq!(p.base_url(), "https://proxy.example.com");
     }
 
     #[test]
     fn provider_type_is_anthropic() {
-        let p = AnthropicProvider::new("", None);
+        let p = AnthropicProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::Anthropic);
     }
 
@@ -412,7 +407,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let p = AnthropicProvider::new("", None);
+        let p = AnthropicProvider::new("", None, None);
         let models = rt.block_on(p.list_models()).unwrap();
         assert!(models.len() >= 3);
         assert!(models.iter().any(|m| m.id.contains("opus")));

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo, Role, TokenUsage};
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig, build_provider_client};
 
 /// Ollama provider using its native `/api/` endpoints.
 pub struct OllamaProvider {
@@ -15,7 +15,7 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, tls_config: Option<&TlsConfig>) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "http://localhost:11434".to_string()
@@ -23,16 +23,7 @@ impl OllamaProvider {
             url.trim_end_matches('/').to_string()
         };
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .tcp_keepalive(std::time::Duration::from_secs(60))
-                .pool_idle_timeout(std::time::Duration::from_secs(600))
-                .pool_max_idle_per_host(32)
-                .http2_adaptive_window(true)
-                .build()
-                .unwrap_or_default(),
+            client: build_provider_client(tls_config),
             base_url: url,
         }
     }
@@ -360,25 +351,25 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = OllamaProvider::new("");
+        let p = OllamaProvider::new("", None);
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn custom_url() {
-        let p = OllamaProvider::new("http://my-ollama:9999");
+        let p = OllamaProvider::new("http://my-ollama:9999", None);
         assert_eq!(p.base_url, "http://my-ollama:9999");
     }
 
     #[test]
     fn strips_trailing_slash() {
-        let p = OllamaProvider::new("http://localhost:11434/");
+        let p = OllamaProvider::new("http://localhost:11434/", None);
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn provider_type_is_ollama() {
-        let p = OllamaProvider::new("");
+        let p = OllamaProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::Ollama);
     }
 

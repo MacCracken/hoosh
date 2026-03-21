@@ -60,6 +60,8 @@ fn router_selects_provider() {
             base_url: "http://localhost:11434".into(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         },
         ProviderRoute {
             provider: ProviderType::OpenAi,
@@ -69,6 +71,8 @@ fn router_selects_provider() {
             base_url: "https://api.openai.com".into(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         },
     ];
     let router = Router::new(routes, RoutingStrategy::Priority);
@@ -159,6 +163,8 @@ fn provider_registry_register_ollama() {
         base_url: "http://localhost:11434".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     };
     registry.register_from_route(&route);
     assert_eq!(registry.len(), 1);
@@ -183,6 +189,8 @@ fn provider_registry_dedup() {
         base_url: "http://localhost:11434".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     };
     registry.register_from_route(&route);
     registry.register_from_route(&route);
@@ -202,6 +210,8 @@ fn provider_registry_multiple_providers() {
         base_url: "http://localhost:11434".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     });
     registry.register_from_route(&ProviderRoute {
         provider: ProviderType::LlamaCpp,
@@ -211,6 +221,8 @@ fn provider_registry_multiple_providers() {
         base_url: "http://localhost:8080".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     });
     assert_eq!(registry.len(), 2);
 
@@ -223,6 +235,8 @@ fn provider_registry_multiple_providers() {
         base_url: "http://other-host:11434".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     });
     assert_eq!(registry.len(), 3);
 }
@@ -240,6 +254,8 @@ fn provider_registry_unrecognized_type_not_registered() {
         base_url: "http://localhost:9999".into(),
         api_key: None,
         max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     };
     registry.register_from_route(&route);
     assert!(registry.is_empty());
@@ -325,7 +341,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_infer() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp);
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp, None);
 
         let req = InferenceRequest {
             model: "test-model".into(),
@@ -348,7 +364,7 @@ mod mock_server {
         use crate::inference::{Message, Role};
 
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LocalAi);
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LocalAi, None);
 
         let req = InferenceRequest {
             model: "chat-model".into(),
@@ -374,7 +390,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_list_models() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LmStudio);
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LmStudio, None);
 
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
@@ -387,7 +403,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_health_check() {
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp);
+        let provider = OpenAiCompatibleProvider::new(&base_url, None, ProviderType::LlamaCpp, None);
 
         let healthy = provider.health_check().await.unwrap();
         assert!(healthy);
@@ -396,7 +412,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_health_check_unreachable() {
         let provider =
-            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp);
+            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp, None);
         // Should return an error (connection refused), not panic
         let result = provider.health_check().await;
         assert!(result.is_err());
@@ -405,7 +421,7 @@ mod mock_server {
     #[tokio::test]
     async fn openai_compat_infer_unreachable() {
         let provider =
-            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp);
+            OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp, None);
         let req = InferenceRequest {
             model: "test".into(),
             prompt: "Hi".into(),
@@ -465,7 +481,7 @@ mod mock_server {
         #[tokio::test]
         async fn ollama_infer() {
             let base_url = start_mock_ollama().await;
-            let provider = OllamaProvider::new(&base_url);
+            let provider = OllamaProvider::new(&base_url, None);
 
             let req = InferenceRequest {
                 model: "llama3".into(),
@@ -484,7 +500,7 @@ mod mock_server {
         #[tokio::test]
         async fn ollama_infer_with_temperature() {
             let base_url = start_mock_ollama().await;
-            let provider = OllamaProvider::new(&base_url);
+            let provider = OllamaProvider::new(&base_url, None);
 
             let req = InferenceRequest {
                 model: "llama3".into(),
@@ -499,7 +515,7 @@ mod mock_server {
         #[tokio::test]
         async fn ollama_list_models() {
             let base_url = start_mock_ollama().await;
-            let provider = OllamaProvider::new(&base_url);
+            let provider = OllamaProvider::new(&base_url, None);
 
             let models = provider.list_models().await.unwrap();
             assert_eq!(models.len(), 2);
@@ -514,7 +530,7 @@ mod mock_server {
         #[tokio::test]
         async fn ollama_health_check() {
             let base_url = start_mock_ollama().await;
-            let provider = OllamaProvider::new(&base_url);
+            let provider = OllamaProvider::new(&base_url, None);
 
             let healthy = provider.health_check().await.unwrap();
             assert!(healthy);
@@ -522,7 +538,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_health_check_unreachable() {
-            let provider = OllamaProvider::new("http://127.0.0.1:1");
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let result = provider.health_check().await;
             assert!(result.is_err());
         }
@@ -562,7 +578,7 @@ mod mock_server {
         #[tokio::test]
         async fn anthropic_infer() {
             let base_url = start_mock_anthropic().await;
-            let provider = AnthropicProvider::new(&base_url, Some("sk-ant-test".into()));
+            let provider = AnthropicProvider::new(&base_url, Some("sk-ant-test".into()), None);
 
             let req = InferenceRequest {
                 model: "claude-sonnet-4-20250514".into(),
@@ -583,7 +599,7 @@ mod mock_server {
         async fn anthropic_infer_with_messages() {
             use crate::inference::{Message, Role};
             let base_url = start_mock_anthropic().await;
-            let provider = AnthropicProvider::new(&base_url, Some("key".into()));
+            let provider = AnthropicProvider::new(&base_url, Some("key".into()), None);
 
             let req = InferenceRequest {
                 model: "claude-sonnet-4-20250514".into(),
@@ -613,7 +629,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn anthropic_list_models() {
-            let provider = AnthropicProvider::new("http://unused", None);
+            let provider = AnthropicProvider::new("http://unused", None, None);
             let models = provider.list_models().await.unwrap();
             assert!(models.len() >= 3);
             assert!(models.iter().any(|m| m.id.contains("opus")));
@@ -622,7 +638,7 @@ mod mock_server {
         #[tokio::test]
         async fn anthropic_health_reachable() {
             let base_url = start_mock_anthropic().await;
-            let provider = AnthropicProvider::new(&base_url, Some("key".into()));
+            let provider = AnthropicProvider::new(&base_url, Some("key".into()), None);
             // Mock returns 200 on POST /v1/messages, so health should pass
             let healthy = provider.health_check().await.unwrap();
             assert!(healthy);
@@ -630,14 +646,14 @@ mod mock_server {
 
         #[tokio::test]
         async fn anthropic_health_no_key() {
-            let provider = AnthropicProvider::new("http://unused", None);
+            let provider = AnthropicProvider::new("http://unused", None, None);
             let healthy = provider.health_check().await.unwrap();
             assert!(!healthy);
         }
 
         #[tokio::test]
         async fn anthropic_health_unreachable() {
-            let provider = AnthropicProvider::new("http://127.0.0.1:1", Some("key".into()));
+            let provider = AnthropicProvider::new("http://127.0.0.1:1", Some("key".into()), None);
             let healthy = provider.health_check().await.unwrap();
             assert!(!healthy);
         }
@@ -650,7 +666,7 @@ mod mock_server {
         use crate::provider::llamacpp::LlamaCppProvider;
 
         let base_url = start_mock_oai_server().await;
-        let provider = LlamaCppProvider::new(&base_url);
+        let provider = LlamaCppProvider::new(&base_url, None);
 
         let req = InferenceRequest {
             model: "my-gguf".into(),
@@ -668,7 +684,7 @@ mod mock_server {
         use crate::provider::lmstudio::LmStudioProvider;
 
         let base_url = start_mock_oai_server().await;
-        let provider = LmStudioProvider::new(&base_url);
+        let provider = LmStudioProvider::new(&base_url, None);
 
         let req = InferenceRequest {
             model: "lm-model".into(),
@@ -686,7 +702,7 @@ mod mock_server {
         use crate::provider::localai::LocalAiProvider;
 
         let base_url = start_mock_oai_server().await;
-        let provider = LocalAiProvider::new(&base_url);
+        let provider = LocalAiProvider::new(&base_url, None);
 
         let req = InferenceRequest {
             model: "local-model".into(),
@@ -704,7 +720,7 @@ mod mock_server {
         use crate::provider::synapse::SynapseProvider;
 
         let base_url = start_mock_oai_server().await;
-        let provider = SynapseProvider::new(&base_url);
+        let provider = SynapseProvider::new(&base_url, None);
 
         let req = InferenceRequest {
             model: "synapse-model".into(),
@@ -721,7 +737,7 @@ mod mock_server {
     async fn openai_remote_provider_infer() {
         use crate::provider::openai_remote::OpenAiProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiProvider::new(&base_url, None);
+        let provider = OpenAiProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "gpt-4".into(),
             prompt: "Hi".into(),
@@ -737,7 +753,7 @@ mod mock_server {
     async fn deepseek_provider_infer() {
         use crate::provider::deepseek::DeepSeekProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = DeepSeekProvider::new(&base_url, None);
+        let provider = DeepSeekProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "deepseek-chat".into(),
             prompt: "Hi".into(),
@@ -752,7 +768,7 @@ mod mock_server {
     async fn mistral_provider_infer() {
         use crate::provider::mistral::MistralProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = MistralProvider::new(&base_url, None);
+        let provider = MistralProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "mistral-large".into(),
             prompt: "Hi".into(),
@@ -767,7 +783,7 @@ mod mock_server {
     async fn groq_provider_infer() {
         use crate::provider::groq::GroqProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = GroqProvider::new(&base_url, None);
+        let provider = GroqProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "llama3".into(),
             prompt: "Hi".into(),
@@ -782,7 +798,7 @@ mod mock_server {
     async fn openrouter_provider_infer() {
         use crate::provider::openrouter::OpenRouterProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = OpenRouterProvider::new(&base_url, None);
+        let provider = OpenRouterProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "meta/llama3".into(),
             prompt: "Hi".into(),
@@ -797,7 +813,7 @@ mod mock_server {
     async fn grok_provider_infer() {
         use crate::provider::grok::GrokProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = GrokProvider::new(&base_url, None);
+        let provider = GrokProvider::new(&base_url, None, None);
         let req = InferenceRequest {
             model: "grok-2".into(),
             prompt: "Hi".into(),
@@ -814,7 +830,7 @@ mod mock_server {
         use crate::provider::llamacpp::LlamaCppProvider;
 
         let base_url = start_mock_oai_server().await;
-        let provider = LlamaCppProvider::new(&base_url);
+        let provider = LlamaCppProvider::new(&base_url, None);
 
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
@@ -827,7 +843,7 @@ mod mock_server {
     async fn openai_list_models_and_health() {
         use crate::provider::openai_remote::OpenAiProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = OpenAiProvider::new(&base_url, None);
+        let provider = OpenAiProvider::new(&base_url, None, None);
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
         assert!(provider.health_check().await.unwrap());
@@ -838,7 +854,7 @@ mod mock_server {
     async fn groq_list_models_and_health() {
         use crate::provider::groq::GroqProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = GroqProvider::new(&base_url, None);
+        let provider = GroqProvider::new(&base_url, None, None);
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
         assert!(provider.health_check().await.unwrap());
@@ -849,7 +865,7 @@ mod mock_server {
     async fn deepseek_list_models_and_health() {
         use crate::provider::deepseek::DeepSeekProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = DeepSeekProvider::new(&base_url, None);
+        let provider = DeepSeekProvider::new(&base_url, None, None);
         assert_eq!(provider.list_models().await.unwrap().len(), 2);
         assert!(provider.health_check().await.unwrap());
     }
@@ -859,7 +875,7 @@ mod mock_server {
     async fn mistral_health() {
         use crate::provider::mistral::MistralProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = MistralProvider::new(&base_url, None);
+        let provider = MistralProvider::new(&base_url, None, None);
         assert!(provider.health_check().await.unwrap());
     }
 
@@ -868,7 +884,7 @@ mod mock_server {
     async fn openrouter_health() {
         use crate::provider::openrouter::OpenRouterProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = OpenRouterProvider::new(&base_url, None);
+        let provider = OpenRouterProvider::new(&base_url, None, None);
         assert!(provider.health_check().await.unwrap());
     }
 
@@ -877,7 +893,7 @@ mod mock_server {
     async fn grok_health() {
         use crate::provider::grok::GrokProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = GrokProvider::new(&base_url, None);
+        let provider = GrokProvider::new(&base_url, None, None);
         assert!(provider.health_check().await.unwrap());
     }
 
@@ -886,7 +902,7 @@ mod mock_server {
     async fn lmstudio_health() {
         use crate::provider::lmstudio::LmStudioProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = LmStudioProvider::new(&base_url);
+        let provider = LmStudioProvider::new(&base_url, None);
         assert!(provider.health_check().await.unwrap());
     }
 
@@ -895,7 +911,7 @@ mod mock_server {
     async fn localai_health() {
         use crate::provider::localai::LocalAiProvider;
         let base_url = start_mock_oai_server().await;
-        let provider = LocalAiProvider::new(&base_url);
+        let provider = LocalAiProvider::new(&base_url, None);
         assert!(provider.health_check().await.unwrap());
     }
 }
@@ -917,7 +933,7 @@ mod live {
     #[ignore] // Requires `ollama serve` running on localhost:11434
     async fn ollama_live_health() {
         use crate::provider::ollama::OllamaProvider;
-        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         assert!(provider.health_check().await.unwrap());
     }
 
@@ -926,7 +942,7 @@ mod live {
     #[ignore]
     async fn ollama_live_list_models() {
         use crate::provider::ollama::OllamaProvider;
-        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
         assert!(
             !models.is_empty(),
@@ -942,7 +958,7 @@ mod live {
     #[ignore]
     async fn ollama_live_infer() {
         use crate::provider::ollama::OllamaProvider;
-        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
         assert!(!models.is_empty());
 
@@ -970,7 +986,7 @@ mod live {
     #[ignore]
     async fn ollama_live_stream() {
         use crate::provider::ollama::OllamaProvider;
-        let provider = OllamaProvider::new("http://127.0.0.1:11434");
+        let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
         assert!(!models.is_empty());
 
@@ -1011,12 +1027,19 @@ mod server_wiring {
             }
         }
         Arc::new(AppState {
-            router: hoosh_router::Router::new(routes, RoutingStrategy::Priority),
+            router: std::sync::RwLock::new(hoosh_router::Router::new(routes, RoutingStrategy::Priority)),
+            config_path: None,
             cache: ResponseCache::new(CacheConfig::default()),
             budget: std::sync::Mutex::new(TokenBudget::new()),
             providers,
             cost_tracker: std::sync::Arc::new(crate::cost::CostTracker::new()),
             audit: None,
+            auth_tokens: Vec::new(),
+            rate_limiter: std::sync::Arc::new(crate::middleware::rate_limit::RateLimitRegistry::new()),
+            event_bus: std::sync::Arc::new(crate::events::new_event_bus()),
+            inference_queue: std::sync::Arc::new(crate::queue::InferenceQueue::new()),
+            health_map: crate::health::new_health_map(),
+            heartbeat: std::sync::Arc::new(majra::heartbeat::ConcurrentHeartbeatTracker::default()),
             #[cfg(feature = "whisper")]
             whisper: None,
             #[cfg(feature = "piper")]
@@ -1027,7 +1050,7 @@ mod server_wiring {
     #[test]
     fn app_state_empty_routes() {
         let state = make_state(vec![]);
-        assert_eq!(state.router.routes().len(), 0);
+        assert_eq!(state.router.read().unwrap().routes().len(), 0);
         assert!(state.providers.is_empty());
     }
 
@@ -1042,6 +1065,8 @@ mod server_wiring {
             base_url: "http://localhost:11434".into(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         }]);
         assert_eq!(state.providers.len(), 1);
         assert!(
@@ -1063,10 +1088,12 @@ mod server_wiring {
             base_url: "http://localhost:11434".into(),
             api_key: None,
             max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
         }]);
         assert!(state.providers.is_empty());
         // But the route is still in the router
-        assert_eq!(state.router.routes().len(), 1);
+        assert_eq!(state.router.read().unwrap().routes().len(), 1);
     }
 
     #[cfg(all(feature = "ollama", feature = "llamacpp", feature = "lmstudio"))]
@@ -1081,6 +1108,8 @@ mod server_wiring {
                 base_url: "http://localhost:11434".into(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             },
             ProviderRoute {
                 provider: ProviderType::LlamaCpp,
@@ -1090,6 +1119,8 @@ mod server_wiring {
                 base_url: "http://localhost:8080".into(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             },
             ProviderRoute {
                 provider: ProviderType::LmStudio,
@@ -1099,10 +1130,12 @@ mod server_wiring {
                 base_url: "http://localhost:1234".into(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             },
         ]);
         assert_eq!(state.providers.len(), 3);
-        assert_eq!(state.router.routes().len(), 3);
+        assert_eq!(state.router.read().unwrap().routes().len(), 3);
     }
 
     #[test]
@@ -1116,6 +1149,8 @@ mod server_wiring {
                 base_url: "http://localhost:11434".into(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             },
             ProviderRoute {
                 provider: ProviderType::OpenAi,
@@ -1125,14 +1160,22 @@ mod server_wiring {
                 base_url: "https://api.openai.com".into(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             },
         ]);
 
-        let route = state.router.select("llama3").unwrap();
-        assert_eq!(route.provider, ProviderType::Ollama);
+        {
+            let router = state.router.read().unwrap();
+            let route = router.select("llama3").unwrap();
+            assert_eq!(route.provider, ProviderType::Ollama);
+        }
 
-        let route = state.router.select("gpt-4o").unwrap();
-        assert_eq!(route.provider, ProviderType::OpenAi);
+        {
+            let router = state.router.read().unwrap();
+            let route = router.select("gpt-4o").unwrap();
+            assert_eq!(route.provider, ProviderType::OpenAi);
+        }
 
         // OpenAI is now registered as a remote provider
         #[cfg(feature = "openai")]
@@ -1229,6 +1272,8 @@ mod e2e {
                 base_url: backend_url.to_string(),
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             }],
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig {
@@ -1244,9 +1289,11 @@ mod e2e {
             audit_enabled: false,
             audit_signing_key: None,
             audit_max_entries: 10_000,
+            auth_tokens: Vec::new(),
+            ..ServerConfig::default()
         };
 
-        let app = crate::server::build_app(config);
+        let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1309,6 +1356,8 @@ mod e2e {
                 base_url: backend,
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             }],
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
@@ -1318,9 +1367,11 @@ mod e2e {
             audit_enabled: false,
             audit_signing_key: None,
             audit_max_entries: 10_000,
+            auth_tokens: Vec::new(),
+            ..ServerConfig::default()
         };
 
-        let app = crate::server::build_app(config);
+        let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1607,6 +1658,8 @@ mod e2e {
                 base_url: backend,
                 api_key: None,
                 max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
             }],
             strategy: RoutingStrategy::Priority,
             cache_config: CacheConfig::default(),
@@ -1616,8 +1669,10 @@ mod e2e {
             audit_enabled: false,
             audit_signing_key: None,
             audit_max_entries: 10_000,
+            auth_tokens: Vec::new(),
+            ..ServerConfig::default()
         };
-        let app = crate::server::build_app(config);
+        let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1647,7 +1702,7 @@ mod e2e {
         use tokio::net::TcpListener;
 
         let config = ServerConfig::default();
-        let app = build_app(config);
+        let (app, _state) = build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1665,7 +1720,7 @@ mod e2e {
         use tokio::net::TcpListener;
 
         let config = ServerConfig::default();
-        let app = build_app(config);
+        let (app, _state) = build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1707,7 +1762,7 @@ mod e2e {
         use crate::provider::LlmProvider;
         use crate::provider::ollama::OllamaProvider;
 
-        let p = OllamaProvider::new("http://localhost:11434");
+        let p = OllamaProvider::new("http://localhost:11434", None);
         // Provider created with tuned client settings — verify it doesn't panic
         assert_eq!(p.provider_type(), ProviderType::Ollama);
     }
@@ -1722,6 +1777,7 @@ mod e2e {
             "http://localhost:8080",
             Some("sk-test".into()),
             ProviderType::OpenAi,
+            None,
         );
         assert_eq!(p.base_url(), "http://localhost:8080");
         assert_eq!(p.provider_type(), ProviderType::OpenAi);
@@ -1734,7 +1790,7 @@ mod e2e {
         use tokio::net::TcpListener;
 
         let config = ServerConfig::default();
-        let app = build_app(config);
+        let (app, _state) = build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

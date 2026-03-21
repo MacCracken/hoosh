@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// Grok API provider (default: `https://api.x.ai`).
 pub struct GrokProvider {
@@ -10,7 +10,11 @@ pub struct GrokProvider {
 }
 
 impl GrokProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://api.x.ai".to_string()
@@ -18,7 +22,7 @@ impl GrokProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::Grok),
+            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::Grok, tls_config),
         }
     }
 }
@@ -51,13 +55,13 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = GrokProvider::new("", Some("xai-test".into()));
+        let p = GrokProvider::new("", Some("xai-test".into()), None);
         assert_eq!(p.inner.base_url(), "https://api.x.ai");
     }
 
     #[test]
     fn provider_type_is_grok() {
-        let p = GrokProvider::new("", None);
+        let p = GrokProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::Grok);
     }
 }

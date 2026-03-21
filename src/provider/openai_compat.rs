@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo, Role, TokenUsage};
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig, build_provider_client};
 
 /// Generic provider that speaks the OpenAI-compatible `/v1/` API.
 pub struct OpenAiCompatibleProvider {
@@ -21,18 +21,10 @@ impl OpenAiCompatibleProvider {
         base_url: impl Into<String>,
         api_key: Option<String>,
         provider_type: ProviderType,
+        tls_config: Option<&TlsConfig>,
     ) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .tcp_keepalive(std::time::Duration::from_secs(60))
-                .pool_idle_timeout(std::time::Duration::from_secs(600))
-                .pool_max_idle_per_host(32)
-                .http2_adaptive_window(true)
-                .build()
-                .unwrap_or_default(),
+            client: build_provider_client(tls_config),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             provider_type,
@@ -420,7 +412,7 @@ mod tests {
     #[test]
     fn provider_creation() {
         let p =
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp);
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None);
         assert_eq!(p.base_url(), "http://localhost:8080");
         assert_eq!(p.provider_type(), ProviderType::LlamaCpp);
     }
@@ -431,6 +423,7 @@ mod tests {
             "http://localhost:8080/",
             Some("sk-test".into()),
             ProviderType::OpenAi,
+            None,
         );
         assert_eq!(p.base_url(), "http://localhost:8080");
     }
@@ -441,6 +434,7 @@ mod tests {
             "http://localhost:8080",
             Some("sk-secret".into()),
             ProviderType::OpenAi,
+            None,
         );
         assert!(p.api_key.is_some());
         assert_eq!(p.api_key.as_deref(), Some("sk-secret"));
@@ -449,7 +443,22 @@ mod tests {
     #[test]
     fn provider_no_api_key() {
         let p =
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp);
+            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None);
         assert!(p.api_key.is_none());
+    }
+
+    #[test]
+    fn provider_with_tls_config() {
+        let tls = TlsConfig {
+            pinned_certs: vec!["/nonexistent/cert.pem".into()],
+            ..Default::default()
+        };
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            None,
+            ProviderType::LlamaCpp,
+            Some(&tls),
+        );
+        assert_eq!(p.base_url(), "http://localhost:8080");
     }
 }

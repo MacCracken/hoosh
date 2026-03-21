@@ -2,7 +2,7 @@
 
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
-use crate::provider::{LlmProvider, ProviderType};
+use crate::provider::{LlmProvider, ProviderType, TlsConfig};
 
 /// Groq API provider (default: `https://api.groq.com/openai`).
 pub struct GroqProvider {
@@ -10,7 +10,11 @@ pub struct GroqProvider {
 }
 
 impl GroqProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        tls_config: Option<&TlsConfig>,
+    ) -> Self {
         let url = base_url.into();
         let url = if url.is_empty() {
             "https://api.groq.com/openai".to_string()
@@ -18,7 +22,7 @@ impl GroqProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::Groq),
+            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::Groq, tls_config),
         }
     }
 }
@@ -51,13 +55,13 @@ mod tests {
 
     #[test]
     fn default_url() {
-        let p = GroqProvider::new("", Some("gsk-test".into()));
+        let p = GroqProvider::new("", Some("gsk-test".into()), None);
         assert_eq!(p.inner.base_url(), "https://api.groq.com/openai");
     }
 
     #[test]
     fn provider_type_is_groq() {
-        let p = GroqProvider::new("", None);
+        let p = GroqProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::Groq);
     }
 }

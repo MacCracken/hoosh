@@ -9,6 +9,69 @@ use serde::{Deserialize, Serialize};
 use crate::inference::{InferenceRequest, InferenceResponse, ModelInfo};
 use crate::router::ProviderRoute;
 
+/// TLS configuration for provider connections.
+#[derive(Debug, Clone, Default)]
+pub struct TlsConfig {
+    /// Paths to PEM certificate files to pin (for remote providers).
+    pub pinned_certs: Vec<String>,
+    /// Path to client certificate PEM file (for mTLS).
+    pub client_cert: Option<String>,
+    /// Path to client key PEM file (for mTLS).
+    pub client_key: Option<String>,
+}
+
+/// Build a reqwest::Client with standard tuning and optional TLS config.
+pub fn build_provider_client(tls: Option<&TlsConfig>) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_nodelay(true)
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .pool_idle_timeout(std::time::Duration::from_secs(600))
+        .pool_max_idle_per_host(32)
+        .http2_adaptive_window(true);
+
+    if let Some(tls) = tls {
+        // Pin certificates
+        if !tls.pinned_certs.is_empty() {
+            builder = builder.tls_built_in_root_certs(false);
+            for cert_path in &tls.pinned_certs {
+                if let Ok(pem) = std::fs::read(cert_path) {
+                    if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                        builder = builder.add_root_certificate(cert);
+                    } else {
+                        tracing::warn!("failed to parse TLS certificate: {cert_path}");
+                    }
+                } else {
+                    tracing::warn!("failed to read TLS certificate: {cert_path}");
+                }
+            }
+        }
+
+        // mTLS client identity
+        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+            match (std::fs::read(cert_path), std::fs::read(key_path)) {
+                (Ok(cert), Ok(key)) => {
+                    let mut pem = cert;
+                    pem.extend_from_slice(&key);
+                    if let Ok(identity) = reqwest::Identity::from_pem(&pem) {
+                        builder = builder.identity(identity);
+                    } else {
+                        tracing::warn!(
+                            "failed to create TLS identity from {cert_path} + {key_path}"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::warn!("failed to read mTLS cert/key files");
+                }
+            }
+        }
+    }
+
+    builder.build().unwrap_or_default()
+}
+
 // Provider backend modules (feature-gated)
 pub mod openai_compat;
 
@@ -163,52 +226,69 @@ impl ProviderRegistry {
 
         #[allow(unused_variables)]
         let api_key = route.api_key.clone();
+        #[allow(unused_variables)]
+        let tls = route.tls_config.as_ref();
         let provider: Option<Arc<dyn LlmProvider>> = match route.provider {
             // Local providers
             #[cfg(feature = "ollama")]
-            ProviderType::Ollama => Some(Arc::new(ollama::OllamaProvider::new(&route.base_url))),
+            ProviderType::Ollama => {
+                Some(Arc::new(ollama::OllamaProvider::new(&route.base_url, tls)))
+            }
             #[cfg(feature = "llamacpp")]
             ProviderType::LlamaCpp => {
-                Some(Arc::new(llamacpp::LlamaCppProvider::new(&route.base_url)))
+                Some(Arc::new(llamacpp::LlamaCppProvider::new(&route.base_url, tls)))
             }
             #[cfg(feature = "synapse")]
-            ProviderType::Synapse => Some(Arc::new(synapse::SynapseProvider::new(&route.base_url))),
+            ProviderType::Synapse => {
+                Some(Arc::new(synapse::SynapseProvider::new(&route.base_url, tls)))
+            }
             #[cfg(feature = "lmstudio")]
             ProviderType::LmStudio => {
-                Some(Arc::new(lmstudio::LmStudioProvider::new(&route.base_url)))
+                Some(Arc::new(lmstudio::LmStudioProvider::new(&route.base_url, tls)))
             }
             #[cfg(feature = "localai")]
-            ProviderType::LocalAi => Some(Arc::new(localai::LocalAiProvider::new(&route.base_url))),
+            ProviderType::LocalAi => {
+                Some(Arc::new(localai::LocalAiProvider::new(&route.base_url, tls)))
+            }
             // Remote providers
             #[cfg(feature = "openai")]
             ProviderType::OpenAi => Some(Arc::new(openai_remote::OpenAiProvider::new(
                 &route.base_url,
                 api_key,
+                tls,
             ))),
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => Some(Arc::new(anthropic::AnthropicProvider::new(
                 &route.base_url,
                 api_key,
+                tls,
             ))),
             #[cfg(feature = "deepseek")]
             ProviderType::DeepSeek => Some(Arc::new(deepseek::DeepSeekProvider::new(
                 &route.base_url,
                 api_key,
+                tls,
             ))),
             #[cfg(feature = "mistral")]
             ProviderType::Mistral => Some(Arc::new(mistral::MistralProvider::new(
                 &route.base_url,
                 api_key,
+                tls,
             ))),
             #[cfg(feature = "groq")]
-            ProviderType::Groq => Some(Arc::new(groq::GroqProvider::new(&route.base_url, api_key))),
+            ProviderType::Groq => {
+                Some(Arc::new(groq::GroqProvider::new(&route.base_url, api_key, tls)))
+            }
             #[cfg(feature = "openrouter")]
             ProviderType::OpenRouter => Some(Arc::new(openrouter::OpenRouterProvider::new(
                 &route.base_url,
                 api_key,
+                tls,
             ))),
             #[cfg(feature = "grok")]
-            ProviderType::Grok => Some(Arc::new(grok::GrokProvider::new(&route.base_url, api_key))),
+            ProviderType::Grok => {
+                Some(Arc::new(grok::GrokProvider::new(&route.base_url, api_key, tls)))
+            }
             _ => None,
         };
 
@@ -271,6 +351,33 @@ mod tests {
         assert!(ProviderType::Ollama.supports_streaming());
         assert!(ProviderType::OpenAi.supports_streaming());
         assert!(!ProviderType::Whisper.supports_streaming());
+    }
+
+    #[test]
+    fn build_provider_client_no_tls() {
+        let client = build_provider_client(None);
+        // Should return a working client without panicking
+        drop(client);
+    }
+
+    #[test]
+    fn build_provider_client_nonexistent_cert_no_panic() {
+        let tls = TlsConfig {
+            pinned_certs: vec!["/nonexistent/path/cert.pem".to_string()],
+            client_cert: Some("/nonexistent/client.pem".to_string()),
+            client_key: Some("/nonexistent/client-key.pem".to_string()),
+        };
+        // Should not panic — graceful fallback with warnings
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[test]
+    fn tls_config_default() {
+        let tls = TlsConfig::default();
+        assert!(tls.pinned_certs.is_empty());
+        assert!(tls.client_cert.is_none());
+        assert!(tls.client_key.is_none());
     }
 
     #[test]
