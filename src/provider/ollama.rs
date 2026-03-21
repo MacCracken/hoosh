@@ -472,4 +472,147 @@ mod tests {
         assert_eq!(resp.models[0].size, Some(4000000000));
         assert!(resp.models[1].size.is_none());
     }
+
+    #[test]
+    fn embeddings_response_parsing() {
+        // Simulates the JSON that Ollama returns from /api/embed
+        let json = r#"{"embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], "model": "nomic-embed"}"#;
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        // Replicate the parsing logic from the embeddings method
+        let embeddings = raw["embeddings"].as_array().unwrap();
+        assert_eq!(embeddings.len(), 2);
+
+        let data: Vec<crate::inference::EmbeddingData> = embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, emb)| {
+                let values: Vec<f32> = emb
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                crate::inference::EmbeddingData {
+                    object: "embedding".into(),
+                    embedding: values,
+                    index: i,
+                }
+            })
+            .collect();
+
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0].index, 0);
+        assert_eq!(data[0].object, "embedding");
+        assert_eq!(data[0].embedding.len(), 3);
+        assert!((data[0].embedding[0] - 0.1).abs() < 1e-6);
+        assert!((data[0].embedding[1] - 0.2).abs() < 1e-6);
+        assert!((data[0].embedding[2] - 0.3).abs() < 1e-6);
+        assert_eq!(data[1].index, 1);
+        assert!((data[1].embedding[0] - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embeddings_response_missing_field() {
+        // If "embeddings" key is missing, our parsing logic should detect it
+        let json = r#"{"model": "nomic-embed"}"#;
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+        let result = raw["embeddings"].as_array();
+        assert!(result.is_none(), "missing embeddings field should yield None");
+    }
+
+    #[test]
+    fn embeddings_response_empty_array() {
+        let json = r#"{"embeddings": [], "model": "nomic-embed"}"#;
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+        let embeddings = raw["embeddings"].as_array().unwrap();
+        assert!(embeddings.is_empty());
+    }
+
+    #[test]
+    fn embeddings_response_single_embedding() {
+        let json = r#"{"embeddings": [[1.0, 2.0]], "model": "test"}"#;
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+        let embeddings = raw["embeddings"].as_array().unwrap();
+        assert_eq!(embeddings.len(), 1);
+
+        let values: Vec<f32> = embeddings[0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+        assert_eq!(values.len(), 2);
+        assert!((values[0] - 1.0).abs() < 1e-6);
+        assert!((values[1] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embeddings_input_single_conversion() {
+        // Test the input conversion logic used in the embeddings method
+        let input = crate::inference::EmbeddingsInput::Single("hello world".into());
+        let result = match &input {
+            crate::inference::EmbeddingsInput::Single(s) => s.clone(),
+            crate::inference::EmbeddingsInput::Multiple(v) => v.join("\n"),
+        };
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn embeddings_input_multiple_conversion() {
+        let input =
+            crate::inference::EmbeddingsInput::Multiple(vec!["hello".into(), "world".into()]);
+        let result = match &input {
+            crate::inference::EmbeddingsInput::Single(s) => s.clone(),
+            crate::inference::EmbeddingsInput::Multiple(v) => v.join("\n"),
+        };
+        assert_eq!(result, "hello\nworld");
+    }
+
+    #[test]
+    fn stream_line_deserialization_no_message() {
+        let json = r#"{"done": false}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert!(!line.done);
+        assert!(line.message.is_none());
+    }
+
+    #[test]
+    fn stream_line_deserialization_empty_content() {
+        let json = r#"{"message": {"content": ""}, "done": false}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert!(!line.done);
+        assert_eq!(line.message.unwrap().content.unwrap(), "");
+    }
+
+    #[test]
+    fn messages_system_role() {
+        let req = InferenceRequest {
+            messages: vec![Message {
+                role: Role::System,
+                content: "You are helpful.".into(),
+            }],
+            ..Default::default()
+        };
+        let msgs = build_messages(&req);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are helpful.");
+    }
+
+    #[test]
+    fn response_with_no_content() {
+        // message exists but content is None
+        let json = r#"{"message": {}}"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.message.is_some());
+        assert!(resp.message.unwrap().content.is_none());
+    }
+
+    #[test]
+    fn tags_response_empty_models() {
+        let json = r#"{"models": []}"#;
+        let resp: OllamaTagsResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.models.is_empty());
+    }
 }

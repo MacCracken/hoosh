@@ -82,7 +82,7 @@ arc-swap = "1"
 majra = { version = "0.21.3", default-features = true }
 
 # Metrics
-prometheus = "0.13"
+prometheus = "0.14"
 
 # Audit logging
 hmac = "0.12"

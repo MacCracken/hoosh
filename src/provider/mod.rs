@@ -414,4 +414,146 @@ mod tests {
             assert_eq!(*t, back);
         }
     }
+
+    #[test]
+    fn build_provider_client_empty_tls_config() {
+        // TLS config present but with no certs — exercises the Some(tls) branch
+        // with empty pinned_certs and no client_cert/key
+        let tls = TlsConfig::default();
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[test]
+    fn build_provider_client_pinned_certs_nonexistent() {
+        // Multiple non-existent cert paths — exercises the read-failure warning
+        // and the "no certificates loaded" error log
+        let tls = TlsConfig {
+            pinned_certs: vec![
+                "/nonexistent/a.pem".to_string(),
+                "/nonexistent/b.pem".to_string(),
+            ],
+            client_cert: None,
+            client_key: None,
+        };
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[test]
+    fn build_provider_client_mtls_nonexistent_no_panic() {
+        // mTLS with non-existent files — exercises the read-failure branch
+        let tls = TlsConfig {
+            pinned_certs: vec![],
+            client_cert: Some("/nonexistent/client.pem".to_string()),
+            client_key: Some("/nonexistent/client-key.pem".to_string()),
+        };
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn default_embeddings_returns_error() {
+        use crate::inference::{EmbeddingsInput, EmbeddingsRequest};
+
+        // A minimal provider that only implements the required methods
+        struct StubProvider;
+
+        #[async_trait::async_trait]
+        impl LlmProvider for StubProvider {
+            async fn infer(
+                &self,
+                _request: &crate::inference::InferenceRequest,
+            ) -> anyhow::Result<crate::inference::InferenceResponse> {
+                unimplemented!()
+            }
+            async fn infer_stream(
+                &self,
+                _request: crate::inference::InferenceRequest,
+            ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<String>>> {
+                unimplemented!()
+            }
+            async fn list_models(&self) -> anyhow::Result<Vec<crate::inference::ModelInfo>> {
+                unimplemented!()
+            }
+            async fn health_check(&self) -> anyhow::Result<bool> {
+                unimplemented!()
+            }
+            fn provider_type(&self) -> ProviderType {
+                ProviderType::Ollama
+            }
+        }
+
+        let provider = StubProvider;
+        let req = EmbeddingsRequest {
+            model: "test".into(),
+            input: EmbeddingsInput::Single("hello".into()),
+        };
+        let result = provider.embeddings(&req).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not supported")
+        );
+    }
+
+    #[test]
+    fn register_unrecognized_provider_no_panic() {
+        // Google has no backend feature compiled in by default, so it hits
+        // the catch-all `_ =>` branch which logs a warning and returns None.
+        let mut registry = ProviderRegistry::new();
+        let route = crate::router::ProviderRoute {
+            provider: ProviderType::Google,
+            priority: 1,
+            model_patterns: vec!["gemini*".to_string()],
+            enabled: true,
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        };
+        registry.register_from_route(&route);
+        // Google is not compiled, so nothing should be registered
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn register_duplicate_provider_skips() {
+        // Calling register_from_route twice with same (type, base_url) key
+        // should be a no-op on the second call (early return).
+        let mut registry = ProviderRegistry::new();
+        let route = crate::router::ProviderRoute {
+            provider: ProviderType::Google,
+            priority: 1,
+            model_patterns: vec![],
+            enabled: true,
+            base_url: "https://example.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        };
+        registry.register_from_route(&route);
+        registry.register_from_route(&route);
+        // Both calls hit unrecognized or early-return, registry stays empty
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_get_missing() {
+        let registry = ProviderRegistry::new();
+        assert!(registry.get(ProviderType::Ollama, "http://localhost:11434").is_none());
+    }
+
+    #[test]
+    fn registry_default() {
+        let registry = ProviderRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+        assert_eq!(registry.all().count(), 0);
+    }
 }

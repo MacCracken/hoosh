@@ -1088,7 +1088,10 @@ async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<Provid
             match provider.health_check().await {
                 Ok(true) => "healthy".to_string(),
                 Ok(false) => "unhealthy".to_string(),
-                Err(e) => format!("error: {e}"),
+                Err(e) => {
+                    tracing::warn!("health check error for {}: {e}", route.provider);
+                    "error".to_string()
+                }
             }
         } else {
             "no_backend".to_string()
@@ -1100,7 +1103,11 @@ async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<Provid
             enabled: route.enabled,
             status,
             consecutive_failures: bg_state.as_ref().map(|s| s.consecutive_failures),
-            last_error: bg_state.as_ref().and_then(|s| s.last_error.clone()),
+            last_error: bg_state.as_ref().and_then(|s| {
+                s.last_error
+                    .as_ref()
+                    .map(|_| "health check failed".to_string())
+            }),
         });
     }
 

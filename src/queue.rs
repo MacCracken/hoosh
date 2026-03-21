@@ -147,4 +147,135 @@ mod tests {
         assert_eq!(queue.len(), 0);
         assert!(queue.is_empty());
     }
+
+    #[test]
+    fn all_five_priority_tiers_ordering() {
+        let queue = InferenceQueue::new();
+
+        let make_req = |id: &str| QueuedRequest {
+            request: InferenceRequest::default(),
+            model: "test".into(),
+            pool: "default".into(),
+            request_id: id.into(),
+        };
+
+        // Enqueue in arbitrary order
+        queue.enqueue(make_req("normal"), Priority::Normal);
+        queue.enqueue(make_req("background"), Priority::Background);
+        queue.enqueue(make_req("critical"), Priority::Critical);
+        queue.enqueue(make_req("low"), Priority::Low);
+        queue.enqueue(make_req("high"), Priority::High);
+
+        assert_eq!(queue.len(), 5);
+
+        // Should dequeue in priority order: Critical > High > Normal > Low > Background
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "critical");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "high");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "normal");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "low");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "background");
+
+        assert!(queue.is_empty());
+        assert!(queue.dequeue().is_none());
+    }
+
+    #[test]
+    fn dequeue_returns_none_on_empty() {
+        let queue = InferenceQueue::new();
+        assert!(queue.dequeue().is_none());
+        assert!(queue.dequeue().is_none()); // multiple calls
+    }
+
+    #[test]
+    fn is_empty_reflects_state() {
+        let queue = InferenceQueue::new();
+        assert!(queue.is_empty());
+
+        let req = QueuedRequest {
+            request: InferenceRequest::default(),
+            model: "m".into(),
+            pool: "p".into(),
+            request_id: "r".into(),
+        };
+        queue.enqueue(req, Priority::Normal);
+        assert!(!queue.is_empty());
+
+        queue.dequeue();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn same_priority_fifo_order() {
+        let queue = InferenceQueue::new();
+
+        let make_req = |id: &str| QueuedRequest {
+            request: InferenceRequest::default(),
+            model: "test".into(),
+            pool: "default".into(),
+            request_id: id.into(),
+        };
+
+        queue.enqueue(make_req("first"), Priority::Normal);
+        queue.enqueue(make_req("second"), Priority::Normal);
+        queue.enqueue(make_req("third"), Priority::Normal);
+
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "first");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "second");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "third");
+    }
+
+    #[test]
+    fn enqueue_returns_unique_task_ids() {
+        let queue = InferenceQueue::new();
+
+        let req = QueuedRequest {
+            request: InferenceRequest::default(),
+            model: "test".into(),
+            pool: "default".into(),
+            request_id: "r".into(),
+        };
+
+        let id1 = queue.enqueue(req.clone(), Priority::Normal);
+        let id2 = queue.enqueue(req.clone(), Priority::Normal);
+        let id3 = queue.enqueue(req, Priority::High);
+
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn default_creates_empty_queue() {
+        let queue = InferenceQueue::default();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        assert!(queue.dequeue().is_none());
+    }
+
+    #[test]
+    fn mixed_priority_interleaved() {
+        let queue = InferenceQueue::new();
+
+        let make_req = |id: &str| QueuedRequest {
+            request: InferenceRequest::default(),
+            model: "test".into(),
+            pool: "default".into(),
+            request_id: id.into(),
+        };
+
+        // Enqueue, dequeue, enqueue more
+        queue.enqueue(make_req("low1"), Priority::Low);
+        queue.enqueue(make_req("high1"), Priority::High);
+
+        // High comes first
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "high1");
+
+        // Enqueue a Critical while Low is still pending
+        queue.enqueue(make_req("crit1"), Priority::Critical);
+
+        // Critical should come before low
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "crit1");
+        assert_eq!(queue.dequeue().unwrap().payload.request_id, "low1");
+        assert!(queue.is_empty());
+    }
 }

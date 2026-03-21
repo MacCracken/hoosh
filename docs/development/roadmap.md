@@ -99,7 +99,7 @@ All of the following must be true before cutting 1.0:
 - [ ] Public API reviewed and marked stable
 - [ ] `LlmProvider` trait finalized
 - [ ] Core types (`InferenceRequest`, `InferenceResponse`, `ModelInfo`) frozen
-- [ ] 80%+ line coverage
+- [ ] 90%+ line coverage
 - [x] At least 5 provider backends fully implemented and tested (12 done)
 - [ ] OpenAI-compatible API passing conformance tests
 - [ ] Token budget accounting verified against real provider billing

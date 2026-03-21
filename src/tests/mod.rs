@@ -542,6 +542,289 @@ mod mock_server {
             let result = provider.health_check().await;
             assert!(result.is_err());
         }
+
+        /// Start a mock Ollama server with embeddings, streaming, and error support.
+        async fn start_mock_ollama_full() -> String {
+            use axum::http::StatusCode;
+            use axum::response::IntoResponse;
+
+            async fn mock_chat_full(
+                Json(body): Json<serde_json::Value>,
+            ) -> axum::response::Response {
+                let model = body["model"].as_str().unwrap_or("test-model");
+
+                if model == "fail-model" {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "model not found"})),
+                    ).into_response();
+                }
+
+                let stream = body["stream"].as_bool().unwrap_or(false);
+                if stream {
+                    let ndjson = format!(
+                        "{}\n{}\n{}\n",
+                        r#"{"message":{"content":"Hello"},"done":false}"#,
+                        r#"{"message":{"content":" world"},"done":false}"#,
+                        r#"{"message":{"content":""},"done":true,"eval_count":10,"prompt_eval_count":5}"#,
+                    );
+                    (StatusCode::OK, ndjson).into_response()
+                } else {
+                    Json(json!({
+                        "message": {"role": "assistant", "content": "Full mock reply"},
+                        "eval_count": 15,
+                        "prompt_eval_count": 20
+                    })).into_response()
+                }
+            }
+
+            async fn mock_tags_full() -> Json<serde_json::Value> {
+                Json(json!({
+                    "models": [
+                        {"name": "llama3:latest", "size": 4_000_000_000_i64},
+                        {"name": "mistral:7b"},
+                        {"name": "phi3:mini", "size": 2_000_000_000_i64}
+                    ]
+                }))
+            }
+
+            async fn mock_embed(
+                Json(body): Json<serde_json::Value>,
+            ) -> Json<serde_json::Value> {
+                let model = body["model"].as_str().unwrap_or("nomic-embed");
+                Json(json!({
+                    "model": model,
+                    "embeddings": [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]
+                }))
+            }
+
+            let app = Router::new()
+                .route("/api/chat", post(mock_chat_full))
+                .route("/api/tags", get(mock_tags_full))
+                .route("/api/embed", post(mock_embed));
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            format!("http://127.0.0.1:{}", addr.port())
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_with_all_options() {
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                prompt: "Hello".into(),
+                temperature: Some(0.7),
+                top_p: Some(0.9),
+                max_tokens: Some(256),
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Full mock reply");
+            assert_eq!(resp.usage.prompt_tokens, 20);
+            assert_eq!(resp.usage.completion_tokens, 15);
+            assert_eq!(resp.usage.total_tokens, 35);
+            assert_eq!(resp.provider, "ollama");
+            assert!(resp.latency_ms < 5000);
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_with_messages() {
+            use crate::inference::{Message, Role};
+
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                messages: vec![
+                    Message { role: Role::System, content: "Be brief.".into() },
+                    Message { role: Role::User, content: "Hi".into() },
+                    Message { role: Role::Assistant, content: "Hello!".into() },
+                    Message { role: Role::User, content: "How?".into() },
+                ],
+                ..Default::default()
+            };
+            let resp = provider.infer(&req).await.unwrap();
+            assert_eq!(resp.text, "Full mock reply");
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_error_response() {
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = InferenceRequest {
+                model: "fail-model".into(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            };
+            let result = provider.infer(&req).await;
+            assert!(result.is_err(), "should fail on 500 response");
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let req = InferenceRequest {
+                model: "test".into(),
+                prompt: "Hi".into(),
+                ..Default::default()
+            };
+            let result = provider.infer(&req).await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn ollama_list_models_full() {
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let models = provider.list_models().await.unwrap();
+            assert_eq!(models.len(), 3);
+            assert_eq!(models[0].id, "llama3:latest");
+            assert_eq!(models[0].name, "llama3:latest");
+            assert_eq!(models[0].provider, "ollama");
+            assert_eq!(models[0].parameters, Some(4_000_000_000));
+            assert!(models[0].context_length.is_none());
+            assert!(models[0].available);
+            assert_eq!(models[1].id, "mistral:7b");
+            assert!(models[1].parameters.is_none());
+            assert_eq!(models[2].id, "phi3:mini");
+            assert_eq!(models[2].parameters, Some(2_000_000_000));
+        }
+
+        #[tokio::test]
+        async fn ollama_list_models_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let result = provider.list_models().await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn ollama_embeddings_single() {
+            use crate::inference::{EmbeddingsInput, EmbeddingsRequest};
+
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = EmbeddingsRequest {
+                model: "nomic-embed".into(),
+                input: EmbeddingsInput::Single("hello world".into()),
+            };
+            let resp = provider.embeddings(&req).await.unwrap();
+            assert_eq!(resp.object, "list");
+            assert_eq!(resp.model, "nomic-embed");
+            assert_eq!(resp.data.len(), 2);
+            assert_eq!(resp.data[0].object, "embedding");
+            assert_eq!(resp.data[0].index, 0);
+            assert_eq!(resp.data[0].embedding.len(), 4);
+            assert!((resp.data[0].embedding[0] - 0.1).abs() < 1e-6);
+            assert_eq!(resp.data[1].index, 1);
+            assert!((resp.data[1].embedding[0] - 0.5).abs() < 1e-6);
+        }
+
+        #[tokio::test]
+        async fn ollama_embeddings_multiple() {
+            use crate::inference::{EmbeddingsInput, EmbeddingsRequest};
+
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = EmbeddingsRequest {
+                model: "nomic-embed".into(),
+                input: EmbeddingsInput::Multiple(vec!["hello".into(), "world".into()]),
+            };
+            let resp = provider.embeddings(&req).await.unwrap();
+            assert_eq!(resp.data.len(), 2);
+            assert_eq!(resp.usage.prompt_tokens, 0);
+            assert_eq!(resp.usage.total_tokens, 0);
+        }
+
+        #[tokio::test]
+        async fn ollama_embeddings_unreachable() {
+            use crate::inference::{EmbeddingsInput, EmbeddingsRequest};
+
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let req = EmbeddingsRequest {
+                model: "nomic-embed".into(),
+                input: EmbeddingsInput::Single("test".into()),
+            };
+            let result = provider.embeddings(&req).await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_stream_basic() {
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            };
+            let mut rx = provider.infer_stream(req).await.unwrap();
+
+            let mut collected = String::new();
+            while let Some(chunk) = rx.recv().await {
+                collected.push_str(&chunk.unwrap());
+            }
+            assert_eq!(collected, "Hello world");
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_stream_with_options() {
+            let base_url = start_mock_ollama_full().await;
+            let provider = OllamaProvider::new(&base_url, None);
+
+            let req = InferenceRequest {
+                model: "llama3".into(),
+                prompt: "Hello".into(),
+                temperature: Some(0.5),
+                top_p: Some(0.8),
+                max_tokens: Some(128),
+                ..Default::default()
+            };
+            let mut rx = provider.infer_stream(req).await.unwrap();
+
+            let mut collected = String::new();
+            while let Some(chunk) = rx.recv().await {
+                collected.push_str(&chunk.unwrap());
+            }
+            assert_eq!(collected, "Hello world");
+        }
+
+        #[tokio::test]
+        async fn ollama_infer_stream_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let req = InferenceRequest {
+                model: "test".into(),
+                prompt: "Hi".into(),
+                ..Default::default()
+            };
+            let result = provider.infer_stream(req).await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn ollama_pull_model_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let result = provider.pull_model("llama3").await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn ollama_delete_model_unreachable() {
+            let provider = OllamaProvider::new("http://127.0.0.1:1", None);
+            let result = provider.delete_model("llama3").await;
+            assert!(result.is_err());
+        }
     }
 
     /// Mock Anthropic server.
@@ -730,6 +1013,127 @@ mod mock_server {
         let resp = provider.infer(&req).await.unwrap();
         assert_eq!(resp.text, "Mock response from server");
         assert_eq!(resp.provider, "synapse");
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_provider_infer_with_messages() {
+        use crate::inference::{Message, Role};
+        use crate::provider::synapse::SynapseProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = SynapseProvider::new(&base_url, None);
+
+        let req = InferenceRequest {
+            model: "synapse-model".into(),
+            messages: vec![
+                Message { role: Role::System, content: "Be concise.".into() },
+                Message { role: Role::User, content: "Hello".into() },
+            ],
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            ..Default::default()
+        };
+        let resp = provider.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Mock response from server");
+        assert_eq!(resp.provider, "synapse");
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_list_models() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = SynapseProvider::new(&base_url, None);
+
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "mock-model-1");
+        assert!(models[0].available);
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_health_check() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let base_url = start_mock_oai_server().await;
+        let provider = SynapseProvider::new(&base_url, None);
+
+        let healthy = provider.health_check().await.unwrap();
+        assert!(healthy);
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_health_check_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let result = provider.health_check().await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_infer_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let req = InferenceRequest {
+            model: "test".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let result = provider.infer(&req).await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_list_models_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let result = provider.list_models().await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_infer_stream_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let req = InferenceRequest {
+            model: "test".into(),
+            prompt: "Hello".into(),
+            stream: true,
+            ..Default::default()
+        };
+        let result = provider.infer_stream(req).await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_training_status_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let result = provider.training_status("job-123").await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "synapse")]
+    #[tokio::test]
+    async fn synapse_sync_catalog_unreachable() {
+        use crate::provider::synapse::SynapseProvider;
+
+        let provider = SynapseProvider::new("http://127.0.0.1:1", None);
+        let result = provider.sync_catalog().await;
+        assert!(result.is_err());
     }
 
     #[cfg(feature = "openai")]
@@ -1697,6 +2101,495 @@ mod e2e {
     }
 
     // -----------------------------------------------------------------------
+    // Embeddings endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_embeddings_no_provider() {
+        // Server with no matching model for embeddings → 404
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec!["only-this*".into()],
+                enabled: true,
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig::default(),
+            budget_pools: vec![],
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/embeddings",
+                addr.port()
+            ))
+            .json(&json!({
+                "model": "no-such-embed-model",
+                "input": "hello"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin reload endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_admin_reload_no_config_path() {
+        // When config_path is None, reload should return 400
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            config_path: None,
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/admin/reload",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no config path"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Queue status endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_queue_status() {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/v1/queue/status",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["queued"], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Costs endpoints tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_costs_get() {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/v1/costs", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["records"].is_array());
+        assert_eq!(body["total_cost_usd"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn e2e_costs_reset() {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/costs/reset",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_audit_disabled() {
+        // When audit is not enabled, /v1/audit should return 404
+        let config = ServerConfig {
+            audit_enabled: false,
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/v1/audit", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn e2e_audit_enabled() {
+        let config = ServerConfig {
+            audit_enabled: true,
+            audit_signing_key: Some("test-key-for-audit".into()),
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/v1/audit", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["entries"].is_array());
+        assert_eq!(body["total"], 0);
+        assert_eq!(body["chain_valid"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Prometheus metrics endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_prometheus_metrics() {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/metrics", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/plain"),
+            "metrics should be text/plain, got: {content_type}"
+        );
+        let body = resp.text().await.unwrap();
+        // Prometheus output should contain at least HELP or TYPE lines
+        // or be a valid (possibly empty) metrics body
+        assert!(
+            body.is_empty() || body.contains("hoosh") || body.contains("# "),
+            "metrics body should be prometheus format"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Health heartbeat endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_health_heartbeat() {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/v1/health/heartbeat",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        // Fleet stats should be a JSON object with counts
+        assert!(body.is_object(), "heartbeat should return JSON object");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate limiting (429 response) tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_rate_limit_exceeded() {
+        let backend = start_mock_backend().await;
+        // Configure a route with rate_limit_rpm = 1 so it trips after one request
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: Some(1),
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![crate::budget::TokenPool::new("default", 10_000_000)],
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = reqwest::Client::new();
+
+        // First request should succeed (uses up the 1 RPM allowance)
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Second request should be rate-limited (429)
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi again"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 429);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Rate limit"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Token budget enforcement: pool not found, budget exceeded
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_budget_pool_not_found() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "pool": "nonexistent-pool"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"));
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_budget_exceeded() {
+        let backend = start_mock_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+
+        // "limited" pool has 50 tokens, requesting max_tokens=1024 => estimated 1024 > 50
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "pool": "limited"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 429);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let msg = body["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("Token budget exceeded"));
+        assert!(msg.contains("limited"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Costs reset with audit enabled (covers audit recording path)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn e2e_costs_reset_with_audit() {
+        let config = ServerConfig {
+            audit_enabled: true,
+            audit_signing_key: Some("cost-audit-key".into()),
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = reqwest::Client::new();
+
+        // Reset costs (should record audit event)
+        let resp = client
+            .post(format!("{url}/v1/costs/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Verify the audit log now has an entry
+        let resp = client
+            .get(format!("{url}/v1/audit"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["total"].as_u64().unwrap() >= 1);
+        assert_eq!(body["chain_valid"], true);
+        let entries = body["entries"].as_array().unwrap();
+        assert!(entries.iter().any(|e| {
+            e["event"]
+                .as_str()
+                .map(|s| s.contains("costs_reset"))
+                .unwrap_or(false)
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming SSE path in chat_completions
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_streaming_sse_response_shape() {
+        let backend = start_mock_streaming_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "streaming response should be SSE, got: {content_type}"
+        );
+
+        let body = resp.text().await.unwrap();
+        // SSE body should contain "data:" lines with chat.completion.chunk objects
+        assert!(
+            body.contains("chat.completion.chunk"),
+            "SSE body should contain chunk objects"
+        );
+        assert!(
+            body.contains("[DONE]"),
+            "SSE body should end with [DONE]"
+        );
+        assert!(
+            body.contains("\"finish_reason\":\"stop\""),
+            "SSE body should contain finish_reason stop"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Connection tuning tests
     // -----------------------------------------------------------------------
 
@@ -1816,5 +2709,499 @@ mod e2e {
             let result = h.await.unwrap().unwrap();
             assert!(result);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Streaming SSE full flow e2e test
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_streaming_full_flow() {
+        let backend = start_mock_streaming_backend().await;
+        let hoosh_url = start_hoosh(&backend).await;
+        let client = HooshClient::new(&hoosh_url);
+
+        let req = crate::InferenceRequest {
+            model: "mock-model".into(),
+            prompt: "Stream test".into(),
+            stream: true,
+            ..Default::default()
+        };
+        let mut rx = client.infer_stream(&req).await.unwrap();
+        let mut tokens = Vec::new();
+        while let Some(result) = rx.recv().await {
+            let token = result.unwrap();
+            tokens.push(token);
+        }
+
+        assert!(tokens.len() >= 2, "should receive multiple tokens, got {}", tokens.len());
+        let full = tokens.join("");
+        assert_eq!(full, "Hello world!", "concatenated streaming tokens should match");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Embeddings mock + e2e pass-through test (Ollama provider)
+    // -----------------------------------------------------------------------
+
+    /// Start a mock Ollama backend that supports chat, tags, and embeddings.
+    async fn start_mock_ollama_backend_with_embeddings() -> String {
+        async fn ollama_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let stream = body["stream"].as_bool().unwrap_or(false);
+            assert!(!stream, "mock does not support streaming");
+            Json(json!({
+                "message": {"role": "assistant", "content": "Ollama embed mock reply"},
+                "eval_count": 5,
+                "prompt_eval_count": 10
+            }))
+        }
+        async fn ollama_tags() -> Json<serde_json::Value> {
+            Json(json!({
+                "models": [{"name": "mock-embed-model", "size": 1000000000_i64}]
+            }))
+        }
+        async fn ollama_embed(
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let model = body["model"].as_str().unwrap_or("mock-embed-model");
+            Json(json!({
+                "embeddings": [[0.1, 0.2, 0.3]],
+                "model": model
+            }))
+        }
+
+        let app = Router::new()
+            .route("/api/chat", post(ollama_chat))
+            .route("/api/tags", get(ollama_tags))
+            .route("/api/embed", post(ollama_embed));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    async fn e2e_embeddings_pass_through() {
+        let backend = start_mock_ollama_backend_with_embeddings().await;
+
+        // Start hoosh with an Ollama provider (which supports embeddings)
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::Ollama,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                crate::budget::TokenPool::new("default", 100_000),
+            ],
+            ..ServerConfig::default()
+        };
+
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hoosh_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/embeddings"))
+            .json(&json!({
+                "model": "mock-embed-model",
+                "input": "hello world"
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(status, 200, "expected 200 but got {status}: {body}");
+        assert_eq!(body["object"], "list");
+        let data = body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["object"], "embedding");
+        let embedding = data[0]["embedding"].as_array().unwrap();
+        assert_eq!(embedding.len(), 3);
+        assert!((embedding[0].as_f64().unwrap() - 0.1).abs() < 0.001);
+        assert!((embedding[1].as_f64().unwrap() - 0.2).abs() < 0.001);
+        assert!((embedding[2].as_f64().unwrap() - 0.3).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Full gateway flow with observability verification
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_full_flow_with_observability() {
+        let backend = start_mock_backend().await;
+
+        // Start hoosh with audit enabled
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                crate::budget::TokenPool::new("default", 100_000),
+            ],
+            whisper_model: None,
+            tts_model: None,
+            audit_enabled: true,
+            audit_signing_key: Some("observability-test-key".into()),
+            audit_max_entries: 10_000,
+            auth_tokens: Vec::new(),
+            ..ServerConfig::default()
+        };
+
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hoosh_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let client = reqwest::Client::new();
+
+        // Send an inference request
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "observability test"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Verify /v1/costs shows the cost was recorded
+        let resp = client
+            .get(format!("{hoosh_url}/v1/costs"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let costs: serde_json::Value = resp.json().await.unwrap();
+        let records = costs["records"].as_array().unwrap();
+        assert!(
+            !records.is_empty(),
+            "costs should have at least one record after inference"
+        );
+
+        // Verify /v1/audit shows audit entries
+        let resp = client
+            .get(format!("{hoosh_url}/v1/audit"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let audit: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            audit["total"].as_u64().unwrap() >= 1,
+            "audit log should have at least one entry"
+        );
+        assert_eq!(audit["chain_valid"], true, "audit chain should be valid");
+
+        // Verify /metrics contains prometheus output
+        let resp = client
+            .get(format!("{hoosh_url}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let metrics_body = resp.text().await.unwrap();
+        assert!(
+            metrics_body.contains("hoosh") || metrics_body.contains("# ") || metrics_body.is_empty(),
+            "metrics should be prometheus format"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Auth enforcement e2e
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_auth_enforcement() {
+        let backend = start_mock_backend().await;
+
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend,
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                crate::budget::TokenPool::new("default", 100_000),
+            ],
+            auth_tokens: vec!["correct-token-123".into()],
+            ..ServerConfig::default()
+        };
+
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hoosh_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let client = reqwest::Client::new();
+        let body = json!({
+            "model": "mock-model",
+            "messages": [{"role": "user", "content": "auth test"}]
+        });
+
+        // Request without token returns 401
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401, "missing token should return 401");
+
+        // Request with wrong token returns 401
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .bearer_auth("wrong-token-456")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401, "wrong token should return 401");
+
+        // Request with correct token returns 200
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .bearer_auth("correct-token-123")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "correct token should return 200");
+
+        // Verify the response body is valid
+        let resp_body: serde_json::Value = resp.json().await.unwrap();
+        assert!(resp_body["choices"].is_array());
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Health check failover e2e
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llamacpp")]
+    #[tokio::test]
+    async fn e2e_health_failover() {
+        let working_backend = start_mock_backend().await;
+        // Dead port — nothing listens here
+        let dead_backend = "http://127.0.0.1:1";
+
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![
+                // Priority 1: dead backend (should get marked unhealthy)
+                ProviderRoute {
+                    provider: ProviderType::LlamaCpp,
+                    priority: 1,
+                    model_patterns: vec![],
+                    enabled: true,
+                    base_url: dead_backend.to_string(),
+                    api_key: None,
+                    max_tokens_limit: None,
+                    rate_limit_rpm: None,
+                    tls_config: None,
+                },
+                // Priority 2: working backend (fallback)
+                ProviderRoute {
+                    provider: ProviderType::LmStudio,
+                    priority: 2,
+                    model_patterns: vec![],
+                    enabled: true,
+                    base_url: working_backend,
+                    api_key: None,
+                    max_tokens_limit: None,
+                    rate_limit_rpm: None,
+                    tls_config: None,
+                },
+            ],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                crate::budget::TokenPool::new("default", 100_000),
+            ],
+            // Run health checks every 1 second to speed up the test
+            health_check_interval_secs: 1,
+            ..ServerConfig::default()
+        };
+
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hoosh_url = format!("http://127.0.0.1:{}", addr.port());
+
+        // Wait for the health checker to run enough times to mark the dead
+        // backend unhealthy (UNHEALTHY_THRESHOLD = 3 consecutive failures,
+        // plus the initial tick skip). With 1s interval we need ~4-5 seconds.
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{hoosh_url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "failover test"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "request should succeed via healthy fallback backend"
+        );
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "E2E mock response",
+            "response should come from the working mock backend"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Ollama-native mock e2e test
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "ollama")]
+    #[tokio::test]
+    async fn e2e_ollama_native_flow() {
+        // Start a mock Ollama backend with native /api/chat and /api/tags
+        async fn mock_ollama_chat(
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let _model = body["model"].as_str().unwrap_or("llama3:latest");
+            Json(json!({
+                "message": {"role": "assistant", "content": "Ollama mock response"},
+                "eval_count": 5,
+                "prompt_eval_count": 10
+            }))
+        }
+
+        async fn mock_ollama_tags() -> Json<serde_json::Value> {
+            Json(json!({
+                "models": [
+                    {"name": "llama3:latest", "size": 4000000000_i64}
+                ]
+            }))
+        }
+
+        let app = Router::new()
+            .route("/api/chat", post(mock_ollama_chat))
+            .route("/api/tags", get(mock_ollama_tags));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let ollama_url = format!("http://127.0.0.1:{}", addr.port());
+
+        // Start hoosh with an Ollama provider pointing to the mock
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::Ollama,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: ollama_url,
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![
+                crate::budget::TokenPool::new("default", 100_000),
+            ],
+            ..ServerConfig::default()
+        };
+
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hoosh_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let client = HooshClient::new(&hoosh_url);
+
+        // Verify list models through hoosh
+        let models = client.list_models().await.unwrap();
+        assert!(!models.is_empty(), "should list ollama models");
+        assert_eq!(models[0].id, "llama3:latest");
+
+        // Verify inference through hoosh -> Ollama mock
+        let req = crate::InferenceRequest {
+            model: "llama3:latest".into(),
+            prompt: "Hello from e2e".into(),
+            ..Default::default()
+        };
+        let resp = client.infer(&req).await.unwrap();
+        assert_eq!(resp.text, "Ollama mock response");
+        // HooshClient sets provider to "hoosh" (gateway perspective)
+        assert_eq!(resp.provider, "hoosh");
     }
 }
