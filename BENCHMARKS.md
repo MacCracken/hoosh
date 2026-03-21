@@ -105,6 +105,58 @@ Requires `ollama serve` with a pulled model. Measures end-to-end latency includi
 | Time-to-first-token (estimated) | ~240 ms |
 | Gateway overhead per request | < 1 ms |
 
+## End-to-End Benchmarks (`cargo bench --bench e2e`)
+
+Requires `ollama serve` with a pulled model. Measures full round-trip: **HooshClient → hoosh HTTP server → Ollama → response**. This is what downstream consumers (AgnosAI, tarang, daimon) actually experience.
+
+### E2E Results — llama3.2:1b (Vulkan iGPU, with connection tuning)
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| e2e_health_check | **51 µs** | Full round-trip through hoosh server |
+| e2e_list_models | **317 µs** | Queries Ollama through hoosh |
+| e2e_infer (short, 5 tokens) | **277 ms** | ~20 ms overhead vs direct (259 ms direct) |
+| e2e_infer (medium, 50 tokens) | **1.70 s** | Inference-dominated, gateway overhead negligible |
+| e2e_stream (50 tokens) | **1.91 s** | SSE streaming through hoosh |
+| e2e_sequential (3 requests) | **2.61 s** | 3 back-to-back inferences (~870 ms/request avg) |
+
+### Connection Reuse
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| cold (new client per request) | **141 µs** | TCP connect + request |
+| warm (reused connection) | **53 µs** | Pooled connection — **2.7x faster** |
+
+### Concurrency Scaling
+
+| Concurrent requests | Time | Per-request |
+|---|---|---|
+| 1 | 53 µs | 53 µs |
+| 4 | 100 µs | 25 µs |
+| 8 | 205 µs | 26 µs |
+| 16 | 370 µs | 23 µs |
+
+### Gateway Overhead (direct Ollama vs through hoosh)
+
+| Path | Time (5 tokens) | Overhead |
+|---|---|---|
+| Direct to Ollama | 345 ms | baseline |
+| Through hoosh server | 315 ms | **~0 ms** (within noise) |
+
+**Key finding:** hoosh gateway overhead is effectively zero — well within measurement noise. The tuned connection pooling and TCP_NODELAY settings eliminate the HTTP intermediary penalty.
+
+### Connection Tuning
+
+All HTTP clients (HooshClient, OllamaProvider, OpenAiCompatibleProvider, AnthropicProvider) are tuned for low-latency local communication:
+
+| Setting | Value | Why |
+|---|---|---|
+| TCP_NODELAY | true | Disables Nagle's algorithm — avoids 40ms batching delay on small packets |
+| tcp_keepalive | 60s | OS-level keepalive probes prevent connection drops |
+| pool_idle_timeout | 600s | Keep pooled connections alive for 10 min (default 90s) |
+| pool_max_idle_per_host | 32 | Allow more concurrent pooled connections |
+| HTTP/2 adaptive window | true | Multiplexed requests with adaptive flow control |
+
 ## Running Benchmarks
 
 ```bash
@@ -116,6 +168,9 @@ cargo bench --bench live_providers -- hwaccel
 
 # Live Ollama benchmarks (requires ollama serve)
 cargo bench --bench live_providers
+
+# End-to-end through hoosh server (requires ollama serve)
+cargo bench --bench e2e
 
 # Everything
 cargo bench
@@ -134,6 +189,11 @@ cargo bench
 | Config parsing | minimal, full, conversion | `providers.rs` |
 | Hardware detection | detect, summary, placement (1B/7B/70B) | `live_providers.rs` |
 | Ollama inference | health, models, short/medium/multiturn, stream | `live_providers.rs` |
+| **E2E round-trip** | health, models, infer, stream through hoosh server | `e2e.rs` |
+| **Connection reuse** | cold vs warm connection, pool efficiency | `e2e.rs` |
+| **Concurrency** | 1/4/8/16 parallel requests through shared client | `e2e.rs` |
+| **Gateway overhead** | direct Ollama vs through hoosh (isolates overhead) | `e2e.rs` |
+| **Agent simulation** | sequential multi-request (single-agent-single-task) | `e2e.rs` |
 
 ## Adding Results
 

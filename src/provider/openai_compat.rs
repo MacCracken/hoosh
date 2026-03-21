@@ -26,6 +26,11 @@ impl OpenAiCompatibleProvider {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(300))
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .pool_idle_timeout(std::time::Duration::from_secs(600))
+                .pool_max_idle_per_host(32)
+                .http2_adaptive_window(true)
                 .build()
                 .unwrap_or_default(),
             base_url: base_url.into().trim_end_matches('/').to_string(),

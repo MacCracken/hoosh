@@ -53,7 +53,7 @@ async-trait = "0.1"
 
 # Async / HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
 axum = "0.8"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "limit"] }
@@ -97,4 +97,8 @@ harness = false
 
 [[bench]]
 name = "live_providers"
+harness = false
+
+[[bench]]
+name = "e2e"
 harness = false

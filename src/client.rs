@@ -109,10 +109,23 @@ struct ModelObj {
 
 impl HooshClient {
     /// Create a new client pointing at the given hoosh server.
+    ///
+    /// The client is tuned for low-latency local connections:
+    /// - TCP_NODELAY disables Nagle's algorithm (avoids 40ms batching delay)
+    /// - Connection pooling keeps TCP connections alive across requests
+    /// - HTTP/2 adaptive window for multiplexed requests
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .tcp_nodelay(true)
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .pool_idle_timeout(std::time::Duration::from_secs(600))
+                .pool_max_idle_per_host(32)
+                .http2_adaptive_window(true)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
