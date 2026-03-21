@@ -5,6 +5,11 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [0.21.4] — 2026-03-21
+
+### Changed
+- Bump `ai-hwaccel` dependency from 0.20.3 to 0.21.3
+
 ## [0.21.3] — 2026-03-21
 
 ### Added

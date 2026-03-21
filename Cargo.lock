@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "ai-hwaccel"
-version = "0.20.3"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da8db15e7c0b66da2ee1dede56c1b260b5b0badc43bf550691ce2dc3b02a75c6"
+checksum = "6cf22beab2a92f753d3f02c3341d063729c115deeb29965152e6ebd3a62debb6"
 dependencies = [
  "serde",
  "serde_json",
@@ -736,7 +736,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hoosh"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "ai-hwaccel",
  "anyhow",

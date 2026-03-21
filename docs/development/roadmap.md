@@ -41,8 +41,11 @@ All items complete. See CHANGELOG.md for details.
 ### Observability
 - [ ] Prometheus metrics endpoint (`/metrics`)
 - [ ] OpenTelemetry trace propagation
-- [ ] Per-provider cost tracking (token × price)
-- [ ] Request/response audit log
+- [ ] Per-provider cost tracking (token × price) — review secureyeoman for how it implements cost tracking
+- [ ] Request/response audit log — review secureyeoman for how it implements audit logging
+
+### Hardware acceleration
+- [ ] Review ai-hwaccel 0.21.x updates for improved integration (new APIs, deprecations, feature flags)
 
 ### Server improvements
 - [ ] `/v1/embeddings` pass-through
