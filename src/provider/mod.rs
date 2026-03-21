@@ -35,16 +35,23 @@ pub fn build_provider_client(tls: Option<&TlsConfig>) -> reqwest::Client {
         // Pin certificates
         if !tls.pinned_certs.is_empty() {
             builder = builder.tls_built_in_root_certs(false);
+            let mut loaded = 0usize;
             for cert_path in &tls.pinned_certs {
                 if let Ok(pem) = std::fs::read(cert_path) {
                     if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
                         builder = builder.add_root_certificate(cert);
+                        loaded += 1;
                     } else {
-                        tracing::warn!("failed to parse TLS certificate: {cert_path}");
+                        tracing::error!("failed to parse TLS certificate: {cert_path}");
                     }
                 } else {
-                    tracing::warn!("failed to read TLS certificate: {cert_path}");
+                    tracing::error!("failed to read TLS certificate: {cert_path}");
                 }
+            }
+            if loaded == 0 {
+                tracing::error!(
+                    "TLS pinning configured but no certificates loaded — connections will fail"
+                );
             }
         }
 

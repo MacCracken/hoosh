@@ -1037,7 +1037,7 @@ mod server_wiring {
             providers,
             cost_tracker: std::sync::Arc::new(crate::cost::CostTracker::new()),
             audit: None,
-            auth_tokens: Vec::new(),
+            auth_token_digests: Vec::new(),
             rate_limiter: std::sync::Arc::new(
                 crate::middleware::rate_limit::RateLimitRegistry::new(),
             ),

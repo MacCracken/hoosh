@@ -34,7 +34,7 @@ pub struct AppState {
     pub providers: ProviderRegistry,
     pub cost_tracker: Arc<CostTracker>,
     pub audit: Option<Arc<crate::audit::AuditChain>>,
-    pub auth_tokens: Vec<String>,
+    pub auth_token_digests: Vec<crate::middleware::auth::TokenDigest>,
     pub rate_limiter: Arc<crate::middleware::rate_limit::RateLimitRegistry>,
     pub event_bus: Arc<crate::events::EventBus>,
     pub inference_queue: Arc<crate::queue::InferenceQueue>,
@@ -110,6 +110,12 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     }
     crate::metrics::set_providers_configured(providers.len() as i64);
     tracing::info!("{} provider backend(s) registered", providers.len());
+
+    if config.auth_tokens.is_empty() {
+        tracing::warn!(
+            "authentication is DISABLED — all requests will be accepted without a bearer token"
+        );
+    }
 
     let mut budget = TokenBudget::new();
     if !config.budget_pools.iter().any(|p| p.name == "default") {
@@ -208,7 +214,11 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         providers,
         cost_tracker,
         audit,
-        auth_tokens: config.auth_tokens,
+        auth_token_digests: config
+            .auth_tokens
+            .iter()
+            .map(|t| crate::middleware::auth::hash_token(t))
+            .collect(),
         rate_limiter,
         event_bus: event_bus.clone(),
         inference_queue,
@@ -339,7 +349,7 @@ fn reload_config(state: &Arc<AppState>, config_path: &str) {
             // Only the router is hot-reloaded; provider backends persist.
 
             // Swap router atomically
-            let mut router = state.router.write().unwrap();
+            let mut router = state.router.write().unwrap_or_else(|e| e.into_inner());
             router.reload(routes, strategy);
             router.set_health_map(state.health_map.clone());
 
@@ -423,24 +433,29 @@ fn default_pool_name() -> String {
     "default".into()
 }
 
-/// Drop guard that reports token budget when a stream ends (including on client disconnect).
+/// Drop guard that reports budget, cost, metrics, and events when a stream ends.
 struct StreamBudgetGuard {
     state: Arc<AppState>,
     pool: String,
     estimated: u64,
     actual: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    provider: String,
+    model: String,
+    start: std::time::Instant,
 }
 
 impl Drop for StreamBudgetGuard {
     fn drop(&mut self) {
         let actual = self.actual.load(std::sync::atomic::Ordering::Relaxed);
+        let latency_ms = self.start.elapsed().as_millis() as u64;
+
+        // Budget reporting
         match self.state.budget.try_lock() {
             Ok(mut budget) => budget.report(&self.pool, self.estimated, actual),
             Err(std::sync::TryLockError::Poisoned(e)) => {
                 e.into_inner().report(&self.pool, self.estimated, actual);
             }
             Err(std::sync::TryLockError::WouldBlock) => {
-                // Lock is contended — spawn a task to report asynchronously
                 let state = self.state.clone();
                 let pool = self.pool.clone();
                 let estimated = self.estimated;
@@ -450,6 +465,27 @@ impl Drop for StreamBudgetGuard {
                 });
             }
         }
+
+        // Metrics (streaming requests were previously uncounted)
+        crate::metrics::record_request(
+            &self.provider,
+            &self.model,
+            "success",
+            latency_ms as f64 / 1000.0,
+            0,
+            actual as u32,
+        );
+
+        // Event bus
+        self.state.event_bus.publish(
+            crate::events::topics::INFERENCE,
+            crate::events::ProviderEvent::InferenceCompleted {
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+                latency_ms,
+                tokens: actual as u32,
+            },
+        );
     }
 }
 
@@ -536,6 +572,14 @@ async fn chat_completions(
     if req.model.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "model field is required").into_response();
     }
+    if req.model.len() > 256
+        || req
+            .model
+            .bytes()
+            .any(|b| b < 0x20 || b == b'\\' || b == b'"')
+    {
+        return error_response(StatusCode::BAD_REQUEST, "invalid model name").into_response();
+    }
     if let Some(temp) = req.temperature
         && !(0.0..=2.0).contains(&temp)
     {
@@ -556,7 +600,13 @@ async fn chat_completions(
     }
 
     // Find a route for this model
-    let route = match state.router.read().unwrap().select(&req.model).cloned() {
+    let route = match state
+        .router
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .select(&req.model)
+        .cloned()
+    {
         Some(r) => r,
         None => {
             return error_response(
@@ -699,10 +749,10 @@ async fn chat_completions(
                 // Release reservation on error
                 let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
                 budget.report(&pool_name, estimated_tokens, 0);
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Inference error: {e}"),
-                )
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, {
+                    tracing::error!("inference error: {e}");
+                    "Inference request failed".to_string()
+                })
                 .into_response();
             }
         };
@@ -719,27 +769,30 @@ async fn chat_completions(
             pool: pool_clone,
             estimated: estimated_tokens,
             actual: token_count_clone,
+            provider: route.provider.to_string(),
+            model: req.model.clone(),
+            start: std::time::Instant::now(),
         };
 
         let s = async_stream::stream! {
             let _guard = budget_guard;
             let mut rx = rx;
+            let mut buf = String::with_capacity(256);
             while let Some(result) = rx.recv().await {
                 match result {
                     Ok(token) => {
                         token_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let chunk = serde_json::json!({
-                            "id": &id,
-                            "object": "chat.completion.chunk",
-                            "model": &model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"content": token},
-                                "finish_reason": serde_json::Value::Null,
-                            }]
-                        });
+                        // Build JSON directly into a reusable buffer (avoids serde_json::Value allocation per token)
+                        buf.clear();
+                        let escaped = serde_json::to_string(&token).unwrap_or_default();
+                        use std::fmt::Write;
+                        let _ = write!(
+                            buf,
+                            r#"{{"id":"{}","object":"chat.completion.chunk","model":"{}","choices":[{{"index":0,"delta":{{"content":{}}},"finish_reason":null}}]}}"#,
+                            &id, &model, escaped
+                        );
                         yield Ok::<_, std::convert::Infallible>(
-                            Event::default().data(chunk.to_string())
+                            Event::default().data(buf.as_str())
                         );
                     }
                     Err(e) => {
@@ -748,18 +801,14 @@ async fn chat_completions(
                     }
                 }
             }
-            // Final chunk with finish_reason
-            let done_chunk = serde_json::json!({
-                "id": &id,
-                "object": "chat.completion.chunk",
-                "model": &model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop",
-                }]
-            });
-            yield Ok(Event::default().data(done_chunk.to_string()));
+            buf.clear();
+            use std::fmt::Write;
+            let _ = write!(
+                buf,
+                r#"{{"id":"{}","object":"chat.completion.chunk","model":"{}","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}"#,
+                &id, &model
+            );
+            yield Ok(Event::default().data(buf.as_str()));
             yield Ok(Event::default().data("[DONE]"));
         };
 
@@ -772,11 +821,11 @@ async fn chat_completions(
     match provider.infer(&inference_req).await {
         Ok(result) => {
             // Report latency for routing decisions
-            state.router.read().unwrap().report_latency(
-                route.provider,
-                &route.base_url,
-                result.latency_ms,
-            );
+            state
+                .router
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .report_latency(route.provider, &route.base_url, result.latency_ms);
 
             // Report actual usage to budget
             let actual = result.usage.total_tokens as u64;
@@ -868,7 +917,10 @@ async fn chat_completions(
                 audit.record(
                     "inference.error",
                     "error",
-                    &format!("Inference error: {e}"),
+                    &{
+                        tracing::error!("inference error: {e}");
+                        "Inference request failed".to_string()
+                    },
                     Some(&route.provider.to_string()),
                     Some(&req.model),
                     None,
@@ -888,10 +940,10 @@ async fn chat_completions(
             // Release reservation on error
             let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
             budget.report(&pool_name, estimated_tokens, 0);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Inference error: {e}"),
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, {
+                tracing::error!("inference error: {e}");
+                "Inference request failed".to_string()
+            })
             .into_response()
         }
     }
@@ -918,7 +970,12 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse>
     let mut models = Vec::new();
 
     // Clone routes so we don't hold the lock across awaits
-    let routes: Vec<_> = state.router.read().unwrap().routes().to_vec();
+    let routes: Vec<_> = state
+        .router
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .routes()
+        .to_vec();
 
     // Query live providers for real model lists
     for route in &routes {
@@ -981,7 +1038,12 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        providers_configured: state.router.read().unwrap().routes().len(),
+        providers_configured: state
+            .router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .routes()
+            .len(),
     })
 }
 
@@ -1001,7 +1063,12 @@ async fn health_providers(State(state): State<Arc<AppState>>) -> Json<Vec<Provid
     let mut results = Vec::new();
 
     // Clone routes so we don't hold the lock across awaits
-    let routes: Vec<_> = state.router.read().unwrap().routes().to_vec();
+    let routes: Vec<_> = state
+        .router
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .routes()
+        .to_vec();
 
     for route in &routes {
         let key = (route.provider, route.base_url.clone());
@@ -1183,6 +1250,16 @@ async fn costs_get(State(state): State<Arc<AppState>>) -> Json<CostsResponse> {
 }
 
 async fn costs_reset(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    if let Some(ref audit) = state.audit {
+        audit.record(
+            "admin.costs_reset",
+            "warn",
+            "Cost tracking counters reset",
+            None,
+            None,
+            None,
+        );
+    }
     state.cost_tracker.reset();
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -1354,7 +1431,13 @@ async fn embeddings(
     Json(req): Json<crate::inference::EmbeddingsRequest>,
 ) -> impl IntoResponse {
     // Find a route for this model
-    let route = match state.router.read().unwrap().select(&req.model).cloned() {
+    let route = match state
+        .router
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .select(&req.model)
+        .cloned()
+    {
         Some(r) => r,
         None => {
             return error_response(

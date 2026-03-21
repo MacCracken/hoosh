@@ -116,6 +116,8 @@ impl AuditChain {
     }
 
     /// Record an audit event. Thread-safe.
+    /// Minimizes lock hold time: builds entry and computes crypto outside the lock,
+    /// only holds the lock briefly to read last_hash and append.
     pub fn record(
         &self,
         event: &str,
@@ -125,13 +127,10 @@ impl AuditChain {
         model: Option<&str>,
         metadata: Option<serde_json::Value>,
     ) -> AuditEntry {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-
+        // Pre-compute expensive parts outside the lock
         let id = generate_id();
         let timestamp = now_epoch_ms();
-
-        // Build a temporary entry (with placeholder integrity) for hashing
-        let entry = AuditEntry {
+        let entry_base = AuditEntry {
             id,
             timestamp,
             event: event.to_string(),
@@ -143,13 +142,14 @@ impl AuditChain {
             integrity: IntegrityFields {
                 version: CHAIN_VERSION.to_string(),
                 signature: String::new(),
-                previous_hash: inner.last_hash.clone(),
+                previous_hash: String::new(),
             },
         };
+        let entry_hash = compute_entry_hash(&entry_base);
 
-        let entry_hash = compute_entry_hash(&entry);
+        // Brief lock: read last_hash, compute signature, append
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Compute signature: HMAC-SHA256("{entry_hash}:{previous_hash}", signing_key)
         let sig_input = format!("{}:{}", entry_hash, inner.last_hash);
         let signature = hmac_sha256_hex(sig_input.as_bytes(), &inner.signing_key);
 
@@ -159,7 +159,7 @@ impl AuditChain {
                 signature,
                 previous_hash: inner.last_hash.clone(),
             },
-            ..entry
+            ..entry_base
         };
 
         inner.last_hash = entry_hash;
@@ -168,8 +168,6 @@ impl AuditChain {
         if inner.entries.len() >= inner.max_entries
             && let Some(evicted) = inner.entries.pop_front()
         {
-            // Update first_valid_hash to the evicted entry's own hash
-            // so verify() knows where the surviving chain starts
             inner.first_valid_hash = compute_entry_hash(&evicted);
         }
 

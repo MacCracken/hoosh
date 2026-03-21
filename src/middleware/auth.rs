@@ -11,13 +11,23 @@ use std::sync::Arc;
 
 use crate::server::AppState;
 
-/// Constant-time byte comparison to prevent timing attacks on token validation.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
+/// Pre-computed SHA-256 digest of an auth token for constant-time comparison.
+pub type TokenDigest = [u8; 32];
+
+/// Hash a token for storage (called once at startup per configured token).
+pub fn hash_token(token: &str) -> TokenDigest {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes()).into()
+}
+
+/// Constant-time comparison of a provided token against a pre-hashed digest.
+/// Hashes the provided token once, then does fixed-length XOR comparison.
+fn verify_token(provided: &[u8], digest: &TokenDigest) -> bool {
+    use sha2::{Digest, Sha256};
+    let provided_hash: [u8; 32] = Sha256::digest(provided).into();
+    provided_hash
+        .iter()
+        .zip(digest.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }
@@ -32,10 +42,10 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let tokens = &state.auth_tokens;
+    let digests = &state.auth_token_digests;
 
     // No tokens configured — auth disabled, pass through.
-    if tokens.is_empty() {
+    if digests.is_empty() {
         return next.run(request).await;
     }
 
@@ -46,11 +56,7 @@ pub async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match auth_header {
-        Some(token)
-            if tokens
-                .iter()
-                .any(|t| constant_time_eq(t.as_bytes(), token.as_bytes())) =>
-        {
+        Some(token) if digests.iter().any(|d| verify_token(token.as_bytes(), d)) => {
             next.run(request).await
         }
         _ => {
@@ -92,7 +98,7 @@ mod tests {
             providers: ProviderRegistry::new(),
             cost_tracker: Arc::new(CostTracker::new()),
             audit: None,
-            auth_tokens: tokens,
+            auth_token_digests: tokens.iter().map(|t| hash_token(t)).collect(),
             rate_limiter: Arc::new(RateLimitRegistry::new()),
             event_bus: Arc::new(crate::events::new_event_bus()),
             inference_queue: Arc::new(crate::queue::InferenceQueue::new()),

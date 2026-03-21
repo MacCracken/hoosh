@@ -48,7 +48,7 @@ pub struct TtsSection {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct AuditSection {
     /// Enable audit logging. Defaults to false.
     #[serde(default)]
@@ -64,6 +64,19 @@ fn default_audit_max() -> usize {
     10_000
 }
 
+impl std::fmt::Debug for AuditSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditSection")
+            .field("enabled", &self.enabled)
+            .field(
+                "signing_key",
+                &self.signing_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("max_entries", &self.max_entries)
+            .finish()
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct TelemetrySection {
     /// OTLP endpoint (e.g. "http://localhost:4317"). Enables OpenTelemetry when set.
@@ -77,11 +90,32 @@ fn default_service_name() -> String {
     "hoosh".into()
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct AuthConfig {
     /// Bearer tokens that are allowed to access the API.
     #[serde(default)]
     pub tokens: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("tokens", &format!("[{} configured]", self.tokens.len()))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ProviderSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderSection")
+            .field("provider_type", &self.provider_type)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("priority", &self.priority)
+            .field("models", &self.models)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,7 +181,7 @@ pub struct CacheSection {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ProviderSection {
     /// Provider type name (e.g. "ollama", "openai", "anthropic").
     #[serde(rename = "type")]
@@ -359,7 +393,7 @@ impl HooshConfig {
             whisper_model: self.whisper.model,
             tts_model: self.tts.url,
             audit_enabled: self.audit.enabled,
-            audit_signing_key: self.audit.signing_key,
+            audit_signing_key: resolve_api_key(&self.audit.signing_key),
             audit_max_entries: self.audit.max_entries,
             auth_tokens: self.auth.tokens,
             otlp_endpoint: self.telemetry.otlp_endpoint,
