@@ -297,7 +297,13 @@ impl ProviderRegistry {
                 api_key,
                 tls,
             ))),
-            _ => None,
+            _ => {
+                tracing::warn!(
+                    "no backend implementation for provider '{}' — is the feature enabled?",
+                    route.provider
+                );
+                None
+            }
         };
 
         if let Some(p) = provider {

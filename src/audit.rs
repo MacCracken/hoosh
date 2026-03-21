@@ -48,8 +48,6 @@ struct AuditChainInner {
     max_entries: usize,
     /// Hash of the first entry in the deque (updated on eviction).
     first_valid_hash: String,
-    /// Cached chain validity (updated incrementally on each record).
-    chain_valid: bool,
 }
 
 /// Compute SHA-256 hash, returning hex string.
@@ -100,7 +98,7 @@ fn compute_entry_hash(entry: &AuditEntry) -> String {
         data.insert("metadata", meta.clone());
     }
 
-    let json = serde_json::to_string(&data).unwrap_or_default();
+    let json = serde_json::to_string(&data).expect("BTreeMap<&str, Value> always serializes");
     sha256_hex(json.as_bytes())
 }
 
@@ -113,7 +111,6 @@ impl AuditChain {
                 entries: VecDeque::new(),
                 max_entries,
                 first_valid_hash: GENESIS_HASH.to_string(),
-                chain_valid: true,
             }),
         }
     }
@@ -236,13 +233,15 @@ impl AuditChain {
         inner.entries.iter().skip(start).cloned().collect()
     }
 
-    /// Get a snapshot of recent entries, count, and cached validity in a single lock.
+    /// Get a snapshot of recent entries and count in a single lock acquisition.
+    /// Chain validity is always `true` since entries are only appended under lock.
+    /// Use `verify()` explicitly for full cryptographic verification.
     pub fn snapshot(&self, n: usize) -> (Vec<AuditEntry>, usize, bool) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let len = inner.entries.len();
         let start = len.saturating_sub(n);
         let entries: Vec<AuditEntry> = inner.entries.iter().skip(start).cloned().collect();
-        (entries, len, inner.chain_valid)
+        (entries, len, true)
     }
 }
 

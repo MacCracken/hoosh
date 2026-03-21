@@ -11,6 +11,17 @@ use std::sync::Arc;
 
 use crate::server::AppState;
 
+/// Constant-time byte comparison to prevent timing attacks on token validation.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// Axum middleware that validates `Authorization: Bearer <token>` headers.
 ///
 /// If no tokens are configured (empty list), authentication is disabled and all
@@ -35,7 +46,13 @@ pub async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match auth_header {
-        Some(token) if tokens.iter().any(|t| t == token) => next.run(request).await,
+        Some(token)
+            if tokens
+                .iter()
+                .any(|t| constant_time_eq(t.as_bytes(), token.as_bytes())) =>
+        {
+            next.run(request).await
+        }
         _ => {
             let body = serde_json::json!({
                 "error": {

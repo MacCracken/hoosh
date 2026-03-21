@@ -7,8 +7,42 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [0.21.4] — 2026-03-21
 
+### Added
+- **Authentication & security**
+  - Bearer token auth middleware (`[auth] tokens` in config)
+  - Per-provider rate limiting with sliding window RPM (`rate_limit_rpm` per provider)
+  - TLS certificate pinning for remote providers (`tls_pinned_certs`)
+  - mTLS client certificate support for local providers (`client_cert`, `client_key`)
+- **Observability**
+  - Prometheus metrics endpoint (`GET /metrics`) with request counters, latency histograms, token counters, provider gauges
+  - OpenTelemetry trace propagation (feature-gated: `otel`) with OTLP export
+  - Per-provider cost tracking with static pricing table (`GET /v1/costs`, `POST /v1/costs/reset`)
+  - Cryptographic audit log — HMAC-SHA256 linked chain with tamper detection (`GET /v1/audit`)
+- **Server improvements**
+  - `/v1/embeddings` pass-through (OpenAI-compatible and Ollama native)
+  - Hot-reload config via SIGHUP or `POST /v1/admin/reload` (uses `arc-swap` + `RwLock`)
+  - Periodic background health checks with automatic failover (3-strike unhealthy marking)
+  - Latency tracking for `LowestLatency` routing strategy (exponential moving average)
+  - Priority request queue via `majra` (`GET /v1/queue/status`)
+  - Provider event bus via `majra::pubsub` (health changes, inference events, errors)
+  - Provider heartbeat tracking via `majra::heartbeat` with Online→Suspect→Offline FSM (`GET /v1/health/heartbeat`)
+- **New modules**: `audit`, `cost`, `events`, `health`, `metrics`, `middleware/auth`, `middleware/rate_limit`, `queue`, `telemetry`
+- **New dependencies**: `hmac`, `sha2`, `hex`, `rand`, `prometheus`, `arc-swap`, `majra`; optional: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`
+
 ### Changed
 - Bump `ai-hwaccel` dependency from 0.20.3 to 0.21.3
+- All provider constructors now accept optional `TlsConfig` and use shared `build_provider_client()` utility
+- `Router` uses `RwLock` for hot-reload support; `LowestLatency` uses O(n) min scan instead of sort
+- `StrategyValue` → `RoutingStrategy` conversion uses `From` impl (eliminates duplicate match blocks)
+- `AppState` fields: added `cost_tracker`, `audit`, `auth_tokens`, `rate_limiter`, `event_bus`, `inference_queue`, `health_map`, `heartbeat`, `config_path`
+- `ServerConfig` extended with audit, auth, telemetry, health check configuration
+- `build_app()` returns `(Router, Arc<AppState>)` for SIGHUP handler access
+
+### Fixed
+- Audit chain eviction now uses `VecDeque::pop_front()` (O(1)) instead of `Vec::remove(0)` (O(n))
+- Audit verification works correctly after eviction via `first_valid_hash` tracking
+- Audit `/v1/audit` endpoint uses single-lock `snapshot()` instead of 3 separate lock acquisitions
+- Health checker failure handling deduplicated into `handle_check_failure()` helper
 
 ## [0.21.3] — 2026-03-21
 
