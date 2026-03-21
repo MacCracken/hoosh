@@ -20,6 +20,8 @@
 - [ADR-002: Cryptographic Audit Chain](decisions/002-cryptographic-audit-chain.md) — HMAC-SHA256 linked chain for tamper-proof logging
 - [ADR-003: Majra Messaging](decisions/003-majra-messaging.md) — priority queues, pub/sub events, heartbeat tracking
 - [ADR-004: Auth and Security](decisions/004-auth-and-security.md) — bearer tokens, rate limiting, TLS pinning, secret management
+- [ADR-005: MCP via Bote + Szál](decisions/005-mcp-via-bote.md) — MCP tool use via bote (protocol) + szál (58 tools, workflow engine)
+- [ADR-006: Kavach Tool Sandbox](decisions/006-kavach-tool-sandbox.md) — sandboxed tool execution with secret scanning
 
 ## Reference
 

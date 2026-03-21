@@ -24,6 +24,13 @@ All items complete. See CHANGELOG.md for details.
 - [ ] Unified `ToolCall` abstraction mapping Anthropic/OpenAI/Gemini/Ollama tool formats — extract from secureyeoman's provider implementations
 - [ ] Streaming tool call assembly (incremental delta → complete ToolCall)
 - [ ] Tool result message type for multi-turn tool use
+- [ ] MCP integration via `bote` + `szál` — bote for protocol/dispatch, szál for 58+ built-in MCP tools (file, process, git, network, hash, template, math, system), enabling Claude/Cursor-style tool use through hoosh
+- [ ] Workflow-as-tool — invoke szál workflows (DAG steps with retry/rollback) as single MCP tool calls through hoosh
+- [ ] Shared tool schema types — depend on bote for `ToolDef`/`ToolRegistry`/`Dispatcher`, szál for `Tool` trait and tool implementations
+
+### Error handling improvements
+- [ ] Protocol-level error code mapping — `HooshError::http_status_code()` method for consistent OpenAI-compatible error responses (inspired by bote's `rpc_code()` pattern)
+- [ ] Separate metadata registry from routing dispatch — decouple model/provider metadata from routing logic (following bote's registry/dispatch separation)
 
 ### Context management
 - [ ] Model registry with detailed metadata — context windows (60+ models), capability flags (chat/vision/reasoning/tool_use/code/streaming), performance tiers, cost tiers, extended thinking support — port from secureyeoman's `model-registry.ts`
@@ -108,6 +115,12 @@ All of the following must be true before cutting 1.0:
 - [ ] **Privacy-aware routing** — route-level privacy classification (local-only vs remote-allowed) so Ifran can enforce data residency without its own `BackendRouter`
 - [ ] **Backend capability reporting** — expose accelerator type, context length, streaming support, vision support per provider so Ifran can query capabilities without `ai-hwaccel` directly
 - [ ] **Programmatic server builder** — `HooshServer::builder()` API for embedding the gateway inside another Axum app (Ifran's API server) without spawning a separate process
+
+### Kavach + Szál integration (sandboxed tool execution)
+- [ ] **Externalization gate** — apply kavach's secret scanner (17 patterns: AWS keys, GitHub tokens, JWTs, PII) to tool outputs before returning them through hoosh's inference context, preventing secret leakage through LLMs
+- [ ] **Sandbox strength metadata** — tool execution results carry isolation strength scores (Process: 50, gVisor: 70, Firecracker: 90) in API response metadata, enabling agents to make trust decisions
+- [ ] **Direct tool execution** — hoosh invokes szál tools in kavach sandboxes: bote for MCP dispatch → szál for tool logic → kavach for isolation → externalization gate for output scanning
+- [ ] **Workflow orchestration** — expose szál's workflow engine (DAG execution, step retry/rollback, state machine) as a hoosh API, enabling multi-step agentic tool chains through the gateway
 
 ### Advanced features
 - [ ] **Embeddings server** — local embedding generation for RAG
