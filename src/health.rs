@@ -19,9 +19,54 @@ pub struct ProviderHealthState {
 /// Shared health status map, used by the router for filtering.
 pub type HealthMap = Arc<DashMap<(ProviderType, String), ProviderHealthState>>;
 
+/// Consecutive failures before marking a provider unhealthy.
+const UNHEALTHY_THRESHOLD: u32 = 3;
+
 /// Create a new empty health map.
 pub fn new_health_map() -> HealthMap {
     Arc::new(DashMap::new())
+}
+
+/// Handle a health check failure (shared by Ok(false) and Err branches).
+fn handle_check_failure(
+    health_map: &HealthMap,
+    event_bus: &crate::events::EventBus,
+    key: &(ProviderType, String),
+    was_healthy: bool,
+    error_msg: String,
+) {
+    let failures = health_map
+        .get(key)
+        .map(|s| s.consecutive_failures + 1)
+        .unwrap_or(1);
+    let new_healthy = failures < UNHEALTHY_THRESHOLD;
+    health_map.insert(
+        key.clone(),
+        ProviderHealthState {
+            is_healthy: new_healthy,
+            last_check: std::time::Instant::now(),
+            consecutive_failures: failures,
+            last_error: Some(error_msg),
+        },
+    );
+    if was_healthy && !new_healthy {
+        event_bus.publish(
+            crate::events::topics::HEALTH,
+            crate::events::ProviderEvent::HealthChanged {
+                provider: key.0.to_string(),
+                base_url: key.1.clone(),
+                healthy: false,
+            },
+        );
+    }
+    if failures >= UNHEALTHY_THRESHOLD {
+        tracing::warn!(
+            "provider {}@{} marked unhealthy after {} failures",
+            key.0,
+            key.1,
+            failures
+        );
+    }
 }
 
 /// Spawn a background task that periodically checks all provider health.
@@ -50,10 +95,7 @@ pub fn spawn_health_checker(
                 let node_id = format!("{}:{}", route.provider, route.base_url);
 
                 if let Some(provider) = providers.get(route.provider, &route.base_url) {
-                    let was_healthy = health_map
-                        .get(&key)
-                        .map(|s| s.is_healthy)
-                        .unwrap_or(true);
+                    let was_healthy = health_map.get(&key).map(|s| s.is_healthy).unwrap_or(true);
 
                     match provider.health_check().await {
                         Ok(true) => {
@@ -81,72 +123,22 @@ pub fn spawn_health_checker(
                             }
                         }
                         Ok(false) => {
-                            let failures = health_map
-                                .get(&key)
-                                .map(|s| s.consecutive_failures + 1)
-                                .unwrap_or(1);
-                            let new_healthy = failures < 3;
-                            health_map.insert(
-                                key.clone(),
-                                ProviderHealthState {
-                                    is_healthy: new_healthy,
-                                    last_check: std::time::Instant::now(),
-                                    consecutive_failures: failures,
-                                    last_error: Some("health check returned false".into()),
-                                },
+                            handle_check_failure(
+                                &health_map,
+                                &event_bus,
+                                &key,
+                                was_healthy,
+                                "health check returned false".into(),
                             );
-                            if was_healthy && !new_healthy {
-                                event_bus.publish(
-                                    crate::events::topics::HEALTH,
-                                    crate::events::ProviderEvent::HealthChanged {
-                                        provider: key.0.to_string(),
-                                        base_url: key.1.clone(),
-                                        healthy: false,
-                                    },
-                                );
-                            }
-                            if failures >= 3 {
-                                tracing::warn!(
-                                    "provider {}@{} marked unhealthy after {} failures",
-                                    key.0,
-                                    key.1,
-                                    failures
-                                );
-                            }
                         }
                         Err(e) => {
-                            let failures = health_map
-                                .get(&key)
-                                .map(|s| s.consecutive_failures + 1)
-                                .unwrap_or(1);
-                            let new_healthy = failures < 3;
-                            health_map.insert(
-                                key.clone(),
-                                ProviderHealthState {
-                                    is_healthy: new_healthy,
-                                    last_check: std::time::Instant::now(),
-                                    consecutive_failures: failures,
-                                    last_error: Some(e.to_string()),
-                                },
+                            handle_check_failure(
+                                &health_map,
+                                &event_bus,
+                                &key,
+                                was_healthy,
+                                e.to_string(),
                             );
-                            if was_healthy && !new_healthy {
-                                event_bus.publish(
-                                    crate::events::topics::HEALTH,
-                                    crate::events::ProviderEvent::HealthChanged {
-                                        provider: key.0.to_string(),
-                                        base_url: key.1.clone(),
-                                        healthy: false,
-                                    },
-                                );
-                            }
-                            if failures >= 3 {
-                                tracing::warn!(
-                                    "provider {}@{} marked unhealthy: {}",
-                                    key.0,
-                                    key.1,
-                                    e
-                                );
-                            }
                         }
                     }
                 }

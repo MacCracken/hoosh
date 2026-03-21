@@ -115,8 +115,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 HooshConfig::load_or_default()
             };
-            let server_config =
-                hoosh_config.into_server_config(bind.as_deref(), port, config_path);
+            let server_config = hoosh_config.into_server_config(bind.as_deref(), port, config_path);
 
             // Set up tracing — with OpenTelemetry layer when the feature and
             // endpoint are both present, otherwise plain fmt.
@@ -132,15 +131,10 @@ async fn main() -> anyhow::Result<()> {
                         use tracing_subscriber::util::SubscriberInitExt;
                         tracing_subscriber::registry()
                             .with(otel_layer)
-                            .with(
-                                tracing_subscriber::fmt::layer()
-                                    .with_writer(std::io::stderr),
-                            )
+                            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                             .with(
                                 tracing_subscriber::EnvFilter::try_from_default_env()
-                                    .unwrap_or_else(|_| {
-                                        tracing_subscriber::EnvFilter::new("info")
-                                    }),
+                                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
                             )
                             .init();
                         tracing::info!(endpoint, "OpenTelemetry tracing enabled");

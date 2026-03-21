@@ -113,15 +113,23 @@ impl Router {
         match self.strategy {
             RoutingStrategy::Priority | RoutingStrategy::Direct => candidates.first().copied(),
             RoutingStrategy::LowestLatency => {
-                let mut sorted = candidates;
-                sorted.sort_by_key(|r| {
-                    let key = (r.provider, r.base_url.clone());
-                    match self.latencies.get(&key) {
-                        Some(entry) => entry.value().load(Ordering::Relaxed),
-                        None => u64::MAX, // no data → deprioritize
+                // O(n) scan with one String allocation per candidate for DashMap lookup
+                let mut best: Option<(&ProviderRoute, u64)> = None;
+                for c in &candidates {
+                    let key = (c.provider, c.base_url.clone());
+                    let latency = self
+                        .latencies
+                        .get(&key)
+                        .map(|e| e.value().load(Ordering::Relaxed))
+                        .unwrap_or(u64::MAX);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, best_lat)| latency < *best_lat)
+                    {
+                        best = Some((c, latency));
                     }
-                });
-                sorted.first().copied()
+                }
+                best.map(|(r, _)| r)
             }
             RoutingStrategy::RoundRobin => {
                 let idx = self
@@ -327,7 +335,10 @@ mod tests {
         ];
         let router = Router::new(routes, RoutingStrategy::Priority);
         assert!(router.select("any-model").is_some());
-        assert_eq!(router.select("any-model").unwrap().provider, ProviderType::Ollama);
+        assert_eq!(
+            router.select("any-model").unwrap().provider,
+            ProviderType::Ollama
+        );
     }
 
     #[test]

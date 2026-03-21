@@ -40,14 +40,20 @@ impl InferenceQueue {
     pub fn enqueue(&self, request: QueuedRequest, priority: Priority) -> TaskId {
         let item = QueueItem::new(priority, request);
         let id = item.id;
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).enqueue(item);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .enqueue(item);
         self.notify.notify_one();
         id
     }
 
     /// Dequeue the highest-priority request.
     pub fn dequeue(&self) -> Option<QueueItem<QueuedRequest>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).dequeue()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dequeue()
     }
 
     /// Number of queued requests.
@@ -56,7 +62,10 @@ impl InferenceQueue {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Wait for a new item to be available (async).

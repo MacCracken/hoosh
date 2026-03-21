@@ -49,8 +49,6 @@ pub mod events;
 #[cfg(feature = "hwaccel")]
 pub mod hardware;
 pub mod health;
-#[cfg(feature = "otel")]
-pub mod telemetry;
 pub mod inference;
 pub mod metrics;
 pub mod middleware;
@@ -58,6 +56,8 @@ pub mod provider;
 pub mod queue;
 pub mod router;
 pub mod server;
+#[cfg(feature = "otel")]
+pub mod telemetry;
 
 pub use budget::{TokenBudget, TokenPool};
 pub use cache::ResponseCache;

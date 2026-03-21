@@ -164,11 +164,12 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     let rate_limiter = Arc::new(crate::middleware::rate_limit::RateLimitRegistry::new());
     for route in &config.routes {
         if route.enabled
-            && let Some(rpm) = route.rate_limit_rpm {
-                let key = format!("{}:{}", route.provider, route.base_url);
-                rate_limiter.configure(&key, rpm);
-                tracing::info!("rate limit: {} → {} rpm", key, rpm);
-            }
+            && let Some(rpm) = route.rate_limit_rpm
+        {
+            let key = format!("{}:{}", route.provider, route.base_url);
+            rate_limiter.configure(&key, rpm);
+            tracing::info!("rate limit: {} → {} rpm", key, rpm);
+        }
     }
 
     // Create event bus and inference queue
@@ -299,10 +300,8 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     if let Some(config_path) = app_state.config_path.clone() {
         let state = app_state.clone();
         tokio::spawn(async move {
-            let mut sig = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::hangup(),
-            )
-            .expect("failed to register SIGHUP handler");
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to register SIGHUP handler");
             loop {
                 sig.recv().await;
                 tracing::info!("SIGHUP received, reloading config from {}", config_path);
@@ -334,12 +333,7 @@ fn reload_config(state: &Arc<AppState>, config_path: &str) {
     match crate::config::HooshConfig::load(config_path) {
         Ok(config) => {
             let routes = config.routes();
-            let strategy = match config.server.strategy {
-                crate::config::StrategyValue::Priority => RoutingStrategy::Priority,
-                crate::config::StrategyValue::RoundRobin => RoutingStrategy::RoundRobin,
-                crate::config::StrategyValue::LowestLatency => RoutingStrategy::LowestLatency,
-                crate::config::StrategyValue::Direct => RoutingStrategy::Direct,
-            };
+            let strategy: RoutingStrategy = config.server.strategy.into();
 
             // Note: provider re-registration requires mutable access.
             // Only the router is hot-reloaded; provider backends persist.
@@ -778,11 +772,11 @@ async fn chat_completions(
     match provider.infer(&inference_req).await {
         Ok(result) => {
             // Report latency for routing decisions
-            state
-                .router
-                .read()
-                .unwrap()
-                .report_latency(route.provider, &route.base_url, result.latency_ms);
+            state.router.read().unwrap().report_latency(
+                route.provider,
+                &route.base_url,
+                result.latency_ms,
+            );
 
             // Report actual usage to budget
             let actual = result.usage.total_tokens as u64;
@@ -1181,9 +1175,10 @@ struct CostsResponse {
 }
 
 async fn costs_get(State(state): State<Arc<AppState>>) -> Json<CostsResponse> {
+    let (records, total_cost_usd) = state.cost_tracker.all_with_total();
     Json(CostsResponse {
-        records: state.cost_tracker.all(),
-        total_cost_usd: state.cost_tracker.total_cost(),
+        records,
+        total_cost_usd,
     })
 }
 
@@ -1206,9 +1201,7 @@ struct AuditResponse {
 async fn audit_log(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match &state.audit {
         Some(audit) => {
-            let entries = audit.recent(100);
-            let total = audit.count();
-            let (chain_valid, _) = audit.verify();
+            let (entries, total, chain_valid) = audit.snapshot(100);
             (
                 StatusCode::OK,
                 Json(AuditResponse {

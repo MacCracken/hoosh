@@ -35,7 +35,7 @@ pub async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match auth_header {
-        Some(token) if tokens.contains(&token.to_string()) => next.run(request).await,
+        Some(token) if tokens.iter().any(|t| t == token) => next.run(request).await,
         _ => {
             let body = serde_json::json!({
                 "error": {
@@ -52,8 +52,8 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, body::Body, middleware, routing::get};
     use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::{Router, body::Body, middleware, routing::get};
     use tower::ServiceExt;
 
     fn test_state(tokens: Vec<String>) -> Arc<AppState> {
@@ -62,10 +62,13 @@ mod tests {
         use crate::cost::CostTracker;
         use crate::middleware::rate_limit::RateLimitRegistry;
         use crate::provider::ProviderRegistry;
-        use crate::router::{RoutingStrategy};
+        use crate::router::RoutingStrategy;
 
         Arc::new(AppState {
-            router: std::sync::RwLock::new(crate::router::Router::new(vec![], RoutingStrategy::Priority)),
+            router: std::sync::RwLock::new(crate::router::Router::new(
+                vec![],
+                RoutingStrategy::Priority,
+            )),
             config_path: None,
             cache: ResponseCache::new(CacheConfig::default()),
             budget: std::sync::Mutex::new(TokenBudget::new()),
@@ -93,7 +96,10 @@ mod tests {
         let state = test_state(tokens);
         Router::new()
             .route("/test", get(handler))
-            .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
             .with_state(state)
     }
 

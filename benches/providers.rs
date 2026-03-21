@@ -68,7 +68,12 @@ fn bench_registry_lookup(c: &mut Criterion) {
 fn bench_provider_construction(c: &mut Criterion) {
     c.bench_function("openai_compat_new", |b| {
         b.iter(|| {
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None)
+            OpenAiCompatibleProvider::new(
+                "http://localhost:8080",
+                None,
+                ProviderType::LlamaCpp,
+                None,
+            )
         })
     });
 

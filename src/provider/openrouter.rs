@@ -22,7 +22,12 @@ impl OpenRouterProvider {
             url
         };
         Self {
-            inner: OpenAiCompatibleProvider::new(url, api_key, ProviderType::OpenRouter, tls_config),
+            inner: OpenAiCompatibleProvider::new(
+                url,
+                api_key,
+                ProviderType::OpenRouter,
+                tls_config,
+            ),
         }
     }
 }

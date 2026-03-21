@@ -1,8 +1,8 @@
 //! OpenTelemetry integration — OTLP export and trace context propagation.
 //! Only compiled when the `otel` feature is enabled.
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider;
 
@@ -52,9 +52,10 @@ pub fn init_otel(endpoint: &str, service_name: &str) -> anyhow::Result<OtelGuard
 
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![
-            KeyValue::new("service.name", service_name.to_string()),
-        ]))
+        .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
+            "service.name",
+            service_name.to_string(),
+        )]))
         .build();
 
     let tracer = provider.tracer("hoosh");

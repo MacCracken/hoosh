@@ -131,9 +131,6 @@ mod tests {
             output.contains("hoosh_providers_configured"),
             "should contain providers_configured metric"
         );
-        assert!(
-            output.contains("42"),
-            "gauge should reflect the set value"
-        );
+        assert!(output.contains("42"), "gauge should reflect the set value");
     }
 }

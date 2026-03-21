@@ -235,21 +235,25 @@ impl ProviderRegistry {
                 Some(Arc::new(ollama::OllamaProvider::new(&route.base_url, tls)))
             }
             #[cfg(feature = "llamacpp")]
-            ProviderType::LlamaCpp => {
-                Some(Arc::new(llamacpp::LlamaCppProvider::new(&route.base_url, tls)))
-            }
+            ProviderType::LlamaCpp => Some(Arc::new(llamacpp::LlamaCppProvider::new(
+                &route.base_url,
+                tls,
+            ))),
             #[cfg(feature = "synapse")]
-            ProviderType::Synapse => {
-                Some(Arc::new(synapse::SynapseProvider::new(&route.base_url, tls)))
-            }
+            ProviderType::Synapse => Some(Arc::new(synapse::SynapseProvider::new(
+                &route.base_url,
+                tls,
+            ))),
             #[cfg(feature = "lmstudio")]
-            ProviderType::LmStudio => {
-                Some(Arc::new(lmstudio::LmStudioProvider::new(&route.base_url, tls)))
-            }
+            ProviderType::LmStudio => Some(Arc::new(lmstudio::LmStudioProvider::new(
+                &route.base_url,
+                tls,
+            ))),
             #[cfg(feature = "localai")]
-            ProviderType::LocalAi => {
-                Some(Arc::new(localai::LocalAiProvider::new(&route.base_url, tls)))
-            }
+            ProviderType::LocalAi => Some(Arc::new(localai::LocalAiProvider::new(
+                &route.base_url,
+                tls,
+            ))),
             // Remote providers
             #[cfg(feature = "openai")]
             ProviderType::OpenAi => Some(Arc::new(openai_remote::OpenAiProvider::new(
@@ -276,9 +280,11 @@ impl ProviderRegistry {
                 tls,
             ))),
             #[cfg(feature = "groq")]
-            ProviderType::Groq => {
-                Some(Arc::new(groq::GroqProvider::new(&route.base_url, api_key, tls)))
-            }
+            ProviderType::Groq => Some(Arc::new(groq::GroqProvider::new(
+                &route.base_url,
+                api_key,
+                tls,
+            ))),
             #[cfg(feature = "openrouter")]
             ProviderType::OpenRouter => Some(Arc::new(openrouter::OpenRouterProvider::new(
                 &route.base_url,
@@ -286,9 +292,11 @@ impl ProviderRegistry {
                 tls,
             ))),
             #[cfg(feature = "grok")]
-            ProviderType::Grok => {
-                Some(Arc::new(grok::GrokProvider::new(&route.base_url, api_key, tls)))
-            }
+            ProviderType::Grok => Some(Arc::new(grok::GrokProvider::new(
+                &route.base_url,
+                api_key,
+                tls,
+            ))),
             _ => None,
         };
 

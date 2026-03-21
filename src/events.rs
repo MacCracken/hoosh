@@ -3,8 +3,6 @@
 use majra::pubsub::TypedPubSub;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::ProviderType;
-
 /// Events emitted by the hoosh runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProviderEvent {
@@ -46,12 +44,6 @@ pub mod topics {
     pub const ERRORS: &str = "providers/errors";
     pub const RATE_LIMIT: &str = "providers/rate_limit";
 }
-
-// Suppress unused import warning — ProviderType is used for documentation
-// and will be used by callers constructing events from provider data.
-const _: () = {
-    fn _assert_provider_type_available(_: ProviderType) {}
-};
 
 #[cfg(test)]
 mod tests {

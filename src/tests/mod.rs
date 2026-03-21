@@ -1027,7 +1027,10 @@ mod server_wiring {
             }
         }
         Arc::new(AppState {
-            router: std::sync::RwLock::new(hoosh_router::Router::new(routes, RoutingStrategy::Priority)),
+            router: std::sync::RwLock::new(hoosh_router::Router::new(
+                routes,
+                RoutingStrategy::Priority,
+            )),
             config_path: None,
             cache: ResponseCache::new(CacheConfig::default()),
             budget: std::sync::Mutex::new(TokenBudget::new()),
@@ -1035,7 +1038,9 @@ mod server_wiring {
             cost_tracker: std::sync::Arc::new(crate::cost::CostTracker::new()),
             audit: None,
             auth_tokens: Vec::new(),
-            rate_limiter: std::sync::Arc::new(crate::middleware::rate_limit::RateLimitRegistry::new()),
+            rate_limiter: std::sync::Arc::new(
+                crate::middleware::rate_limit::RateLimitRegistry::new(),
+            ),
             event_bus: std::sync::Arc::new(crate::events::new_event_bus()),
             inference_queue: std::sync::Arc::new(crate::queue::InferenceQueue::new()),
             health_map: crate::health::new_health_map(),

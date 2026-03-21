@@ -116,6 +116,17 @@ impl Default for ServerSection {
     }
 }
 
+impl From<StrategyValue> for RoutingStrategy {
+    fn from(v: StrategyValue) -> Self {
+        match v {
+            StrategyValue::Priority => RoutingStrategy::Priority,
+            StrategyValue::RoundRobin => RoutingStrategy::RoundRobin,
+            StrategyValue::LowestLatency => RoutingStrategy::LowestLatency,
+            StrategyValue::Direct => RoutingStrategy::Direct,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyValue {
@@ -327,12 +338,7 @@ impl HooshConfig {
         config_path: Option<String>,
     ) -> ServerConfig {
         let routes = self.routes();
-        let strategy = match self.server.strategy {
-            StrategyValue::Priority => RoutingStrategy::Priority,
-            StrategyValue::RoundRobin => RoutingStrategy::RoundRobin,
-            StrategyValue::LowestLatency => RoutingStrategy::LowestLatency,
-            StrategyValue::Direct => RoutingStrategy::Direct,
-        };
+        let strategy: RoutingStrategy = self.server.strategy.into();
         let budget_pools = self
             .budgets
             .iter()

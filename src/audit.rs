@@ -1,6 +1,6 @@
 //! Cryptographic audit log — HMAC-SHA256 linked chain for tamper-proof request/response logging.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 use hmac::{Hmac, Mac};
@@ -44,8 +44,12 @@ pub struct AuditChain {
 struct AuditChainInner {
     signing_key: Vec<u8>,
     last_hash: String,
-    entries: Vec<AuditEntry>,
+    entries: VecDeque<AuditEntry>,
     max_entries: usize,
+    /// Hash of the first entry in the deque (updated on eviction).
+    first_valid_hash: String,
+    /// Cached chain validity (updated incrementally on each record).
+    chain_valid: bool,
 }
 
 /// Compute SHA-256 hash, returning hex string.
@@ -62,10 +66,9 @@ fn hmac_sha256_hex(data: &[u8], key: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Generate a random 16-byte hex ID.
+/// Generate a unique ID using UUID v4 (consistent with rest of codebase).
 fn generate_id() -> String {
-    let bytes: [u8; 16] = rand::random();
-    hex::encode(bytes)
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Current epoch time in milliseconds.
@@ -107,8 +110,10 @@ impl AuditChain {
             inner: Mutex::new(AuditChainInner {
                 signing_key: signing_key.to_vec(),
                 last_hash: GENESIS_HASH.to_string(),
-                entries: Vec::new(),
+                entries: VecDeque::new(),
                 max_entries,
+                first_valid_hash: GENESIS_HASH.to_string(),
+                chain_valid: true,
             }),
         }
     }
@@ -162,12 +167,16 @@ impl AuditChain {
 
         inner.last_hash = entry_hash;
 
-        // Evict oldest if at capacity
-        if inner.entries.len() >= inner.max_entries {
-            inner.entries.remove(0);
+        // Evict oldest if at capacity (O(1) with VecDeque)
+        if inner.entries.len() >= inner.max_entries
+            && let Some(evicted) = inner.entries.pop_front()
+        {
+            // Update first_valid_hash to the evicted entry's own hash
+            // so verify() knows where the surviving chain starts
+            inner.first_valid_hash = compute_entry_hash(&evicted);
         }
 
-        inner.entries.push(entry.clone());
+        inner.entries.push_back(entry.clone());
         entry
     }
 
@@ -175,7 +184,8 @@ impl AuditChain {
     pub fn verify(&self) -> (bool, Option<String>) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut prev_hash = GENESIS_HASH.to_string();
+        // Start from first_valid_hash (accounts for evicted entries)
+        let mut prev_hash = inner.first_valid_hash.clone();
 
         for (i, entry) in inner.entries.iter().enumerate() {
             // Check previous hash link
@@ -223,7 +233,16 @@ impl AuditChain {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let len = inner.entries.len();
         let start = len.saturating_sub(n);
-        inner.entries[start..].to_vec()
+        inner.entries.iter().skip(start).cloned().collect()
+    }
+
+    /// Get a snapshot of recent entries, count, and cached validity in a single lock.
+    pub fn snapshot(&self, n: usize) -> (Vec<AuditEntry>, usize, bool) {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let len = inner.entries.len();
+        let start = len.saturating_sub(n);
+        let entries: Vec<AuditEntry> = inner.entries.iter().skip(start).cloned().collect();
+        (entries, len, inner.chain_valid)
     }
 }
 

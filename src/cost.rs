@@ -165,6 +165,17 @@ impl CostTracker {
         self.records.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// Get all records and total cost in a single pass.
+    pub fn all_with_total(&self) -> (Vec<ProviderCostRecord>, f64) {
+        let mut records = Vec::new();
+        let mut total = 0.0;
+        for entry in self.records.iter() {
+            total += entry.value().total_cost_usd;
+            records.push(entry.value().clone());
+        }
+        (records, total)
+    }
+
     /// Get total cost across all providers.
     pub fn total_cost(&self) -> f64 {
         self.records.iter().map(|r| r.value().total_cost_usd).sum()

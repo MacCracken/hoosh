@@ -411,8 +411,12 @@ mod tests {
 
     #[test]
     fn provider_creation() {
-        let p =
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None);
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            None,
+            ProviderType::LlamaCpp,
+            None,
+        );
         assert_eq!(p.base_url(), "http://localhost:8080");
         assert_eq!(p.provider_type(), ProviderType::LlamaCpp);
     }
@@ -442,8 +446,12 @@ mod tests {
 
     #[test]
     fn provider_no_api_key() {
-        let p =
-            OpenAiCompatibleProvider::new("http://localhost:8080", None, ProviderType::LlamaCpp, None);
+        let p = OpenAiCompatibleProvider::new(
+            "http://localhost:8080",
+            None,
+            ProviderType::LlamaCpp,
+            None,
+        );
         assert!(p.api_key.is_none());
     }
 
