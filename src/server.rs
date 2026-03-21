@@ -128,7 +128,7 @@ pub fn build_app(config: ServerConfig) -> Router {
         .layer(DefaultBodyLimit::max(1024 * 1024)); // 1 MB for JSON API
 
     #[allow(unused_mut)]
-    let mut app = Router::new().merge(api_routes);
+    let mut app = api_routes;
 
     // Audio routes with 50MB body limit
     #[cfg(feature = "whisper")]
