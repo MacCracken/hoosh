@@ -288,6 +288,66 @@ impl LlmProvider for OllamaProvider {
         Ok(resp.status().is_success())
     }
 
+    async fn embeddings(
+        &self,
+        request: &crate::inference::EmbeddingsRequest,
+    ) -> anyhow::Result<crate::inference::EmbeddingsResponse> {
+        let url = format!("{}/api/embed", self.base_url);
+
+        // Convert input to Ollama format
+        let input = match &request.input {
+            crate::inference::EmbeddingsInput::Single(s) => s.clone(),
+            crate::inference::EmbeddingsInput::Multiple(v) => v.join("\n"),
+        };
+
+        let body = serde_json::json!({
+            "model": request.model,
+            "input": input,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let raw: serde_json::Value = resp.json().await?;
+
+        // Ollama returns {"embeddings": [[...]], "model": "..."}
+        let embeddings = raw["embeddings"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("missing embeddings field in Ollama response"))?;
+
+        let data: Vec<crate::inference::EmbeddingData> = embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, emb)| {
+                let values: Vec<f32> = emb
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                crate::inference::EmbeddingData {
+                    object: "embedding".into(),
+                    embedding: values,
+                    index: i,
+                }
+            })
+            .collect();
+
+        Ok(crate::inference::EmbeddingsResponse {
+            object: "list".into(),
+            data,
+            model: request.model.clone(),
+            usage: crate::inference::EmbeddingsUsage {
+                prompt_tokens: 0,
+                total_tokens: 0,
+            },
+        })
+    }
+
     fn provider_type(&self) -> ProviderType {
         ProviderType::Ollama
     }

@@ -300,6 +300,20 @@ impl LlmProvider for OpenAiCompatibleProvider {
         Ok(resp.status().is_success())
     }
 
+    async fn embeddings(
+        &self,
+        request: &crate::inference::EmbeddingsRequest,
+    ) -> anyhow::Result<crate::inference::EmbeddingsResponse> {
+        let url = format!("{}/v1/embeddings", self.base_url);
+        let mut rb = self.client.post(&url).json(request);
+        if let Some(key) = &self.api_key {
+            rb = rb.bearer_auth(key);
+        }
+        let resp = rb.send().await?.error_for_status()?;
+        let result: crate::inference::EmbeddingsResponse = resp.json().await?;
+        Ok(result)
+    }
+
     fn provider_type(&self) -> ProviderType {
         self.provider_type
     }

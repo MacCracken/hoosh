@@ -19,6 +19,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::budget::{TokenBudget, TokenPool};
 use crate::cache::{CacheConfig, ResponseCache};
+use crate::cost::CostTracker;
 use crate::inference::{InferenceRequest, Message, Role};
 use crate::provider::ProviderRegistry;
 use crate::router::{self as hoosh_router, ProviderRoute, RoutingStrategy};
@@ -29,6 +30,8 @@ pub struct AppState {
     pub cache: ResponseCache,
     pub budget: std::sync::Mutex<TokenBudget>,
     pub providers: ProviderRegistry,
+    pub cost_tracker: Arc<CostTracker>,
+    pub audit: Option<Arc<crate::audit::AuditChain>>,
     #[cfg(feature = "whisper")]
     pub whisper: Option<std::sync::Arc<crate::provider::whisper::WhisperProvider>>,
     #[cfg(feature = "piper")]
@@ -47,6 +50,12 @@ pub struct ServerConfig {
     pub whisper_model: Option<String>,
     /// Path to piper TTS model config (e.g. "models/en_US-lessac-medium.onnx.json").
     pub tts_model: Option<String>,
+    /// Whether audit logging is enabled.
+    pub audit_enabled: bool,
+    /// HMAC signing key for audit chain.
+    pub audit_signing_key: Option<String>,
+    /// Max audit entries to keep in memory.
+    pub audit_max_entries: usize,
 }
 
 impl Default for ServerConfig {
@@ -60,6 +69,9 @@ impl Default for ServerConfig {
             budget_pools: Vec::new(),
             whisper_model: None,
             tts_model: None,
+            audit_enabled: false,
+            audit_signing_key: None,
+            audit_max_entries: 10_000,
         }
     }
 }
@@ -104,11 +116,32 @@ pub fn build_app(config: ServerConfig) -> Router {
         std::sync::Arc::new(crate::provider::tts::TtsProvider::new(url, None))
     });
 
+    let cost_tracker = Arc::new(CostTracker::new());
+
+    let audit = if config.audit_enabled {
+        let key = match &config.audit_signing_key {
+            Some(k) => k.as_bytes().to_vec(),
+            None => {
+                let key: [u8; 32] = rand::random();
+                tracing::info!("audit chain enabled with auto-generated signing key");
+                key.to_vec()
+            }
+        };
+        Some(Arc::new(crate::audit::AuditChain::new(
+            &key,
+            config.audit_max_entries,
+        )))
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         router: hoosh_router::Router::new(config.routes, config.strategy),
         cache: ResponseCache::new(config.cache_config),
         budget: std::sync::Mutex::new(budget),
         providers,
+        cost_tracker,
+        audit,
         #[cfg(feature = "whisper")]
         whisper,
         #[cfg(feature = "piper")]
@@ -125,6 +158,10 @@ pub fn build_app(config: ServerConfig) -> Router {
         .route("/v1/tokens/reserve", post(tokens_reserve))
         .route("/v1/tokens/report", post(tokens_report))
         .route("/v1/tokens/pools", get(tokens_pools))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/costs", get(costs_get))
+        .route("/v1/costs/reset", post(costs_reset))
+        .route("/v1/audit", get(audit_log))
         .layer(DefaultBodyLimit::max(1024 * 1024)); // 1 MB for JSON API
 
     #[allow(unused_mut)]
@@ -428,8 +465,32 @@ async fn chat_completions(
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         let rx = match provider.infer_stream(inference_req).await {
-            Ok(rx) => rx,
+            Ok(rx) => {
+                // Record audit event for streaming request
+                if let Some(ref audit) = state.audit {
+                    audit.record(
+                        "inference.request",
+                        "info",
+                        &format!("Streaming inference started for model {}", model),
+                        Some(&route.provider.to_string()),
+                        Some(&model),
+                        None,
+                    );
+                }
+                rx
+            }
             Err(e) => {
+                // Record audit event for streaming error
+                if let Some(ref audit) = state.audit {
+                    audit.record(
+                        "inference.error",
+                        "error",
+                        &format!("Streaming inference error: {e}"),
+                        Some(&route.provider.to_string()),
+                        Some(&model),
+                        None,
+                    );
+                }
                 // Release reservation on error
                 let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
                 budget.report(&pool_name, estimated_tokens, 0);
@@ -505,11 +566,41 @@ async fn chat_completions(
     // Non-streaming
     match provider.infer(&inference_req).await {
         Ok(result) => {
+            // Report latency for routing decisions
+            state
+                .router
+                .report_latency(route.provider, &route.base_url, result.latency_ms);
+
             // Report actual usage to budget
             let actual = result.usage.total_tokens as u64;
             {
                 let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
                 budget.report(&pool_name, estimated_tokens, actual);
+            }
+
+            // Track cost
+            let cost = state.cost_tracker.record(
+                route.provider,
+                &route.base_url,
+                &result.model,
+                &result.usage,
+            );
+            tracing::debug!(cost_usd = cost, model = %result.model, "request cost");
+
+            // Record audit event for successful inference
+            if let Some(ref audit) = state.audit {
+                audit.record(
+                    "inference.response",
+                    "info",
+                    &format!("Inference completed for model {}", result.model),
+                    Some(&route.provider.to_string()),
+                    Some(&result.model),
+                    Some(serde_json::json!({
+                        "prompt_tokens": result.usage.prompt_tokens,
+                        "completion_tokens": result.usage.completion_tokens,
+                        "total_tokens": result.usage.total_tokens,
+                    })),
+                );
             }
 
             let resp = ChatCompletionResponse {
@@ -534,6 +625,18 @@ async fn chat_completions(
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(e) => {
+            // Record audit event for inference error
+            if let Some(ref audit) = state.audit {
+                audit.record(
+                    "inference.error",
+                    "error",
+                    &format!("Inference error: {e}"),
+                    Some(&route.provider.to_string()),
+                    Some(&req.model),
+                    None,
+                );
+            }
+
             // Release reservation on error
             let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
             budget.report(&pool_name, estimated_tokens, 0);
@@ -782,6 +885,63 @@ async fn tokens_pools(State(state): State<Arc<AppState>>) -> Json<Vec<TokenPool>
 }
 
 // ---------------------------------------------------------------------------
+// Cost tracking: /v1/costs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct CostsResponse {
+    records: Vec<crate::cost::ProviderCostRecord>,
+    total_cost_usd: f64,
+}
+
+async fn costs_get(State(state): State<Arc<AppState>>) -> Json<CostsResponse> {
+    Json(CostsResponse {
+        records: state.cost_tracker.all(),
+        total_cost_usd: state.cost_tracker.total_cost(),
+    })
+}
+
+async fn costs_reset(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    state.cost_tracker.reset();
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+// ---------------------------------------------------------------------------
+// Audit log: /v1/audit
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct AuditResponse {
+    entries: Vec<crate::audit::AuditEntry>,
+    total: usize,
+    chain_valid: bool,
+}
+
+async fn audit_log(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.audit {
+        Some(audit) => {
+            let entries = audit.recent(100);
+            let total = audit.count();
+            let (chain_valid, _) = audit.verify();
+            (
+                StatusCode::OK,
+                Json(AuditResponse {
+                    entries,
+                    total,
+                    chain_valid,
+                }),
+            )
+                .into_response()
+        }
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "Audit logging is not enabled. Set [audit] enabled = true in config.",
+        )
+        .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Speech-to-text: /v1/audio/transcriptions (OpenAI-compatible)
 // ---------------------------------------------------------------------------
 
@@ -901,6 +1061,47 @@ async fn text_to_speech(
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("TTS synthesis error: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embeddings: /v1/embeddings (OpenAI-compatible)
+// ---------------------------------------------------------------------------
+
+async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::inference::EmbeddingsRequest>,
+) -> impl IntoResponse {
+    // Find a route for this model
+    let route = match state.router.select(&req.model) {
+        Some(r) => r,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                format!("No provider configured for model '{}'", req.model),
+            )
+            .into_response();
+        }
+    };
+
+    let provider = match state.providers.get(route.provider, &route.base_url) {
+        Some(p) => p,
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Provider '{}' not available", route.provider),
+            )
+            .into_response();
+        }
+    };
+
+    match provider.embeddings(&req).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Embeddings error: {e}"),
         )
         .into_response(),
     }

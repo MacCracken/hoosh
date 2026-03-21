@@ -73,6 +73,12 @@ toml = "0.8"
 # Caching
 dashmap = "6"
 
+# Audit logging
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
 # Hardware detection
 ai-hwaccel = { version = "0.21.3", optional = true, default-features = false, features = ["vulkan", "rocm", "cuda"] }
 

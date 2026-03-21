@@ -150,6 +150,45 @@ pub struct SpeechResponse {
     pub duration_secs: f64,
 }
 
+/// Embeddings request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingsRequest {
+    /// Model to use for embeddings.
+    pub model: String,
+    /// Input text(s) to embed.
+    pub input: EmbeddingsInput,
+}
+
+/// Input for embeddings — single string or array of strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingsInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+/// Embeddings response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingsResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingsUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingData {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingsUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +237,48 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let back: InferenceResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn embeddings_input_single_serde() {
+        let input = EmbeddingsInput::Single("hello world".into());
+        let json = serde_json::to_string(&input).unwrap();
+        assert_eq!(json, "\"hello world\"");
+        let back: EmbeddingsInput = serde_json::from_str(&json).unwrap();
+        match back {
+            EmbeddingsInput::Single(s) => assert_eq!(s, "hello world"),
+            _ => panic!("expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn embeddings_input_multiple_serde() {
+        let input = EmbeddingsInput::Multiple(vec!["a".into(), "b".into()]);
+        let json = serde_json::to_string(&input).unwrap();
+        let back: EmbeddingsInput = serde_json::from_str(&json).unwrap();
+        match back {
+            EmbeddingsInput::Multiple(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], "a");
+                assert_eq!(v[1], "b");
+            }
+            _ => panic!("expected Multiple variant"),
+        }
+    }
+
+    #[test]
+    fn embeddings_request_roundtrip() {
+        let req = EmbeddingsRequest {
+            model: "text-embedding-ada-002".into(),
+            input: EmbeddingsInput::Single("test input".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: EmbeddingsRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model, "text-embedding-ada-002");
+        match back.input {
+            EmbeddingsInput::Single(s) => assert_eq!(s, "test input"),
+            _ => panic!("expected Single variant"),
+        }
     }
 
     #[test]

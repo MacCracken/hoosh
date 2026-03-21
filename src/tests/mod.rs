@@ -1015,6 +1015,8 @@ mod server_wiring {
             cache: ResponseCache::new(CacheConfig::default()),
             budget: std::sync::Mutex::new(TokenBudget::new()),
             providers,
+            cost_tracker: std::sync::Arc::new(crate::cost::CostTracker::new()),
+            audit: None,
             #[cfg(feature = "whisper")]
             whisper: None,
             #[cfg(feature = "piper")]
@@ -1239,6 +1241,9 @@ mod e2e {
             ],
             whisper_model: None,
             tts_model: None,
+            audit_enabled: false,
+            audit_signing_key: None,
+            audit_max_entries: 10_000,
         };
 
         let app = crate::server::build_app(config);
@@ -1310,6 +1315,9 @@ mod e2e {
             budget_pools: vec![TokenPool::new("default", u64::MAX)],
             whisper_model: None,
             tts_model: None,
+            audit_enabled: false,
+            audit_signing_key: None,
+            audit_max_entries: 10_000,
         };
 
         let app = crate::server::build_app(config);
@@ -1605,6 +1613,9 @@ mod e2e {
             budget_pools: vec![TokenPool::new("default", 10_000_000)],
             whisper_model: None,
             tts_model: None,
+            audit_enabled: false,
+            audit_signing_key: None,
+            audit_max_entries: 10_000,
         };
         let app = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -66,6 +66,14 @@ pub trait LlmProvider: Send + Sync {
     /// Check if the provider is healthy / reachable.
     async fn health_check(&self) -> anyhow::Result<bool>;
 
+    /// Generate embeddings for input text. Not all providers support this.
+    async fn embeddings(
+        &self,
+        _request: &crate::inference::EmbeddingsRequest,
+    ) -> anyhow::Result<crate::inference::EmbeddingsResponse> {
+        Err(anyhow::anyhow!("embeddings not supported by this provider"))
+    }
+
     /// Provider type identifier.
     fn provider_type(&self) -> ProviderType;
 }

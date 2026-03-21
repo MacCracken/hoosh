@@ -28,6 +28,8 @@ pub struct HooshConfig {
     pub whisper: WhisperSection,
     #[serde(default)]
     pub tts: TtsSection,
+    #[serde(default)]
+    pub audit: AuditSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -40,6 +42,22 @@ pub struct WhisperSection {
 pub struct TtsSection {
     /// URL of the TTS backend (e.g. "http://localhost:5500" for openedai-speech).
     pub url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuditSection {
+    /// Enable audit logging. Defaults to false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// HMAC signing key. Generated randomly if not set.
+    pub signing_key: Option<String>,
+    /// Max entries to keep in memory. Defaults to 10000.
+    #[serde(default = "default_audit_max")]
+    pub max_entries: usize,
+}
+
+fn default_audit_max() -> usize {
+    10_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +235,7 @@ impl HooshConfig {
                 budgets: Vec::new(),
                 whisper: WhisperSection::default(),
                 tts: TtsSection::default(),
+                audit: AuditSection::default(),
             }
         }
     }
@@ -275,6 +294,9 @@ impl HooshConfig {
             budget_pools,
             whisper_model: self.whisper.model,
             tts_model: self.tts.url,
+            audit_enabled: self.audit.enabled,
+            audit_signing_key: self.audit.signing_key,
+            audit_max_entries: self.audit.max_entries,
         }
     }
 }

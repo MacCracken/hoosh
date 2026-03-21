@@ -41,17 +41,17 @@ All items complete. See CHANGELOG.md for details.
 ### Observability
 - [ ] Prometheus metrics endpoint (`/metrics`)
 - [ ] OpenTelemetry trace propagation
-- [ ] Per-provider cost tracking (token × price) — review secureyeoman for how it implements cost tracking
-- [ ] Request/response audit log — review secureyeoman for how it implements audit logging
+- [x] Per-provider cost tracking (token × price) — ported from secureyeoman's cost-calculator pattern
+- [x] Request/response audit log — HMAC-SHA256 linked chain, ported from secureyeoman's sy-audit pattern
 
 ### Hardware acceleration
-- [ ] Review ai-hwaccel 0.21.x updates for improved integration (new APIs, deprecations, feature flags)
+- [x] Review ai-hwaccel 0.21.x updates for improved integration — no breaking changes; new LazyRegistry, DiskCachedRegistry, cost module available
 
 ### Server improvements
-- [ ] `/v1/embeddings` pass-through
+- [x] `/v1/embeddings` pass-through
 - [ ] Hot-reload config without restart
 - [ ] Periodic health checks with automatic failover
-- [ ] Latency tracking for LowestLatency routing
+- [x] Latency tracking for LowestLatency routing
 
 ---
 
