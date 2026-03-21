@@ -491,12 +491,7 @@ mod tests {
         };
         let result = provider.embeddings(&req).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not supported")
-        );
+        assert!(result.unwrap_err().to_string().contains("not supported"));
     }
 
     #[test]
@@ -546,7 +541,11 @@ mod tests {
     #[test]
     fn registry_get_missing() {
         let registry = ProviderRegistry::new();
-        assert!(registry.get(ProviderType::Ollama, "http://localhost:11434").is_none());
+        assert!(
+            registry
+                .get(ProviderType::Ollama, "http://localhost:11434")
+                .is_none()
+        );
     }
 
     #[test]

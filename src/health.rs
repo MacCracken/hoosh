@@ -205,7 +205,11 @@ mod tests {
     }
 
     /// Helper: create a health map and event bus for handle_check_failure tests.
-    fn setup_failure_test() -> (HealthMap, std::sync::Arc<crate::events::EventBus>, (ProviderType, String)) {
+    fn setup_failure_test() -> (
+        HealthMap,
+        std::sync::Arc<crate::events::EventBus>,
+        (ProviderType, String),
+    ) {
         let map = new_health_map();
         let bus = std::sync::Arc::new(crate::events::new_event_bus());
         let key = (ProviderType::Ollama, "http://localhost:11434".to_string());
@@ -229,12 +233,15 @@ mod tests {
         let (map, bus, key) = setup_failure_test();
 
         // Simulate first failure already recorded
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 1,
-            last_error: Some("first".into()),
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 1,
+                last_error: Some("first".into()),
+            },
+        );
 
         handle_check_failure(&map, &bus, &key, true, "second".into());
 
@@ -248,12 +255,15 @@ mod tests {
         let (map, bus, key) = setup_failure_test();
 
         // Pre-seed with 2 consecutive failures (still healthy)
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 2,
-            last_error: Some("prev".into()),
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 2,
+                last_error: Some("prev".into()),
+            },
+        );
 
         handle_check_failure(&map, &bus, &key, true, "third strike".into());
 
@@ -269,19 +279,28 @@ mod tests {
         let mut rx = bus.subscribe(crate::events::topics::HEALTH);
 
         // Pre-seed at threshold - 1 failures
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: UNHEALTHY_THRESHOLD - 1,
-            last_error: None,
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: UNHEALTHY_THRESHOLD - 1,
+                last_error: None,
+            },
+        );
 
         // This call should transition healthy -> unhealthy and publish an event
         handle_check_failure(&map, &bus, &key, true, "fatal".into());
 
-        let msg = rx.try_recv().expect("expected a HealthChanged event to be published");
+        let msg = rx
+            .try_recv()
+            .expect("expected a HealthChanged event to be published");
         match msg.payload {
-            crate::events::ProviderEvent::HealthChanged { provider, base_url, healthy } => {
+            crate::events::ProviderEvent::HealthChanged {
+                provider,
+                base_url,
+                healthy,
+            } => {
                 assert_eq!(provider, "ollama");
                 assert_eq!(base_url, "http://localhost:11434");
                 assert!(!healthy);
@@ -296,12 +315,15 @@ mod tests {
         let mut rx = bus.subscribe(crate::events::topics::HEALTH);
 
         // Pre-seed as already unhealthy
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: false,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 5,
-            last_error: Some("old".into()),
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: false,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 5,
+                last_error: Some("old".into()),
+            },
+        );
 
         // was_healthy = false, so no transition event should fire
         handle_check_failure(&map, &bus, &key, false, "still broken".into());
@@ -318,7 +340,10 @@ mod tests {
 
     #[test]
     fn unhealthy_threshold_constant_is_three() {
-        assert_eq!(UNHEALTHY_THRESHOLD, 3, "threshold should be 3 consecutive failures");
+        assert_eq!(
+            UNHEALTHY_THRESHOLD, 3,
+            "threshold should be 3 consecutive failures"
+        );
     }
 
     #[test]
@@ -350,12 +375,15 @@ mod tests {
         assert_eq!(map.get(&key).unwrap().consecutive_failures, 3);
 
         // Simulate recovery (what spawn_health_checker does on Ok(true))
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 0,
-            last_error: None,
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 0,
+                last_error: None,
+            },
+        );
         assert!(map.get(&key).unwrap().is_healthy);
         assert_eq!(map.get(&key).unwrap().consecutive_failures, 0);
 
@@ -382,8 +410,14 @@ mod tests {
         // Fail provider B once
         handle_check_failure(&map, &bus, &key_b, true, "err".into());
 
-        assert!(!map.get(&key_a).unwrap().is_healthy, "A should be unhealthy");
-        assert!(map.get(&key_b).unwrap().is_healthy, "B should still be healthy");
+        assert!(
+            !map.get(&key_a).unwrap().is_healthy,
+            "A should be unhealthy"
+        );
+        assert!(
+            map.get(&key_b).unwrap().is_healthy,
+            "B should still be healthy"
+        );
         assert_eq!(map.get(&key_a).unwrap().consecutive_failures, 3);
         assert_eq!(map.get(&key_b).unwrap().consecutive_failures, 1);
     }
@@ -393,12 +427,15 @@ mod tests {
         let (map, bus, key) = setup_failure_test();
 
         // Pre-seed at 3 failures (already unhealthy)
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: false,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 3,
-            last_error: Some("third".into()),
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: false,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 3,
+                last_error: Some("third".into()),
+            },
+        );
 
         handle_check_failure(&map, &bus, &key, false, "fourth strike".into());
 
@@ -413,10 +450,16 @@ mod tests {
         let (map, bus, key) = setup_failure_test();
 
         handle_check_failure(&map, &bus, &key, true, "timeout after 5s".into());
-        assert_eq!(map.get(&key).unwrap().last_error.as_deref(), Some("timeout after 5s"));
+        assert_eq!(
+            map.get(&key).unwrap().last_error.as_deref(),
+            Some("timeout after 5s")
+        );
 
         handle_check_failure(&map, &bus, &key, true, "connection refused".into());
-        assert_eq!(map.get(&key).unwrap().last_error.as_deref(), Some("connection refused"));
+        assert_eq!(
+            map.get(&key).unwrap().last_error.as_deref(),
+            Some("connection refused")
+        );
     }
 
     #[test]
@@ -427,12 +470,15 @@ mod tests {
         let key3 = (ProviderType::OpenAi, "https://api.openai.com".to_string());
 
         for key in [&key1, &key2, &key3] {
-            map.insert(key.clone(), ProviderHealthState {
-                is_healthy: true,
-                last_check: std::time::Instant::now(),
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            map.insert(
+                key.clone(),
+                ProviderHealthState {
+                    is_healthy: true,
+                    last_check: std::time::Instant::now(),
+                    consecutive_failures: 0,
+                    last_error: None,
+                },
+            );
         }
         assert_eq!(map.len(), 3);
 
@@ -448,20 +494,26 @@ mod tests {
         let map = new_health_map();
         let key = (ProviderType::Ollama, "http://localhost:11434".to_string());
 
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 0,
-            last_error: None,
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 0,
+                last_error: None,
+            },
+        );
         assert!(map.get(&key).unwrap().is_healthy);
 
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: false,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 5,
-            last_error: Some("down".into()),
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: false,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 5,
+                last_error: Some("down".into()),
+            },
+        );
         assert!(!map.get(&key).unwrap().is_healthy);
         assert_eq!(map.get(&key).unwrap().consecutive_failures, 5);
         assert_eq!(map.len(), 1);
@@ -491,12 +543,15 @@ mod tests {
         let (map, bus, key) = setup_failure_test();
 
         // Seed with UNHEALTHY_THRESHOLD - 2 failures
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: UNHEALTHY_THRESHOLD - 2,
-            last_error: None,
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: UNHEALTHY_THRESHOLD - 2,
+                last_error: None,
+            },
+        );
 
         // This brings to UNHEALTHY_THRESHOLD - 1 => still healthy
         handle_check_failure(&map, &bus, &key, true, "still ok".into());
@@ -558,12 +613,15 @@ mod tests {
         assert!(!map.get(&key).unwrap().is_healthy);
 
         // Recovery
-        map.insert(key.clone(), ProviderHealthState {
-            is_healthy: true,
-            last_check: std::time::Instant::now(),
-            consecutive_failures: 0,
-            last_error: None,
-        });
+        map.insert(
+            key.clone(),
+            ProviderHealthState {
+                is_healthy: true,
+                last_check: std::time::Instant::now(),
+                consecutive_failures: 0,
+                last_error: None,
+            },
+        );
 
         // Cycle 2: fail to unhealthy again
         for _ in 0..UNHEALTHY_THRESHOLD {
@@ -571,6 +629,9 @@ mod tests {
             handle_check_failure(&map, &bus, &key, was, "fail again".into());
         }
         assert!(!map.get(&key).unwrap().is_healthy);
-        assert_eq!(map.get(&key).unwrap().consecutive_failures, UNHEALTHY_THRESHOLD);
+        assert_eq!(
+            map.get(&key).unwrap().consecutive_failures,
+            UNHEALTHY_THRESHOLD
+        );
     }
 }

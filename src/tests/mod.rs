@@ -557,7 +557,8 @@ mod mock_server {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({"error": "model not found"})),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
 
                 let stream = body["stream"].as_bool().unwrap_or(false);
@@ -574,7 +575,8 @@ mod mock_server {
                         "message": {"role": "assistant", "content": "Full mock reply"},
                         "eval_count": 15,
                         "prompt_eval_count": 20
-                    })).into_response()
+                    }))
+                    .into_response()
                 }
             }
 
@@ -588,9 +590,7 @@ mod mock_server {
                 }))
             }
 
-            async fn mock_embed(
-                Json(body): Json<serde_json::Value>,
-            ) -> Json<serde_json::Value> {
+            async fn mock_embed(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
                 let model = body["model"].as_str().unwrap_or("nomic-embed");
                 Json(json!({
                     "model": model,
@@ -643,10 +643,22 @@ mod mock_server {
             let req = InferenceRequest {
                 model: "llama3".into(),
                 messages: vec![
-                    Message { role: Role::System, content: "Be brief.".into() },
-                    Message { role: Role::User, content: "Hi".into() },
-                    Message { role: Role::Assistant, content: "Hello!".into() },
-                    Message { role: Role::User, content: "How?".into() },
+                    Message {
+                        role: Role::System,
+                        content: "Be brief.".into(),
+                    },
+                    Message {
+                        role: Role::User,
+                        content: "Hi".into(),
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: "Hello!".into(),
+                    },
+                    Message {
+                        role: Role::User,
+                        content: "How?".into(),
+                    },
                 ],
                 ..Default::default()
             };
@@ -1027,8 +1039,14 @@ mod mock_server {
         let req = InferenceRequest {
             model: "synapse-model".into(),
             messages: vec![
-                Message { role: Role::System, content: "Be concise.".into() },
-                Message { role: Role::User, content: "Hello".into() },
+                Message {
+                    role: Role::System,
+                    content: "Be concise.".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "Hello".into(),
+                },
             ],
             temperature: Some(0.5),
             max_tokens: Some(100),
@@ -2134,10 +2152,7 @@ mod e2e {
 
         let client = reqwest::Client::new();
         let resp = client
-            .post(format!(
-                "http://127.0.0.1:{}/v1/embeddings",
-                addr.port()
-            ))
+            .post(format!("http://127.0.0.1:{}/v1/embeddings", addr.port()))
             .json(&json!({
                 "model": "no-such-embed-model",
                 "input": "hello"
@@ -2168,19 +2183,18 @@ mod e2e {
 
         let client = reqwest::Client::new();
         let resp = client
-            .post(format!(
-                "http://127.0.0.1:{}/v1/admin/reload",
-                addr.port()
-            ))
+            .post(format!("http://127.0.0.1:{}/v1/admin/reload", addr.port()))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 400);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("no config path"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no config path")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2197,10 +2211,7 @@ mod e2e {
 
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!(
-                "http://127.0.0.1:{}/v1/queue/status",
-                addr.port()
-            ))
+            .get(format!("http://127.0.0.1:{}/v1/queue/status", addr.port()))
             .send()
             .await
             .unwrap();
@@ -2243,10 +2254,7 @@ mod e2e {
 
         let client = reqwest::Client::new();
         let resp = client
-            .post(format!(
-                "http://127.0.0.1:{}/v1/costs/reset",
-                addr.port()
-            ))
+            .post(format!("http://127.0.0.1:{}/v1/costs/reset", addr.port()))
             .send()
             .await
             .unwrap();
@@ -2433,10 +2441,12 @@ mod e2e {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 429);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Rate limit"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Rate limit")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2462,10 +2472,12 @@ mod e2e {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 400);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("does not exist"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not exist")
+        );
     }
 
     #[cfg(feature = "llamacpp")]
@@ -2522,11 +2534,7 @@ mod e2e {
         assert_eq!(resp.status().as_u16(), 200);
 
         // Verify the audit log now has an entry
-        let resp = client
-            .get(format!("{url}/v1/audit"))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(format!("{url}/v1/audit")).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert!(body["total"].as_u64().unwrap() >= 1);
@@ -2579,10 +2587,7 @@ mod e2e {
             body.contains("chat.completion.chunk"),
             "SSE body should contain chunk objects"
         );
-        assert!(
-            body.contains("[DONE]"),
-            "SSE body should end with [DONE]"
-        );
+        assert!(body.contains("[DONE]"), "SSE body should end with [DONE]");
         assert!(
             body.contains("\"finish_reason\":\"stop\""),
             "SSE body should contain finish_reason stop"
@@ -2735,9 +2740,16 @@ mod e2e {
             tokens.push(token);
         }
 
-        assert!(tokens.len() >= 2, "should receive multiple tokens, got {}", tokens.len());
+        assert!(
+            tokens.len() >= 2,
+            "should receive multiple tokens, got {}",
+            tokens.len()
+        );
         let full = tokens.join("");
-        assert_eq!(full, "Hello world!", "concatenated streaming tokens should match");
+        assert_eq!(
+            full, "Hello world!",
+            "concatenated streaming tokens should match"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2760,9 +2772,7 @@ mod e2e {
                 "models": [{"name": "mock-embed-model", "size": 1000000000_i64}]
             }))
         }
-        async fn ollama_embed(
-            Json(body): Json<serde_json::Value>,
-        ) -> Json<serde_json::Value> {
+        async fn ollama_embed(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             let model = body["model"].as_str().unwrap_or("mock-embed-model");
             Json(json!({
                 "embeddings": [[0.1, 0.2, 0.3]],
@@ -2808,9 +2818,7 @@ mod e2e {
                 enabled: false,
                 ..CacheConfig::default()
             },
-            budget_pools: vec![
-                crate::budget::TokenPool::new("default", 100_000),
-            ],
+            budget_pools: vec![crate::budget::TokenPool::new("default", 100_000)],
             ..ServerConfig::default()
         };
 
@@ -2873,9 +2881,7 @@ mod e2e {
                 enabled: false,
                 ..CacheConfig::default()
             },
-            budget_pools: vec![
-                crate::budget::TokenPool::new("default", 100_000),
-            ],
+            budget_pools: vec![crate::budget::TokenPool::new("default", 100_000)],
             whisper_model: None,
             tts_model: None,
             audit_enabled: true,
@@ -2942,7 +2948,9 @@ mod e2e {
         assert_eq!(resp.status().as_u16(), 200);
         let metrics_body = resp.text().await.unwrap();
         assert!(
-            metrics_body.contains("hoosh") || metrics_body.contains("# ") || metrics_body.is_empty(),
+            metrics_body.contains("hoosh")
+                || metrics_body.contains("# ")
+                || metrics_body.is_empty(),
             "metrics should be prometheus format"
         );
     }
@@ -2975,9 +2983,7 @@ mod e2e {
                 enabled: false,
                 ..CacheConfig::default()
             },
-            budget_pools: vec![
-                crate::budget::TokenPool::new("default", 100_000),
-            ],
+            budget_pools: vec![crate::budget::TokenPool::new("default", 100_000)],
             auth_tokens: vec!["correct-token-123".into()],
             ..ServerConfig::default()
         };
@@ -3001,7 +3007,11 @@ mod e2e {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 401, "missing token should return 401");
+        assert_eq!(
+            resp.status().as_u16(),
+            401,
+            "missing token should return 401"
+        );
 
         // Request with wrong token returns 401
         let resp = client
@@ -3021,7 +3031,11 @@ mod e2e {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 200, "correct token should return 200");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "correct token should return 200"
+        );
 
         // Verify the response body is valid
         let resp_body: serde_json::Value = resp.json().await.unwrap();
@@ -3073,9 +3087,7 @@ mod e2e {
                 enabled: false,
                 ..CacheConfig::default()
             },
-            budget_pools: vec![
-                crate::budget::TokenPool::new("default", 100_000),
-            ],
+            budget_pools: vec![crate::budget::TokenPool::new("default", 100_000)],
             // Run health checks every 1 second to speed up the test
             health_check_interval_secs: 1,
             ..ServerConfig::default()
@@ -3110,8 +3122,7 @@ mod e2e {
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(
-            body["choices"][0]["message"]["content"],
-            "E2E mock response",
+            body["choices"][0]["message"]["content"], "E2E mock response",
             "response should come from the working mock backend"
         );
     }
@@ -3124,9 +3135,7 @@ mod e2e {
     #[tokio::test]
     async fn e2e_ollama_native_flow() {
         // Start a mock Ollama backend with native /api/chat and /api/tags
-        async fn mock_ollama_chat(
-            Json(body): Json<serde_json::Value>,
-        ) -> Json<serde_json::Value> {
+        async fn mock_ollama_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             let _model = body["model"].as_str().unwrap_or("llama3:latest");
             Json(json!({
                 "message": {"role": "assistant", "content": "Ollama mock response"},
@@ -3174,9 +3183,7 @@ mod e2e {
                 enabled: false,
                 ..CacheConfig::default()
             },
-            budget_pools: vec![
-                crate::budget::TokenPool::new("default", 100_000),
-            ],
+            budget_pools: vec![crate::budget::TokenPool::new("default", 100_000)],
             ..ServerConfig::default()
         };
 

@@ -518,7 +518,10 @@ mod tests {
         let json = r#"{"model": "nomic-embed"}"#;
         let raw: serde_json::Value = serde_json::from_str(json).unwrap();
         let result = raw["embeddings"].as_array();
-        assert!(result.is_none(), "missing embeddings field should yield None");
+        assert!(
+            result.is_none(),
+            "missing embeddings field should yield None"
+        );
     }
 
     #[test]
