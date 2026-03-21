@@ -20,12 +20,21 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | Capability | Details |
 |------------|---------|
 | **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
-| **OpenAI-compatible API** | `/v1/chat/completions` drop-in replacement with streaming SSE |
-| **Provider routing** | Priority, round-robin, lowest-latency, direct — with model pattern matching |
+| **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` — streaming SSE |
+| **Provider routing** | Priority, round-robin, lowest-latency (EMA), direct — with model pattern matching |
+| **Authentication** | Bearer token auth middleware with constant-time comparison |
+| **Rate limiting** | Per-provider sliding window RPM limits |
 | **Token budgets** | Per-agent named pools with reserve/commit/release lifecycle |
+| **Cost tracking** | Per-provider/model cost accumulation with static pricing table |
+| **Observability** | Prometheus `/metrics`, OpenTelemetry (feature-gated), cryptographic audit log |
+| **Health checks** | Background periodic checks, automatic failover, heartbeat tracking (majra) |
 | **Response caching** | Thread-safe DashMap cache with TTL eviction |
-| **Speech-to-text** | whisper.cpp bindings for local transcription (feature-gated) |
-| **Hardware-aware** | ai-hwaccel detects GPUs/TPUs for model placement decisions |
+| **Request queuing** | Priority queue for inference requests (majra) |
+| **Event bus** | Pub/sub for provider health changes, inference events (majra) |
+| **Hot-reload** | SIGHUP or `POST /v1/admin/reload` — no restart required |
+| **TLS security** | Certificate pinning for remote providers, mTLS for local |
+| **Speech** | whisper.cpp STT + TTS via HTTP backend (feature-gated) |
+| **Hardware-aware** | ai-hwaccel detects GPUs/TPUs/NPUs for model placement |
 | **Local-first** | Prefers on-device inference; remote APIs as fallback |
 
 ---
@@ -36,14 +45,19 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 Clients (tarang, daimon, agnoshi, consumer apps)
     │
     ▼
-Router (provider selection, load balancing, fallback)
-    │
-    ├──▶ Local backends (Ollama, llama.cpp, Synapse, whisper.cpp)
-    │
-    └──▶ Remote APIs (OpenAI, Anthropic, DeepSeek, Mistral, Groq, ...)
-          │
-          ▼
-    Cache ◀── Rate Limiter ◀── Token Budget
+Auth ──▶ Rate Limiter ──▶ Router (priority, round-robin, lowest-latency)
+                              │
+    ┌─────────────────────────┤
+    │                         │
+    ▼                         ▼
+Local backends            Remote APIs (TLS pinned / mTLS)
+(Ollama, llama.cpp, …)   (OpenAI, Anthropic, DeepSeek, …)
+    │                         │
+    └────────┬────────────────┘
+             ▼
+    Cache ◀── Budget ◀── Cost Tracker
+             │
+    Metrics ◀── Audit Log ◀── Event Bus (majra)
 ```
 
 See [docs/architecture/overview.md](docs/architecture/overview.md) for the full architecture document.
@@ -56,7 +70,7 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for the full 
 
 ```toml
 [dependencies]
-hoosh = "0.20"
+hoosh = "0.21"
 ```
 
 ```rust
@@ -112,17 +126,21 @@ curl http://localhost:8088/v1/chat/completions \
 |---------|---------|---------|
 | `ollama` | Ollama REST API | yes |
 | `llamacpp` | llama.cpp server | yes |
+| `synapse` | Synapse server | yes |
+| `lmstudio` | LM Studio API | yes |
+| `localai` | LocalAI API | yes |
 | `openai` | OpenAI API | yes |
 | `anthropic` | Anthropic Messages API | yes |
 | `deepseek` | DeepSeek API | yes |
 | `mistral` | Mistral API | yes |
 | `groq` | Groq API | yes |
 | `openrouter` | OpenRouter API | yes |
-| `lmstudio` | LM Studio API | yes |
-| `localai` | LocalAI API | yes |
+| `grok` | xAI Grok API | yes |
 | `whisper` | whisper.cpp STT | no |
+| `piper` | Piper TTS | no |
 | `hwaccel` | ai-hwaccel hardware detection | yes |
-| `all-providers` | All of the above (except whisper) | yes |
+| `otel` | OpenTelemetry tracing | no |
+| `all-providers` | All LLM providers | yes |
 
 ```toml
 # Minimal: just Ollama + llama.cpp for local inference
@@ -177,13 +195,10 @@ let routes = vec![
         model_patterns: vec!["llama*".into(), "mistral*".into()],
         enabled: true,
         base_url: "http://localhost:11434".into(),
-    },
-    ProviderRoute {
-        provider: ProviderType::OpenAi,
-        priority: 2,
-        model_patterns: vec!["gpt-*".into()],
-        enabled: true,
-        base_url: "https://api.openai.com".into(),
+        api_key: None,
+        max_tokens_limit: None,
+        rate_limit_rpm: None,
+        tls_config: None,
     },
 ];
 let router = Router::new(routes, RoutingStrategy::Priority);
@@ -214,9 +229,12 @@ budget.report("agent-123", 2000, 1847);
 | Crate | Role |
 |-------|------|
 | [ai-hwaccel](https://crates.io/crates/ai-hwaccel) | Hardware detection for model placement |
+| [majra](https://crates.io/crates/majra) | Priority queues, pub/sub events, heartbeat tracking |
 | [axum](https://crates.io/crates/axum) | HTTP server |
-| [reqwest](https://crates.io/crates/reqwest) | HTTP client for remote providers |
-| [dashmap](https://crates.io/crates/dashmap) | Thread-safe response cache |
+| [reqwest](https://crates.io/crates/reqwest) | HTTP client for remote providers (rustls-tls) |
+| [prometheus](https://crates.io/crates/prometheus) | Metrics endpoint |
+| [dashmap](https://crates.io/crates/dashmap) | Thread-safe caches and registries |
+| [hmac](https://crates.io/crates/hmac) + [sha2](https://crates.io/crates/sha2) | Audit chain cryptography |
 | [whisper-rs](https://crates.io/crates/whisper-rs) | whisper.cpp Rust bindings (optional) |
 | [tokio](https://crates.io/crates/tokio) | Async runtime |
 
@@ -237,14 +255,13 @@ budget.report("agent-123", 2000, 1847);
 
 ## Roadmap
 
-| Version | Milestone | Key features |
-|---------|-----------|--------------|
-| **0.20.3** | Core gateway + local backends | Inference types, provider trait, routing, caching, token budgets, HTTP client, axum server, Ollama, llama.cpp, Synapse, LM Studio, LocalAI, hardware-aware placement |
-| **0.21.3** | Remote backends | OpenAI, Anthropic, DeepSeek, Mistral, Groq, Google, health monitoring |
-| **0.22.3** | Speech-to-text | whisper.cpp integration, transcription API, tarang integration |
-| **0.23.3** | Config & hardening | TOML config, hot-reload, embeddings pass-through, auth, rate limiting |
-| **0.24.3** | Advanced | Semantic cache, cost tracking, Prometheus metrics, TLS pinning |
-| **1.0.0** | Stable API | Frozen traits, 90%+ coverage, conformance tests, semver-checks |
+| Version | Milestone | Status |
+|---------|-----------|--------|
+| **0.20.3** | Core gateway + providers | Done |
+| **0.21.5** | Auth, observability, messaging | Done |
+| **0.22.3** | Tool use, context management, privacy routing | Next |
+| **0.23.3** | Speech & audio improvements | Planned |
+| **1.0.0** | Stable API, 90%+ coverage | Target |
 
 Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
 

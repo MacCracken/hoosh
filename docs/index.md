@@ -17,6 +17,9 @@
 ## Decisions
 
 - [ADR-001: HTTP Gateway Design](decisions/001-http-gateway.md) — why hoosh is an HTTP server, not a library
+- [ADR-002: Cryptographic Audit Chain](decisions/002-cryptographic-audit-chain.md) — HMAC-SHA256 linked chain for tamper-proof logging
+- [ADR-003: Majra Messaging](decisions/003-majra-messaging.md) — priority queues, pub/sub events, heartbeat tracking
+- [ADR-004: Auth and Security](decisions/004-auth-and-security.md) — bearer tokens, rate limiting, TLS pinning, secret management
 
 ## Reference
 

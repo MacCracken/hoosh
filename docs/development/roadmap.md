@@ -12,7 +12,7 @@ All items complete. See CHANGELOG.md for details.
 
 ---
 
-## v0.21.4 — Server Hardening, Observability & Messaging ✅
+## v0.21.5 — Server Hardening, Observability & Messaging ✅
 
 All items complete. See CHANGELOG.md for details.
 
@@ -20,18 +20,32 @@ All items complete. See CHANGELOG.md for details.
 
 ## v0.22.3 — Advanced Inference
 
+### Tool use & function calling
+- [ ] Unified `ToolCall` abstraction mapping Anthropic/OpenAI/Gemini/Ollama tool formats — extract from secureyeoman's provider implementations
+- [ ] Streaming tool call assembly (incremental delta → complete ToolCall)
+- [ ] Tool result message type for multi-turn tool use
+
+### Context management
+- [ ] Model registry with detailed metadata — context windows (60+ models), capability flags (chat/vision/reasoning/tool_use/code/streaming), performance tiers, cost tiers, extended thinking support — port from secureyeoman's `model-registry.ts`
+- [ ] Context compactor — proactive 80% threshold check + conversation summarization before API call, preserving recent turns — port from secureyeoman's `context-compactor.ts`
+- [ ] Token counting per provider (tiktoken for OpenAI, Anthropic tokenizer, etc.)
+
 ### Caching improvements
-- [ ] Semantic cache (embedding similarity, not just exact match)
+- [ ] Semantic cache (embedding similarity via cosine distance, configurable threshold) — port pattern from secureyeoman's `semantic-cache.ts`
 - [ ] Cache warming for common prompts
 - [ ] Cache statistics API
 
 ### Provider acceleration
-- [ ] Batch inference (group compatible requests)
-- [ ] Speculative decoding hints
+- [ ] Batch inference manager — concurrent batching with progress tracking, per-prompt timeout, cancellation support — port from secureyeoman's `batch-inference-manager.ts`
+- [ ] Retry manager — jittered exponential backoff, retryable vs permanent error classification, Retry-After header support — port from secureyeoman's `retry-manager.ts`
+- [ ] Cost optimizer — dynamic model selection based on workload complexity (simple→Haiku, complex→Opus), 30-day forecasting — port from secureyeoman's `cost-optimizer.ts`
 - [ ] Prompt compression for long conversations
 
+### Privacy & data classification
+- [ ] DLP classification engine — PII regex scanning (email, SSN, credit card), keyword scanning, custom patterns, 4-level classification (Public/Internal/Confidential/Restricted) — port from secureyeoman's `sy-privacy` crate
+- [ ] Privacy-aware routing — route sensitive content to local models only, GPU-aware model selection, configurable policy (auto/local-preferred/local-only/cloud-only) — port from secureyeoman's `privacy-router.ts`
+
 ### Multi-modal
-- [ ] Tool use / function calling — unified across providers
 - [ ] Vision models — image input support (GPT-4V, Claude, Gemini)
 - [ ] Multi-modal routing — route text/image/audio to appropriate backends
 

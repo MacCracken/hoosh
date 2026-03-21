@@ -5,7 +5,7 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
-## [0.21.4] — 2026-03-21
+## [0.21.5] — 2026-03-21
 
 ### Added
 - **Authentication & security**
@@ -34,7 +34,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - All provider constructors now accept optional `TlsConfig` and use shared `build_provider_client()` utility
 - `Router` uses `RwLock` for hot-reload support; `LowestLatency` uses O(n) min scan instead of sort
 - `StrategyValue` → `RoutingStrategy` conversion uses `From` impl (eliminates duplicate match blocks)
-- `AppState` fields: added `cost_tracker`, `audit`, `auth_tokens`, `rate_limiter`, `event_bus`, `inference_queue`, `health_map`, `heartbeat`, `config_path`
+- `AppState` fields: added `cost_tracker`, `audit`, `auth_token_digests`, `rate_limiter`, `event_bus`, `inference_queue`, `health_map`, `heartbeat`, `config_path`
 - `ServerConfig` extended with audit, auth, telemetry, health check configuration
 - `build_app()` returns `(Router, Arc<AppState>)` for SIGHUP handler access
 
