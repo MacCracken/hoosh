@@ -253,6 +253,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bhava"
+version = "0.23.3"
+dependencies = [
+ "chrono",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "hoosh"
-version = "0.21.5"
+version = "0.22.3"
 dependencies = [
  "ai-hwaccel",
  "anyhow",
@@ -870,6 +879,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.8",
+ "bhava",
  "bytes",
  "chrono",
  "clap",

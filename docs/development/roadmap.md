@@ -60,6 +60,20 @@ All items complete. See CHANGELOG.md for details.
 
 ## v0.23.3 — Speech & Audio
 
+### Cross-platform audio preprocessing
+
+- [ ] **macOS: CoreAudio for STT audio preprocessing** — replace
+  PipeWire-only audio capture with CoreAudio (`AudioQueue` /
+  `AVAudioEngine`) for microphone input on macOS. Required for Whisper
+  transcription on non-Linux hosts.
+- [ ] **Windows: WASAPI for audio preprocessing** — WASAPI loopback and
+  microphone capture via `windows-rs` for STT input on Windows.
+- [ ] **Cross-platform: abstract audio capture behind platform trait** —
+  `AudioCapture` trait with `open_device()`, `read_frames()`,
+  `list_devices()`. Feature-gated backends: `pipewire` (Linux, default),
+  `coreaudio` (macOS), `wasapi` (Windows). Consumers call the same API
+  regardless of platform.
+
 ### Whisper improvements
 - [ ] Model download and management (tiny, base, small, medium, large)
 - [ ] Audio format support beyond WAV: MP3, OGG, FLAC

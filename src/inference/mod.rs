@@ -54,6 +54,47 @@ pub struct InferenceResponse {
     pub latency_ms: u64,
 }
 
+/// Sentiment analysis result for an inference response.
+#[cfg(feature = "sentiment")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentimentAnalysis {
+    /// Overall valence: -1.0 (very negative) to 1.0 (very positive).
+    pub valence: f32,
+    /// Confidence in the classification.
+    pub confidence: f32,
+    /// Whether the overall sentiment is positive.
+    pub is_positive: bool,
+    /// Whether the overall sentiment is negative.
+    pub is_negative: bool,
+}
+
+/// Analyze response text for sentiment (requires `sentiment` feature).
+#[cfg(feature = "sentiment")]
+#[must_use]
+pub fn analyze_response_sentiment(text: &str) -> SentimentAnalysis {
+    let result = bhava::sentiment::analyze(text);
+    SentimentAnalysis {
+        valence: result.valence,
+        confidence: result.confidence,
+        is_positive: result.is_positive(),
+        is_negative: result.is_negative(),
+    }
+}
+
+/// Extension trait for analyzing sentiment on inference responses.
+#[cfg(feature = "sentiment")]
+pub trait ResponseSentiment {
+    /// Analyze the sentiment of this response's text.
+    fn sentiment(&self) -> SentimentAnalysis;
+}
+
+#[cfg(feature = "sentiment")]
+impl ResponseSentiment for InferenceResponse {
+    fn sentiment(&self) -> SentimentAnalysis {
+        analyze_response_sentiment(&self.text)
+    }
+}
+
 /// Token usage breakdown.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {

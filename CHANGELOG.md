@@ -5,6 +5,14 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [0.22.3] — 2026-03-23
+
+### Added
+- `sentiment` feature flag — optional bhava integration for response sentiment analysis
+- `SentimentAnalysis` struct on `InferenceResponse` — valence, confidence, is_positive, is_negative (feature-gated)
+- `analyze_response_sentiment()` — analyze response text for sentiment using bhava's keyword engine
+- bhava 0.22.3 as optional dependency (sentiment analysis with negation, intensity modifiers)
+
 ## [0.21.5] — 2026-03-21
 
 ### Added
