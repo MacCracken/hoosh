@@ -5,7 +5,7 @@
 
 ## Context
 
-Hoosh's v0.22.3 milestone adds tool use / function calling. When LLMs invoke tools, those tools may:
+Hoosh's v0.23.3 milestone adds tool use / function calling. When LLMs invoke tools, those tools may:
 1. Execute arbitrary code (bash, Python scripts)
 2. Access files, network, or credentials
 3. Return output that contains secrets (API keys, tokens, PII)

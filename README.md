@@ -259,8 +259,8 @@ budget.report("agent-123", 2000, 1847);
 |---------|-----------|--------|
 | **0.20.3** | Core gateway + providers | Done |
 | **0.21.5** | Auth, observability, messaging | Done |
-| **0.22.3** | Tool use, context management, privacy routing | Next |
-| **0.23.3** | Speech & audio improvements | Planned |
+| **0.23.3** | Tool use, context management, privacy routing | Next |
+| **0.24.0** | Speech & audio improvements | Planned |
 | **1.0.0** | Stable API, 90%+ coverage | Target |
 
 Full details: [docs/development/roadmap.md](docs/development/roadmap.md)

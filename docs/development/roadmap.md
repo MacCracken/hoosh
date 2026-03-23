@@ -18,7 +18,7 @@ All items complete. See CHANGELOG.md for details.
 
 ---
 
-## v0.22.3 — Advanced Inference
+## v0.23.3 — Advanced Inference
 
 ### Tool use & function calling
 - [ ] Unified `ToolCall` abstraction mapping Anthropic/OpenAI/Gemini/Ollama tool formats — extract from secureyeoman's provider implementations

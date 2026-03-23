@@ -38,7 +38,7 @@ Client → hoosh (inference + tool routing)
 
 ### Integration layers (incremental)
 
-1. **v0.22.3**: Map provider tool formats to bote's `ToolCall`. Register szál tools with bote's registry. Hoosh exposes MCP-compatible `tools/list` and `tools/call` endpoints.
+1. **v0.23.3**: Map provider tool formats to bote's `ToolCall`. Register szál tools with bote's registry. Hoosh exposes MCP-compatible `tools/list` and `tools/call` endpoints.
 
 2. **Post-v1**: Add kavach sandboxing. Tool execution runs inside kavach with externalization gate scanning outputs before they re-enter the inference context.
 

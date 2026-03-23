@@ -1,6 +1,6 @@
 [package]
 name = "hoosh"
-version = "0.22.3"
+version = "0.23.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -93,10 +93,10 @@ hex = "0.4"
 rand = "0.8"
 
 # Personality & emotion engine
-bhava = { path = "../bhava", version = "0.23.3", default-features = false, features = ["sentiment"], optional = true }
+bhava = { version = "0.23.3", default-features = false, features = ["sentiment"], optional = true }
 
 # Hardware detection
-ai-hwaccel = { version = "0.21.3", optional = true, default-features = false, features = ["vulkan", "rocm", "cuda"] }
+ai-hwaccel = { version = "0.23.3", optional = true, default-features = false, features = ["vulkan", "rocm", "cuda"] }
 
 # Speech-to-text
 whisper-rs = { version = "0.16", optional = true }

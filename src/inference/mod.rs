@@ -329,4 +329,199 @@ mod tests {
         let back: Role = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Role::Assistant);
     }
+
+    #[test]
+    fn role_serde_all_variants() {
+        for (role, expected) in [
+            (Role::System, "\"system\""),
+            (Role::User, "\"user\""),
+            (Role::Assistant, "\"assistant\""),
+        ] {
+            let json = serde_json::to_string(&role).unwrap();
+            assert_eq!(json, expected);
+            let back: Role = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, role);
+        }
+    }
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let msg = Message {
+            role: Role::User,
+            content: "What is Rust?".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, Role::User);
+        assert_eq!(back.content, "What is Rust?");
+    }
+
+    #[test]
+    fn speech_request_defaults() {
+        let json = r#"{"input":"hello"}"#;
+        let req: SpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.input, "hello");
+        assert_eq!(req.voice, "default");
+        assert!((req.speed - 1.0).abs() < f32::EPSILON);
+        assert_eq!(req.response_format, "wav");
+    }
+
+    #[test]
+    fn speech_request_custom() {
+        let req = SpeechRequest {
+            input: "hi".into(),
+            voice: "nova".into(),
+            speed: 1.5,
+            response_format: "pcm".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: SpeechRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.voice, "nova");
+        assert!((back.speed - 1.5).abs() < f32::EPSILON);
+        assert_eq!(back.response_format, "pcm");
+    }
+
+    #[test]
+    fn model_info_serde() {
+        let info = ModelInfo {
+            id: "llama3:8b".into(),
+            name: "LLaMA 3 8B".into(),
+            provider: "ollama".into(),
+            parameters: Some(8_000_000_000),
+            context_length: Some(8192),
+            available: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ModelInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "llama3:8b");
+        assert_eq!(back.parameters, Some(8_000_000_000));
+        assert!(back.available);
+    }
+
+    #[test]
+    fn transcription_response_serde() {
+        let resp = TranscriptionResponse {
+            text: "Hello world".into(),
+            language: "en".into(),
+            duration_secs: 2.5,
+            segments: vec![TranscriptionSegment {
+                text: "Hello".into(),
+                start_secs: 0.0,
+                end_secs: 1.0,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: TranscriptionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, "Hello world");
+        assert_eq!(back.segments.len(), 1);
+        assert!((back.duration_secs - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn embeddings_response_serde() {
+        let resp = EmbeddingsResponse {
+            object: "list".into(),
+            data: vec![EmbeddingData {
+                object: "embedding".into(),
+                embedding: vec![0.1, 0.2, 0.3],
+                index: 0,
+            }],
+            model: "text-embedding-ada-002".into(),
+            usage: EmbeddingsUsage {
+                prompt_tokens: 5,
+                total_tokens: 5,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: EmbeddingsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.data.len(), 1);
+        assert_eq!(back.data[0].embedding.len(), 3);
+        assert_eq!(back.usage.prompt_tokens, 5);
+    }
+
+    #[test]
+    fn inference_request_with_messages() {
+        let req = InferenceRequest {
+            model: "gpt-4o".into(),
+            prompt: String::new(),
+            system: Some("You are helpful.".into()),
+            messages: vec![
+                Message {
+                    role: Role::System,
+                    content: "You are helpful.".into(),
+                },
+                Message {
+                    role: Role::User,
+                    content: "Hi".into(),
+                },
+            ],
+            max_tokens: Some(1000),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+            stream: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: InferenceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.messages.len(), 2);
+        assert!(back.stream);
+        assert_eq!(back.system.as_deref(), Some("You are helpful."));
+        assert_eq!(back.top_p, Some(0.9));
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_analysis_positive() {
+        let result = analyze_response_sentiment("This is great and wonderful!");
+        assert!(result.valence > 0.0);
+        assert!(result.is_positive);
+        assert!(!result.is_negative);
+        assert!(result.confidence > 0.0);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_analysis_negative() {
+        let result = analyze_response_sentiment("This is terrible and horrible!");
+        assert!(result.valence < 0.0);
+        assert!(!result.is_positive);
+        assert!(result.is_negative);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_analysis_neutral() {
+        let result = analyze_response_sentiment("The function returns an integer.");
+        // Neutral text should have low absolute valence
+        assert!(result.valence.abs() < 0.5);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn response_sentiment_trait() {
+        let resp = InferenceResponse {
+            text: "I love this answer, it's fantastic!".into(),
+            model: "test".into(),
+            usage: TokenUsage::default(),
+            provider: "test".into(),
+            latency_ms: 0,
+        };
+        let s = resp.sentiment();
+        assert!(s.valence > 0.0);
+        assert!(s.is_positive);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_analysis_serde() {
+        let sa = SentimentAnalysis {
+            valence: 0.8,
+            confidence: 0.9,
+            is_positive: true,
+            is_negative: false,
+        };
+        let json = serde_json::to_string(&sa).unwrap();
+        let back: SentimentAnalysis = serde_json::from_str(&json).unwrap();
+        assert!((back.valence - 0.8).abs() < f32::EPSILON);
+        assert!(back.is_positive);
+    }
 }
