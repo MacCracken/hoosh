@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "hoosh"
-version = "0.23.3"
+version = "0.23.4"
 dependencies = [
  "ai-hwaccel",
  "anyhow",
@@ -2234,9 +2234,9 @@ dependencies = [
 
 [[package]]
 name = "szal"
-version = "0.23.3"
+version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b10b14b85b710881f40dd6dca6af0d940c1148ea702e6e6876ee65264dff115"
+checksum = "6ec40535905026dd1c206e9fa4d43066ac400fdf06bdc53df54cebddc2f365fc"
 dependencies = [
  "anyhow",
  "base64",

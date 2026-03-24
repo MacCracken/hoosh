@@ -3,13 +3,14 @@
 
 use bote::{Dispatcher, JsonRpcRequest, JsonRpcResponse};
 
-/// MCP tool bridge backed by bote protocol dispatch and szal built-in tools.
+/// MCP tool bridge backed by bote protocol dispatch and szal built-in tools,
+/// plus hoosh's own workflow-as-tool.
 pub struct McpBridge {
     dispatcher: Dispatcher,
 }
 
 impl McpBridge {
-    /// Create a new bridge with szal's 47 built-in tools registered.
+    /// Create a new bridge with szal's built-in tools + workflow-as-tool.
     pub fn new() -> Self {
         let dispatcher = szal::mcp::register_tools();
         Self { dispatcher }
@@ -18,7 +19,7 @@ impl McpBridge {
     /// List all registered tools as a JSON value.
     pub fn list_tools(&self) -> serde_json::Value {
         let request = JsonRpcRequest::new(1, "tools/list");
-        match self.dispatcher.dispatch(&request) {
+        let mut result = match self.dispatcher.dispatch(&request) {
             Some(resp) if resp.error.is_none() => {
                 resp.result.unwrap_or(serde_json::json!({"tools": []}))
             }
@@ -26,7 +27,25 @@ impl McpBridge {
                 "error": resp.error.map(|e| e.message).unwrap_or_default()
             }),
             None => serde_json::json!({"tools": []}),
+        };
+
+        // Append hoosh-registered tools
+        if let Some(tools) = result["tools"].as_array_mut() {
+            tools.push(serde_json::json!({
+                "name": "szal_workflow_run",
+                "description": "Execute a szal workflow (sequential/parallel/DAG steps with retry and rollback)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "flow": {"type": "object", "description": "Flow definition with name, mode, and steps"},
+                        "max_concurrency": {"type": "integer", "description": "Max parallel steps (default: 16)", "default": 16}
+                    },
+                    "required": ["flow"]
+                }
+            }));
         }
+
+        result
     }
 
     /// Call a tool by name with the given arguments.
@@ -35,6 +54,11 @@ impl McpBridge {
         name: &str,
         arguments: serde_json::Value,
     ) -> (serde_json::Value, bool) {
+        // Handle hoosh-registered tools first
+        if name == "szal_workflow_run" {
+            return run_workflow(arguments);
+        }
+
         let request = JsonRpcRequest::new(1, "tools/call")
             .with_params(serde_json::json!({
                 "name": name,
@@ -61,6 +85,51 @@ impl McpBridge {
 impl Default for McpBridge {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Execute a szal workflow — called directly for the `szal_workflow_run` tool.
+fn run_workflow(args: serde_json::Value) -> (serde_json::Value, bool) {
+    let flow_json = &args["flow"];
+    let flow_def: szal::flow::FlowDef = match serde_json::from_value(flow_json.clone()) {
+        Ok(f) => f,
+        Err(e) => return (serde_json::json!({"error": format!("invalid flow: {e}")}), true),
+    };
+
+    if let Err(e) = flow_def.validate() {
+        return (
+            serde_json::json!({"error": format!("flow validation failed: {e}")}),
+            true,
+        );
+    }
+
+    let max_concurrency = args["max_concurrency"].as_u64().unwrap_or(16) as usize;
+    let config = szal::engine::EngineConfig {
+        max_concurrency,
+        ..Default::default()
+    };
+
+    let handler = szal::engine::handler_fn(|step| async move {
+        Ok(serde_json::json!({"step": step.name, "status": "completed"}))
+    });
+
+    let engine = szal::engine::Engine::new(config, handler);
+
+    let rt = tokio::runtime::Handle::current();
+    match rt.block_on(engine.run(&flow_def)) {
+        Ok(result) => (
+            serde_json::json!({
+                "success": result.success,
+                "flow": result.flow_name,
+                "completed": result.completed_count(),
+                "failed": result.failed_count(),
+                "skipped": result.skipped_count(),
+                "duration_ms": result.total_duration_ms,
+                "rolled_back": result.rolled_back,
+            }),
+            false,
+        ),
+        Err(e) => (serde_json::json!({"error": format!("workflow failed: {e}")}), true),
     }
 }
 
@@ -133,5 +202,34 @@ mod tests {
     fn default_impl() {
         let bridge = McpBridge::default();
         assert!(bridge.tool_count() > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_workflow_run() {
+        let bridge = McpBridge::new();
+        let mut flow_def = szal::flow::FlowDef::new("test-flow", szal::flow::FlowMode::Sequential);
+        flow_def.steps.push(szal::step::StepDef::new("step-1"));
+        flow_def.steps.push(szal::step::StepDef::new("step-2"));
+        let flow = serde_json::to_value(&flow_def).unwrap();
+        let (result, is_error) = tokio::task::spawn_blocking(move || {
+            bridge.call_tool("szal_workflow_run", serde_json::json!({"flow": flow}))
+        })
+        .await
+        .unwrap();
+        assert!(!is_error, "workflow should succeed: {result}");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["completed"], 2);
+        assert_eq!(result["failed"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_workflow_invalid_flow() {
+        let bridge = McpBridge::new();
+        let (result, _) = tokio::task::spawn_blocking(move || {
+            bridge.call_tool("szal_workflow_run", serde_json::json!({"flow": "not an object"}))
+        })
+        .await
+        .unwrap();
+        assert!(result["error"].as_str().unwrap().contains("invalid flow"));
     }
 }

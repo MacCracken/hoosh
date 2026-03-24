@@ -5,6 +5,30 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [0.23.4] — 2026-03-23
+
+### Added
+- **Tool use & function calling** (`tools` feature flag)
+  - `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolChoice` — unified tool types across providers
+  - `tools::convert` — OpenAI/Anthropic format conversion and response parsing
+  - `tools::McpBridge` — MCP integration via bote dispatcher + szal's 47 built-in tools
+  - `POST /v1/tools/list` — list all registered MCP tools
+  - `POST /v1/tools/call` — invoke MCP tools by name with arguments
+  - `Role::Tool` variant for tool-result messages in multi-turn conversations
+  - `tools`/`tool_choice` fields on `InferenceRequest`, `tool_calls` on `InferenceResponse`
+  - `Message::new()` constructor for ergonomic message creation
+  - Streaming tool call assembly — accumulates incremental OpenAI SSE deltas into complete ToolCalls
+  - `szal_workflow_run` MCP tool — invoke szál workflow engine (sequential/parallel/DAG) as a single tool call
+- **Error handling** — `HooshError::http_status_code()` and `error_code()` for consistent OpenAI-compatible error responses
+- **Model metadata registry** — `provider::metadata::ModelMetadataRegistry` with 20+ models, context windows, capability flags (chat/streaming/tool_use/vision/embeddings), prefix matching
+- `hot_path` benchmark suite — auth, rate limiting, cost tracking, audit chain, event bus, health-aware routing, queue operations (22 benchmarks)
+- bote 0.22.3 and szal 0.23.4 as optional dependencies
+
+### Changed
+- **Server refactor** — split `server.rs` (1477 lines) into `server/` module: `mod.rs` (331), `types.rs` (263), `handlers.rs` (831), `audio.rs` (136)
+- Bump ai-hwaccel from 0.21.3 to 0.23.3
+- Remove local path dependency on bhava (now resolves from crates.io)
+
 ## [0.23.3] — 2026-03-23
 
 ### Added

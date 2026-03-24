@@ -77,6 +77,12 @@ fn build_chat_body(req: &InferenceRequest) -> serde_json::Value {
     if let Some(tp) = req.top_p {
         body["top_p"] = serde_json::json!(tp);
     }
+    if !req.tools.is_empty() {
+        body["tools"] = serde_json::json!(crate::tools::to_openai_tools(&req.tools));
+    }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = serde_json::json!(choice);
+    }
 
     body
 }
@@ -98,6 +104,20 @@ struct OaiChoice {
 #[derive(Deserialize)]
 struct OaiMessage {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OaiToolCall>,
+}
+
+#[derive(Deserialize)]
+struct OaiToolCall {
+    id: String,
+    function: OaiToolCallFunction,
+}
+
+#[derive(Deserialize)]
+struct OaiToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -115,11 +135,81 @@ struct OaiStreamChunk {
 #[derive(Deserialize)]
 struct OaiStreamChoice {
     delta: OaiDelta,
+    #[serde(default)]
+    #[allow(dead_code)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct OaiDelta {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OaiStreamToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamToolCall {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OaiStreamFunction>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Accumulates incremental tool call deltas into complete ToolCalls.
+struct ToolCallAccumulator {
+    calls: Vec<(String, String, String)>, // (id, name, arguments_json)
+}
+
+impl ToolCallAccumulator {
+    fn new() -> Self {
+        Self { calls: Vec::new() }
+    }
+
+    fn process_delta(&mut self, tool_calls: &[OaiStreamToolCall]) {
+        for tc in tool_calls {
+            // Grow the calls vec as needed
+            while self.calls.len() <= tc.index {
+                self.calls.push((String::new(), String::new(), String::new()));
+            }
+            let entry = &mut self.calls[tc.index];
+            if let Some(id) = &tc.id {
+                entry.0 = id.clone();
+            }
+            if let Some(f) = &tc.function {
+                if let Some(name) = &f.name {
+                    entry.1 = name.clone();
+                }
+                if let Some(args) = &f.arguments {
+                    entry.2.push_str(args);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<crate::tools::ToolCall> {
+        self.calls
+            .into_iter()
+            .filter(|(id, name, _)| !id.is_empty() && !name.is_empty())
+            .map(|(id, name, args)| crate::tools::ToolCall {
+                id,
+                name,
+                arguments: serde_json::from_str(&args).unwrap_or(serde_json::json!({})),
+            })
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
 }
 
 #[derive(Deserialize)]
@@ -151,10 +241,24 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let oai: OaiChatResponse = resp.json().await?;
         let latency = start.elapsed().as_millis() as u64;
 
-        let text = oai
-            .choices
-            .first()
+        let first_choice = oai.choices.first();
+        let text = first_choice
             .and_then(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        let tool_calls = first_choice
+            .map(|c| {
+                c.message
+                    .tool_calls
+                    .iter()
+                    .map(|tc| crate::tools::ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::json!({})),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let usage = oai.usage.as_ref();
@@ -168,7 +272,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             },
             provider: self.provider_type.to_string(),
             latency_ms: latency,
-            tool_calls: Vec::new(),
+            tool_calls,
         })
     }
 
@@ -204,6 +308,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             use futures::StreamExt;
             let mut stream = resp.bytes_stream();
             let mut buf = String::new();
+            let mut tool_acc = ToolCallAccumulator::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -236,6 +341,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         continue;
                     };
                     if data == "[DONE]" {
+                        // Emit accumulated tool calls as a special marker
+                        if !tool_acc.is_empty() {
+                            let calls = tool_acc.finish();
+                            if let Ok(json) = serde_json::to_string(&calls) {
+                                let _ = tx
+                                    .send(Ok(format!("\x00TOOL_CALLS:{json}")))
+                                    .await;
+                            }
+                        }
                         return;
                     }
                     match serde_json::from_str::<OaiStreamChunk>(data) {
@@ -244,6 +358,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         }
                         Ok(chunk) => {
                             for choice in &chunk.choices {
+                                // Accumulate tool call deltas
+                                if let Some(tool_calls) = &choice.delta.tool_calls {
+                                    tool_acc.process_delta(tool_calls);
+                                }
+                                // Stream text content
                                 if let Some(content) = &choice.delta.content
                                     && !content.is_empty()
                                     && tx.send(Ok(content.clone())).await.is_err()
@@ -461,5 +580,119 @@ mod tests {
             Some(&tls),
         );
         assert_eq!(p.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn build_body_with_tools() {
+        use crate::tools::{ToolChoice, ToolDefinition};
+        let req = InferenceRequest {
+            model: "gpt-4o".into(),
+            prompt: "What's the weather?".into(),
+            tools: vec![ToolDefinition {
+                name: "get_weather".into(),
+                description: "Get weather".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"loc": {"type": "string"}}}),
+            }],
+            tool_choice: Some(ToolChoice::Auto),
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn build_body_no_tools() {
+        let req = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hi".into(),
+            ..Default::default()
+        };
+        let body = build_chat_body(&req);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn tool_call_accumulator_single_call() {
+        let mut acc = ToolCallAccumulator::new();
+        // First chunk: id + name + partial args
+        acc.process_delta(&[OaiStreamToolCall {
+            index: 0,
+            id: Some("call_abc".into()),
+            function: Some(OaiStreamFunction {
+                name: Some("get_weather".into()),
+                arguments: Some("{\"lo".into()),
+            }),
+        }]);
+        // Second chunk: more args
+        acc.process_delta(&[OaiStreamToolCall {
+            index: 0,
+            id: None,
+            function: Some(OaiStreamFunction {
+                name: None,
+                arguments: Some("cation\":\"London\"}".into()),
+            }),
+        }]);
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_abc");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments["location"], "London");
+    }
+
+    #[test]
+    fn tool_call_accumulator_multiple_calls() {
+        let mut acc = ToolCallAccumulator::new();
+        acc.process_delta(&[
+            OaiStreamToolCall {
+                index: 0,
+                id: Some("c1".into()),
+                function: Some(OaiStreamFunction {
+                    name: Some("tool_a".into()),
+                    arguments: Some("{}".into()),
+                }),
+            },
+            OaiStreamToolCall {
+                index: 1,
+                id: Some("c2".into()),
+                function: Some(OaiStreamFunction {
+                    name: Some("tool_b".into()),
+                    arguments: Some("{\"x\":1}".into()),
+                }),
+            },
+        ]);
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "tool_a");
+        assert_eq!(calls[1].name, "tool_b");
+        assert_eq!(calls[1].arguments["x"], 1);
+    }
+
+    #[test]
+    fn tool_call_accumulator_empty() {
+        let acc = ToolCallAccumulator::new();
+        assert!(acc.is_empty());
+        assert!(acc.finish().is_empty());
+    }
+
+    #[test]
+    fn tool_call_accumulator_invalid_json_args() {
+        let mut acc = ToolCallAccumulator::new();
+        acc.process_delta(&[OaiStreamToolCall {
+            index: 0,
+            id: Some("c1".into()),
+            function: Some(OaiStreamFunction {
+                name: Some("tool".into()),
+                arguments: Some("not valid json".into()),
+            }),
+        }]);
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        // Falls back to empty object
+        assert!(calls[0].arguments.is_object());
     }
 }

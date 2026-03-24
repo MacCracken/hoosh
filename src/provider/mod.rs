@@ -82,6 +82,9 @@ pub fn build_provider_client(tls: Option<&TlsConfig>) -> reqwest::Client {
 // Provider backend modules (feature-gated)
 pub mod openai_compat;
 
+// Model metadata
+pub mod metadata;
+
 // Local providers
 #[cfg(feature = "llamacpp")]
 pub mod llamacpp;

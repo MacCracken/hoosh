@@ -397,6 +397,121 @@ fn bench_queue(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Error mapping
+// ---------------------------------------------------------------------------
+
+fn bench_error_mapping(c: &mut Criterion) {
+    use hoosh::error::HooshError;
+
+    let errors = vec![
+        HooshError::ModelNotFound("gpt-99".into()),
+        HooshError::NoProvider("unknown".into()),
+        HooshError::RateLimited { retry_after_ms: 1000 },
+        HooshError::BudgetExceeded { pool: "default".into(), remaining: 0 },
+        HooshError::Timeout(5000),
+        HooshError::Provider("backend down".into()),
+        HooshError::Cache("miss".into()),
+        HooshError::Other(anyhow::anyhow!("something")),
+    ];
+
+    c.bench_function("error_http_status_code", |b| {
+        b.iter(|| {
+            for e in &errors {
+                std::hint::black_box(e.http_status_code());
+            }
+        })
+    });
+
+    c.bench_function("error_code_string", |b| {
+        b.iter(|| {
+            for e in &errors {
+                std::hint::black_box(e.error_code());
+            }
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model metadata registry
+// ---------------------------------------------------------------------------
+
+fn bench_metadata_registry(c: &mut Criterion) {
+    use hoosh::provider::metadata::ModelMetadataRegistry;
+
+    let reg = ModelMetadataRegistry::new();
+
+    c.bench_function("metadata_exact_lookup", |b| {
+        b.iter(|| reg.get("gpt-4o"))
+    });
+
+    c.bench_function("metadata_prefix_lookup", |b| {
+        b.iter(|| reg.get("claude-sonnet-4-20250514"))
+    });
+
+    c.bench_function("metadata_miss", |b| {
+        b.iter(|| reg.get("totally-unknown-model-xyz"))
+    });
+
+    c.bench_function("metadata_registry_creation", |b| {
+        b.iter(ModelMetadataRegistry::new)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tool format conversion
+// ---------------------------------------------------------------------------
+
+fn bench_tool_conversion(c: &mut Criterion) {
+    use hoosh::tools::{ToolDefinition, to_openai_tools, to_anthropic_tools, parse_openai_tool_calls};
+
+    let defs: Vec<ToolDefinition> = (0..5)
+        .map(|i| ToolDefinition {
+            name: format!("tool_{i}"),
+            description: format!("Tool number {i}"),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "arg1": {"type": "string"},
+                    "arg2": {"type": "integer"}
+                },
+                "required": ["arg1"]
+            }),
+        })
+        .collect();
+
+    c.bench_function("to_openai_tools_5", |b| {
+        b.iter(|| to_openai_tools(&defs))
+    });
+
+    c.bench_function("to_anthropic_tools_5", |b| {
+        b.iter(|| to_anthropic_tools(&defs))
+    });
+
+    let response_with_tools = serde_json::json!({
+        "choices": [{
+            "message": {
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "tool_0", "arguments": "{\"arg1\":\"hello\",\"arg2\":42}"}},
+                    {"id": "c2", "type": "function", "function": {"name": "tool_1", "arguments": "{\"arg1\":\"world\"}"}},
+                ]
+            }
+        }]
+    });
+
+    c.bench_function("parse_openai_tool_calls_2", |b| {
+        b.iter(|| parse_openai_tool_calls(&response_with_tools))
+    });
+
+    let response_no_tools = serde_json::json!({
+        "choices": [{"message": {"content": "Hello!"}}]
+    });
+
+    c.bench_function("parse_openai_tool_calls_none", |b| {
+        b.iter(|| parse_openai_tool_calls(&response_no_tools))
+    });
+}
+
 criterion_group!(
     benches,
     bench_auth,
@@ -406,5 +521,8 @@ criterion_group!(
     bench_event_bus,
     bench_routing_with_health,
     bench_queue,
+    bench_error_mapping,
+    bench_metadata_registry,
+    bench_tool_conversion,
 );
 criterion_main!(benches);

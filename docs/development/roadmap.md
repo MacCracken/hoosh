@@ -6,51 +6,27 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.20.3 — Core Gateway + Provider Backends ✅
-
-All items complete. See CHANGELOG.md for details.
-
----
-
-## v0.21.5 — Server Hardening, Observability & Messaging ✅
-
-All items complete. See CHANGELOG.md for details.
-
----
-
-## v0.23.3 — Advanced Inference
-
-### Tool use & function calling
-- [ ] Unified `ToolCall` abstraction mapping Anthropic/OpenAI/Gemini/Ollama tool formats — extract from secureyeoman's provider implementations
-- [ ] Streaming tool call assembly (incremental delta → complete ToolCall)
-- [ ] Tool result message type for multi-turn tool use
-- [ ] MCP integration via `bote` + `szál` — bote for protocol/dispatch, szál for 58+ built-in MCP tools (file, process, git, network, hash, template, math, system), enabling Claude/Cursor-style tool use through hoosh
-- [ ] Workflow-as-tool — invoke szál workflows (DAG steps with retry/rollback) as single MCP tool calls through hoosh
-- [ ] Shared tool schema types — depend on bote for `ToolDef`/`ToolRegistry`/`Dispatcher`, szál for `Tool` trait and tool implementations
-
-### Error handling improvements
-- [ ] Protocol-level error code mapping — `HooshError::http_status_code()` method for consistent OpenAI-compatible error responses (inspired by bote's `rpc_code()` pattern)
-- [ ] Separate metadata registry from routing dispatch — decouple model/provider metadata from routing logic (following bote's registry/dispatch separation)
+## v0.24.0 — Context, Caching & Privacy
 
 ### Context management
-- [ ] Model registry with detailed metadata — context windows (60+ models), capability flags (chat/vision/reasoning/tool_use/code/streaming), performance tiers, cost tiers, extended thinking support — port from secureyeoman's `model-registry.ts`
-- [ ] Context compactor — proactive 80% threshold check + conversation summarization before API call, preserving recent turns — port from secureyeoman's `context-compactor.ts`
+- [ ] Model registry with detailed metadata — context windows (60+ models), capability flags, performance/cost tiers
+- [ ] Context compactor — proactive 80% threshold check + conversation summarization
 - [ ] Token counting per provider (tiktoken for OpenAI, Anthropic tokenizer, etc.)
 
 ### Caching improvements
-- [ ] Semantic cache (embedding similarity via cosine distance, configurable threshold) — port pattern from secureyeoman's `semantic-cache.ts`
+- [ ] Semantic cache (embedding similarity via cosine distance, configurable threshold)
 - [ ] Cache warming for common prompts
 - [ ] Cache statistics API
 
 ### Provider acceleration
-- [ ] Batch inference manager — concurrent batching with progress tracking, per-prompt timeout, cancellation support — port from secureyeoman's `batch-inference-manager.ts`
-- [ ] Retry manager — jittered exponential backoff, retryable vs permanent error classification, Retry-After header support — port from secureyeoman's `retry-manager.ts`
-- [ ] Cost optimizer — dynamic model selection based on workload complexity (simple→Haiku, complex→Opus), 30-day forecasting — port from secureyeoman's `cost-optimizer.ts`
+- [ ] Batch inference manager — concurrent batching with progress tracking, cancellation
+- [ ] Retry manager — jittered exponential backoff, retryable vs permanent error classification
+- [ ] Cost optimizer — dynamic model selection based on workload complexity
 - [ ] Prompt compression for long conversations
 
 ### Privacy & data classification
-- [ ] DLP classification engine — PII regex scanning (email, SSN, credit card), keyword scanning, custom patterns, 4-level classification (Public/Internal/Confidential/Restricted) — port from secureyeoman's `sy-privacy` crate
-- [ ] Privacy-aware routing — route sensitive content to local models only, GPU-aware model selection, configurable policy (auto/local-preferred/local-only/cloud-only) — port from secureyeoman's `privacy-router.ts`
+- [ ] DLP classification engine — PII regex scanning, keyword scanning, custom patterns, 4-level classification
+- [ ] Privacy-aware routing — route sensitive content to local models only
 
 ### Multi-modal
 - [ ] Vision models — image input support (GPT-4V, Claude, Gemini)
@@ -58,7 +34,7 @@ All items complete. See CHANGELOG.md for details.
 
 ---
 
-## v0.23.3 — Speech & Audio
+## v0.25.0 — Speech & Audio
 
 ### Cross-platform audio preprocessing
 
