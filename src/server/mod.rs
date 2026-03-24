@@ -38,6 +38,8 @@ pub struct AppState {
     pub whisper: Option<std::sync::Arc<crate::provider::whisper::WhisperProvider>>,
     #[cfg(feature = "piper")]
     pub tts: Option<std::sync::Arc<crate::provider::tts::TtsProvider>>,
+    #[cfg(feature = "tools")]
+    pub mcp_bridge: Arc<crate::tools::McpBridge>,
 }
 
 /// Server configuration.
@@ -163,6 +165,13 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     let event_bus = Arc::new(crate::events::new_event_bus());
     let inference_queue = Arc::new(crate::queue::InferenceQueue::new());
 
+    #[cfg(feature = "tools")]
+    let mcp_bridge = {
+        let bridge = crate::tools::McpBridge::new();
+        tracing::info!("MCP tool bridge enabled ({} tools)", bridge.tool_count());
+        Arc::new(bridge)
+    };
+
     let health_map = crate::health::new_health_map();
     let heartbeat = Arc::new(majra::heartbeat::ConcurrentHeartbeatTracker::new(
         majra::heartbeat::HeartbeatConfig {
@@ -207,6 +216,8 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         whisper,
         #[cfg(feature = "piper")]
         tts,
+        #[cfg(feature = "tools")]
+        mcp_bridge,
     });
 
     // Spawn background health checker if enabled
@@ -252,6 +263,13 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
 
     #[allow(unused_mut)]
     let mut app = api_routes.route("/metrics", get(handlers::prometheus_metrics));
+
+    #[cfg(feature = "tools")]
+    {
+        app = app
+            .route("/v1/tools/list", post(handlers::tools_list))
+            .route("/v1/tools/call", post(handlers::tools_call));
+    }
 
     #[cfg(feature = "whisper")]
     {

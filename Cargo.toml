@@ -37,6 +37,8 @@ piper = []
 sentiment = ["dep:bhava"]
 # Hardware detection for model placement
 hwaccel = ["dep:ai-hwaccel"]
+# Tool use & MCP integration (bote protocol + szal built-in tools)
+tools = ["dep:bote", "dep:szal"]
 # OpenTelemetry trace propagation
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
@@ -94,6 +96,10 @@ rand = "0.8"
 
 # Personality & emotion engine
 bhava = { version = "0.23.3", default-features = false, features = ["sentiment"], optional = true }
+
+# Tool use & MCP protocol
+bote = { version = "0.22.3", optional = true, default-features = false }
+szal = { version = "0.23.3", optional = true, default-features = false }
 
 # Hardware detection
 ai-hwaccel = { version = "0.23.3", optional = true, default-features = false, features = ["vulkan", "rocm", "cuda"] }

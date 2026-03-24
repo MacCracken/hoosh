@@ -55,6 +55,7 @@ fn build_chat_body(req: &InferenceRequest) -> serde_json::Value {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
+                    Role::Tool => "tool",
                 };
                 serde_json::json!({"role": role, "content": m.content})
             })
@@ -167,6 +168,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             },
             provider: self.provider_type.to_string(),
             latency_ms: latency,
+            tool_calls: Vec::new(),
         })
     }
 
@@ -354,18 +356,9 @@ mod tests {
         let req = InferenceRequest {
             model: "gpt-4".into(),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "Be concise.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Hi".into(),
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: "Hello!".into(),
-                },
+                Message::new(Role::System, "Be concise."),
+                Message::new(Role::User, "Hi"),
+                Message::new(Role::Assistant, "Hello!"),
             ],
             ..Default::default()
         };

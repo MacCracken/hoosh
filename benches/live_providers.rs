@@ -120,24 +120,13 @@ fn bench_ollama_infer_multiturn(c: &mut Criterion) {
     let req = InferenceRequest {
         model: model.clone(),
         messages: vec![
-            Message {
-                role: Role::System,
-                content: "Answer in one sentence.".into(),
-            },
-            Message {
-                role: Role::User,
-                content: "What is Rust?".into(),
-            },
-            Message {
-                role: Role::Assistant,
-                content:
-                    "Rust is a systems programming language focused on safety and performance."
-                        .into(),
-            },
-            Message {
-                role: Role::User,
-                content: "What about its type system?".into(),
-            },
+            Message::new(Role::System, "Answer in one sentence."),
+            Message::new(Role::User, "What is Rust?"),
+            Message::new(
+                Role::Assistant,
+                "Rust is a systems programming language focused on safety and performance.",
+            ),
+            Message::new(Role::User, "What about its type system?"),
         ],
         max_tokens: Some(30),
         temperature: Some(0.0),

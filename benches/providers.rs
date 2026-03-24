@@ -102,22 +102,10 @@ fn bench_inference_request_construction(c: &mut Criterion) {
         b.iter(|| InferenceRequest {
             model: "llama3".into(),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "You are a helpful assistant.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Explain Rust ownership.".into(),
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: "Rust uses an ownership model...".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Give me an example.".into(),
-                },
+                Message::new(Role::System, "You are a helpful assistant."),
+                Message::new(Role::User, "Explain Rust ownership."),
+                Message::new(Role::Assistant, "Rust uses an ownership model..."),
+                Message::new(Role::User, "Give me an example."),
             ],
             temperature: Some(0.7),
             max_tokens: Some(1024),
@@ -140,14 +128,10 @@ fn bench_request_serialization(c: &mut Criterion) {
     let complex = InferenceRequest {
         model: "llama3".into(),
         messages: (0..10)
-            .map(|i| Message {
-                role: if i % 2 == 0 {
-                    Role::User
-                } else {
-                    Role::Assistant
-                },
-                content: format!("Message number {} with some content to serialize.", i),
-            })
+            .map(|i| Message::new(
+                if i % 2 == 0 { Role::User } else { Role::Assistant },
+                format!("Message number {} with some content to serialize.", i),
+            ))
             .collect(),
         temperature: Some(0.7),
         max_tokens: Some(2048),
@@ -199,14 +183,10 @@ fn bench_cache_operations(c: &mut Criterion) {
     use hoosh::cache::cache_key;
     use hoosh::inference::{Message, Role};
     let msgs: Vec<Message> = (0..5)
-        .map(|i| Message {
-            role: if i % 2 == 0 {
-                Role::User
-            } else {
-                Role::Assistant
-            },
-            content: format!("message {i}"),
-        })
+        .map(|i| Message::new(
+            if i % 2 == 0 { Role::User } else { Role::Assistant },
+            format!("message {i}"),
+        ))
         .collect();
 
     c.bench_function("cache_key_5_messages", |b| {

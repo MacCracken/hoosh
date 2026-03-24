@@ -66,7 +66,7 @@ fn build_anthropic_body(req: &InferenceRequest, stream: bool) -> serde_json::Val
                 Role::System => {
                     system_text = Some(m.content.clone());
                 }
-                Role::User => {
+                Role::User | Role::Tool => {
                     msgs.push(serde_json::json!({"role": "user", "content": m.content}));
                 }
                 Role::Assistant => {
@@ -163,6 +163,7 @@ impl LlmProvider for AnthropicProvider {
             },
             provider: "anthropic".into(),
             latency_ms: latency,
+            tool_calls: Vec::new(),
         })
     }
 
@@ -341,22 +342,10 @@ mod tests {
         let req = InferenceRequest {
             model: "claude-sonnet-4-20250514".into(),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "Be concise.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Hi".into(),
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: "Hello!".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "More".into(),
-                },
+                Message::new(Role::System, "Be concise."),
+                Message::new(Role::User, "Hi"),
+                Message::new(Role::Assistant, "Hello!"),
+                Message::new(Role::User, "More"),
             ],
             max_tokens: Some(500),
             ..Default::default()

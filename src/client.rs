@@ -34,6 +34,7 @@ fn to_chat_body(request: &InferenceRequest) -> serde_json::Value {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
+                    Role::Tool => "tool",
                 };
                 serde_json::json!({"role": role, "content": m.content})
             })
@@ -168,6 +169,7 @@ impl HooshClient {
             },
             provider: "hoosh".into(),
             latency_ms: 0,
+            tool_calls: Vec::new(),
         })
     }
 

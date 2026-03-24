@@ -109,15 +109,20 @@ pub(crate) async fn chat_completions(
                 role: match m.role.as_str() {
                     "system" => Role::System,
                     "assistant" => Role::Assistant,
+                    "tool" => Role::Tool,
                     _ => Role::User,
                 },
                 content: m.content.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+                tool_calls: m.tool_calls.clone(),
             })
             .collect(),
         max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
         stream: req.stream,
+        tools: req.tools.clone(),
+        tool_choice: req.tool_choice.clone(),
     };
 
     // Token budget: validate pool exists, then atomically reserve
@@ -412,8 +417,13 @@ async fn handle_non_streaming(
                     message: ChatResponseMessage {
                         role: "assistant",
                         content: result.text,
+                        tool_calls: result.tool_calls.clone(),
                     },
-                    finish_reason: "stop",
+                    finish_reason: if result.tool_calls.is_empty() {
+                        "stop"
+                    } else {
+                        "tool_calls"
+                    },
                 }],
                 usage: ChatUsage {
                     prompt_tokens: result.usage.prompt_tokens,
@@ -828,4 +838,28 @@ pub(crate) async fn embeddings(
         )
         .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP tools
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "tools")]
+pub(crate) async fn tools_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let result = state.mcp_bridge.list_tools();
+    (StatusCode::OK, Json(result)).into_response()
+}
+
+#[cfg(feature = "tools")]
+pub(crate) async fn tools_call(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<super::types::ToolCallRequest>,
+) -> impl IntoResponse {
+    let (result, is_error) = state.mcp_bridge.call_tool(&req.name, req.arguments);
+    let status = if is_error {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(result)).into_response()
 }

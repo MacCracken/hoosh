@@ -22,6 +22,12 @@ pub(crate) struct ChatRequest {
     pub top_p: Option<f64>,
     #[serde(default)]
     pub stream: bool,
+    /// Tool definitions the model may call.
+    #[serde(default)]
+    pub tools: Vec<crate::tools::ToolDefinition>,
+    /// How the model should choose tools.
+    #[serde(default)]
+    pub tool_choice: Option<crate::tools::ToolChoice>,
     /// Token budget pool name (defaults to "default").
     #[serde(default = "default_pool_name")]
     pub pool: String,
@@ -32,10 +38,14 @@ fn default_pool_name() -> String {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields consumed by future provider backends
+#[allow(dead_code)]
 pub(crate) struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<crate::tools::ToolCall>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +69,8 @@ pub(crate) struct ChatChoice {
 pub(crate) struct ChatResponseMessage {
     pub role: &'static str,
     pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<crate::tools::ToolCall>,
 }
 
 #[derive(Serialize)]
@@ -179,6 +191,18 @@ pub(crate) struct TokenReportRequest {
 pub(crate) struct TokenReportResponse {
     pub used: u64,
     pub available: u64,
+}
+
+// ---------------------------------------------------------------------------
+// MCP tools
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "tools")]
+#[derive(Deserialize)]
+pub(crate) struct ToolCallRequest {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------

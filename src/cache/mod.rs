@@ -214,10 +214,7 @@ mod tests {
     #[test]
     fn cache_key_different_models() {
         use crate::inference::{Message, Role};
-        let msgs = vec![Message {
-            role: Role::User,
-            content: "hello".into(),
-        }];
+        let msgs = vec![Message::new(Role::User, "hello")];
         let k1 = super::cache_key("llama3", &msgs);
         let k2 = super::cache_key("gpt-4", &msgs);
         assert_ne!(k1, k2);
@@ -228,14 +225,8 @@ mod tests {
     #[test]
     fn cache_key_different_messages() {
         use crate::inference::{Message, Role};
-        let msgs1 = vec![Message {
-            role: Role::User,
-            content: "hello".into(),
-        }];
-        let msgs2 = vec![Message {
-            role: Role::User,
-            content: "world".into(),
-        }];
+        let msgs1 = vec![Message::new(Role::User, "hello")];
+        let msgs2 = vec![Message::new(Role::User, "world")];
         let k1 = super::cache_key("model", &msgs1);
         let k2 = super::cache_key("model", &msgs2);
         assert_ne!(k1, k2);
@@ -244,10 +235,7 @@ mod tests {
     #[test]
     fn cache_key_same_request() {
         use crate::inference::{Message, Role};
-        let msgs = vec![Message {
-            role: Role::User,
-            content: "hello".into(),
-        }];
+        let msgs = vec![Message::new(Role::User, "hello")];
         let k1 = super::cache_key("model", &msgs);
         let k2 = super::cache_key("model", &msgs);
         assert_eq!(k1, k2);

@@ -369,14 +369,8 @@ mod mock_server {
         let req = InferenceRequest {
             model: "chat-model".into(),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "Be helpful.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Hi".into(),
-                },
+                Message::new(Role::System, "Be helpful."),
+                Message::new(Role::User, "Hi"),
             ],
             temperature: Some(0.5),
             max_tokens: Some(100),
@@ -643,22 +637,10 @@ mod mock_server {
             let req = InferenceRequest {
                 model: "llama3".into(),
                 messages: vec![
-                    Message {
-                        role: Role::System,
-                        content: "Be brief.".into(),
-                    },
-                    Message {
-                        role: Role::User,
-                        content: "Hi".into(),
-                    },
-                    Message {
-                        role: Role::Assistant,
-                        content: "Hello!".into(),
-                    },
-                    Message {
-                        role: Role::User,
-                        content: "How?".into(),
-                    },
+                    Message::new(Role::System, "Be brief."),
+                    Message::new(Role::User, "Hi"),
+                    Message::new(Role::Assistant, "Hello!"),
+                    Message::new(Role::User, "How?"),
                 ],
                 ..Default::default()
             };
@@ -899,22 +881,10 @@ mod mock_server {
             let req = InferenceRequest {
                 model: "claude-sonnet-4-20250514".into(),
                 messages: vec![
-                    Message {
-                        role: Role::System,
-                        content: "Be concise.".into(),
-                    },
-                    Message {
-                        role: Role::User,
-                        content: "Hi".into(),
-                    },
-                    Message {
-                        role: Role::Assistant,
-                        content: "Hello!".into(),
-                    },
-                    Message {
-                        role: Role::User,
-                        content: "More".into(),
-                    },
+                    Message::new(Role::System, "Be concise."),
+                    Message::new(Role::User, "Hi"),
+                    Message::new(Role::Assistant, "Hello!"),
+                    Message::new(Role::User, "More"),
                 ],
                 ..Default::default()
             };
@@ -1039,14 +1009,8 @@ mod mock_server {
         let req = InferenceRequest {
             model: "synapse-model".into(),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "Be concise.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Hello".into(),
-                },
+                Message::new(Role::System, "Be concise."),
+                Message::new(Role::User, "Hello"),
             ],
             temperature: Some(0.5),
             max_tokens: Some(100),
@@ -1471,6 +1435,8 @@ mod server_wiring {
             whisper: None,
             #[cfg(feature = "piper")]
             tts: None,
+            #[cfg(feature = "tools")]
+            mcp_bridge: std::sync::Arc::new(crate::tools::McpBridge::new()),
         })
     }
 

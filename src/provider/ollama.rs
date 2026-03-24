@@ -67,7 +67,7 @@ fn build_messages(req: &InferenceRequest) -> Vec<serde_json::Value> {
             .map(|m| {
                 let role = match m.role {
                     Role::System => "system",
-                    Role::User => "user",
+                    Role::User | Role::Tool => "user",
                     Role::Assistant => "assistant",
                 };
                 serde_json::json!({"role": role, "content": m.content})
@@ -161,6 +161,7 @@ impl LlmProvider for OllamaProvider {
             },
             provider: "ollama".into(),
             latency_ms: latency,
+            tool_calls: Vec::new(),
         })
     }
 
@@ -403,18 +404,9 @@ mod tests {
     fn messages_from_conversation() {
         let req = InferenceRequest {
             messages: vec![
-                Message {
-                    role: Role::User,
-                    content: "Hi".into(),
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: "Hello!".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "How are you?".into(),
-                },
+                Message::new(Role::User, "Hi"),
+                Message::new(Role::Assistant, "Hello!"),
+                Message::new(Role::User, "How are you?"),
             ],
             ..Default::default()
         };
@@ -591,10 +583,7 @@ mod tests {
     #[test]
     fn messages_system_role() {
         let req = InferenceRequest {
-            messages: vec![Message {
-                role: Role::System,
-                content: "You are helpful.".into(),
-            }],
+            messages: vec![Message::new(Role::System, "You are helpful.")],
             ..Default::default()
         };
         let msgs = build_messages(&req);

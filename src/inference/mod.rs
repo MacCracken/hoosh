@@ -21,6 +21,12 @@ pub struct InferenceRequest {
     pub top_p: Option<f64>,
     /// Whether to stream the response.
     pub stream: bool,
+    /// Tool definitions the model may call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<crate::tools::ToolDefinition>,
+    /// How the model should choose tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<crate::tools::ToolChoice>,
 }
 
 /// A single message in a conversation.
@@ -28,6 +34,24 @@ pub struct InferenceRequest {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// For tool-result messages: the ID of the tool call this responds to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// For assistant messages: tool calls the model made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<crate::tools::ToolCall>,
+}
+
+impl Message {
+    /// Create a new message with no tool fields.
+    pub fn new(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
 }
 
 /// Message role.
@@ -37,6 +61,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 /// An inference response.
@@ -48,6 +73,9 @@ pub struct InferenceResponse {
     pub model: String,
     /// Token usage.
     pub usage: TokenUsage,
+    /// Tool calls made by the model (empty if none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<crate::tools::ToolCall>,
     /// Provider that handled the request.
     pub provider: String,
     /// Latency in milliseconds.
@@ -274,6 +302,7 @@ mod tests {
             },
             provider: "ollama".into(),
             latency_ms: 42,
+            tool_calls: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: InferenceResponse = serde_json::from_str(&json).unwrap();
@@ -346,10 +375,7 @@ mod tests {
 
     #[test]
     fn message_serde_roundtrip() {
-        let msg = Message {
-            role: Role::User,
-            content: "What is Rust?".into(),
-        };
+        let msg = Message::new(Role::User, "What is Rust?");
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(back.role, Role::User);
@@ -446,19 +472,14 @@ mod tests {
             prompt: String::new(),
             system: Some("You are helpful.".into()),
             messages: vec![
-                Message {
-                    role: Role::System,
-                    content: "You are helpful.".into(),
-                },
-                Message {
-                    role: Role::User,
-                    content: "Hi".into(),
-                },
+                Message::new(Role::System, "You are helpful."),
+                Message::new(Role::User, "Hi"),
             ],
             max_tokens: Some(1000),
             temperature: Some(0.5),
             top_p: Some(0.9),
             stream: true,
+            ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: InferenceRequest = serde_json::from_str(&json).unwrap();
@@ -504,6 +525,7 @@ mod tests {
             usage: TokenUsage::default(),
             provider: "test".into(),
             latency_ms: 0,
+            tool_calls: Vec::new(),
         };
         let s = resp.sentiment();
         assert!(s.valence > 0.0);

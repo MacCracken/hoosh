@@ -299,6 +299,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bote"
+version = "0.22.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119a5d314ce7fdd501aa133eb00e5e9917a89922180162626b3031bb1363c2e3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,6 +894,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.8",
  "bhava",
+ "bote",
  "bytes",
  "chrono",
  "clap",
@@ -900,6 +913,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "szal",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1354,6 +1368,16 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "memchr"
@@ -2209,6 +2233,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "szal"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b10b14b85b710881f40dd6dca6af0d940c1148ea702e6e6876ee65264dff115"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bote",
+ "chrono",
+ "md-5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2373,6 +2418,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

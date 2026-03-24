@@ -58,6 +58,7 @@ pub mod router;
 pub mod server;
 #[cfg(feature = "otel")]
 pub mod telemetry;
+pub mod tools;
 
 pub use budget::{TokenBudget, TokenPool};
 pub use cache::ResponseCache;
@@ -66,6 +67,7 @@ pub use error::HooshError;
 pub use inference::{InferenceRequest, InferenceResponse, ModelInfo};
 pub use provider::{LlmProvider, ProviderRegistry, ProviderType};
 pub use router::Router;
+pub use tools::{ToolCall, ToolChoice, ToolDefinition, ToolResult};
 
 #[cfg(test)]
 mod tests;

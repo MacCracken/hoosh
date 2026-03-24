@@ -108,6 +108,8 @@ mod tests {
             whisper: None,
             #[cfg(feature = "piper")]
             tts: None,
+            #[cfg(feature = "tools")]
+            mcp_bridge: Arc::new(crate::tools::McpBridge::new()),
         })
     }
 
