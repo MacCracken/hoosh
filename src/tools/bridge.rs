@@ -49,21 +49,16 @@ impl McpBridge {
     }
 
     /// Call a tool by name with the given arguments.
-    pub fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> (serde_json::Value, bool) {
+    pub fn call_tool(&self, name: &str, arguments: serde_json::Value) -> (serde_json::Value, bool) {
         // Handle hoosh-registered tools first
         if name == "szal_workflow_run" {
             return run_workflow(arguments);
         }
 
-        let request = JsonRpcRequest::new(1, "tools/call")
-            .with_params(serde_json::json!({
-                "name": name,
-                "arguments": arguments,
-            }));
+        let request = JsonRpcRequest::new(1, "tools/call").with_params(serde_json::json!({
+            "name": name,
+            "arguments": arguments,
+        }));
 
         match self.dispatcher.dispatch(&request) {
             Some(resp) => response_to_result(resp),
@@ -93,7 +88,12 @@ fn run_workflow(args: serde_json::Value) -> (serde_json::Value, bool) {
     let flow_json = &args["flow"];
     let flow_def: szal::flow::FlowDef = match serde_json::from_value(flow_json.clone()) {
         Ok(f) => f,
-        Err(e) => return (serde_json::json!({"error": format!("invalid flow: {e}")}), true),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("invalid flow: {e}")}),
+                true,
+            );
+        }
     };
 
     if let Err(e) = flow_def.validate() {
@@ -129,7 +129,10 @@ fn run_workflow(args: serde_json::Value) -> (serde_json::Value, bool) {
             }),
             false,
         ),
-        Err(e) => (serde_json::json!({"error": format!("workflow failed: {e}")}), true),
+        Err(e) => (
+            serde_json::json!({"error": format!("workflow failed: {e}")}),
+            true,
+        ),
     }
 }
 
@@ -138,10 +141,7 @@ fn response_to_result(resp: JsonRpcResponse) -> (serde_json::Value, bool) {
     if let Some(err) = resp.error {
         (serde_json::json!({"error": err.message}), true)
     } else {
-        (
-            resp.result.unwrap_or(serde_json::Value::Null),
-            false,
-        )
+        (resp.result.unwrap_or(serde_json::Value::Null), false)
     }
 }
 
@@ -226,7 +226,10 @@ mod tests {
     async fn call_workflow_invalid_flow() {
         let bridge = McpBridge::new();
         let (result, _) = tokio::task::spawn_blocking(move || {
-            bridge.call_tool("szal_workflow_run", serde_json::json!({"flow": "not an object"}))
+            bridge.call_tool(
+                "szal_workflow_run",
+                serde_json::json!({"flow": "not an object"}),
+            )
         })
         .await
         .unwrap();

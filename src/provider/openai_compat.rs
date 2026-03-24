@@ -178,7 +178,8 @@ impl ToolCallAccumulator {
         for tc in tool_calls {
             // Grow the calls vec as needed
             while self.calls.len() <= tc.index {
-                self.calls.push((String::new(), String::new(), String::new()));
+                self.calls
+                    .push((String::new(), String::new(), String::new()));
             }
             let entry = &mut self.calls[tc.index];
             if let Some(id) = &tc.id {
@@ -345,9 +346,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                         if !tool_acc.is_empty() {
                             let calls = tool_acc.finish();
                             if let Ok(json) = serde_json::to_string(&calls) {
-                                let _ = tx
-                                    .send(Ok(format!("\x00TOOL_CALLS:{json}")))
-                                    .await;
+                                let _ = tx.send(Ok(format!("\x00TOOL_CALLS:{json}"))).await;
                             }
                         }
                         return;

@@ -407,8 +407,13 @@ fn bench_error_mapping(c: &mut Criterion) {
     let errors = vec![
         HooshError::ModelNotFound("gpt-99".into()),
         HooshError::NoProvider("unknown".into()),
-        HooshError::RateLimited { retry_after_ms: 1000 },
-        HooshError::BudgetExceeded { pool: "default".into(), remaining: 0 },
+        HooshError::RateLimited {
+            retry_after_ms: 1000,
+        },
+        HooshError::BudgetExceeded {
+            pool: "default".into(),
+            remaining: 0,
+        },
         HooshError::Timeout(5000),
         HooshError::Provider("backend down".into()),
         HooshError::Cache("miss".into()),
@@ -441,9 +446,7 @@ fn bench_metadata_registry(c: &mut Criterion) {
 
     let reg = ModelMetadataRegistry::new();
 
-    c.bench_function("metadata_exact_lookup", |b| {
-        b.iter(|| reg.get("gpt-4o"))
-    });
+    c.bench_function("metadata_exact_lookup", |b| b.iter(|| reg.get("gpt-4o")));
 
     c.bench_function("metadata_prefix_lookup", |b| {
         b.iter(|| reg.get("claude-sonnet-4-20250514"))
@@ -463,7 +466,9 @@ fn bench_metadata_registry(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_tool_conversion(c: &mut Criterion) {
-    use hoosh::tools::{ToolDefinition, to_openai_tools, to_anthropic_tools, parse_openai_tool_calls};
+    use hoosh::tools::{
+        ToolDefinition, parse_openai_tool_calls, to_anthropic_tools, to_openai_tools,
+    };
 
     let defs: Vec<ToolDefinition> = (0..5)
         .map(|i| ToolDefinition {
@@ -480,9 +485,7 @@ fn bench_tool_conversion(c: &mut Criterion) {
         })
         .collect();
 
-    c.bench_function("to_openai_tools_5", |b| {
-        b.iter(|| to_openai_tools(&defs))
-    });
+    c.bench_function("to_openai_tools_5", |b| b.iter(|| to_openai_tools(&defs)));
 
     c.bench_function("to_anthropic_tools_5", |b| {
         b.iter(|| to_anthropic_tools(&defs))

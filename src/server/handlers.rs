@@ -206,9 +206,7 @@ fn validate_chat_request(req: &ChatRequest) -> Option<axum::response::Response> 
             .bytes()
             .any(|b| b < 0x20 || b == b'\\' || b == b'"')
     {
-        return Some(
-            error_response(StatusCode::BAD_REQUEST, "invalid model name").into_response(),
-        );
+        return Some(error_response(StatusCode::BAD_REQUEST, "invalid model name").into_response());
     }
     if let Some(temp) = req.temperature
         && !(0.0..=2.0).contains(&temp)
@@ -485,9 +483,7 @@ async fn handle_non_streaming(
 // /v1/models
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn list_models(
-    State(state): State<Arc<AppState>>,
-) -> Json<ModelsResponse> {
+pub(crate) async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
     let mut models = Vec::new();
 
     let routes: Vec<_> = state
@@ -611,9 +607,7 @@ pub(crate) async fn health_providers(
     Json(results)
 }
 
-pub(crate) async fn health_heartbeat(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn health_heartbeat(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let stats = state.heartbeat.fleet_stats();
     (StatusCode::OK, Json(stats)).into_response()
 }
@@ -708,9 +702,7 @@ pub(crate) async fn costs_get(State(state): State<Arc<AppState>>) -> Json<CostsR
     })
 }
 
-pub(crate) async fn costs_reset(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+pub(crate) async fn costs_reset(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     if let Some(ref audit) = state.audit {
         audit.record(
             "admin.costs_reset",

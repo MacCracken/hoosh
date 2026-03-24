@@ -128,10 +128,16 @@ fn bench_request_serialization(c: &mut Criterion) {
     let complex = InferenceRequest {
         model: "llama3".into(),
         messages: (0..10)
-            .map(|i| Message::new(
-                if i % 2 == 0 { Role::User } else { Role::Assistant },
-                format!("Message number {} with some content to serialize.", i),
-            ))
+            .map(|i| {
+                Message::new(
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    format!("Message number {} with some content to serialize.", i),
+                )
+            })
             .collect(),
         temperature: Some(0.7),
         max_tokens: Some(2048),
@@ -183,10 +189,16 @@ fn bench_cache_operations(c: &mut Criterion) {
     use hoosh::cache::cache_key;
     use hoosh::inference::{Message, Role};
     let msgs: Vec<Message> = (0..5)
-        .map(|i| Message::new(
-            if i % 2 == 0 { Role::User } else { Role::Assistant },
-            format!("message {i}"),
-        ))
+        .map(|i| {
+            Message::new(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                format!("message {i}"),
+            )
+        })
         .collect();
 
     c.bench_function("cache_key_5_messages", |b| {

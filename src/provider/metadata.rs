@@ -102,7 +102,11 @@ impl ModelMetadataRegistry {
             ("grok-3", 131_072, chat_stream_tools.clone()),
             ("grok-3-mini", 131_072, chat_stream_tools.clone()),
             // Gemini
-            ("gemini-2.0-flash", 1_048_576, chat_stream_tools_vision.clone()),
+            (
+                "gemini-2.0-flash",
+                1_048_576,
+                chat_stream_tools_vision.clone(),
+            ),
             // Groq (hosted)
             ("llama-3.3-70b", 128_000, chat_stream.clone()),
             ("llama-3.1-8b", 128_000, chat_stream.clone()),

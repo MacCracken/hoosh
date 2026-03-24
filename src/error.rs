@@ -70,10 +70,16 @@ mod tests {
 
     #[test]
     fn http_status_codes() {
-        assert_eq!(HooshError::ModelNotFound("x".into()).http_status_code(), 404);
+        assert_eq!(
+            HooshError::ModelNotFound("x".into()).http_status_code(),
+            404
+        );
         assert_eq!(HooshError::NoProvider("x".into()).http_status_code(), 404);
         assert_eq!(
-            HooshError::RateLimited { retry_after_ms: 1000 }.http_status_code(),
+            HooshError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .http_status_code(),
             429
         );
         assert_eq!(
@@ -99,7 +105,10 @@ mod tests {
             HooshError::ModelNotFound("x".into()).error_code(),
             "model_not_found"
         );
-        assert_eq!(HooshError::NoProvider("x".into()).error_code(), "no_provider");
+        assert_eq!(
+            HooshError::NoProvider("x".into()).error_code(),
+            "no_provider"
+        );
         assert_eq!(
             HooshError::RateLimited { retry_after_ms: 0 }.error_code(),
             "rate_limit_exceeded"
