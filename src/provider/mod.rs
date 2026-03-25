@@ -34,13 +34,11 @@ pub fn build_provider_client(tls: Option<&TlsConfig>) -> reqwest::Client {
     if let Some(tls) = tls {
         // Pin certificates
         if !tls.pinned_certs.is_empty() {
-            builder = builder.tls_built_in_root_certs(false);
-            let mut loaded = 0usize;
+            let mut certs = Vec::new();
             for cert_path in &tls.pinned_certs {
                 if let Ok(pem) = std::fs::read(cert_path) {
                     if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
-                        builder = builder.add_root_certificate(cert);
-                        loaded += 1;
+                        certs.push(cert);
                     } else {
                         tracing::error!("failed to parse TLS certificate: {cert_path}");
                     }
@@ -48,11 +46,12 @@ pub fn build_provider_client(tls: Option<&TlsConfig>) -> reqwest::Client {
                     tracing::error!("failed to read TLS certificate: {cert_path}");
                 }
             }
-            if loaded == 0 {
+            if certs.is_empty() {
                 tracing::error!(
                     "TLS pinning configured but no certificates loaded — connections will fail"
                 );
             }
+            builder = builder.tls_certs_only(certs);
         }
 
         // mTLS client identity

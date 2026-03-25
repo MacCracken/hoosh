@@ -1,6 +1,6 @@
 [package]
 name = "hoosh"
-version = "0.23.4"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -59,10 +59,10 @@ async-trait = "0.1"
 
 # Async / HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "http2"] }
 axum = "0.8"
-tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors", "limit"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "limit"] }
 async-stream = "0.3"
 futures = "0.3"
 
@@ -92,7 +92,7 @@ prometheus = "0.14"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-rand = "0.8"
+rand = "0.9"
 
 # Personality & emotion engine
 bhava = { version = "0.23.3", default-features = false, features = ["sentiment"], optional = true }
@@ -118,7 +118,7 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tokio-test = "0.4"
 
 [[bench]]
