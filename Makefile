@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test audit deny vet semver bench coverage build release doc clean
+.PHONY: check fmt clippy test audit deny vet semver bench bench-history coverage build release doc fuzz msrv clean
 
 # Run all CI checks locally
 check: fmt clippy test audit deny
@@ -9,11 +9,11 @@ fmt:
 
 # Lint (zero warnings)
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-features --all-targets -- -D warnings
 
 # Run test suite
 test:
-	cargo test
+	cargo test --all-features
 
 # Security audit
 audit:
@@ -31,13 +31,28 @@ vet:
 semver:
 	cargo semver-checks check-release
 
-# Run benchmarks (synthetic + e2e)
-bench:
-	cargo bench --bench routing --bench providers --bench e2e -- --noplot
+# MSRV check
+msrv:
+	cargo +1.89 check
+	cargo +1.89 test
 
-# Coverage report
+# Run benchmarks (synthetic)
+bench:
+	cargo bench --bench routing --bench providers --bench hot_path --bench e2e -- --noplot
+
+# Run benchmarks with CSV history tracking
+bench-history:
+	./scripts/bench-history.sh
+
+# Coverage report (HTML + lcov)
 coverage:
-	cargo llvm-cov --lcov --output-path lcov.info
+	cargo llvm-cov --all-features --lcov --output-path lcov.info
+	cargo llvm-cov --all-features --html
+
+# Fuzz deserialization paths (requires cargo-fuzz, nightly)
+fuzz:
+	cargo +nightly fuzz run fuzz_inference_request -- -max_total_time=300
+	cargo +nightly fuzz run fuzz_message_content -- -max_total_time=300
 
 # Build release
 build:
@@ -51,9 +66,9 @@ release:
 	sha256sum "hoosh-$${VERSION}-linux-amd64.tar.gz" > "hoosh-$${VERSION}-linux-amd64.tar.gz.sha256"; \
 	echo "Packaged hoosh-$${VERSION}-linux-amd64.tar.gz"
 
-# Generate documentation
+# Generate documentation (warnings as errors)
 doc:
-	cargo doc --no-deps
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 # Clean build artifacts
 clean:

@@ -14,6 +14,8 @@ dependencies = [
 [[package]]
 name = "ai-hwaccel"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cd3d3539f780343ed071981ff2c7341466202a5f46831efa58e3a628714bc23"
 dependencies = [
  "serde",
  "serde_json",

@@ -1,0 +1,17 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 85%
+        threshold: 2%
+    patch:
+      default:
+        target: 80%
+
+ignore:
+  - "benches/"
+  - "src/main.rs"
+  - "src/server/audio.rs"
+  - "src/telemetry.rs"
+  - "src/provider/whisper.rs"
+  - "src/provider/tts.rs"

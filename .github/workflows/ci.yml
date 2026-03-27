@@ -27,10 +27,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Type check
+      - name: Clippy (all features)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+      - name: Type check (default features)
         run: cargo check
+      - name: Type check (no default features)
+        run: cargo check --no-default-features
+      - name: Type check (all features)
+        run: cargo check --all-features --all-targets
+      - name: Doc warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
   security:
     name: Security Audit
@@ -61,6 +67,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -69,9 +77,30 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test
+        run: cargo test --all-features
       - name: Run doc tests
         run: cargo test --doc
+
+  test-features:
+    name: Feature Matrix
+    needs: [check]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "ollama"
+          - "openai,anthropic"
+          - "dlp"
+          - "all-providers"
+          - "all-providers,dlp,tools"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test with features '${{ matrix.features }}'
+        run: cargo test --no-default-features --features "${{ matrix.features }}"
 
   msrv:
     name: MSRV (1.89)
@@ -87,6 +116,22 @@ jobs:
       - name: Test with MSRV
         run: cargo test
 
+  semver:
+    name: SemVer Check
+    runs-on: ubuntu-latest
+    needs: [check]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks
+      - name: Check semver compliance
+        run: cargo semver-checks check-release
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -100,7 +145,7 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload coverage
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: codecov/codecov-action@v4
@@ -108,22 +153,21 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
-  semver:
-    name: SemVer Check
+  fuzz:
+    name: Fuzz (smoke)
     runs-on: ubuntu-latest
     needs: [check]
-    # Only run on PRs — compares against base branch
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-semver-checks
-        run: cargo install cargo-semver-checks
-      - name: Check semver compliance
-        run: cargo semver-checks check-release
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz inference request (60s)
+        run: cargo +nightly fuzz run fuzz_inference_request -- -max_total_time=60
+      - name: Fuzz message content (60s)
+        run: cargo +nightly fuzz run fuzz_message_content -- -max_total_time=60
 
   bench:
     name: Benchmarks
@@ -134,7 +178,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run synthetic benchmarks
-        run: cargo bench --bench routing --bench providers -- --noplot
+        run: cargo bench --bench routing --bench providers --bench hot_path --bench e2e -- --noplot
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
