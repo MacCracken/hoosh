@@ -309,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "hwaccel")]
             {
-                let hw = hoosh::hardware::HardwareManager::detect();
+                let hw = hoosh::hardware::HardwareManager::detect_with_timing();
                 println!("Hardware:");
                 for line in hw.summary() {
                     println!("{line}");
@@ -317,6 +317,15 @@ async fn main() -> anyhow::Result<()> {
                 if hw.has_accelerator() {
                     let mem_gb = hw.total_accelerator_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
                     println!("  Total accelerator memory: {mem_gb:.1} GB");
+                    if let Some(best) = hw.best_device() {
+                        let fallback = best.accelerator.to_string();
+                        let name = best.device_name.as_deref().unwrap_or(&fallback);
+                        println!("  Best device: {name}");
+                    }
+                }
+                if hw.has_fast_interconnect() {
+                    let bw = hw.system_io().total_interconnect_bandwidth_gbps();
+                    println!("  Interconnect bandwidth: {bw:.0} GB/s");
                 }
                 println!();
             }
