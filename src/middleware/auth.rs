@@ -110,6 +110,9 @@ mod tests {
             tts: None,
             #[cfg(feature = "tools")]
             mcp_bridge: Arc::new(crate::tools::McpBridge::new()),
+            compactor: crate::context::compactor::ContextCompactor::new(0.8, 10, true),
+            model_registry: crate::provider::metadata::ModelMetadataRegistry::new(),
+            retry_manager: crate::provider::retry::RetryManager::new(Default::default()),
         })
     }
 

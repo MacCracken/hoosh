@@ -118,6 +118,7 @@ impl WhisperProvider {
 }
 
 /// Decoded WAV audio data.
+#[derive(Debug)]
 struct DecodedAudio {
     samples: Vec<f32>,
     sample_rate: u32,

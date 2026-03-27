@@ -1,5 +1,7 @@
 //! Core inference types: requests, responses, model metadata.
 
+pub mod batch;
+
 use serde::{Deserialize, Serialize};
 
 /// An inference request.
@@ -29,11 +31,111 @@ pub struct InferenceRequest {
     pub tool_choice: Option<crate::tools::ToolChoice>,
 }
 
+/// Message content — plain text or multi-part (text + images).
+///
+/// Deserializes from either a JSON string (`"hello"`) or an array of content
+/// parts (`[{"type":"text","text":"hello"}, {"type":"image_url",...}]`),
+/// matching the OpenAI API format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content.
+    Text(String),
+    /// Multi-part content (text, images, etc.).
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract the text content, concatenating text parts if multi-part.
+    #[must_use]
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Text(s) => std::borrow::Cow::Borrowed(s),
+            Self::Parts(parts) => {
+                let mut buf = String::new();
+                for p in parts {
+                    if let ContentPart::Text { text } = p {
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                        buf.push_str(text);
+                    }
+                }
+                std::borrow::Cow::Owned(buf)
+            }
+        }
+    }
+
+    /// Whether the content contains any image parts.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        match self {
+            Self::Text(_) => false,
+            Self::Parts(parts) => parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+        }
+    }
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
+impl PartialEq<&str> for MessageContent {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == *other
+    }
+}
+
+impl PartialEq<str> for MessageContent {
+    fn eq(&self, other: &str) -> bool {
+        self.text() == other
+    }
+}
+
+/// A single content part in a multi-modal message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum ContentPart {
+    /// Text content.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL content.
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL with optional detail level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL of the image (https:// or data:image/...).
+    pub url: String,
+    /// Detail level: "low", "high", or "auto".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: String,
+    pub content: MessageContent,
     /// For tool-result messages: the ID of the tool call this responds to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -43,11 +145,11 @@ pub struct Message {
 }
 
 impl Message {
-    /// Create a new message with no tool fields.
+    /// Create a new text message with no tool fields.
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: Vec::new(),
         }
@@ -545,5 +647,73 @@ mod tests {
         let back: SentimentAnalysis = serde_json::from_str(&json).unwrap();
         assert!((back.valence - 0.8).abs() < f32::EPSILON);
         assert!(back.is_positive);
+    }
+
+    #[test]
+    fn message_content_text_serde() {
+        let msg = Message::new(Role::User, "hello");
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content, "hello");
+    }
+
+    #[test]
+    fn message_content_parts_serde() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "What is this?".into(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/img.png".into(),
+                        detail: Some("high".into()),
+                    },
+                },
+            ]),
+            tool_call_id: None,
+            tool_calls: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert!(back.content.has_images());
+        assert_eq!(back.content.text(), "What is this?");
+    }
+
+    #[test]
+    fn message_content_text_from_plain_string_json() {
+        // OpenAI format: "content": "hello"
+        let json = r#"{"role":"user","content":"hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content, "hello");
+        assert!(!msg.content.has_images());
+    }
+
+    #[test]
+    fn message_content_parts_from_array_json() {
+        // OpenAI format: "content": [{"type":"text","text":"hi"},{"type":"image_url",...}]
+        let json = r#"{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert!(msg.content.has_images());
+        assert_eq!(msg.content.text(), "describe this");
+    }
+
+    #[test]
+    fn message_content_no_images_in_text() {
+        let content = MessageContent::Text("just text".into());
+        assert!(!content.has_images());
+    }
+
+    #[test]
+    fn message_content_partial_eq_str() {
+        let content = MessageContent::Text("hello".into());
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn message_content_default() {
+        let content = MessageContent::default();
+        assert_eq!(content, "");
     }
 }

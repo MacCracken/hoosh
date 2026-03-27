@@ -1,6 +1,10 @@
 //! Response caching for inference results.
 
+pub mod semantic;
+pub mod warming;
+
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -46,15 +50,37 @@ pub fn cache_key(model: &str, messages: &[crate::inference::Message]) -> String 
     model.hash(&mut hasher);
     for m in messages {
         std::mem::discriminant(&m.role).hash(&mut hasher);
-        m.content.hash(&mut hasher);
+        m.content.text().hash(&mut hasher);
     }
     format!("{}:{:016x}", model, hasher.finish())
 }
 
-/// Thread-safe response cache with TTL eviction.
+/// Cache statistics snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheStats {
+    /// Current number of entries.
+    pub entries: usize,
+    /// Maximum entries allowed.
+    pub max_entries: usize,
+    /// Total cache hits.
+    pub hits: u64,
+    /// Total cache misses.
+    pub misses: u64,
+    /// Total evictions (expired + capacity).
+    pub evictions: u64,
+    /// Hit rate (0.0–1.0). NaN if no lookups yet.
+    pub hit_rate: f64,
+    /// Whether caching is enabled.
+    pub enabled: bool,
+}
+
+/// Thread-safe response cache with TTL eviction and statistics tracking.
 pub struct ResponseCache {
     entries: DashMap<String, CacheEntry>,
     config: CacheConfig,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
 }
 
 impl ResponseCache {
@@ -63,6 +89,9 @@ impl ResponseCache {
         Self {
             entries: DashMap::new(),
             config,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -71,13 +100,24 @@ impl ResponseCache {
         if !self.config.enabled {
             return None;
         }
-        let entry = self.entries.get(key)?;
+        let entry = match self.entries.get(key) {
+            Some(e) => e,
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
         if entry.is_expired() {
             drop(entry);
             self.entries.remove(key);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        Some(entry.value.clone())
+        let value = entry.value.clone();
+        drop(entry);
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Some(value)
     }
 
     /// Insert a response into the cache.
@@ -97,9 +137,11 @@ impl ResponseCache {
                     .take(to_remove)
                     .map(|e| e.key().clone())
                     .collect();
+                let removed = keys.len() as u64;
                 for key in keys {
                     self.entries.remove(&key);
                 }
+                self.evictions.fetch_add(removed, Ordering::Relaxed);
             }
         }
         self.entries.insert(
@@ -127,9 +169,35 @@ impl ResponseCache {
         self.entries.clear();
     }
 
+    /// Get a snapshot of cache statistics.
+    #[must_use]
+    pub fn stats(&self) -> CacheStats {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        CacheStats {
+            entries: self.entries.len(),
+            max_entries: self.config.max_entries,
+            hits,
+            misses,
+            evictions: self.evictions.load(Ordering::Relaxed),
+            hit_rate: if total > 0 {
+                hits as f64 / total as f64
+            } else {
+                0.0
+            },
+            enabled: self.config.enabled,
+        }
+    }
+
     /// Remove expired entries.
     fn evict_expired(&self) {
+        let before = self.entries.len();
         self.entries.retain(|_, entry| !entry.is_expired());
+        let evicted = before.saturating_sub(self.entries.len()) as u64;
+        if evicted > 0 {
+            self.evictions.fetch_add(evicted, Ordering::Relaxed);
+        }
     }
 }
 
@@ -253,5 +321,59 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         cache.evict_expired();
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn stats_initial() {
+        let cache = ResponseCache::new(CacheConfig::default());
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions, 0);
+        assert!((stats.hit_rate - 0.0).abs() < f64::EPSILON);
+        assert!(stats.enabled);
+    }
+
+    #[test]
+    fn stats_hit_and_miss() {
+        let cache = ResponseCache::new(CacheConfig::default());
+        cache.insert("key".into(), "value".into());
+        let _ = cache.get("key"); // hit
+        let _ = cache.get("missing"); // miss
+        let _ = cache.get("key"); // hit
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 1);
+        assert!((stats.hit_rate - 2.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn stats_eviction_counted() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 2,
+            ttl_secs: 300,
+            enabled: true,
+        });
+        cache.insert("a".into(), "1".into());
+        cache.insert("b".into(), "2".into());
+        cache.insert("c".into(), "3".into()); // triggers eviction
+        let stats = cache.stats();
+        assert!(stats.evictions >= 1);
+    }
+
+    #[test]
+    fn stats_ttl_eviction_counted() {
+        let cache = ResponseCache::new(CacheConfig {
+            max_entries: 100,
+            ttl_secs: 0,
+            enabled: true,
+        });
+        cache.insert("key".into(), "value".into());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = cache.get("key"); // should be expired → eviction + miss
+        let stats = cache.stats();
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(stats.misses, 1);
     }
 }

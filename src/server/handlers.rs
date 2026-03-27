@@ -13,7 +13,7 @@ use axum::{
 };
 
 use crate::budget::TokenPool;
-use crate::inference::{InferenceRequest, Message, Role};
+use crate::inference::{InferenceRequest, Message, MessageContent, Role};
 
 use super::AppState;
 use super::types::*;
@@ -98,7 +98,7 @@ pub(crate) async fn chat_completions(
     };
 
     // Convert ChatRequest → InferenceRequest
-    let inference_req = InferenceRequest {
+    let mut inference_req = InferenceRequest {
         model: req.model.clone(),
         prompt: String::new(),
         system: None,
@@ -112,7 +112,7 @@ pub(crate) async fn chat_completions(
                     "tool" => Role::Tool,
                     _ => Role::User,
                 },
-                content: m.content.clone(),
+                content: MessageContent::Text(m.content.clone()),
                 tool_call_id: m.tool_call_id.clone(),
                 tool_calls: m.tool_calls.clone(),
             })
@@ -125,8 +125,30 @@ pub(crate) async fn chat_completions(
         tool_choice: req.tool_choice.clone(),
     };
 
-    // Token budget: validate pool exists, then atomically reserve
-    let estimated_tokens = max_tokens.unwrap_or(1024) as u64;
+    // Context compaction: truncate if approaching model's context window.
+    let counter = crate::context::tokens::ProviderTokenCounter::for_provider(route.provider);
+    if let Some(result) = state.compactor.compact(
+        &inference_req.model,
+        &inference_req.messages,
+        &state.model_registry,
+        &counter,
+    ) {
+        tracing::info!(
+            request_id = %request_id,
+            original_tokens = result.original_tokens,
+            compacted_tokens = result.compacted_tokens,
+            messages_dropped = result.messages_dropped,
+            "context compacted"
+        );
+        inference_req.messages = result.messages;
+    }
+
+    // Token budget: validate pool exists, then atomically reserve.
+    // Estimate = input tokens (from messages) + output budget (max_tokens or default).
+    let input_estimate =
+        crate::context::tokens::TokenCounter::count_messages(&counter, &inference_req.messages);
+    let output_budget = max_tokens.unwrap_or(1024);
+    let estimated_tokens = (input_estimate.saturating_add(output_budget)) as u64;
     let pool_name = req.pool.clone();
     {
         let mut budget = state.budget.lock().unwrap_or_else(|e| e.into_inner());
@@ -772,6 +794,10 @@ pub(crate) async fn queue_status(State(state): State<Arc<AppState>>) -> impl Int
         })),
     )
         .into_response()
+}
+
+pub(crate) async fn cache_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!(state.cache.stats()))).into_response()
 }
 
 pub(crate) async fn prometheus_metrics() -> impl IntoResponse {

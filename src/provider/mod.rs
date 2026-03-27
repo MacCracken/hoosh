@@ -83,6 +83,8 @@ pub mod openai_compat;
 
 // Model metadata
 pub mod metadata;
+// Retry logic
+pub mod retry;
 
 // Local providers
 #[cfg(feature = "llamacpp")]

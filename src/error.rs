@@ -26,6 +26,9 @@ pub enum HooshError {
     #[error("cache error: {0}")]
     Cache(String),
 
+    #[error("content blocked by DLP policy: {reason}")]
+    DlpBlocked { reason: String },
+
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 
@@ -41,8 +44,31 @@ impl HooshError {
             Self::RateLimited { .. } | Self::BudgetExceeded { .. } => 429,
             Self::Timeout(_) => 408,
             Self::Cache(_) | Self::Provider(_) => 500,
+            Self::DlpBlocked { .. } => 403,
             Self::Http(e) => e.status().map(|s| s.as_u16()).unwrap_or(502),
             Self::Other(_) => 500,
+        }
+    }
+
+    /// Whether this error is transient and the request should be retried.
+    ///
+    /// Retryable: rate limits, timeouts, provider 5xx, connection errors.
+    /// Permanent: model not found, budget exceeded, 4xx client errors.
+    #[must_use]
+    #[inline]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Timeout(_) => true,
+            Self::Provider(_) | Self::Cache(_) => true,
+            Self::Http(e) => {
+                // Retry on 5xx or connection errors
+                e.status().map(|s| s.is_server_error()).unwrap_or(true) // connection error = retryable
+            }
+            Self::ModelNotFound(_)
+            | Self::NoProvider(_)
+            | Self::BudgetExceeded { .. }
+            | Self::DlpBlocked { .. }
+            | Self::Other(_) => false,
         }
     }
 
@@ -56,6 +82,7 @@ impl HooshError {
             Self::Timeout(_) => "timeout",
             Self::Cache(_) => "cache_error",
             Self::Provider(_) => "provider_error",
+            Self::DlpBlocked { .. } => "content_blocked",
             Self::Http(_) => "upstream_error",
             Self::Other(_) => "internal_error",
         }

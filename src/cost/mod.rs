@@ -1,5 +1,7 @@
 //! Per-provider cost tracking — pricing table and cost accumulation.
 
+pub mod optimizer;
+
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -91,7 +93,7 @@ fn fallback_pricing(provider: ProviderType) -> ModelPricing {
 /// 1. Try exact match in PRICING table.
 /// 2. Try prefix match (e.g. "claude-sonnet-4-20250514" matches "claude-sonnet-4").
 /// 3. Fall back to provider-level default.
-fn lookup_pricing(model: &str, provider: ProviderType) -> ModelPricing {
+pub(crate) fn lookup_pricing(model: &str, provider: ProviderType) -> ModelPricing {
     // Exact match
     if let Some(p) = PRICING.get(model) {
         return p.clone();

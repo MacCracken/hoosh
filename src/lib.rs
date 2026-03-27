@@ -43,7 +43,10 @@ pub mod budget;
 pub mod cache;
 pub mod client;
 pub mod config;
+pub mod context;
 pub mod cost;
+#[cfg(feature = "dlp")]
+pub mod dlp;
 pub mod error;
 pub mod events;
 #[cfg(feature = "hwaccel")]

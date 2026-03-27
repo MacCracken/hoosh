@@ -64,7 +64,7 @@ fn build_anthropic_body(req: &InferenceRequest, stream: bool) -> serde_json::Val
         for m in &req.messages {
             match m.role {
                 Role::System => {
-                    system_text = Some(m.content.clone());
+                    system_text = Some(m.content.text().into_owned());
                 }
                 Role::User | Role::Tool => {
                     msgs.push(serde_json::json!({"role": "user", "content": m.content}));

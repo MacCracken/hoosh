@@ -140,6 +140,69 @@ impl Router {
         }
     }
 
+    /// Select a provider with DLP classification-aware filtering.
+    ///
+    /// When classification is `Confidential` or higher, only local providers
+    /// (where `ProviderType::is_local()` returns true) are eligible.
+    /// `Restricted` classification blocks all routing (returns `None`).
+    #[cfg(feature = "dlp")]
+    pub fn select_with_classification(
+        &self,
+        model: &str,
+        classification: crate::dlp::ClassificationLevel,
+    ) -> Option<&ProviderRoute> {
+        use crate::dlp::ClassificationLevel;
+
+        if classification == ClassificationLevel::Restricted {
+            return None;
+        }
+
+        let require_local = classification >= ClassificationLevel::Confidential;
+
+        let candidates: Vec<&ProviderRoute> = self
+            .routes
+            .iter()
+            .filter(|r| {
+                r.enabled
+                    && self.matches_model(r, model)
+                    && self.is_provider_healthy(r.provider, &r.base_url)
+                    && (!require_local || r.provider.is_local())
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        match self.strategy {
+            RoutingStrategy::Priority | RoutingStrategy::Direct => candidates.first().copied(),
+            RoutingStrategy::LowestLatency => {
+                let mut best: Option<(&ProviderRoute, u64)> = None;
+                for c in &candidates {
+                    let key = (c.provider, c.base_url.clone());
+                    let latency = self
+                        .latencies
+                        .get(&key)
+                        .map(|e| e.value().load(Ordering::Relaxed))
+                        .unwrap_or(u64::MAX);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, best_lat)| latency < *best_lat)
+                    {
+                        best = Some((c, latency));
+                    }
+                }
+                best.map(|(r, _)| r)
+            }
+            RoutingStrategy::RoundRobin => {
+                let idx = self
+                    .round_robin_index
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(candidates[idx % candidates.len()])
+            }
+        }
+    }
+
     /// Report observed latency for a provider, updating an exponential moving average.
     pub fn report_latency(&self, provider: ProviderType, base_url: &str, latency_ms: u64) {
         let key = (provider, base_url.to_string());

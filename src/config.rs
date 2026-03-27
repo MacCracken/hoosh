@@ -34,6 +34,10 @@ pub struct HooshConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub telemetry: TelemetrySection,
+    #[serde(default)]
+    pub context: ContextSection,
+    #[serde(default)]
+    pub retry: crate::provider::retry::RetryConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,6 +79,38 @@ impl std::fmt::Debug for AuditSection {
             .field("max_entries", &self.max_entries)
             .finish()
     }
+}
+
+/// Context management configuration.
+#[derive(Debug, Deserialize)]
+pub struct ContextSection {
+    /// Token ratio threshold (0.0–1.0) at which context compaction triggers.
+    /// Default 0.8 = compact when messages exceed 80% of the model's context window.
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold: f64,
+    /// Number of most-recent messages to keep when truncating.
+    #[serde(default = "default_keep_last")]
+    pub keep_last_messages: usize,
+    /// Enable context compaction. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for ContextSection {
+    fn default() -> Self {
+        Self {
+            compaction_threshold: default_compaction_threshold(),
+            keep_last_messages: default_keep_last(),
+            enabled: true,
+        }
+    }
+}
+
+fn default_compaction_threshold() -> f64 {
+    0.8
+}
+fn default_keep_last() -> usize {
+    10
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -324,6 +360,8 @@ impl HooshConfig {
                 audit: AuditSection::default(),
                 auth: AuthConfig::default(),
                 telemetry: TelemetrySection::default(),
+                context: ContextSection::default(),
+                retry: crate::provider::retry::RetryConfig::default(),
             }
         }
     }
@@ -400,6 +438,8 @@ impl HooshConfig {
             telemetry_service_name: self.telemetry.service_name,
             health_check_interval_secs: self.server.health_check_interval_secs,
             config_path,
+            context_config: self.context,
+            retry_config: self.retry,
         }
     }
 }

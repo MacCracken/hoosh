@@ -40,6 +40,9 @@ pub struct AppState {
     pub tts: Option<std::sync::Arc<crate::provider::tts::TtsProvider>>,
     #[cfg(feature = "tools")]
     pub mcp_bridge: Arc<crate::tools::McpBridge>,
+    pub compactor: crate::context::compactor::ContextCompactor,
+    pub model_registry: crate::provider::metadata::ModelMetadataRegistry,
+    pub retry_manager: crate::provider::retry::RetryManager,
 }
 
 /// Server configuration.
@@ -60,6 +63,8 @@ pub struct ServerConfig {
     pub telemetry_service_name: String,
     pub health_check_interval_secs: u64,
     pub config_path: Option<String>,
+    pub context_config: crate::config::ContextSection,
+    pub retry_config: crate::provider::retry::RetryConfig,
 }
 
 impl Default for ServerConfig {
@@ -81,6 +86,8 @@ impl Default for ServerConfig {
             telemetry_service_name: "hoosh".into(),
             health_check_interval_secs: 30,
             config_path: None,
+            context_config: crate::config::ContextSection::default(),
+            retry_config: crate::provider::retry::RetryConfig::default(),
         }
     }
 }
@@ -194,6 +201,12 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     let mut router = hoosh_router::Router::new(config.routes, config.strategy);
     router.set_health_map(health_map.clone());
 
+    let compactor = crate::context::compactor::ContextCompactor::new(
+        config.context_config.compaction_threshold,
+        config.context_config.keep_last_messages,
+        config.context_config.enabled,
+    );
+
     let state = Arc::new(AppState {
         router: std::sync::RwLock::new(router),
         config_path: config.config_path,
@@ -218,6 +231,9 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         tts,
         #[cfg(feature = "tools")]
         mcp_bridge,
+        compactor,
+        model_registry: crate::provider::metadata::ModelMetadataRegistry::new(),
+        retry_manager: crate::provider::retry::RetryManager::new(config.retry_config),
     });
 
     // Spawn background health checker if enabled
@@ -259,6 +275,7 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         .route("/v1/audit", get(handlers::audit_log))
         .route("/v1/admin/reload", post(handlers::admin_reload))
         .route("/v1/queue/status", get(handlers::queue_status))
+        .route("/v1/cache/stats", get(handlers::cache_stats))
         .layer(DefaultBodyLimit::max(1024 * 1024));
 
     #[allow(unused_mut)]
