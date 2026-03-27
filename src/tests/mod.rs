@@ -3074,7 +3074,8 @@ mod e2e {
         // Wait for the health checker to run enough times to mark the dead
         // backend unhealthy (UNHEALTHY_THRESHOLD = 3 consecutive failures,
         // plus the initial tick skip). With 1s interval we need ~4-5 seconds.
-        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        // Use 10s to account for slower CI runners (Windows).
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
         let client = reqwest::Client::new();
         let resp = client
