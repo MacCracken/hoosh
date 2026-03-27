@@ -37,7 +37,7 @@ impl HardwareManager {
 
     /// Run hardware discovery with per-backend timing information.
     ///
-    /// The timings are available via [`detection_timing_summary`].
+    /// The timings are available via [`HardwareManager::detection_timing_summary`].
     pub fn detect_with_timing() -> Self {
         let timed = AcceleratorRegistry::detect_with_timing();
         Self {

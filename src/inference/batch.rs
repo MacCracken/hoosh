@@ -80,7 +80,7 @@ impl BatchManager {
     /// Submit a batch of inference requests for execution.
     ///
     /// Returns the batch ID for tracking progress. The batch executes
-    /// asynchronously — use [`get_progress`] to check status.
+    /// asynchronously — use [`BatchManager::get_progress`] to check status.
     pub fn submit<F, Fut>(
         &self,
         batch_id: String,
