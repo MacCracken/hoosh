@@ -319,6 +319,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     tracing::info!("hoosh v{} listening on {}", env!("CARGO_PKG_VERSION"), addr);
     tracing::info!("OpenAI-compatible API: http://{}/v1/chat/completions", addr);
 
+    #[cfg(unix)]
     if let Some(config_path) = app_state.config_path.clone() {
         let state = app_state.clone();
         tokio::spawn(async move {
