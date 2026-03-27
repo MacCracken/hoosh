@@ -5,6 +5,19 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// A named token pool with a capacity limit.
+///
+/// # Example
+///
+/// ```
+/// use hoosh::TokenPool;
+///
+/// let mut pool = TokenPool::new("default", 10_000);
+/// assert!(pool.can_reserve(5_000));
+/// pool.reserve(5_000);
+/// assert_eq!(pool.available(), 5_000);
+/// pool.commit(5_000, 3_000); // reserved 5k, actually used 3k
+/// assert_eq!(pool.available(), 7_000);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPool {
     /// Pool name (e.g. "default", "agent-123", "batch-jobs").

@@ -3,6 +3,17 @@
 use thiserror::Error;
 
 /// Top-level error type.
+///
+/// # Example
+///
+/// ```
+/// use hoosh::HooshError;
+///
+/// let err = HooshError::ModelNotFound("gpt-99".into());
+/// assert_eq!(err.http_status_code(), 404);
+/// assert_eq!(err.error_code(), "model_not_found");
+/// assert!(!err.is_retryable());
+/// ```
 #[derive(Debug, Error)]
 pub enum HooshError {
     #[error("provider error: {0}")]

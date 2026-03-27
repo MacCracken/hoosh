@@ -5,6 +5,21 @@ pub mod batch;
 use serde::{Deserialize, Serialize};
 
 /// An inference request.
+///
+/// # Example
+///
+/// ```
+/// use hoosh::InferenceRequest;
+///
+/// let req = InferenceRequest {
+///     model: "llama3".into(),
+///     prompt: "Hello".into(),
+///     max_tokens: Some(100),
+///     temperature: Some(0.7),
+///     ..Default::default()
+/// };
+/// assert_eq!(req.model, "llama3");
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InferenceRequest {
     /// Model identifier (e.g. "llama3", "gpt-4o", "claude-sonnet-4-20250514").
@@ -36,6 +51,21 @@ pub struct InferenceRequest {
 /// Deserializes from either a JSON string (`"hello"`) or an array of content
 /// parts (`[{"type":"text","text":"hello"}, {"type":"image_url",...}]`),
 /// matching the OpenAI API format.
+///
+/// # Example
+///
+/// ```
+/// use hoosh::inference::MessageContent;
+///
+/// // Plain text
+/// let text = MessageContent::Text("Hello".into());
+/// assert_eq!(text.text(), "Hello");
+/// assert!(!text.has_images());
+///
+/// // Deserializes from JSON string
+/// let mc: MessageContent = serde_json::from_str(r#""hello""#).unwrap();
+/// assert_eq!(mc, "hello");
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
@@ -159,6 +189,7 @@ impl Message {
 /// Message role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Role {
     System,
     User,
@@ -333,6 +364,7 @@ pub struct EmbeddingsRequest {
 /// Input for embeddings — single string or array of strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum EmbeddingsInput {
     Single(String),
     Multiple(Vec<String>),

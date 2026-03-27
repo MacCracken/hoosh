@@ -83,8 +83,8 @@ pub fn spawn_warming_task<F, Fut>(
 
             let f = infer_fn.clone();
             match f(req).await {
-                Ok((cache_key, response_text)) => {
-                    cache.insert(cache_key, response_text);
+                Ok((_returned_key, response_text)) => {
+                    cache.insert(key, response_text);
                     warmed += 1;
                 }
                 Err(e) => {
@@ -141,5 +141,121 @@ mod tests {
     fn empty_prompts_no_requests() {
         let requests = to_inference_requests(&[]);
         assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn warming_prompt_with_assistant_role() {
+        let prompts = vec![WarmingPrompt {
+            model: "gpt-4o".into(),
+            messages: vec![
+                WarmingMessage {
+                    role: "user".into(),
+                    content: "Hello".into(),
+                },
+                WarmingMessage {
+                    role: "assistant".into(),
+                    content: "Hi there!".into(),
+                },
+                WarmingMessage {
+                    role: "user".into(),
+                    content: "How are you?".into(),
+                },
+            ],
+        }];
+        let requests = to_inference_requests(&prompts);
+        assert_eq!(requests[0].messages.len(), 3);
+        assert_eq!(requests[0].messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn warming_prompt_unknown_role_defaults_to_user() {
+        let prompts = vec![WarmingPrompt {
+            model: "test".into(),
+            messages: vec![WarmingMessage {
+                role: "custom-role".into(),
+                content: "test".into(),
+            }],
+        }];
+        let requests = to_inference_requests(&prompts);
+        assert_eq!(requests[0].messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn warming_prompt_multiple() {
+        let prompts = vec![
+            WarmingPrompt {
+                model: "llama3".into(),
+                messages: vec![WarmingMessage {
+                    role: "user".into(),
+                    content: "Hello".into(),
+                }],
+            },
+            WarmingPrompt {
+                model: "gpt-4o".into(),
+                messages: vec![WarmingMessage {
+                    role: "user".into(),
+                    content: "World".into(),
+                }],
+            },
+        ];
+        let requests = to_inference_requests(&prompts);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].model, "llama3");
+        assert_eq!(requests[1].model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn spawn_warming_task_empty_prompts_returns_early() {
+        let cache = Arc::new(crate::cache::ResponseCache::new(
+            crate::cache::CacheConfig::default(),
+        ));
+        // Should return immediately without spawning
+        spawn_warming_task(vec![], cache, |_req| async {
+            Ok(("key".to_string(), "value".to_string()))
+        });
+        // No panic means it worked
+    }
+
+    #[tokio::test]
+    async fn spawn_warming_task_populates_cache() {
+        let cache = Arc::new(crate::cache::ResponseCache::new(
+            crate::cache::CacheConfig::default(),
+        ));
+        let prompts = vec![WarmingPrompt {
+            model: "test-model".into(),
+            messages: vec![WarmingMessage {
+                role: "user".into(),
+                content: "warm me up".into(),
+            }],
+        }];
+        let cache_clone = cache.clone();
+        spawn_warming_task(prompts, cache_clone, |_req| async {
+            Ok(("key".to_string(), "warmed response".to_string()))
+        });
+        // Wait for the background task to complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The cache should have an entry now
+        let stats = cache.stats();
+        assert!(stats.entries > 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_warming_task_handles_inference_error() {
+        let cache = Arc::new(crate::cache::ResponseCache::new(
+            crate::cache::CacheConfig::default(),
+        ));
+        let prompts = vec![WarmingPrompt {
+            model: "fail-model".into(),
+            messages: vec![WarmingMessage {
+                role: "user".into(),
+                content: "fail".into(),
+            }],
+        }];
+        spawn_warming_task(prompts, cache.clone(), |_req| async {
+            Err(anyhow::anyhow!("inference failed"))
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Cache should be empty since inference failed
+        assert_eq!(cache.stats().entries, 0);
     }
 }

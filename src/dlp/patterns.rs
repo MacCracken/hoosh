@@ -19,10 +19,10 @@ impl BuiltinPatterns {
                 r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
                 ClassificationLevel::Internal,
             ),
-            // US phone numbers
+            // US phone numbers (require separators to reduce false positives)
             (
                 "phone_us",
-                r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+                r"\b\d{3}[-. ]\d{3}[-. ]\d{4}\b",
                 ClassificationLevel::Confidential,
             ),
             // Social Security Numbers
@@ -46,7 +46,7 @@ impl BuiltinPatterns {
             // API keys / secrets (common prefixes)
             (
                 "api_key",
-                r"\b(?:sk-|pk-|api[_\-]?key[=: ]+)[a-zA-Z0-9]{20,}\b",
+                r"\b(?:sk-|pk-|api[_\-]?key[=: ]{1,5})[a-zA-Z0-9]{20,}\b",
                 ClassificationLevel::Restricted,
             ),
             // AWS access key IDs

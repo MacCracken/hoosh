@@ -321,4 +321,137 @@ mod tests {
         let client = HooshClient::new("http://localhost:8088/");
         assert_eq!(client.base_url(), "http://localhost:8088");
     }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = HooshClient::new("http://localhost:8088///");
+        // trim_end_matches removes all trailing slashes
+        assert_eq!(client.base_url(), "http://localhost:8088");
+    }
+
+    #[test]
+    fn to_chat_body_with_messages() {
+        let request = InferenceRequest {
+            model: "llama3".into(),
+            messages: vec![
+                crate::inference::Message::new(Role::System, "You are a helper."),
+                crate::inference::Message::new(Role::User, "Hello"),
+                crate::inference::Message::new(Role::Assistant, "Hi there!"),
+                crate::inference::Message::new(Role::Tool, "tool result"),
+            ],
+            stream: false,
+            ..Default::default()
+        };
+        let body = to_chat_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[3]["role"], "tool");
+    }
+
+    #[test]
+    fn to_chat_body_no_messages_uses_prompt() {
+        let request = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hello world".into(),
+            system: None,
+            messages: vec![],
+            stream: false,
+            ..Default::default()
+        };
+        let body = to_chat_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Hello world");
+    }
+
+    #[test]
+    fn to_chat_body_no_messages_with_system() {
+        let request = InferenceRequest {
+            model: "llama3".into(),
+            prompt: "Hello".into(),
+            system: Some("You are helpful.".into()),
+            messages: vec![],
+            stream: false,
+            ..Default::default()
+        };
+        let body = to_chat_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are helpful.");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn to_chat_body_with_optional_params() {
+        let request = InferenceRequest {
+            model: "gpt-4o".into(),
+            prompt: "test".into(),
+            max_tokens: Some(500),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stream: true,
+            ..Default::default()
+        };
+        let body = to_chat_body(&request);
+        assert_eq!(body["max_tokens"], 500);
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["top_p"], 0.9);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn to_chat_body_without_optional_params() {
+        let request = InferenceRequest {
+            model: "gpt-4o".into(),
+            prompt: "test".into(),
+            ..Default::default()
+        };
+        let body = to_chat_body(&request);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+    }
+
+    #[tokio::test]
+    async fn health_unreachable_server() {
+        let client = HooshClient::new("http://127.0.0.1:1");
+        let result = client.health().await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn infer_connection_refused() {
+        let client = HooshClient::new("http://127.0.0.1:1");
+        let request = InferenceRequest {
+            model: "test".into(),
+            prompt: "hello".into(),
+            ..Default::default()
+        };
+        let result = client.infer(&request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_models_connection_refused() {
+        let client = HooshClient::new("http://127.0.0.1:1");
+        let result = client.list_models().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn infer_stream_connection_refused() {
+        let client = HooshClient::new("http://127.0.0.1:1");
+        let request = InferenceRequest {
+            model: "test".into(),
+            prompt: "hello".into(),
+            ..Default::default()
+        };
+        let result = client.infer_stream(&request).await;
+        assert!(result.is_err());
+    }
 }

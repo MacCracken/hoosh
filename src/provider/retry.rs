@@ -64,7 +64,7 @@ impl RetryManager {
                     let is_retryable = e
                         .downcast_ref::<crate::error::HooshError>()
                         .map(|he| he.is_retryable())
-                        .unwrap_or(true); // unknown errors are retryable by default
+                        .unwrap_or(false); // unknown errors are NOT retried
 
                     if !is_retryable || attempt >= self.config.max_retries {
                         if attempt > 0 {
@@ -257,5 +257,94 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[test]
+    fn compute_delay_with_jitter() {
+        let manager = RetryManager::new(RetryConfig {
+            base_delay_ms: 100,
+            max_delay_ms: 10_000,
+            jitter_factor: 0.5,
+            ..Default::default()
+        });
+        // With jitter factor 0.5, delay should be in range [100, 150] for attempt 0
+        let delay = manager.compute_delay(0);
+        assert!(delay.as_millis() >= 100);
+        assert!(delay.as_millis() <= 150);
+    }
+
+    #[test]
+    fn compute_delay_zero_jitter() {
+        let manager = RetryManager::new(RetryConfig {
+            base_delay_ms: 200,
+            max_delay_ms: 10_000,
+            jitter_factor: 0.0,
+            ..Default::default()
+        });
+        let d0 = manager.compute_delay(0);
+        let d1 = manager.compute_delay(1);
+        assert_eq!(d0.as_millis(), 200);
+        assert_eq!(d1.as_millis(), 400);
+    }
+
+    #[test]
+    fn compute_delay_large_attempt_capped() {
+        let manager = RetryManager::new(RetryConfig {
+            base_delay_ms: 500,
+            max_delay_ms: 5_000,
+            jitter_factor: 0.0,
+            ..Default::default()
+        });
+        // 500 * 2^10 = 512000, should be capped to 5000
+        let d = manager.compute_delay(10);
+        assert_eq!(d.as_millis(), 5000);
+    }
+
+    #[tokio::test]
+    async fn retry_with_convenience_fn() {
+        let manager = RetryManager::new(RetryConfig {
+            max_retries: 1,
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+            jitter_factor: 0.0,
+        });
+        let result = retry_with(&manager, || Box::pin(async { Ok::<_, anyhow::Error>(42) })).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn retry_unknown_error_not_retried() {
+        // Unknown errors (not HooshError) should NOT be retried
+        let manager = RetryManager::new(RetryConfig {
+            max_retries: 3,
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+            jitter_factor: 0.0,
+        });
+        let attempts = AtomicU32::new(0);
+        let result: anyhow::Result<i32> = manager
+            .with_retry(|| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                async { Err(anyhow::anyhow!("generic error, not HooshError")) }
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1); // no retries
+    }
+
+    #[test]
+    fn retry_config_serde_roundtrip() {
+        let cfg = RetryConfig {
+            max_retries: 5,
+            base_delay_ms: 1000,
+            max_delay_ms: 60_000,
+            jitter_factor: 0.3,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: RetryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_retries, 5);
+        assert_eq!(back.base_delay_ms, 1000);
+        assert_eq!(back.max_delay_ms, 60_000);
+        assert!((back.jitter_factor - 0.3).abs() < f64::EPSILON);
     }
 }

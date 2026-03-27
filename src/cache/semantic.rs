@@ -79,8 +79,10 @@ impl SemanticCache {
         let mut best_key: Option<String> = None;
         let mut best_score: f32 = self.config.threshold;
 
+        // Full scan — cosine similarity on f32 vecs is fast for reasonable cache sizes.
+        // max_search caps the scan if the cache is very large.
         for (searched, entry) in self.entries.iter().enumerate() {
-            if searched >= self.config.max_search {
+            if self.config.max_search > 0 && searched >= self.config.max_search {
                 break;
             }
             let score = cosine_similarity(query_embedding, &entry.embedding);
@@ -98,9 +100,8 @@ impl SemanticCache {
         if !self.config.enabled {
             return;
         }
-        let entry_key = cache_key.clone();
         self.entries.insert(
-            entry_key,
+            cache_key.clone(),
             EmbeddingEntry {
                 cache_key,
                 embedding,

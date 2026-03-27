@@ -56,6 +56,7 @@ pub struct BatchProgress {
 struct BatchState {
     progress: tokio::sync::Mutex<BatchProgress>,
     cancel: CancellationToken,
+    completed_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// Batch inference manager with concurrency control and progress tracking.
@@ -109,9 +110,11 @@ impl BatchManager {
         let state = Arc::new(BatchState {
             progress: tokio::sync::Mutex::new(progress),
             cancel: CancellationToken::new(),
+            completed_at: std::sync::Mutex::new(None),
         });
 
         self.batches.insert(batch_id.clone(), state.clone());
+        tracing::info!(batch_id = %batch_id, total, "batch submitted");
         let semaphore = self.semaphore.clone();
         let infer_fn = Arc::new(infer_fn);
 
@@ -168,6 +171,10 @@ impl BatchManager {
             } else {
                 prog.status = BatchStatus::Completed;
             }
+            drop(prog);
+            if let Ok(mut ts) = state.completed_at.lock() {
+                *ts = Some(std::time::Instant::now());
+            }
         });
 
         batch_id
@@ -193,6 +200,34 @@ impl BatchManager {
     /// Remove a completed batch from tracking.
     pub fn remove(&self, batch_id: &str) -> bool {
         self.batches.remove(batch_id).is_some()
+    }
+
+    /// Remove completed batches older than `max_age`.
+    ///
+    /// Call this periodically (e.g. from a background task) to prevent
+    /// unbounded memory growth from finished batch results.
+    pub fn evict_completed(&self, max_age: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
+        let mut evicted = 0;
+        let keys: Vec<String> = self
+            .batches
+            .iter()
+            .filter_map(|entry| {
+                let state = entry.value();
+                if let Ok(ts) = state.completed_at.lock()
+                    && let Some(completed) = *ts
+                    && now.duration_since(completed) > max_age
+                {
+                    return Some(entry.key().clone());
+                }
+                None
+            })
+            .collect();
+        for key in keys {
+            self.batches.remove(&key);
+            evicted += 1;
+        }
+        evicted
     }
 
     /// Number of active batches.
@@ -300,5 +335,103 @@ mod tests {
     async fn batch_nonexistent_progress() {
         let mgr = BatchManager::new(4);
         assert!(mgr.get_progress("nope").await.is_none());
+    }
+
+    #[test]
+    fn batch_cancel_nonexistent() {
+        let mgr = BatchManager::new(4);
+        assert!(!mgr.cancel("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn batch_remove_completed() {
+        let mgr = BatchManager::new(4);
+        let requests = vec![make_request("model1")];
+        mgr.submit("batch-rm".into(), requests, |req| async move {
+            Ok(make_response(&req.model))
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(mgr.active_count(), 1);
+        assert!(mgr.remove("batch-rm"));
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_evict_completed_none_old_enough() {
+        let mgr = BatchManager::new(4);
+        let requests = vec![make_request("model1")];
+        mgr.submit("batch-ev".into(), requests, |req| async move {
+            Ok(make_response(&req.model))
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Evict with 1 hour max age - nothing should be evicted
+        let evicted = mgr.evict_completed(std::time::Duration::from_secs(3600));
+        assert_eq!(evicted, 0);
+        assert_eq!(mgr.active_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_evict_completed_old_entries() {
+        let mgr = BatchManager::new(4);
+        let requests = vec![make_request("model1")];
+        mgr.submit("batch-old".into(), requests, |req| async move {
+            Ok(make_response(&req.model))
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Evict with 0 duration max age - everything gets evicted
+        let evicted = mgr.evict_completed(std::time::Duration::ZERO);
+        assert_eq!(evicted, 1);
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_evict_running_not_evicted() {
+        let mgr = BatchManager::new(1);
+        let requests = vec![make_request("slow")];
+        mgr.submit("batch-running".into(), requests, |_req| async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok(make_response("slow"))
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // Try to evict - running batches have no completed_at, so they stay
+        let evicted = mgr.evict_completed(std::time::Duration::ZERO);
+        assert_eq!(evicted, 0);
+        // Clean up
+        mgr.cancel("batch-running");
+    }
+
+    #[tokio::test]
+    async fn batch_progress_shows_individual_results() {
+        let mgr = BatchManager::new(4);
+        let requests = vec![make_request("ok"), make_request("fail")];
+        mgr.submit("batch-results".into(), requests, |req| async move {
+            if req.model == "fail" {
+                Err(anyhow::anyhow!("oops"))
+            } else {
+                Ok(make_response(&req.model))
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let progress = mgr.get_progress("batch-results").await.unwrap();
+        assert_eq!(progress.results.len(), 2);
+        // One should have a response, one should have an error
+        let has_response = progress.results.iter().any(|r| r.response.is_some());
+        let has_error = progress.results.iter().any(|r| r.error.is_some());
+        assert!(has_response);
+        assert!(has_error);
+    }
+
+    #[test]
+    fn batch_status_serde_roundtrip() {
+        let statuses = [
+            BatchStatus::Running,
+            BatchStatus::Completed,
+            BatchStatus::Cancelled,
+        ];
+        for status in &statuses {
+            let json = serde_json::to_string(status).unwrap();
+            let back: BatchStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, back);
+        }
     }
 }

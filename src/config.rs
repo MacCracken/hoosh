@@ -724,4 +724,306 @@ type = "Ollama"
         assert!(p.models.is_empty());
         assert!(p.base_url.is_none());
     }
+
+    #[test]
+    fn routes_with_tls_config() {
+        let toml = r#"
+[[providers]]
+type = "OpenAi"
+api_key = "sk-test"
+models = ["gpt-*"]
+tls_pinned_certs = ["/path/to/cert.pem"]
+client_cert = "/path/to/client.pem"
+client_key = "/path/to/client-key.pem"
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let routes = config.routes();
+        assert_eq!(routes.len(), 1);
+        let tls = routes[0].tls_config.as_ref().unwrap();
+        assert_eq!(tls.pinned_certs.len(), 1);
+        assert_eq!(tls.client_cert.as_deref(), Some("/path/to/client.pem"));
+        assert_eq!(tls.client_key.as_deref(), Some("/path/to/client-key.pem"));
+    }
+
+    #[test]
+    fn routes_without_tls_config() {
+        let toml = r#"
+[[providers]]
+type = "Ollama"
+models = ["llama*"]
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let routes = config.routes();
+        assert!(routes[0].tls_config.is_none());
+    }
+
+    #[test]
+    fn routes_with_rate_limit() {
+        let toml = r#"
+[[providers]]
+type = "OpenAi"
+api_key = "sk-test"
+models = ["gpt-*"]
+rate_limit_rpm = 60
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let routes = config.routes();
+        assert_eq!(routes[0].rate_limit_rpm, Some(60));
+    }
+
+    #[test]
+    fn routes_disabled_provider() {
+        let toml = r#"
+[[providers]]
+type = "Ollama"
+enabled = false
+models = ["llama*"]
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let routes = config.routes();
+        assert!(!routes[0].enabled);
+    }
+
+    #[test]
+    fn parse_audit_section() {
+        let toml = r#"
+[audit]
+enabled = true
+signing_key = "my-secret-key"
+max_entries = 5000
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert!(config.audit.enabled);
+        assert_eq!(config.audit.signing_key.as_deref(), Some("my-secret-key"));
+        assert_eq!(config.audit.max_entries, 5000);
+    }
+
+    #[test]
+    fn parse_audit_defaults() {
+        let config: HooshConfig = toml::from_str("").unwrap();
+        assert!(!config.audit.enabled);
+        assert!(config.audit.signing_key.is_none());
+        // AuditSection default() uses #[serde(default = "default_audit_max")] = 10_000
+        // but when deserialized from empty TOML, [audit] section is absent, so Default is used
+    }
+
+    #[test]
+    fn parse_context_section() {
+        let toml = r#"
+[context]
+compaction_threshold = 0.6
+keep_last_messages = 5
+enabled = false
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert!((config.context.compaction_threshold - 0.6).abs() < f64::EPSILON);
+        assert_eq!(config.context.keep_last_messages, 5);
+        assert!(!config.context.enabled);
+    }
+
+    #[test]
+    fn parse_context_defaults() {
+        let config: HooshConfig = toml::from_str("").unwrap();
+        assert!((config.context.compaction_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.context.keep_last_messages, 10);
+        assert!(config.context.enabled);
+    }
+
+    #[test]
+    fn parse_telemetry_section() {
+        let toml = r#"
+[telemetry]
+otlp_endpoint = "http://localhost:4317"
+service_name = "my-hoosh"
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.telemetry.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
+        assert_eq!(config.telemetry.service_name, "my-hoosh");
+    }
+
+    #[test]
+    fn parse_telemetry_defaults() {
+        let config: HooshConfig = toml::from_str("").unwrap();
+        assert!(config.telemetry.otlp_endpoint.is_none());
+    }
+
+    #[test]
+    fn parse_telemetry_with_service_name() {
+        let toml = r#"
+[telemetry]
+service_name = "hoosh"
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.telemetry.service_name, "hoosh");
+    }
+
+    #[test]
+    fn parse_auth_section() {
+        let toml = r#"
+[auth]
+tokens = ["token1", "token2"]
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.auth.tokens.len(), 2);
+    }
+
+    #[test]
+    fn parse_retry_section() {
+        let toml = r#"
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
+jitter_factor = 0.3
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.retry.base_delay_ms, 1000);
+        assert_eq!(config.retry.max_delay_ms, 60_000);
+    }
+
+    #[test]
+    fn into_server_config_full() {
+        let toml = r#"
+[server]
+port = 9000
+bind = "0.0.0.0"
+strategy = "lowest_latency"
+health_check_interval_secs = 60
+
+[cache]
+max_entries = 500
+ttl_secs = 600
+enabled = false
+
+[audit]
+enabled = true
+max_entries = 5000
+
+[telemetry]
+otlp_endpoint = "http://otel:4317"
+service_name = "test-hoosh"
+
+[auth]
+tokens = ["tok1"]
+
+[context]
+compaction_threshold = 0.9
+keep_last_messages = 20
+
+[retry]
+max_retries = 5
+base_delay_ms = 500
+max_delay_ms = 30000
+jitter_factor = 0.5
+
+[[budgets]]
+name = "default"
+capacity = 100000
+
+[[providers]]
+type = "Ollama"
+priority = 1
+models = ["llama*"]
+rate_limit_rpm = 120
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        let sc = config.into_server_config(None, None, Some("/path/to/config.toml".into()));
+        assert_eq!(sc.port, 9000);
+        assert_eq!(sc.bind, "0.0.0.0");
+        assert_eq!(sc.cache_config.max_entries, 500);
+        assert!(!sc.cache_config.enabled);
+        assert!(sc.audit_enabled);
+        assert_eq!(sc.audit_max_entries, 5000);
+        assert_eq!(sc.otlp_endpoint.as_deref(), Some("http://otel:4317"));
+        assert_eq!(sc.telemetry_service_name, "test-hoosh");
+        assert_eq!(sc.auth_tokens.len(), 1);
+        assert_eq!(sc.health_check_interval_secs, 60);
+        assert_eq!(sc.config_path.as_deref(), Some("/path/to/config.toml"));
+        assert!((sc.context_config.compaction_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(sc.context_config.keep_last_messages, 20);
+        assert_eq!(sc.retry_config.max_retries, 5);
+        assert_eq!(sc.budget_pools.len(), 1);
+        assert_eq!(sc.routes.len(), 1);
+    }
+
+    #[test]
+    fn audit_section_debug_redacts_key() {
+        let section = AuditSection {
+            enabled: true,
+            signing_key: Some("super-secret".into()),
+            max_entries: 1000,
+        };
+        let debug = format!("{section:?}");
+        assert!(!debug.contains("super-secret"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn auth_config_debug_shows_count() {
+        let auth = AuthConfig {
+            tokens: vec!["tok1".into(), "tok2".into()],
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("2 configured"));
+        assert!(!debug.contains("tok1"));
+    }
+
+    #[test]
+    fn provider_section_debug_redacts_key() {
+        let section: ProviderSection = toml::from_str(
+            r#"
+type = "OpenAi"
+api_key = "sk-secret-key"
+models = ["gpt-*"]
+"#,
+        )
+        .unwrap();
+        let debug = format!("{section:?}");
+        assert!(!debug.contains("sk-secret-key"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn load_nonexistent_config_file() {
+        let result = HooshConfig::load("/nonexistent/path/hoosh.toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_invalid_toml() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("hoosh_test_invalid.toml");
+        std::fs::write(&path, "invalid {{{{ toml content").unwrap();
+        let result = HooshConfig::load(&path);
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn context_section_default() {
+        let ctx = ContextSection::default();
+        assert!((ctx.compaction_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(ctx.keep_last_messages, 10);
+        assert!(ctx.enabled);
+    }
+
+    #[test]
+    fn server_section_default() {
+        let s = ServerSection::default();
+        assert_eq!(s.bind, "127.0.0.1");
+        assert_eq!(s.port, 8088);
+        assert_eq!(s.health_check_interval_secs, 30);
+    }
+
+    #[test]
+    fn cache_section_default() {
+        let c = CacheSection::default();
+        assert_eq!(c.max_entries, 1000);
+        assert_eq!(c.ttl_secs, 300);
+        assert!(c.enabled);
+    }
 }

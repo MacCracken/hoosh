@@ -7,7 +7,7 @@
 - **Type**: Flat crate with binary (server, port 8088)
 - **License**: AGPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
+- **Version**: SemVer 1.x stable
 
 ## Consumers
 
@@ -44,7 +44,7 @@ All AGNOS apps (LLM inference), daimon (inference routing)
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
+- **Tests + benchmarks are the way.** Minimum 85%+ coverage target (currently 88% excl. hardware-gated).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.

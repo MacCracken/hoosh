@@ -3181,3 +3181,933 @@ mod e2e {
         assert_eq!(resp.provider, "hoosh");
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI API conformance tests — strict schema validation
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "llamacpp")]
+mod conformance {
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+
+    use crate::budget::TokenPool;
+    use crate::cache::CacheConfig;
+    use crate::provider::ProviderType;
+    use crate::router::{ProviderRoute, RoutingStrategy};
+    use crate::server::ServerConfig;
+
+    async fn start_mock_backend() -> String {
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+
+        async fn mock_chat(Json(body): Json<Value>) -> Json<Value> {
+            let model = body["model"].as_str().unwrap_or("mock-model");
+            Json(serde_json::json!({
+                "id": "chatcmpl-conf",
+                "object": "chat.completion",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "conformance reply"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11}
+            }))
+        }
+
+        async fn mock_models() -> Json<Value> {
+            Json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "mock-model", "object": "model", "owned_by": "mock"}]
+            }))
+        }
+
+        let app = Router::new()
+            .route("/v1/chat/completions", post(mock_chat))
+            .route("/v1/models", get(mock_models));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    async fn start_hoosh(backend_url: &str) -> String {
+        let config = ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            routes: vec![ProviderRoute {
+                provider: ProviderType::LlamaCpp,
+                priority: 1,
+                model_patterns: vec![],
+                enabled: true,
+                base_url: backend_url.to_string(),
+                api_key: None,
+                max_tokens_limit: None,
+                rate_limit_rpm: None,
+                tls_config: None,
+            }],
+            strategy: RoutingStrategy::Priority,
+            cache_config: CacheConfig {
+                enabled: false,
+                ..CacheConfig::default()
+            },
+            budget_pools: vec![TokenPool::new("default", 100_000)],
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    fn http_client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    // -- /v1/chat/completions response schema --
+
+    #[tokio::test]
+    async fn conformance_chat_response_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        // Required top-level fields
+        assert!(resp["id"].is_string(), "id must be string");
+        assert_eq!(resp["object"], "chat.completion");
+        assert!(resp["created"].is_number(), "created must be number");
+        assert!(resp["model"].is_string(), "model must be string");
+        assert!(resp["choices"].is_array(), "choices must be array");
+        assert!(resp["usage"].is_object(), "usage must be object");
+    }
+
+    #[tokio::test]
+    async fn conformance_chat_choices_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let choices = resp["choices"].as_array().unwrap();
+        assert_eq!(choices.len(), 1);
+
+        let choice = &choices[0];
+        assert_eq!(choice["index"], 0);
+        assert!(
+            choice["finish_reason"].is_string(),
+            "finish_reason must be string"
+        );
+
+        let msg = &choice["message"];
+        assert_eq!(msg["role"], "assistant");
+        assert!(msg["content"].is_string(), "content must be string");
+    }
+
+    #[tokio::test]
+    async fn conformance_chat_usage_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let usage = &resp["usage"];
+        assert!(
+            usage["prompt_tokens"].is_number(),
+            "prompt_tokens must be number"
+        );
+        assert!(
+            usage["completion_tokens"].is_number(),
+            "completion_tokens must be number"
+        );
+        assert!(
+            usage["total_tokens"].is_number(),
+            "total_tokens must be number"
+        );
+        let total = usage["total_tokens"].as_u64().unwrap();
+        let prompt = usage["prompt_tokens"].as_u64().unwrap();
+        let completion = usage["completion_tokens"].as_u64().unwrap();
+        assert_eq!(
+            total,
+            prompt + completion,
+            "total must equal prompt + completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn conformance_chat_id_format() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let id = resp["id"].as_str().unwrap();
+        assert!(id.starts_with("chatcmpl-"), "id must start with chatcmpl-");
+    }
+
+    #[tokio::test]
+    async fn conformance_chat_created_is_unix_timestamp() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let created = resp["created"].as_i64().unwrap();
+        // Must be a reasonable unix timestamp (after 2024-01-01)
+        assert!(created > 1_704_067_200, "created must be a unix timestamp");
+    }
+
+    // -- /v1/models response schema --
+
+    #[tokio::test]
+    async fn conformance_models_response_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+        let resp: Value = http_client()
+            .get(format!("{url}/v1/models"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(resp["object"], "list");
+        assert!(resp["data"].is_array(), "data must be array");
+
+        let models = resp["data"].as_array().unwrap();
+        assert!(!models.is_empty());
+
+        for model in models {
+            assert!(model["id"].is_string(), "model.id must be string");
+            assert_eq!(model["object"], "model");
+            assert!(
+                model["owned_by"].is_string(),
+                "model.owned_by must be string"
+            );
+        }
+    }
+
+    // -- Error response schema --
+
+    #[tokio::test]
+    async fn conformance_error_response_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        // Empty model string → our handler validation error (not serde)
+        let resp = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(
+            resp.status().is_client_error(),
+            "empty model must be client error"
+        );
+        let body: Value = resp.json().await.unwrap();
+        assert!(body["error"].is_object(), "error must be object");
+        assert!(
+            body["error"]["message"].is_string(),
+            "error.message must be string"
+        );
+        assert!(
+            body["error"]["type"].is_string(),
+            "error.type must be string"
+        );
+    }
+
+    #[tokio::test]
+    async fn conformance_validation_empty_messages() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        let resp = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": []
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 400, "empty messages must be 400");
+    }
+
+    // -- Content type validation --
+
+    #[tokio::test]
+    async fn conformance_response_content_type() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        let resp = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("application/json"),
+            "response must be application/json"
+        );
+    }
+
+    // -- Multi-part content support --
+
+    #[tokio::test]
+    async fn conformance_multipart_content_accepted() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        // OpenAI vision format with content array
+        let resp = http_client()
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "mock-model",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+                    ]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(
+            resp.status().is_success(),
+            "multi-part content must be accepted"
+        );
+    }
+
+    // -- Health endpoint --
+
+    #[tokio::test]
+    async fn conformance_health_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        let resp: Value = http_client()
+            .get(format!("{url}/v1/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(resp["status"], "ok");
+        assert!(resp["version"].is_string(), "version must be string");
+        assert!(
+            resp["providers_configured"].is_number(),
+            "providers_configured must be number"
+        );
+    }
+
+    // -- Cache stats endpoint --
+
+    #[tokio::test]
+    async fn conformance_cache_stats_schema() {
+        let backend = start_mock_backend().await;
+        let url = start_hoosh(&backend).await;
+
+        let resp: Value = http_client()
+            .get(format!("{url}/v1/cache/stats"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(resp["entries"].is_number());
+        assert!(resp["max_entries"].is_number());
+        assert!(resp["hits"].is_number());
+        assert!(resp["misses"].is_number());
+        assert!(resp["evictions"].is_number());
+        assert!(resp["hit_rate"].is_number());
+        assert!(resp["enabled"].is_boolean());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler coverage tests (no feature gates, cover uncovered handler paths)
+// ---------------------------------------------------------------------------
+mod handler_coverage {
+    use crate::server::ServerConfig;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    /// Start a minimal hoosh server with no providers configured.
+    async fn start_minimal_server() -> String {
+        let config = ServerConfig::default();
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    /// Start a hoosh server with audit enabled.
+    async fn start_server_with_audit() -> String {
+        let config = ServerConfig {
+            audit_enabled: true,
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn handler_validation_empty_model() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"]["message"].as_str().unwrap().contains("model"));
+    }
+
+    #[tokio::test]
+    async fn handler_validation_invalid_model_name() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        // Model with control characters
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "model\twith\ttabs",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid model name")
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_validation_empty_messages() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "test-model",
+                "messages": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn handler_validation_bad_temperature() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 3.0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("temperature")
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_validation_bad_top_p() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "top_p": 1.5
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"]["message"].as_str().unwrap().contains("top_p"));
+    }
+
+    #[tokio::test]
+    async fn handler_validation_negative_top_p() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "top_p": -0.1
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn handler_no_provider_for_model() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "nonexistent-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_embeddings_no_provider() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/embeddings"))
+            .json(&json!({
+                "model": "nonexistent-embed-model",
+                "input": "hello world"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_token_check_existing_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/tokens/check"))
+            .json(&json!({"pool": "default", "tokens": 100}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["allowed"].as_bool().unwrap());
+        assert!(body["available"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn handler_token_check_nonexistent_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/tokens/check"))
+            .json(&json!({"pool": "nonexistent", "tokens": 100}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_token_reserve_existing_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/tokens/reserve"))
+            .json(&json!({"pool": "default", "tokens": 500}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["reserved"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn handler_token_reserve_nonexistent_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/tokens/reserve"))
+            .json(&json!({"pool": "no-such-pool", "tokens": 100}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_token_report_existing_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        // First reserve, then report
+        let _ = client
+            .post(format!("{url}/v1/tokens/reserve"))
+            .json(&json!({"pool": "default", "tokens": 1000}))
+            .send()
+            .await
+            .unwrap();
+        let resp = client
+            .post(format!("{url}/v1/tokens/report"))
+            .json(&json!({"pool": "default", "reserved": 1000, "actual": 500}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["used"].is_number());
+        assert!(body["available"].is_number());
+    }
+
+    #[tokio::test]
+    async fn handler_token_report_nonexistent_pool() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/tokens/report"))
+            .json(&json!({"pool": "nonexistent", "reserved": 100, "actual": 50}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_token_pools_list() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{url}/v1/tokens/pools"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(!body.as_array().unwrap().is_empty()); // at least "default"
+    }
+
+    #[tokio::test]
+    async fn handler_costs_get_empty() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/v1/costs")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["records"].is_array());
+        assert_eq!(body["total_cost_usd"].as_f64().unwrap(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn handler_costs_reset() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/costs/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn handler_audit_disabled() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/v1/audit")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn handler_audit_enabled() {
+        let url = start_server_with_audit().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/v1/audit")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["entries"].is_array());
+        assert!(body["total"].is_number());
+        assert!(body["chain_valid"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn handler_admin_reload_no_config() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/admin/reload"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn handler_queue_status() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{url}/v1/queue/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["queued"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn handler_cache_stats() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{url}/v1/cache/stats"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["entries"].is_number());
+    }
+
+    #[tokio::test]
+    async fn handler_prometheus_metrics() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/metrics")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn handler_health() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/v1/health")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+        assert!(body["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn handler_health_providers_empty() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{url}/v1/health/providers"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handler_health_heartbeat() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{url}/v1/health/heartbeat"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn handler_list_models_empty() {
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("{url}/v1/models")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["object"], "list");
+        assert!(body["data"].is_array());
+    }
+
+    #[tokio::test]
+    async fn handler_costs_reset_with_audit() {
+        let url = start_server_with_audit().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/costs/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Audit log should have the reset event
+        let audit_resp = client.get(format!("{url}/v1/audit")).send().await.unwrap();
+        assert_eq!(audit_resp.status().as_u16(), 200);
+        let audit_body: serde_json::Value = audit_resp.json().await.unwrap();
+        assert!(audit_body["total"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn handler_nonexistent_model_returns_404() {
+        // With no providers, any model request returns 404 (no route found)
+        let url = start_minimal_server().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({
+                "model": "any-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("No provider configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_admin_reload_with_valid_config() {
+        // Create a temp config file
+        let dir = std::env::temp_dir();
+        let config_path = dir.join("hoosh_test_reload.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let config = ServerConfig {
+            config_path: Some(config_path.to_string_lossy().to_string()),
+            ..ServerConfig::default()
+        };
+        let (app, _state) = crate::server::build_app(config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{url}/v1/admin/reload"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "reloaded");
+        let _ = std::fs::remove_file(&config_path);
+    }
+}

@@ -75,6 +75,19 @@ pub struct CacheStats {
 }
 
 /// Thread-safe response cache with TTL eviction and statistics tracking.
+///
+/// # Example
+///
+/// ```
+/// use hoosh::cache::{CacheConfig, ResponseCache};
+///
+/// let cache = ResponseCache::new(CacheConfig::default());
+/// cache.insert("key1".into(), "response text".into());
+/// assert_eq!(cache.get("key1").unwrap().as_str(), "response text");
+///
+/// let stats = cache.stats();
+/// assert_eq!(stats.hits, 1);
+/// ```
 pub struct ResponseCache {
     entries: DashMap<String, CacheEntry>,
     config: CacheConfig,

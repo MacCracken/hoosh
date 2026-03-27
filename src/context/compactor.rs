@@ -106,18 +106,36 @@ fn truncate_messages(
         messages.iter().filter(|m| m.role == Role::System).collect();
     let non_system: Vec<&Message> = messages.iter().filter(|m| m.role != Role::System).collect();
 
-    // Start with keep_last, reduce if still over budget
-    let mut keep = keep_last.min(non_system.len());
-    loop {
-        let mut candidate: Vec<Message> = system_messages.iter().map(|m| (*m).clone()).collect();
-        let start = non_system.len().saturating_sub(keep);
+    // Binary search for the largest `keep` that fits within the token limit.
+    let max_keep = keep_last.min(non_system.len());
+    let mut lo = 1usize;
+    let mut hi = max_keep;
+    let mut best_keep = 1;
+
+    // Pre-compute system message tokens (constant across iterations).
+    let system_only: Vec<Message> = system_messages.iter().map(|m| (*m).clone()).collect();
+
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let start = non_system.len().saturating_sub(mid);
+        let mut candidate = system_only.clone();
         candidate.extend(non_system[start..].iter().map(|m| (*m).clone()));
 
-        if counter.count_messages(&candidate) <= token_limit || keep <= 1 {
-            return candidate;
+        if counter.count_messages(&candidate) <= token_limit {
+            best_keep = mid;
+            lo = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
         }
-        keep = keep.saturating_sub(1);
     }
+
+    let start = non_system.len().saturating_sub(best_keep);
+    let mut result = system_only;
+    result.extend(non_system[start..].iter().map(|m| (*m).clone()));
+    result
 }
 
 #[cfg(test)]

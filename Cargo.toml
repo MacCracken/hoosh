@@ -1,6 +1,6 @@
 [package]
 name = "hoosh"
-version = "0.25.3"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"

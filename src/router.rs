@@ -10,6 +10,7 @@ use crate::provider::ProviderType;
 
 /// Routing strategy for selecting a provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RoutingStrategy {
     /// Use the first healthy provider (ordered by priority).
     #[default]
@@ -519,5 +520,145 @@ mod tests {
         let r2 = router.read().unwrap();
         assert_eq!(r1.routes().len(), 1);
         assert_eq!(r2.routes().len(), 1);
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_restricted_returns_none() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        assert!(
+            router
+                .select_with_classification("any", crate::dlp::ClassificationLevel::Restricted)
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_public_allows_remote() {
+        let routes = vec![
+            make_route(ProviderType::OpenAi, 1, vec![]),
+            make_route(ProviderType::Ollama, 2, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let selected = router
+            .select_with_classification("any", crate::dlp::ClassificationLevel::Public)
+            .unwrap();
+        assert_eq!(selected.provider, ProviderType::OpenAi);
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_confidential_forces_local() {
+        let routes = vec![
+            make_route(ProviderType::OpenAi, 1, vec![]),
+            make_route(ProviderType::Ollama, 2, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let selected = router
+            .select_with_classification("any", crate::dlp::ClassificationLevel::Confidential)
+            .unwrap();
+        // OpenAi is remote, should be skipped; Ollama is local
+        assert_eq!(selected.provider, ProviderType::Ollama);
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_confidential_no_local_returns_none() {
+        let routes = vec![make_route(ProviderType::OpenAi, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let result =
+            router.select_with_classification("any", crate::dlp::ClassificationLevel::Confidential);
+        // No local providers available
+        assert!(result.is_none());
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_round_robin() {
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 1, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::RoundRobin);
+        let first = router
+            .select_with_classification("any", crate::dlp::ClassificationLevel::Public)
+            .unwrap()
+            .provider;
+        let second = router
+            .select_with_classification("any", crate::dlp::ClassificationLevel::Public)
+            .unwrap()
+            .provider;
+        assert_ne!(first, second);
+    }
+
+    #[cfg(feature = "dlp")]
+    #[test]
+    fn select_with_classification_lowest_latency() {
+        let routes = vec![
+            make_route_with_url(ProviderType::Ollama, 1, vec![], "http://ollama"),
+            make_route_with_url(ProviderType::LlamaCpp, 1, vec![], "http://llamacpp"),
+        ];
+        let router = Router::new(routes, RoutingStrategy::LowestLatency);
+        router.report_latency(ProviderType::Ollama, "http://ollama", 50);
+        router.report_latency(ProviderType::LlamaCpp, "http://llamacpp", 500);
+        let selected = router
+            .select_with_classification("any", crate::dlp::ClassificationLevel::Public)
+            .unwrap();
+        assert_eq!(selected.provider, ProviderType::Ollama);
+    }
+
+    #[test]
+    fn direct_routing_picks_first() {
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::LlamaCpp, 2, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::Direct);
+        let selected = router.select("any-model").unwrap();
+        assert_eq!(selected.provider, ProviderType::Ollama);
+    }
+
+    #[test]
+    fn exact_model_match() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec!["llama3.2:latest"])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        assert!(router.select("llama3.2:latest").is_some());
+        assert!(router.select("llama3.2").is_none());
+    }
+
+    #[test]
+    fn multiple_model_patterns() {
+        let routes = vec![make_route(
+            ProviderType::Ollama,
+            1,
+            vec!["llama*", "mistral*"],
+        )];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        assert!(router.select("llama3").is_some());
+        assert!(router.select("mistral-7b").is_some());
+        assert!(router.select("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn report_latency_ema_multiple_updates() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::LowestLatency);
+        let key = (ProviderType::Ollama, "http://localhost".to_string());
+
+        // Initial: 100
+        router.report_latency(ProviderType::Ollama, "http://localhost", 100);
+        // EMA: (100*7 + 200*3)/10 = 130
+        router.report_latency(ProviderType::Ollama, "http://localhost", 200);
+        // EMA: (130*7 + 50*3)/10 = 106
+        router.report_latency(ProviderType::Ollama, "http://localhost", 50);
+        let latency = router
+            .latencies
+            .get(&key)
+            .unwrap()
+            .value()
+            .load(Ordering::Relaxed);
+        assert_eq!(latency, 106);
     }
 }

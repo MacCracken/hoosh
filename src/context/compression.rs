@@ -75,7 +75,7 @@ fn prune_stale_tool_pairs(messages: &mut Vec<Message>) {
     let stale_indices: Vec<usize> = tool_call_indices[..stale_count].to_vec();
 
     // Collect tool call IDs from stale assistant messages
-    let stale_tool_ids: Vec<String> = stale_indices
+    let stale_tool_ids: std::collections::HashSet<String> = stale_indices
         .iter()
         .flat_map(|&i| messages[i].tool_calls.iter().map(|tc| tc.id.clone()))
         .collect();
@@ -94,14 +94,13 @@ fn prune_stale_tool_pairs(messages: &mut Vec<Message>) {
         }
     }
 
-    // Remove marked messages (reverse order to preserve indices)
-    let mut i = messages.len();
-    while i > 0 {
-        i -= 1;
-        if remove_set[i] {
-            messages.remove(i);
-        }
-    }
+    // Remove marked messages in O(n) using retain
+    let mut idx = 0;
+    messages.retain(|_| {
+        let keep = !remove_set[idx];
+        idx += 1;
+        keep
+    });
 }
 
 #[cfg(test)]

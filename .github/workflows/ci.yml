@@ -108,6 +108,23 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  semver:
+    name: SemVer Check
+    runs-on: ubuntu-latest
+    needs: [check]
+    # Only run on PRs — compares against base branch
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks
+      - name: Check semver compliance
+        run: cargo semver-checks check-release
+
   bench:
     name: Benchmarks
     runs-on: ubuntu-latest

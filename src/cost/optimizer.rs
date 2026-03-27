@@ -133,10 +133,14 @@ impl CostOptimizer {
     fn meets_requirements(
         &self,
         meta: &crate::provider::metadata::ModelMetadata,
-        _min_tier: ModelTier,
+        min_tier: ModelTier,
         required_modalities: &[Modality],
         profile: &RequestProfile,
     ) -> bool {
+        // Check tier meets minimum requirement
+        if tier_rank(meta.tier) < tier_rank(min_tier) {
+            return false;
+        }
         // Check modalities
         for modality in required_modalities {
             if !meta.modalities.contains(modality) {
@@ -166,6 +170,19 @@ impl CostOptimizer {
     #[inline]
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+}
+
+/// Map tier to a numeric rank for comparison.
+#[must_use]
+fn tier_rank(tier: ModelTier) -> u8 {
+    #[allow(unreachable_patterns)]
+    match tier {
+        ModelTier::Economy => 0,
+        ModelTier::Standard => 1,
+        ModelTier::Premium => 2,
+        ModelTier::Reasoning => 3,
+        _ => 1, // future variants default to Standard
     }
 }
 
@@ -258,5 +275,189 @@ mod tests {
     fn is_enabled() {
         assert!(CostOptimizer::new(true).is_enabled());
         assert!(!CostOptimizer::new(false).is_enabled());
+    }
+
+    #[test]
+    fn complexity_tools_with_large_input() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 3000,
+            max_output_tokens: 100,
+            uses_tools: true,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        assert_eq!(optimizer.classify_complexity(&profile), ModelTier::Standard);
+    }
+
+    #[test]
+    fn complexity_tools_with_small_input_is_economy() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 500,
+            max_output_tokens: 100,
+            uses_tools: true,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        // tools with small input stays economy
+        assert_eq!(optimizer.classify_complexity(&profile), ModelTier::Economy);
+    }
+
+    #[test]
+    fn required_modalities_text_only() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        let mods = optimizer.required_modalities(&profile);
+        assert_eq!(mods, vec![Modality::Text]);
+    }
+
+    #[test]
+    fn required_modalities_with_vision() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: true,
+            has_system_prompt: false,
+        };
+        let mods = optimizer.required_modalities(&profile);
+        assert_eq!(mods, vec![Modality::Text, Modality::Vision]);
+    }
+
+    #[test]
+    fn tier_rank_ordering() {
+        assert!(tier_rank(ModelTier::Economy) < tier_rank(ModelTier::Standard));
+        assert!(tier_rank(ModelTier::Standard) < tier_rank(ModelTier::Premium));
+        assert!(tier_rank(ModelTier::Premium) < tier_rank(ModelTier::Reasoning));
+    }
+
+    #[test]
+    fn recommend_no_routes_returns_none() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        let result = optimizer.recommend(&profile, &[], &ModelMetadataRegistry::new());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn recommend_with_matching_model() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        let registry = ModelMetadataRegistry::new();
+        // Use a model that's in the default registry
+        let routes = vec![ProviderRoute {
+            provider: crate::provider::ProviderType::OpenAi,
+            priority: 1,
+            model_patterns: vec!["gpt-4o-mini".to_string()],
+            enabled: true,
+            base_url: "https://api.openai.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        }];
+        let result = optimizer.recommend(&profile, &routes, &registry);
+        if let Some(rec) = result {
+            assert_eq!(rec.model, "gpt-4o-mini");
+            assert!(rec.estimated_cost > 0.0);
+            assert!(!rec.reason.is_empty());
+        }
+    }
+
+    #[test]
+    fn recommend_skips_disabled_routes() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        let routes = vec![ProviderRoute {
+            provider: crate::provider::ProviderType::OpenAi,
+            priority: 1,
+            model_patterns: vec!["gpt-4o-mini".to_string()],
+            enabled: false,
+            base_url: "https://api.openai.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        }];
+        let result = optimizer.recommend(&profile, &routes, &ModelMetadataRegistry::new());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn recommend_skips_wildcard_patterns() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 100,
+            max_output_tokens: 100,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        // Wildcard patterns contain '*' and are skipped in recommend
+        let routes = vec![ProviderRoute {
+            provider: crate::provider::ProviderType::OpenAi,
+            priority: 1,
+            model_patterns: vec!["gpt-*".to_string()],
+            enabled: true,
+            base_url: "https://api.openai.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        }];
+        let result = optimizer.recommend(&profile, &routes, &ModelMetadataRegistry::new());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn recommend_context_window_too_small() {
+        let optimizer = CostOptimizer::new(true);
+        let profile = RequestProfile {
+            input_tokens: 500_000,
+            max_output_tokens: 500_000,
+            uses_tools: false,
+            has_vision: false,
+            has_system_prompt: false,
+        };
+        // Request exceeds all models' context windows
+        let routes = vec![ProviderRoute {
+            provider: crate::provider::ProviderType::OpenAi,
+            priority: 1,
+            model_patterns: vec!["gpt-4o-mini".to_string()],
+            enabled: true,
+            base_url: "https://api.openai.com".to_string(),
+            api_key: None,
+            max_tokens_limit: None,
+            rate_limit_rpm: None,
+            tls_config: None,
+        }];
+        let result = optimizer.recommend(&profile, &routes, &ModelMetadataRegistry::new());
+        assert!(result.is_none());
     }
 }

@@ -13,7 +13,7 @@ use axum::{
 };
 
 use crate::budget::TokenPool;
-use crate::inference::{InferenceRequest, Message, MessageContent, Role};
+use crate::inference::{InferenceRequest, Message, Role};
 
 use super::AppState;
 use super::types::*;
@@ -112,7 +112,7 @@ pub(crate) async fn chat_completions(
                     "tool" => Role::Tool,
                     _ => Role::User,
                 },
-                content: MessageContent::Text(m.content.clone()),
+                content: m.content.clone(),
                 tool_call_id: m.tool_call_id.clone(),
                 tool_calls: m.tool_calls.clone(),
             })
@@ -365,7 +365,21 @@ async fn handle_non_streaming(
     estimated_tokens: u64,
     req_model: String,
 ) -> axum::response::Response {
-    match provider.infer(&inference_req).await {
+    let infer_result = if state.retry_manager.is_enabled() {
+        let p = provider.clone();
+        let req = inference_req.clone();
+        state
+            .retry_manager
+            .with_retry(|| {
+                let p = p.clone();
+                let r = req.clone();
+                async move { p.infer(&r).await }
+            })
+            .await
+    } else {
+        provider.infer(&inference_req).await
+    };
+    match infer_result {
         Ok(result) => {
             // Report latency for routing decisions
             state

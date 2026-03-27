@@ -41,7 +41,7 @@ fn default_pool_name() -> String {
 #[allow(dead_code)]
 pub(crate) struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: crate::inference::MessageContent,
     #[serde(default)]
     pub tool_call_id: Option<String>,
     #[serde(default)]

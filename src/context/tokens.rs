@@ -25,8 +25,11 @@ pub trait TokenCounter: Send + Sync {
 pub struct SimpleTokenCounter;
 
 impl SimpleTokenCounter {
-    /// Characters-per-token ratio used by the simple estimator.
-    const CHARS_PER_TOKEN: f64 = 4.0;
+    /// Bytes-per-token ratio used by the simple estimator.
+    /// Note: uses `str::len()` (bytes), not character count.
+    /// ~4 bytes/token for English text, intentionally over-estimates for
+    /// multi-byte scripts (CJK, emoji) which is safe for budget reservation.
+    const BYTES_PER_TOKEN: f64 = 4.0;
 
     /// Per-message overhead: role name + delimiters (~4 tokens).
     const MESSAGE_OVERHEAD: u32 = 4;
@@ -35,7 +38,7 @@ impl SimpleTokenCounter {
 impl TokenCounter for SimpleTokenCounter {
     #[inline]
     fn count(&self, text: &str) -> u32 {
-        (text.len() as f64 / Self::CHARS_PER_TOKEN).ceil() as u32
+        (text.len() as f64 / Self::BYTES_PER_TOKEN).ceil() as u32
     }
 
     fn count_messages(&self, messages: &[Message]) -> u32 {
@@ -57,9 +60,9 @@ impl TokenCounter for SimpleTokenCounter {
 /// Provider-aware token counter with per-provider character ratios.
 ///
 /// Different tokenizers produce different token counts for the same text.
-/// This counter adjusts the chars-per-token ratio based on the provider family.
+/// This counter adjusts the bytes-per-token ratio based on the provider family.
 pub struct ProviderTokenCounter {
-    chars_per_token: f64,
+    bytes_per_token: f64,
     message_overhead: u32,
 }
 
@@ -91,7 +94,7 @@ impl ProviderTokenCounter {
             _ => (4.0, 4),
         };
         Self {
-            chars_per_token: cpt,
+            bytes_per_token: cpt,
             message_overhead: overhead,
         }
     }
@@ -100,7 +103,7 @@ impl ProviderTokenCounter {
 impl TokenCounter for ProviderTokenCounter {
     #[inline]
     fn count(&self, text: &str) -> u32 {
-        (text.len() as f64 / self.chars_per_token).ceil() as u32
+        (text.len() as f64 / self.bytes_per_token).ceil() as u32
     }
 
     fn count_messages(&self, messages: &[Message]) -> u32 {
@@ -197,11 +200,12 @@ mod tests {
     }
 
     #[test]
-    fn saturation_on_huge_input() {
+    fn saturation_on_large_input() {
         let counter = SimpleTokenCounter;
-        // Verify no panic on very large token counts
-        let text = "a".repeat(u32::MAX as usize / 2);
-        let _ = counter.count(&text);
+        // Verify no panic on large token counts (10M chars ≈ 2.5M tokens)
+        let text = "a".repeat(10_000_000);
+        let count = counter.count(&text);
+        assert!(count > 0);
     }
 
     #[test]

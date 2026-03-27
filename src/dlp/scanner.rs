@@ -119,8 +119,8 @@ impl DlpScanner {
         let regex_set = RegexSet::new(&pattern_strings)?;
         let regexes: Vec<Regex> = pattern_strings
             .iter()
-            .map(|p| Regex::new(p).expect("already validated"))
-            .collect();
+            .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("regex compile failed: {e}")))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok(Self {
             regex_set,

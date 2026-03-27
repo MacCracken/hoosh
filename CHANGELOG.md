@@ -5,6 +5,104 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-03-27
+
+### Added
+- **Context management** (`context` module)
+  - `TokenCounter` trait with `SimpleTokenCounter` (bytes/4 heuristic) and `ProviderTokenCounter` (per-provider ratios for OpenAI, Anthropic, etc.)
+  - `ContextCompactor` — proactive context window management, truncates conversations at configurable threshold (default 80%), preserves system prompts + last N messages, binary search for optimal keep count
+  - `compress_messages()` — mechanical prompt compression: whitespace collapse, stale tool-call pair pruning (keeps last 3 tool interactions)
+  - `[context]` config section: `compaction_threshold`, `keep_last_messages`, `enabled`
+  - Handler integration: token-counted budget estimation replaces hardcoded `1024`, compaction runs before inference
+- **Model metadata registry expansion** — 21 → 63 models
+  - `ModelTier` enum (Economy/Standard/Premium/Reasoning) with `#[non_exhaustive]`
+  - `Modality` enum (Text/Vision/Audio/Embedding) with `#[non_exhaustive]`
+  - `max_output_tokens`, `supports_system_prompt` fields on `ModelMetadata`
+  - `by_tier()`, `by_modality()`, `len()`, `is_empty()` query methods
+  - New models: GPT-4.1 family, o3/o4-mini, Gemini 2.5, Llama 4, Mistral Nemo/Codestral/Pixtral, Phi-3/4, Gemma 2/3, Command-R, embedding models (OpenAI, nomic, mxbai)
+- **Cache improvements**
+  - `CacheStats` with atomic hit/miss/eviction counters, `hit_rate` calculation
+  - `GET /v1/cache/stats` endpoint
+  - `SemanticCache` — cosine similarity lookup over stored embeddings, configurable threshold (default 0.92), full-scan with optional max_search cap
+  - `CacheWarmer` — pre-populate cache on startup from `[[cache.warming_prompts]]` config
+- **Provider acceleration**
+  - `RetryManager` — jittered exponential backoff, `ErrorClass` (Retryable vs Permanent), configurable max_retries/base_delay/max_delay/jitter; integrated in non-streaming handler path
+  - `HooshError::is_retryable()` — classifies 429/5xx/timeouts as retryable, 400/401/404/budget as permanent
+  - `[retry]` config section: `max_retries`, `base_delay_ms`, `max_delay_ms`
+  - `BatchManager` — concurrent inference with `Semaphore` concurrency control, `CancellationToken`, per-batch progress tracking, TTL-based eviction of completed batches
+  - `CostOptimizer` — recommends cheapest capable model given request complexity (token count, tools, vision), tier classification, capability matching
+  - `RequestProfile` and `ModelRecommendation` types
+- **Privacy & DLP** (`dlp` feature flag, requires `regex`)
+  - `DlpScanner` with `RegexSet` single-pass matching, 8 built-in PII patterns: email, phone (US, separator-required), SSN, credit card, IPv4, API keys, AWS access keys, GitHub tokens
+  - `ClassificationLevel` enum: Public/Internal/Confidential/Restricted with `#[non_exhaustive]`
+  - Custom patterns via `[[dlp.patterns]]` config with per-pattern classification
+  - `DlpConfig` with enable/disable and default classification level
+  - Privacy-aware routing: `Router::select_with_classification()` — Confidential routes to local-only providers, Restricted blocks entirely
+  - `HooshError::DlpBlocked` variant (HTTP 403, `content_blocked` error code)
+- **Multi-modal support**
+  - `MessageContent` enum: `Text(String)` | `Parts(Vec<ContentPart>)` — serde-compatible with OpenAI format (deserializes from plain string or content array)
+  - `ContentPart::Text` and `ContentPart::ImageUrl` with `#[non_exhaustive]`
+  - `ImageUrl` struct with optional detail level
+  - `MessageContent::text()` (returns `Cow<str>`), `has_images()`, `PartialEq<&str>` for ergonomic use
+  - `ChatMessage.content` changed from `String` to `MessageContent` — vision requests pass through to providers
+- **Hardware capabilities** (ai-hwaccel 1.0.0)
+  - `detect_with_timing()` — per-backend probe timing for startup diagnostics
+  - `from_cache(ttl)` — disk-cached detection via `DiskCachedRegistry`, skips re-probing on restart
+  - `best_device()` — ranked device selection by memory × throughput
+  - `devices_by_family()`, `gpus()`, `npus()`, `tpus()` — filter by accelerator family
+  - `plan_sharding(model_params)` — multi-GPU model splitting plans (pipeline/tensor/data parallel)
+  - `system_io()`, `has_fast_interconnect()`, `estimate_data_load_secs()` — I/O topology and throughput estimation
+  - `ShardingSummary` and `ShardInfo` output types
+  - Hardware summary now shows device names (e.g. "RTX 4090") and interconnect info
+  - `hoosh info` uses timed detection, shows best device and interconnect bandwidth
+
+### Changed
+- Bump ai-hwaccel from 0.23.3 to 1.0.0 (path dep, pre-publish)
+- `Message.content` type changed from `String` to `MessageContent` (backwards-compatible deserialization)
+- `Role`, `RoutingStrategy`, `EmbeddingsInput` enums now `#[non_exhaustive]`
+- `AppState` expanded: `compactor`, `model_registry`, `retry_manager` fields
+- `ServerConfig` expanded: `context_config`, `retry_config` fields
+- Budget estimation in handler uses `ProviderTokenCounter` (input tokens + output budget) instead of hardcoded `max_tokens.unwrap_or(1024)`
+- Cost module restructured from `cost.rs` to `cost/mod.rs` + `cost/optimizer.rs`
+- `lookup_pricing()` visibility changed from `fn` to `pub(crate) fn` for optimizer access
+
+### Fixed
+- `#[derive(Debug)]` added to `provider::whisper::DecodedAudio` (clippy fix)
+- DLP scanner uses `map_err` instead of `expect()` for regex compilation (no panic in lib code)
+- Cache warming uses locally-computed key for insertion (was using mismatched key from closure)
+- Token counter documents bytes-per-token semantics (intentionally over-estimates for multi-byte UTF-8)
+- Compactor truncation uses binary search O(log n) instead of linear decrement O(n)
+- Batch manager `evict_completed(max_age)` prevents unbounded memory growth from finished batches
+- Prompt compression uses `retain()` O(n) instead of `remove()` O(n²), `HashSet` for stale tool ID lookups
+- Phone pattern requires separators to reduce false positives on numeric strings
+- API key DLP pattern quantifier bounded to `{1,5}` (prevents ReDoS)
+- Retry manager defaults unknown errors to non-retryable (was retrying permanently broken requests)
+- Semantic cache redundant key clone removed
+
+### Security
+- DLP scanner rejects invalid custom regex patterns at construction time
+- Privacy-aware routing enforces local-only inference for Confidential content
+- Restricted classification blocks inference entirely (HTTP 403)
+- ReDoS mitigation: bounded quantifiers on all DLP regex patterns
+
+### CI/CD
+- `cargo-semver-checks` job in CI pipeline — runs on PRs to detect accidental API breakage
+- `make semver` Makefile target
+
+### Documentation
+- Runnable doc examples on `InferenceRequest`, `MessageContent`, `TokenPool`, `HooshError`, `ResponseCache` (6 doc-tests)
+
+### Testing
+- 613 tests (up from 388) + 6 doc-tests, all passing
+- 82.8% line coverage (88% excluding untestable hardware-gated code)
+- **OpenAI conformance suite** — 12 strict schema validation tests: response fields, choices/usage schema, `chatcmpl-` ID prefix, unix timestamp, content-type, error format, multi-part content, models/health/cache endpoints
+- New unit test coverage: token counting (11), context compaction (8), prompt compression (5), cache stats (4), semantic cache (7), cache warming (6), retry manager (12), batch inference (13), cost optimizer (14), DLP scanner (13), hardware capabilities (6), multi-modal content (7), config (30), router DLP (6), provider TLS (6), client (10), handler conformance (25)
+- Full audit round: 3 critical, 7 high, 12 medium, 12 low findings — all critical/high fixed
+
+### Dependencies
+- `regex` 1.x (optional, behind `dlp` feature)
+- `tokio-util` 0.7 (for `CancellationToken` in batch inference)
+
 ## [0.23.4] — 2026-03-23
 
 ### Added

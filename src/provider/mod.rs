@@ -559,4 +559,151 @@ mod tests {
         assert_eq!(registry.len(), 0);
         assert_eq!(registry.all().count(), 0);
     }
+
+    #[test]
+    fn all_provider_types_display() {
+        let types = [
+            (ProviderType::Ollama, "ollama"),
+            (ProviderType::LlamaCpp, "llamacpp"),
+            (ProviderType::Synapse, "synapse"),
+            (ProviderType::LmStudio, "lmstudio"),
+            (ProviderType::LocalAi, "localai"),
+            (ProviderType::OpenAi, "openai"),
+            (ProviderType::Anthropic, "anthropic"),
+            (ProviderType::DeepSeek, "deepseek"),
+            (ProviderType::Mistral, "mistral"),
+            (ProviderType::Google, "google"),
+            (ProviderType::Groq, "groq"),
+            (ProviderType::Grok, "grok"),
+            (ProviderType::OpenRouter, "openrouter"),
+            (ProviderType::Whisper, "whisper"),
+        ];
+        for (pt, expected) in types {
+            assert_eq!(pt.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn all_local_providers() {
+        let local = [
+            ProviderType::Ollama,
+            ProviderType::LlamaCpp,
+            ProviderType::Synapse,
+            ProviderType::LmStudio,
+            ProviderType::LocalAi,
+            ProviderType::Whisper,
+        ];
+        for pt in &local {
+            assert!(pt.is_local(), "{pt} should be local");
+        }
+        let remote = [
+            ProviderType::OpenAi,
+            ProviderType::Anthropic,
+            ProviderType::DeepSeek,
+            ProviderType::Mistral,
+            ProviderType::Groq,
+            ProviderType::Grok,
+            ProviderType::OpenRouter,
+            ProviderType::Google,
+        ];
+        for pt in &remote {
+            assert!(!pt.is_local(), "{pt} should be remote");
+        }
+    }
+
+    #[test]
+    fn streaming_support_all_types() {
+        // Only Whisper doesn't support streaming
+        let types = [
+            ProviderType::Ollama,
+            ProviderType::LlamaCpp,
+            ProviderType::Synapse,
+            ProviderType::LmStudio,
+            ProviderType::LocalAi,
+            ProviderType::OpenAi,
+            ProviderType::Anthropic,
+            ProviderType::DeepSeek,
+            ProviderType::Mistral,
+            ProviderType::Groq,
+            ProviderType::Grok,
+            ProviderType::OpenRouter,
+            ProviderType::Google,
+        ];
+        for pt in &types {
+            assert!(pt.supports_streaming(), "{pt} should support streaming");
+        }
+    }
+
+    #[test]
+    fn build_provider_client_mtls_only_cert_no_key() {
+        // Only client_cert without client_key — mTLS branch requires both
+        let tls = TlsConfig {
+            pinned_certs: vec![],
+            client_cert: Some("/path/to/cert.pem".to_string()),
+            client_key: None,
+        };
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[test]
+    fn build_provider_client_mtls_only_key_no_cert() {
+        // Only client_key without client_cert — mTLS branch requires both
+        let tls = TlsConfig {
+            pinned_certs: vec![],
+            client_cert: None,
+            client_key: Some("/path/to/key.pem".to_string()),
+        };
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+    }
+
+    #[test]
+    fn build_provider_client_invalid_pem_data() {
+        // Write invalid PEM data to a temp file to exercise the parse failure
+        let dir = std::env::temp_dir();
+        let cert_path = dir.join("hoosh_test_invalid_cert.pem");
+        std::fs::write(&cert_path, b"not a valid PEM certificate").unwrap();
+        let tls = TlsConfig {
+            pinned_certs: vec![cert_path.to_string_lossy().to_string()],
+            client_cert: None,
+            client_key: None,
+        };
+        // Should not panic — logs error and continues
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+        let _ = std::fs::remove_file(&cert_path);
+    }
+
+    #[test]
+    fn build_provider_client_invalid_mtls_pem() {
+        let dir = std::env::temp_dir();
+        let cert_path = dir.join("hoosh_test_mtls_cert.pem");
+        let key_path = dir.join("hoosh_test_mtls_key.pem");
+        std::fs::write(&cert_path, b"invalid cert data").unwrap();
+        std::fs::write(&key_path, b"invalid key data").unwrap();
+        let tls = TlsConfig {
+            pinned_certs: vec![],
+            client_cert: Some(cert_path.to_string_lossy().to_string()),
+            client_key: Some(key_path.to_string_lossy().to_string()),
+        };
+        // Should not panic — logs warning about failed identity creation
+        let client = build_provider_client(Some(&tls));
+        drop(client);
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+    }
+
+    #[test]
+    fn tls_config_clone() {
+        let tls = TlsConfig {
+            pinned_certs: vec!["a.pem".to_string()],
+            client_cert: Some("cert.pem".to_string()),
+            client_key: Some("key.pem".to_string()),
+        };
+        let cloned = tls.clone();
+        assert_eq!(cloned.pinned_certs, tls.pinned_certs);
+        assert_eq!(cloned.client_cert, tls.client_cert);
+        assert_eq!(cloned.client_key, tls.client_key);
+    }
 }
