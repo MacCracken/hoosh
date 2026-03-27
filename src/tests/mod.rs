@@ -1311,7 +1311,9 @@ mod mock_server {
 // ---------------------------------------------------------------------------
 
 mod live {
+    #[cfg(feature = "ollama")]
     use crate::inference::InferenceRequest;
+    #[cfg(feature = "ollama")]
     use crate::provider::LlmProvider;
 
     #[cfg(feature = "ollama")]
@@ -2629,6 +2631,7 @@ mod e2e {
     }
 
     /// Verify tuned OllamaProvider creates successfully.
+    #[cfg(feature = "ollama")]
     #[test]
     fn ollama_provider_tuned_creation() {
         use crate::provider::LlmProvider;
