@@ -364,6 +364,8 @@ fn bench_queue(c: &mut Criterion) {
     // Re-export from majra
     use majra::queue::Priority;
 
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
     c.bench_function("queue_enqueue_dequeue_cycle", |b| {
         let queue = InferenceQueue::new();
         let req = hoosh::queue::QueuedRequest {
@@ -373,8 +375,10 @@ fn bench_queue(c: &mut Criterion) {
             request_id: "bench-req".into(),
         };
         b.iter(|| {
-            queue.enqueue(req.clone(), Priority::Normal);
-            queue.dequeue()
+            rt.block_on(async {
+                queue.enqueue(req.clone(), Priority::Normal).await;
+                queue.dequeue().await
+            })
         })
     });
 
@@ -387,12 +391,14 @@ fn bench_queue(c: &mut Criterion) {
             request_id: "r".into(),
         };
         b.iter(|| {
-            queue.enqueue(req.clone(), Priority::Background);
-            queue.enqueue(req.clone(), Priority::Critical);
-            queue.enqueue(req.clone(), Priority::Normal);
-            queue.dequeue();
-            queue.dequeue();
-            queue.dequeue();
+            rt.block_on(async {
+                queue.enqueue(req.clone(), Priority::Background).await;
+                queue.enqueue(req.clone(), Priority::Critical).await;
+                queue.enqueue(req.clone(), Priority::Normal).await;
+                queue.dequeue().await;
+                queue.dequeue().await;
+                queue.dequeue().await;
+            })
         })
     });
 }

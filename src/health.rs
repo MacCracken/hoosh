@@ -1,4 +1,8 @@
 //! Background health checker — periodic provider health monitoring with automatic failover.
+//!
+//! Integrates with majra's heartbeat tracker for Online→Suspect→Offline FSM,
+//! GPU telemetry forwarding, fleet statistics, and automatic eviction of
+//! persistently offline providers.
 
 use std::sync::Arc;
 
@@ -69,6 +73,21 @@ fn handle_check_failure(
     }
 }
 
+/// Build GPU telemetry from ai-hwaccel device profiles for the heartbeat tracker.
+#[cfg(feature = "hwaccel")]
+fn collect_gpu_telemetry() -> Vec<majra::heartbeat::GpuTelemetry> {
+    let hw = crate::hardware::HardwareManager::detect();
+    hw.gpus()
+        .iter()
+        .map(|gpu| majra::heartbeat::GpuTelemetry {
+            utilization_pct: 0.0, // runtime utilization not available from static detection
+            memory_used_mb: 0,    // would require runtime query
+            memory_total_mb: gpu.memory_bytes / (1024 * 1024),
+            temperature_c: None,
+        })
+        .collect()
+}
+
 /// Spawn a background task that periodically checks all provider health.
 /// Returns a JoinHandle that can be used to cancel the task.
 pub fn spawn_health_checker(
@@ -78,7 +97,45 @@ pub fn spawn_health_checker(
     interval_secs: u64,
     event_bus: Arc<crate::events::EventBus>,
     heartbeat: Arc<majra::heartbeat::ConcurrentHeartbeatTracker>,
+    eviction_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> tokio::task::JoinHandle<()> {
+    // Spawn eviction handler if configured
+    if let Some(mut rx) = eviction_rx {
+        let health_map_evict = health_map.clone();
+        let event_bus_evict = event_bus.clone();
+        tokio::spawn(async move {
+            while let Some(node_id) = rx.recv().await {
+                tracing::warn!(
+                    "heartbeat eviction: {} removed (persistently offline)",
+                    node_id
+                );
+                // Parse node_id back to (ProviderType, base_url) and remove from health map
+                if let Some((ptype_str, _base_url)) = node_id.split_once(':') {
+                    // Try to find and remove matching entry
+                    let keys_to_remove: Vec<_> = health_map_evict
+                        .iter()
+                        .filter(|entry| {
+                            let (pt, url) = entry.key();
+                            pt.to_string() == ptype_str || (format!("{}:{}", pt, url) == node_id)
+                        })
+                        .map(|entry| entry.key().clone())
+                        .collect();
+                    for key in &keys_to_remove {
+                        health_map_evict.remove(key);
+                        event_bus_evict.publish(
+                            crate::events::topics::HEALTH,
+                            crate::events::ProviderEvent::HealthChanged {
+                                provider: key.0.to_string(),
+                                base_url: key.1.clone(),
+                                healthy: false,
+                            },
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Don't run immediately — let providers warm up
@@ -99,8 +156,25 @@ pub fn spawn_health_checker(
 
                     match provider.health_check().await {
                         Ok(true) => {
-                            // Send heartbeat to majra tracker
-                            heartbeat.heartbeat(&node_id);
+                            // Send heartbeat with GPU telemetry when hwaccel is available
+                            #[cfg(feature = "hwaccel")]
+                            {
+                                if route.provider.is_local() {
+                                    let telemetry = collect_gpu_telemetry();
+                                    if !telemetry.is_empty() {
+                                        let _ =
+                                            heartbeat.heartbeat_with_telemetry(&node_id, telemetry);
+                                    } else {
+                                        let _ = heartbeat.heartbeat(&node_id);
+                                    }
+                                } else {
+                                    let _ = heartbeat.heartbeat(&node_id);
+                                }
+                            }
+                            #[cfg(not(feature = "hwaccel"))]
+                            {
+                                let _ = heartbeat.heartbeat(&node_id);
+                            }
 
                             health_map.insert(
                                 key.clone(),

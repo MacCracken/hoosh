@@ -180,11 +180,15 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     };
 
     let health_map = crate::health::new_health_map();
+    let (eviction_tx, eviction_rx) = tokio::sync::mpsc::unbounded_channel();
     let heartbeat = Arc::new(majra::heartbeat::ConcurrentHeartbeatTracker::new(
         majra::heartbeat::HeartbeatConfig {
             suspect_after: std::time::Duration::from_secs(30),
             offline_after: std::time::Duration::from_secs(90),
-            eviction_policy: None,
+            eviction_policy: Some(majra::heartbeat::EvictionPolicy {
+                offline_cycles: 5,
+                eviction_tx: Some(eviction_tx),
+            }),
         },
     ));
     for route in &config.routes {
@@ -251,6 +255,7 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
             health_interval,
             event_bus,
             heartbeat,
+            Some(eviction_rx),
         );
         tracing::info!(
             "background health checker started (interval: {}s)",

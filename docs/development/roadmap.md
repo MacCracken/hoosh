@@ -8,7 +8,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v1.1.0 — New Backends & Integrations
+## v1.2.0 — New Backends & Integrations
 
 ### New backends
 - [ ] **ONNX Runtime** — local ONNX model inference
@@ -34,7 +34,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v1.2.0 — Ifran Integration (library-mode API)
+## v1.3.0 — Ifran Integration (library-mode API)
 
 - [ ] **Embeddings trait** — expose embeddings generation through `LlmProvider` so Ifran can drop its per-backend embedding wrappers
 - [ ] **Backend capability reporting** — expose accelerator type, context length, streaming support, vision support per provider so Ifran can query capabilities without `ai-hwaccel` directly

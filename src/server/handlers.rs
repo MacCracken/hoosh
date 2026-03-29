@@ -804,7 +804,7 @@ pub(crate) async fn queue_status(State(state): State<Arc<AppState>>) -> impl Int
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "queued": state.inference_queue.len(),
+            "queued": state.inference_queue.len().await,
         })),
     )
         .into_response()

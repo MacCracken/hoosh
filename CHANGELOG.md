@@ -5,6 +5,28 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-03-29
+
+### Added
+- **GPU telemetry on heartbeats** — local providers now forward GPU memory capacity from ai-hwaccel into majra's heartbeat tracker via `heartbeat_with_telemetry()` (feature-gated: `hwaccel`)
+- **Heartbeat eviction policy** — persistently offline providers (5 consecutive offline sweep cycles) are automatically evicted from the heartbeat tracker and removed from the health map; eviction events are published to the event bus and logged
+- **`dequeue_wait()` on `InferenceQueue`** — async blocking dequeue that parks until an item is enqueued, powered by majra's built-in `Notify`
+
+### Changed
+- **`InferenceQueue` → majra `ConcurrentPriorityQueue`** — replaced `std::sync::Mutex<PriorityQueue>` wrapper with majra's async-native `ConcurrentPriorityQueue` (tokio mutex + notify); `enqueue`, `dequeue`, `len`, `is_empty` are now `async fn`
+- Dependency updates:
+  - `majra` 0.21.3 → 1.0.2
+  - `aws-lc-sys` 0.39.0 → 0.39.1
+  - `cc` 1.2.57 → 1.2.58
+  - `cmake` 0.1.57 → 0.1.58
+  - `js-sys` 0.3.91 → 0.3.92
+  - `mio` 1.1.1 → 1.2.0
+  - `rustc-hash` 2.1.1 → 2.1.2
+  - `uuid` 1.22.0 → 1.23.0
+  - `wasm-bindgen` 0.2.114 → 0.2.115
+  - `web-sys` 0.3.91 → 0.3.92
+  - `zerocopy` 0.8.47 → 0.8.48
+
 ## [1.0.0] — 2026-03-27
 
 ### Added
