@@ -128,7 +128,7 @@ impl HardwareManager {
     /// Only available (non-errored) accelerator profiles.
     #[must_use]
     pub fn available_profiles(&self) -> Vec<&AcceleratorProfile> {
-        self.registry.available()
+        self.registry.available().collect()
     }
 
     // ─── Device filtering ───────────────────────────────────────────────
@@ -142,25 +142,25 @@ impl HardwareManager {
     /// All devices in a given family (GPU, NPU, TPU, etc.).
     #[must_use]
     pub fn devices_by_family(&self, family: AcceleratorFamily) -> Vec<&AcceleratorProfile> {
-        self.registry.by_family(family)
+        self.registry.by_family(family).collect()
     }
 
     /// All GPUs.
     #[must_use]
     pub fn gpus(&self) -> Vec<&AcceleratorProfile> {
-        self.registry.by_family(AcceleratorFamily::Gpu)
+        self.registry.by_family(AcceleratorFamily::Gpu).collect()
     }
 
     /// All NPUs (neural processing units).
     #[must_use]
     pub fn npus(&self) -> Vec<&AcceleratorProfile> {
-        self.registry.by_family(AcceleratorFamily::Npu)
+        self.registry.by_family(AcceleratorFamily::Npu).collect()
     }
 
     /// All TPUs (tensor processing units).
     #[must_use]
     pub fn tpus(&self) -> Vec<&AcceleratorProfile> {
-        self.registry.by_family(AcceleratorFamily::Tpu)
+        self.registry.by_family(AcceleratorFamily::Tpu).collect()
     }
 
     // ─── Model placement ────────────────────────────────────────────────
