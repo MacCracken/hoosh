@@ -41,6 +41,7 @@ fn make_routes(n: usize) -> Vec<ProviderRoute> {
 }
 
 fn bench_registry_register(c: &mut Criterion) {
+    install_crypto_provider();
     let routes = make_routes(20);
     c.bench_function("registry_register_20_routes", |b| {
         b.iter(|| {
@@ -74,7 +75,6 @@ fn bench_registry_lookup(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_provider_construction(c: &mut Criterion) {
-    install_crypto_provider();
     c.bench_function("openai_compat_new", |b| {
         b.iter(|| {
             OpenAiCompatibleProvider::new(
