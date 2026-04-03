@@ -126,4 +126,4 @@ Version is tracked in three places (kept in sync by `scripts/version-bump.sh`):
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [AGPL-3.0-only](LICENSE) license.
+By contributing, you agree that your contributions will be licensed under the [GPL-3.0-only](LICENSE) license.

@@ -5,7 +5,7 @@
 **Hoosh** (Persian: intelligence (the word for AI)) — AI inference gateway — multi-provider LLM routing, token budgets, caching, local model serving
 
 - **Type**: Flat crate with binary (server, port 8088)
-- **License**: AGPL-3.0-only
+- **License**: GPL-3.0-only
 - **MSRV**: 1.89
 - **Version**: SemVer 1.x stable
 

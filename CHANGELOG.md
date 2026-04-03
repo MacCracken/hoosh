@@ -5,6 +5,14 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-04-03
+
+### Changed
+- **License changed from AGPL-3.0-only to GPL-3.0-only** — updated `Cargo.toml`, `deny.toml`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`; added `LICENSE` file with full GPL-3.0 text
+- **Binary size optimization** — added `[profile.release]` with `strip = true`, `lto = true`, `codegen-units = 1`, `opt-level = "s"`, `panic = "abort"`
+- **TLS provider decoupling** — switched reqwest from `rustls` feature to `rustls-no-provider`, added explicit `rustls` 0.23 dependency with `ring` crypto provider; `install_crypto_provider()` initializes ring at startup
+- All tests updated with explicit `install_crypto_provider()` calls for deterministic TLS initialization
+
 ## [1.1.0] — 2026-03-29
 
 ### Added

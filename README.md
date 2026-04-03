@@ -9,7 +9,7 @@ Multi-provider LLM routing, local model serving, speech-to-text, and token budge
 
 [![Crates.io](https://img.shields.io/crates/v/hoosh.svg)](https://crates.io/crates/hoosh)
 [![CI](https://github.com/MacCracken/hoosh/actions/workflows/ci.yml/badge.svg)](https://github.com/MacCracken/hoosh/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
 ---
 
@@ -300,7 +300,7 @@ The `VERSION` file is the single source of truth. Use `./scripts/version-bump.sh
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) for details.
+GPL-3.0-only. See [LICENSE](LICENSE) for details.
 
 ---
 
