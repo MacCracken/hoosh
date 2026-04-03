@@ -380,6 +380,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_no_tls() {
+        crate::install_crypto_provider();
         let client = build_provider_client(None);
         // Should return a working client without panicking
         drop(client);
@@ -387,6 +388,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_nonexistent_cert_no_panic() {
+        crate::install_crypto_provider();
         let tls = TlsConfig {
             pinned_certs: vec!["/nonexistent/path/cert.pem".to_string()],
             client_cert: Some("/nonexistent/client.pem".to_string()),
@@ -421,6 +423,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_empty_tls_config() {
+        crate::install_crypto_provider();
         // TLS config present but with no certs — exercises the Some(tls) branch
         // with empty pinned_certs and no client_cert/key
         let tls = TlsConfig::default();
@@ -430,6 +433,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_pinned_certs_nonexistent() {
+        crate::install_crypto_provider();
         // Multiple non-existent cert paths — exercises the read-failure warning
         // and the "no certificates loaded" error log
         let tls = TlsConfig {
@@ -446,6 +450,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_mtls_nonexistent_no_panic() {
+        crate::install_crypto_provider();
         // mTLS with non-existent files — exercises the read-failure branch
         let tls = TlsConfig {
             pinned_certs: vec![],
@@ -636,6 +641,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_mtls_only_cert_no_key() {
+        crate::install_crypto_provider();
         // Only client_cert without client_key — mTLS branch requires both
         let tls = TlsConfig {
             pinned_certs: vec![],
@@ -648,6 +654,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_mtls_only_key_no_cert() {
+        crate::install_crypto_provider();
         // Only client_key without client_cert — mTLS branch requires both
         let tls = TlsConfig {
             pinned_certs: vec![],
@@ -660,6 +667,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_invalid_pem_data() {
+        crate::install_crypto_provider();
         // Write invalid PEM data to a temp file to exercise the parse failure
         let dir = std::env::temp_dir();
         let cert_path = dir.join("hoosh_test_invalid_cert.pem");
@@ -677,6 +685,7 @@ mod tests {
 
     #[test]
     fn build_provider_client_invalid_mtls_pem() {
+        crate::install_crypto_provider();
         let dir = std::env::temp_dir();
         let cert_path = dir.join("hoosh_test_mtls_cert.pem");
         let key_path = dir.join("hoosh_test_mtls_key.pem");

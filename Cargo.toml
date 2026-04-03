@@ -61,7 +61,8 @@ async-trait = "0.1"
 
 # Async / HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
@@ -126,6 +127,13 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 tokio-test = "0.4"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
+panic = "abort"
 
 [[bench]]
 name = "routing"

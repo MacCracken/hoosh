@@ -4,6 +4,7 @@ use crate::*;
 
 #[test]
 fn client_creation() {
+    crate::install_crypto_provider();
     let client = HooshClient::new("http://localhost:8088");
     assert_eq!(client.base_url(), "http://localhost:8088");
 }
@@ -288,6 +289,7 @@ mod mock_server {
     /// Start a mock server that responds to OpenAI-compatible endpoints.
     /// Returns the base URL (e.g. "http://127.0.0.1:PORT").
     async fn start_mock_oai_server() -> String {
+        crate::install_crypto_provider();
         let app = Router::new()
             .route("/v1/chat/completions", post(mock_chat_completions))
             .route("/v1/models", get(mock_models));
@@ -405,6 +407,7 @@ mod mock_server {
 
     #[tokio::test]
     async fn openai_compat_health_check_unreachable() {
+        crate::install_crypto_provider();
         let provider =
             OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp, None);
         // Should return an error (connection refused), not panic
@@ -414,6 +417,7 @@ mod mock_server {
 
     #[tokio::test]
     async fn openai_compat_infer_unreachable() {
+        crate::install_crypto_provider();
         let provider =
             OpenAiCompatibleProvider::new("http://127.0.0.1:1", None, ProviderType::LlamaCpp, None);
         let req = InferenceRequest {
@@ -440,6 +444,7 @@ mod mock_server {
         use crate::provider::ollama::OllamaProvider;
 
         async fn start_mock_ollama() -> String {
+            crate::install_crypto_provider();
             let app = Router::new()
                 .route("/api/chat", post(mock_chat))
                 .route("/api/tags", get(mock_tags));
@@ -532,6 +537,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_health_check_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let result = provider.health_check().await;
             assert!(result.is_err());
@@ -539,6 +545,7 @@ mod mock_server {
 
         /// Start a mock Ollama server with embeddings, streaming, and error support.
         async fn start_mock_ollama_full() -> String {
+            crate::install_crypto_provider();
             use axum::http::StatusCode;
             use axum::response::IntoResponse;
 
@@ -664,6 +671,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_infer_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let req = InferenceRequest {
                 model: "test".into(),
@@ -695,6 +703,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_list_models_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let result = provider.list_models().await;
             assert!(result.is_err());
@@ -742,6 +751,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_embeddings_unreachable() {
+            crate::install_crypto_provider();
             use crate::inference::{EmbeddingsInput, EmbeddingsRequest};
 
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
@@ -796,6 +806,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_infer_stream_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let req = InferenceRequest {
                 model: "test".into(),
@@ -808,6 +819,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_pull_model_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let result = provider.pull_model("llama3").await;
             assert!(result.is_err());
@@ -815,6 +827,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn ollama_delete_model_unreachable() {
+            crate::install_crypto_provider();
             let provider = OllamaProvider::new("http://127.0.0.1:1", None);
             let result = provider.delete_model("llama3").await;
             assert!(result.is_err());
@@ -833,6 +846,7 @@ mod mock_server {
         use crate::provider::anthropic::AnthropicProvider;
 
         async fn start_mock_anthropic() -> String {
+            crate::install_crypto_provider();
             async fn mock_messages(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
                 let model = body["model"].as_str().unwrap_or("claude-sonnet-4-20250514");
                 Json(json!({
@@ -894,6 +908,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn anthropic_list_models() {
+            crate::install_crypto_provider();
             let provider = AnthropicProvider::new("http://unused", None, None);
             let models = provider.list_models().await.unwrap();
             assert!(models.len() >= 3);
@@ -911,6 +926,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn anthropic_health_no_key() {
+            crate::install_crypto_provider();
             let provider = AnthropicProvider::new("http://unused", None, None);
             let healthy = provider.health_check().await.unwrap();
             assert!(!healthy);
@@ -918,6 +934,7 @@ mod mock_server {
 
         #[tokio::test]
         async fn anthropic_health_unreachable() {
+            crate::install_crypto_provider();
             let provider = AnthropicProvider::new("http://127.0.0.1:1", Some("key".into()), None);
             let healthy = provider.health_check().await.unwrap();
             assert!(!healthy);
@@ -1050,6 +1067,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_health_check_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1060,6 +1078,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_infer_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1075,6 +1094,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_list_models_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1085,6 +1105,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_infer_stream_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1101,6 +1122,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_training_status_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1111,6 +1133,7 @@ mod mock_server {
     #[cfg(feature = "synapse")]
     #[tokio::test]
     async fn synapse_sync_catalog_unreachable() {
+        crate::install_crypto_provider();
         use crate::provider::synapse::SynapseProvider;
 
         let provider = SynapseProvider::new("http://127.0.0.1:1", None);
@@ -1320,6 +1343,7 @@ mod live {
     #[tokio::test]
     #[ignore] // Requires `ollama serve` running on localhost:11434
     async fn ollama_live_health() {
+        crate::install_crypto_provider();
         use crate::provider::ollama::OllamaProvider;
         let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         assert!(provider.health_check().await.unwrap());
@@ -1329,6 +1353,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn ollama_live_list_models() {
+        crate::install_crypto_provider();
         use crate::provider::ollama::OllamaProvider;
         let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
@@ -1345,6 +1370,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn ollama_live_infer() {
+        crate::install_crypto_provider();
         use crate::provider::ollama::OllamaProvider;
         let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
@@ -1373,6 +1399,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn ollama_live_stream() {
+        crate::install_crypto_provider();
         use crate::provider::ollama::OllamaProvider;
         let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
         let models = provider.list_models().await.unwrap();
@@ -1408,6 +1435,7 @@ mod server_wiring {
     use crate::server::AppState;
 
     fn make_state(routes: Vec<ProviderRoute>) -> Arc<AppState> {
+        crate::install_crypto_provider();
         let mut providers = ProviderRegistry::new();
         for route in &routes {
             if route.enabled {
@@ -1614,6 +1642,7 @@ mod e2e {
 
     /// Start a mock OpenAI-compatible backend and return its URL.
     async fn start_mock_backend() -> String {
+        crate::install_crypto_provider();
         let app = Router::new()
             .route("/v1/chat/completions", post(mock_chat))
             .route("/v1/models", get(mock_models));
@@ -1742,6 +1771,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_infer_no_matching_model() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let config = ServerConfig {
             bind: "127.0.0.1".into(),
@@ -1787,6 +1817,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_budget_enforcement() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
 
@@ -1823,6 +1854,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_budget_tracks_usage() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
         let client = reqwest::Client::new();
@@ -1868,6 +1900,7 @@ mod e2e {
 
     /// Mock backend that supports SSE streaming.
     async fn start_mock_streaming_backend() -> String {
+        crate::install_crypto_provider();
         async fn mock_stream_chat(Json(body): Json<serde_json::Value>) -> axum::response::Response {
             let model = body["model"].as_str().unwrap_or("mock-model").to_owned();
             let stream = body["stream"].as_bool().unwrap_or(false);
@@ -2042,6 +2075,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_no_provider_for_model() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let _hoosh_url = start_hoosh(&backend).await;
         // wildcard route matches everything, so use a server with restricted patterns
@@ -2096,6 +2130,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_embeddings_no_provider() {
+        crate::install_crypto_provider();
         // Server with no matching model for embeddings → 404
         let config = ServerConfig {
             bind: "127.0.0.1".into(),
@@ -2140,6 +2175,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_admin_reload_no_config_path() {
+        crate::install_crypto_provider();
         // When config_path is None, reload should return 400
         let config = ServerConfig {
             bind: "127.0.0.1".into(),
@@ -2174,6 +2210,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_queue_status() {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2197,6 +2234,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_costs_get() {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2217,6 +2255,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_costs_reset() {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2240,6 +2279,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_audit_disabled() {
+        crate::install_crypto_provider();
         // When audit is not enabled, /v1/audit should return 404
         let config = ServerConfig {
             audit_enabled: false,
@@ -2261,6 +2301,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_audit_enabled() {
+        crate::install_crypto_provider();
         let config = ServerConfig {
             audit_enabled: true,
             audit_signing_key: Some("test-key-for-audit".into()),
@@ -2290,6 +2331,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_prometheus_metrics() {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2328,6 +2370,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_health_heartbeat() {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2356,6 +2399,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_rate_limit_exceeded() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         // Configure a route with rate_limit_rpm = 1 so it trips after one request
         let config = ServerConfig {
@@ -2427,6 +2471,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_budget_pool_not_found() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
         let client = reqwest::Client::new();
@@ -2454,6 +2499,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_budget_exceeded() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
         let client = reqwest::Client::new();
@@ -2483,6 +2529,7 @@ mod e2e {
 
     #[tokio::test]
     async fn e2e_costs_reset_with_audit() {
+        crate::install_crypto_provider();
         let config = ServerConfig {
             audit_enabled: true,
             audit_signing_key: Some("cost-audit-key".into()),
@@ -2526,6 +2573,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_streaming_sse_response_shape() {
+        crate::install_crypto_provider();
         let backend = start_mock_streaming_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
         let client = reqwest::Client::new();
@@ -2572,6 +2620,7 @@ mod e2e {
     /// Verify HooshClient with tuned settings can connect and get health.
     #[tokio::test]
     async fn hoosh_client_tuned_health() {
+        crate::install_crypto_provider();
         use crate::server::{ServerConfig, build_app};
         use tokio::net::TcpListener;
 
@@ -2590,6 +2639,7 @@ mod e2e {
     /// reuse the TCP connection (second request should be faster than first).
     #[tokio::test]
     async fn hoosh_client_connection_reuse() {
+        crate::install_crypto_provider();
         use crate::server::{ServerConfig, build_app};
         use tokio::net::TcpListener;
 
@@ -2634,6 +2684,7 @@ mod e2e {
     #[cfg(feature = "ollama")]
     #[test]
     fn ollama_provider_tuned_creation() {
+        crate::install_crypto_provider();
         use crate::provider::LlmProvider;
         use crate::provider::ollama::OllamaProvider;
 
@@ -2645,6 +2696,7 @@ mod e2e {
     /// Verify tuned OpenAiCompatibleProvider creates successfully.
     #[test]
     fn openai_compat_provider_tuned_creation() {
+        crate::install_crypto_provider();
         use crate::provider::LlmProvider;
         use crate::provider::openai_compat::OpenAiCompatibleProvider;
 
@@ -2661,6 +2713,7 @@ mod e2e {
     /// Verify concurrent requests through a tuned HooshClient all succeed.
     #[tokio::test]
     async fn hoosh_client_concurrent_requests() {
+        crate::install_crypto_provider();
         use crate::server::{ServerConfig, build_app};
         use tokio::net::TcpListener;
 
@@ -2695,6 +2748,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_streaming_full_flow() {
+        crate::install_crypto_provider();
         let backend = start_mock_streaming_backend().await;
         let hoosh_url = start_hoosh(&backend).await;
         let client = HooshClient::new(&hoosh_url);
@@ -2730,6 +2784,7 @@ mod e2e {
 
     /// Start a mock Ollama backend that supports chat, tags, and embeddings.
     async fn start_mock_ollama_backend_with_embeddings() -> String {
+        crate::install_crypto_provider();
         async fn ollama_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             let stream = body["stream"].as_bool().unwrap_or(false);
             assert!(!stream, "mock does not support streaming");
@@ -2768,6 +2823,7 @@ mod e2e {
     #[cfg(feature = "ollama")]
     #[tokio::test]
     async fn e2e_embeddings_pass_through() {
+        crate::install_crypto_provider();
         let backend = start_mock_ollama_backend_with_embeddings().await;
 
         // Start hoosh with an Ollama provider (which supports embeddings)
@@ -2831,6 +2887,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_full_flow_with_observability() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
 
         // Start hoosh with audit enabled
@@ -2934,6 +2991,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_auth_enforcement() {
+        crate::install_crypto_provider();
         let backend = start_mock_backend().await;
 
         let config = ServerConfig {
@@ -3021,6 +3079,7 @@ mod e2e {
     #[cfg(feature = "llamacpp")]
     #[tokio::test]
     async fn e2e_health_failover() {
+        crate::install_crypto_provider();
         let working_backend = start_mock_backend().await;
         // Dead port — nothing listens here
         let dead_backend = "http://127.0.0.1:1";
@@ -3107,6 +3166,7 @@ mod e2e {
     #[cfg(feature = "ollama")]
     #[tokio::test]
     async fn e2e_ollama_native_flow() {
+        crate::install_crypto_provider();
         // Start a mock Ollama backend with native /api/chat and /api/tags
         async fn mock_ollama_chat(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
             let _model = body["model"].as_str().unwrap_or("llama3:latest");
@@ -3270,6 +3330,7 @@ mod conformance {
     }
 
     fn http_client() -> reqwest::Client {
+        crate::install_crypto_provider();
         reqwest::Client::new()
     }
 
@@ -3618,6 +3679,7 @@ mod handler_coverage {
 
     /// Start a minimal hoosh server with no providers configured.
     async fn start_minimal_server() -> String {
+        crate::install_crypto_provider();
         let config = ServerConfig::default();
         let (app, _state) = crate::server::build_app(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3628,6 +3690,7 @@ mod handler_coverage {
 
     /// Start a hoosh server with audit enabled.
     async fn start_server_with_audit() -> String {
+        crate::install_crypto_provider();
         let config = ServerConfig {
             audit_enabled: true,
             ..ServerConfig::default()
@@ -4088,6 +4151,7 @@ mod handler_coverage {
 
     #[tokio::test]
     async fn handler_admin_reload_with_valid_config() {
+        crate::install_crypto_provider();
         // Create a temp config file
         let dir = std::env::temp_dir();
         let config_path = dir.join("hoosh_test_reload.toml");

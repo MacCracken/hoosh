@@ -71,18 +71,21 @@ mod tests {
 
     #[test]
     fn default_url() {
+        crate::install_crypto_provider();
         let p = SynapseProvider::new("", None);
         assert_eq!(p.inner.base_url(), "http://localhost:5000");
     }
 
     #[test]
     fn custom_url() {
+        crate::install_crypto_provider();
         let p = SynapseProvider::new("http://synapse:7000", None);
         assert_eq!(p.inner.base_url(), "http://synapse:7000");
     }
 
     #[test]
     fn provider_type_is_synapse() {
+        crate::install_crypto_provider();
         let p = SynapseProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::Synapse);
     }

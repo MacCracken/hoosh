@@ -128,12 +128,14 @@ mod tests {
 
     #[test]
     fn provider_creation() {
+        crate::install_crypto_provider();
         let p = TtsProvider::new("http://localhost:5500", None);
         assert_eq!(p.base_url, "http://localhost:5500");
     }
 
     #[test]
     fn provider_with_api_key() {
+        crate::install_crypto_provider();
         let p = TtsProvider::new("https://api.openai.com", Some("sk-test".into()));
         assert!(p.api_key.is_some());
     }

@@ -72,5 +72,16 @@ pub use provider::{LlmProvider, ProviderRegistry, ProviderType};
 pub use router::Router;
 pub use tools::{ToolCall, ToolChoice, ToolDefinition, ToolResult};
 
+/// Install the rustls ring crypto provider for tests (called once per process).
+#[cfg(test)]
+#[doc(hidden)]
+pub fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[cfg(test)]
 mod tests;

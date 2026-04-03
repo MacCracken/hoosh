@@ -352,24 +352,28 @@ mod tests {
 
     #[test]
     fn default_url() {
+        crate::install_crypto_provider();
         let p = OllamaProvider::new("", None);
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn custom_url() {
+        crate::install_crypto_provider();
         let p = OllamaProvider::new("http://my-ollama:9999", None);
         assert_eq!(p.base_url, "http://my-ollama:9999");
     }
 
     #[test]
     fn strips_trailing_slash() {
+        crate::install_crypto_provider();
         let p = OllamaProvider::new("http://localhost:11434/", None);
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn provider_type_is_ollama() {
+        crate::install_crypto_provider();
         let p = OllamaProvider::new("", None);
         assert_eq!(p.provider_type(), ProviderType::Ollama);
     }

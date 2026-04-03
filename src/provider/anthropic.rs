@@ -304,18 +304,21 @@ mod tests {
 
     #[test]
     fn default_url() {
+        crate::install_crypto_provider();
         let p = AnthropicProvider::new("", Some("sk-ant-test".into()), None);
         assert_eq!(p.base_url(), "https://api.anthropic.com");
     }
 
     #[test]
     fn custom_url() {
+        crate::install_crypto_provider();
         let p = AnthropicProvider::new("https://proxy.example.com", None, None);
         assert_eq!(p.base_url(), "https://proxy.example.com");
     }
 
     #[test]
     fn provider_type_is_anthropic() {
+        crate::install_crypto_provider();
         let p = AnthropicProvider::new("", None, None);
         assert_eq!(p.provider_type(), ProviderType::Anthropic);
     }
@@ -393,6 +396,7 @@ mod tests {
 
     #[test]
     fn list_models_returns_known() {
+        crate::install_crypto_provider();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

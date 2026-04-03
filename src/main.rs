@@ -99,6 +99,10 @@ fn init_default_tracing() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     // For non-Serve commands, init tracing immediately.

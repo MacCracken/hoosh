@@ -312,18 +312,21 @@ mod tests {
 
     #[test]
     fn client_creation() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://localhost:8088");
         assert_eq!(client.base_url(), "http://localhost:8088");
     }
 
     #[test]
     fn client_strips_trailing_slash() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://localhost:8088/");
         assert_eq!(client.base_url(), "http://localhost:8088");
     }
 
     #[test]
     fn client_strips_multiple_trailing_slashes() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://localhost:8088///");
         // trim_end_matches removes all trailing slashes
         assert_eq!(client.base_url(), "http://localhost:8088");
@@ -419,6 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_unreachable_server() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://127.0.0.1:1");
         let result = client.health().await.unwrap();
         assert!(!result);
@@ -426,6 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn infer_connection_refused() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://127.0.0.1:1");
         let request = InferenceRequest {
             model: "test".into(),
@@ -438,6 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_connection_refused() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://127.0.0.1:1");
         let result = client.list_models().await;
         assert!(result.is_err());
@@ -445,6 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn infer_stream_connection_refused() {
+        crate::install_crypto_provider();
         let client = HooshClient::new("http://127.0.0.1:1");
         let request = InferenceRequest {
             model: "test".into(),

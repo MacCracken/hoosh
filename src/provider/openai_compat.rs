@@ -522,6 +522,7 @@ mod tests {
 
     #[test]
     fn provider_creation() {
+        crate::install_crypto_provider();
         let p = OpenAiCompatibleProvider::new(
             "http://localhost:8080",
             None,
@@ -534,6 +535,7 @@ mod tests {
 
     #[test]
     fn provider_strips_trailing_slash() {
+        crate::install_crypto_provider();
         let p = OpenAiCompatibleProvider::new(
             "http://localhost:8080/",
             Some("sk-test".into()),
@@ -545,6 +547,7 @@ mod tests {
 
     #[test]
     fn provider_preserves_api_key() {
+        crate::install_crypto_provider();
         let p = OpenAiCompatibleProvider::new(
             "http://localhost:8080",
             Some("sk-secret".into()),
@@ -557,6 +560,7 @@ mod tests {
 
     #[test]
     fn provider_no_api_key() {
+        crate::install_crypto_provider();
         let p = OpenAiCompatibleProvider::new(
             "http://localhost:8080",
             None,
@@ -568,6 +572,7 @@ mod tests {
 
     #[test]
     fn provider_with_tls_config() {
+        crate::install_crypto_provider();
         let tls = TlsConfig {
             pinned_certs: vec!["/nonexistent/cert.pem".into()],
             ..Default::default()
