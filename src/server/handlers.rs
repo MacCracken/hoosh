@@ -35,13 +35,26 @@ pub(crate) async fn chat_completions(
     }
 
     // Find a route for this model
-    let route = match state
+    #[cfg(feature = "hwaccel")]
+    let selected_route = {
+        let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
+        let model_params = estimate_model_params(&req.model);
+        state
+            .router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .select_with_hardware(&req.model, &hw, model_params, state.vram_reserve_bytes)
+            .cloned()
+    };
+    #[cfg(not(feature = "hwaccel"))]
+    let selected_route = state
         .router
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .select(&req.model)
-        .cloned()
-    {
+        .cloned();
+
+    let route = match selected_route {
         Some(r) => r,
         None => {
             return error_response(
@@ -894,4 +907,158 @@ pub(crate) async fn tools_call(
         StatusCode::OK
     };
     (status, Json(result)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Hardware
+// ---------------------------------------------------------------------------
+
+/// Estimate model parameter count from the model name.
+///
+/// Parses patterns like "llama3-70b", "mistral-7b-instruct", "qwen2.5:32b",
+/// etc. Returns `None` if no parameter count can be inferred.
+#[cfg(feature = "hwaccel")]
+fn estimate_model_params(model: &str) -> Option<u64> {
+    let lower = model.to_ascii_lowercase();
+    // Look for patterns like "70b", "7b", "1.5b" preceded by a separator
+    for (i, ch) in lower.char_indices() {
+        if ch == 'b'
+            && i > 0
+            && (i + 1 >= lower.len() || !lower.as_bytes()[i + 1].is_ascii_alphanumeric())
+        {
+            // Walk backwards to find the number
+            let before = &lower[..i];
+            // Find the start of the number (digits and dots)
+            let num_start = before
+                .rfind(|c: char| !c.is_ascii_digit() && c != '.')
+                .map(|pos| pos + 1)
+                .unwrap_or(0);
+            let num_str = &before[num_start..];
+            if let Ok(val) = num_str.parse::<f64>()
+                && val > 0.0
+                && val < 10_000.0
+            {
+                return Some((val * 1_000_000_000.0) as u64);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(feature = "hwaccel")]
+pub(crate) async fn hardware_info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
+    let vram_reserve = state.vram_reserve_bytes;
+
+    let accelerators: Vec<super::types::AcceleratorInfo> = hw
+        .all_profiles()
+        .iter()
+        .filter(|p| p.available && !matches!(p.accelerator, ai_hwaccel::AcceleratorType::Cpu))
+        .map(|p| {
+            let fallback = p.accelerator.to_string();
+            let name = p.device_name.as_deref().unwrap_or(&fallback);
+            super::types::AcceleratorInfo {
+                name: name.to_string(),
+                family: format!("{:?}", p.accelerator.family()),
+                memory_bytes: p.memory_bytes,
+                memory_used_bytes: p.memory_used_bytes,
+                memory_free_bytes: p.memory_free_bytes,
+                utilization_pct: p.gpu_utilization_percent,
+                temperature_c: p.temperature_c,
+                power_watts: p.power_watts,
+                bandwidth_gbps: p.memory_bandwidth_gbps,
+            }
+        })
+        .collect();
+
+    let environment = hw
+        .runtime_environment()
+        .map(|env| super::types::EnvironmentInfo {
+            is_docker: env.is_docker,
+            is_kubernetes: env.is_kubernetes,
+            namespace: env.kubernetes_namespace.clone(),
+            cloud_provider: env.cloud_instance.as_ref().map(|c| c.provider.clone()),
+            instance_type: env
+                .cloud_instance
+                .as_ref()
+                .and_then(|c| c.instance_type.clone()),
+        });
+
+    let resp = super::types::HardwareResponse {
+        accelerators,
+        total_vram_bytes: hw.total_accelerator_memory(),
+        available_vram_bytes: hw.available_vram(vram_reserve),
+        vram_reserve_bytes: vram_reserve,
+        has_fast_interconnect: hw.has_fast_interconnect(),
+        environment,
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[cfg(feature = "hwaccel")]
+pub(crate) async fn hardware_placement(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<super::types::PlacementRequest>,
+) -> impl IntoResponse {
+    let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
+    let recommendation = hw.recommend_placement(req.model_params, &req.providers);
+
+    let cloud_instances = if !recommendation.fits_in_vram {
+        hw.recommend_cloud_instance(req.model_params, None)
+            .into_iter()
+            .take(5)
+            .map(|rec| super::types::CloudInstanceInfo {
+                name: rec.instance.name,
+                provider: rec.instance.provider,
+                gpu: rec.instance.gpu,
+                gpu_count: rec.instance.gpu_count,
+                total_gpu_memory_gb: rec.instance.total_gpu_memory_gb,
+                price_per_hour: rec.instance.price_per_hour,
+                memory_headroom_pct: rec.memory_headroom_pct,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let resp = super::types::PlacementResponse {
+        recommendation,
+        cloud_alternatives: cloud_instances,
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[cfg(all(test, feature = "hwaccel"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_params_standard_patterns() {
+        assert_eq!(estimate_model_params("llama3-70b"), Some(70_000_000_000));
+        assert_eq!(
+            estimate_model_params("mistral-7b-instruct"),
+            Some(7_000_000_000)
+        );
+        assert_eq!(estimate_model_params("qwen2.5:32b"), Some(32_000_000_000));
+        assert_eq!(estimate_model_params("phi-3.5b"), Some(3_500_000_000));
+    }
+
+    #[test]
+    fn estimate_params_with_decimals() {
+        assert_eq!(estimate_model_params("llama-1.5b"), Some(1_500_000_000));
+        assert_eq!(estimate_model_params("model-0.5b"), Some(500_000_000));
+    }
+
+    #[test]
+    fn estimate_params_no_match() {
+        assert_eq!(estimate_model_params("gpt-4o"), None);
+        assert_eq!(estimate_model_params("claude-sonnet-4"), None);
+        assert_eq!(estimate_model_params("some-model"), None);
+    }
+
+    #[test]
+    fn estimate_params_edge_cases() {
+        // "b" in the middle of a word shouldn't match
+        assert_eq!(estimate_model_params("bert-base"), None);
+    }
 }

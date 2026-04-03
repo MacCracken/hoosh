@@ -73,23 +73,53 @@ fn handle_check_failure(
     }
 }
 
-/// Build GPU telemetry from ai-hwaccel device profiles for the heartbeat tracker.
+/// Hardware state handle for the health checker's periodic GPU telemetry refresh.
 #[cfg(feature = "hwaccel")]
-fn collect_gpu_telemetry() -> Vec<majra::heartbeat::GpuTelemetry> {
-    let hw = crate::hardware::HardwareManager::detect();
-    hw.gpus()
-        .iter()
-        .map(|gpu| majra::heartbeat::GpuTelemetry {
-            utilization_pct: 0.0, // runtime utilization not available from static detection
-            memory_used_mb: 0,    // would require runtime query
-            memory_total_mb: gpu.memory_bytes / (1024 * 1024),
-            temperature_c: None,
-        })
-        .collect()
+pub struct HwHandle {
+    state: Arc<crate::server::AppState>,
+    refresh_interval_secs: u64,
+}
+
+#[cfg(feature = "hwaccel")]
+impl HwHandle {
+    pub fn new(state: Arc<crate::server::AppState>, refresh_interval_secs: u64) -> Self {
+        Self {
+            state,
+            refresh_interval_secs,
+        }
+    }
+
+    /// Refresh hardware state by re-detecting with disk cache, then return
+    /// current GPU telemetry.
+    fn refresh_and_collect(&self) -> Vec<majra::heartbeat::GpuTelemetry> {
+        let fresh = crate::hardware::HardwareManager::from_cache(self.state.hw_cache_ttl);
+        match self.state.hardware.write() {
+            Ok(mut hw) => {
+                *hw = fresh;
+                hw.gpu_telemetry()
+            }
+            Err(e) => {
+                tracing::warn!("hardware state lock poisoned, using fresh detection: {e}");
+                fresh.gpu_telemetry()
+            }
+        }
+    }
+
+    /// Collect GPU telemetry from the current (cached) hardware state.
+    fn collect(&self) -> Vec<majra::heartbeat::GpuTelemetry> {
+        match self.state.hardware.read() {
+            Ok(hw) => hw.gpu_telemetry(),
+            Err(e) => {
+                tracing::warn!("hardware state lock poisoned: {e}");
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// Spawn a background task that periodically checks all provider health.
 /// Returns a JoinHandle that can be used to cancel the task.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_health_checker(
     providers: Arc<ProviderRegistry>,
     routes: Vec<ProviderRoute>,
@@ -98,6 +128,7 @@ pub fn spawn_health_checker(
     event_bus: Arc<crate::events::EventBus>,
     heartbeat: Arc<majra::heartbeat::ConcurrentHeartbeatTracker>,
     eviction_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    #[cfg(feature = "hwaccel")] hw_handle: HwHandle,
 ) -> tokio::task::JoinHandle<()> {
     // Spawn eviction handler if configured
     if let Some(mut rx) = eviction_rx {
@@ -141,8 +172,24 @@ pub fn spawn_health_checker(
         // Don't run immediately — let providers warm up
         interval.tick().await;
 
+        #[cfg(feature = "hwaccel")]
+        let mut last_hw_refresh = std::time::Instant::now();
+
         loop {
             interval.tick().await;
+
+            // Refresh hardware telemetry at the configured interval
+            #[cfg(feature = "hwaccel")]
+            let gpu_telemetry = {
+                let refresh_due = hw_handle.refresh_interval_secs > 0
+                    && last_hw_refresh.elapsed().as_secs() >= hw_handle.refresh_interval_secs;
+                if refresh_due {
+                    last_hw_refresh = std::time::Instant::now();
+                    hw_handle.refresh_and_collect()
+                } else {
+                    hw_handle.collect()
+                }
+            };
 
             for route in &routes {
                 if !route.enabled {
@@ -159,14 +206,9 @@ pub fn spawn_health_checker(
                             // Send heartbeat with GPU telemetry when hwaccel is available
                             #[cfg(feature = "hwaccel")]
                             {
-                                if route.provider.is_local() {
-                                    let telemetry = collect_gpu_telemetry();
-                                    if !telemetry.is_empty() {
-                                        let _ =
-                                            heartbeat.heartbeat_with_telemetry(&node_id, telemetry);
-                                    } else {
-                                        let _ = heartbeat.heartbeat(&node_id);
-                                    }
+                                if route.provider.is_local() && !gpu_telemetry.is_empty() {
+                                    let _ = heartbeat
+                                        .heartbeat_with_telemetry(&node_id, gpu_telemetry.clone());
                                 } else {
                                     let _ = heartbeat.heartbeat(&node_id);
                                 }

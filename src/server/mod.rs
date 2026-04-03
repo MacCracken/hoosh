@@ -43,6 +43,12 @@ pub struct AppState {
     pub compactor: crate::context::compactor::ContextCompactor,
     pub model_registry: crate::provider::metadata::ModelMetadataRegistry,
     pub retry_manager: crate::provider::retry::RetryManager,
+    #[cfg(feature = "hwaccel")]
+    pub hardware: std::sync::RwLock<crate::hardware::HardwareManager>,
+    #[cfg(feature = "hwaccel")]
+    pub vram_reserve_bytes: u64,
+    #[cfg(feature = "hwaccel")]
+    pub hw_cache_ttl: std::time::Duration,
 }
 
 /// Server configuration.
@@ -65,6 +71,8 @@ pub struct ServerConfig {
     pub config_path: Option<String>,
     pub context_config: crate::config::ContextSection,
     pub retry_config: crate::provider::retry::RetryConfig,
+    #[cfg(feature = "hwaccel")]
+    pub hardware_config: crate::config::HardwareSection,
 }
 
 impl Default for ServerConfig {
@@ -88,6 +96,8 @@ impl Default for ServerConfig {
             config_path: None,
             context_config: crate::config::ContextSection::default(),
             retry_config: crate::provider::retry::RetryConfig::default(),
+            #[cfg(feature = "hwaccel")]
+            hardware_config: crate::config::HardwareSection::default(),
         }
     }
 }
@@ -179,6 +189,37 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         Arc::new(bridge)
     };
 
+    #[cfg(feature = "hwaccel")]
+    let hardware = {
+        let hw_cfg = &config.hardware_config;
+        let hw = if hw_cfg.disabled_backends.is_empty() {
+            crate::hardware::HardwareManager::from_cache(std::time::Duration::from_secs(
+                hw_cfg.cache_ttl_secs,
+            ))
+        } else {
+            crate::hardware::HardwareManager::detect_selective(&hw_cfg.disabled_backends)
+        };
+        if hw.has_accelerator() {
+            let total_vram_gb = hw.total_accelerator_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            tracing::info!(
+                accelerators = hw.available_profiles().len(),
+                total_vram_gb = %format_args!("{total_vram_gb:.1}"),
+                "hardware detection complete"
+            );
+        } else {
+            tracing::info!("no hardware accelerators detected");
+        }
+        if let Some(env) = hw.runtime_environment() {
+            tracing::info!(
+                is_docker = env.is_docker,
+                is_kubernetes = env.is_kubernetes,
+                namespace = env.kubernetes_namespace.as_deref().unwrap_or("-"),
+                "runtime environment detected"
+            );
+        }
+        hw
+    };
+
     let health_map = crate::health::new_health_map();
     let (eviction_tx, eviction_rx) = tokio::sync::mpsc::unbounded_channel();
     let heartbeat = Arc::new(majra::heartbeat::ConcurrentHeartbeatTracker::new(
@@ -202,6 +243,8 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     }
     let routes_for_checker = config.routes.clone();
     let health_interval = config.health_check_interval_secs;
+    #[cfg(feature = "hwaccel")]
+    let hw_refresh_secs = config.hardware_config.refresh_interval_secs;
     let mut router = hoosh_router::Router::new(config.routes, config.strategy);
     router.set_health_map(health_map.clone());
 
@@ -238,6 +281,12 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
         compactor,
         model_registry: crate::provider::metadata::ModelMetadataRegistry::new(),
         retry_manager: crate::provider::retry::RetryManager::new(config.retry_config),
+        #[cfg(feature = "hwaccel")]
+        vram_reserve_bytes: config.hardware_config.vram_reserve_bytes,
+        #[cfg(feature = "hwaccel")]
+        hw_cache_ttl: std::time::Duration::from_secs(config.hardware_config.cache_ttl_secs),
+        #[cfg(feature = "hwaccel")]
+        hardware: std::sync::RwLock::new(hardware),
     });
 
     // Spawn background health checker if enabled
@@ -256,6 +305,8 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
             event_bus,
             heartbeat,
             Some(eviction_rx),
+            #[cfg(feature = "hwaccel")]
+            crate::health::HwHandle::new(state.clone(), hw_refresh_secs),
         );
         tracing::info!(
             "background health checker started (interval: {}s)",
@@ -301,6 +352,13 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     {
         app = app.route("/v1/audio/speech", post(audio::text_to_speech));
     }
+    #[cfg(feature = "hwaccel")]
+    {
+        app = app
+            .route("/v1/hardware", get(handlers::hardware_info))
+            .route("/v1/hardware/placement", post(handlers::hardware_placement));
+    }
+
     #[cfg(any(feature = "whisper", feature = "piper"))]
     {
         app = app.layer(DefaultBodyLimit::max(50 * 1024 * 1024));

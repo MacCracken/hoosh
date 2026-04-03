@@ -38,6 +38,8 @@ pub struct HooshConfig {
     pub context: ContextSection,
     #[serde(default)]
     pub retry: crate::provider::retry::RetryConfig,
+    #[serde(default)]
+    pub hardware: HardwareSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,6 +113,41 @@ fn default_compaction_threshold() -> f64 {
 }
 fn default_keep_last() -> usize {
     10
+}
+
+/// Hardware acceleration configuration.
+#[derive(Debug, Deserialize)]
+pub struct HardwareSection {
+    /// Disk cache TTL in seconds for detection results. Default: 300 (5 min).
+    #[serde(default = "default_hw_cache_ttl")]
+    pub cache_ttl_secs: u64,
+    /// Backend names to disable during detection (e.g. \["vulkan", "tpu"\]).
+    #[serde(default)]
+    pub disabled_backends: Vec<String>,
+    /// VRAM bytes to reserve for non-inference GPU workloads (mabda compute, etc.).
+    #[serde(default)]
+    pub vram_reserve_bytes: u64,
+    /// How often (seconds) to refresh GPU telemetry. Default: 30.
+    #[serde(default = "default_hw_refresh")]
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for HardwareSection {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: default_hw_cache_ttl(),
+            disabled_backends: Vec::new(),
+            vram_reserve_bytes: 0,
+            refresh_interval_secs: default_hw_refresh(),
+        }
+    }
+}
+
+fn default_hw_cache_ttl() -> u64 {
+    300
+}
+fn default_hw_refresh() -> u64 {
+    30
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -362,6 +399,7 @@ impl HooshConfig {
                 telemetry: TelemetrySection::default(),
                 context: ContextSection::default(),
                 retry: crate::provider::retry::RetryConfig::default(),
+                hardware: HardwareSection::default(),
             }
         }
     }
@@ -440,6 +478,8 @@ impl HooshConfig {
             config_path,
             context_config: self.context,
             retry_config: self.retry,
+            #[cfg(feature = "hwaccel")]
+            hardware_config: self.hardware,
         }
     }
 }
@@ -1025,5 +1065,47 @@ models = ["gpt-*"]
         assert_eq!(c.max_entries, 1000);
         assert_eq!(c.ttl_secs, 300);
         assert!(c.enabled);
+    }
+
+    #[test]
+    fn hardware_section_default() {
+        let h = HardwareSection::default();
+        assert_eq!(h.cache_ttl_secs, 300);
+        assert!(h.disabled_backends.is_empty());
+        assert_eq!(h.vram_reserve_bytes, 0);
+        assert_eq!(h.refresh_interval_secs, 30);
+    }
+
+    #[test]
+    fn parse_hardware_section() {
+        let toml = r#"
+[hardware]
+cache_ttl_secs = 600
+disabled_backends = ["vulkan", "tpu"]
+vram_reserve_bytes = 2147483648
+refresh_interval_secs = 60
+"#;
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.hardware.cache_ttl_secs, 600);
+        assert_eq!(config.hardware.disabled_backends, vec!["vulkan", "tpu"]);
+        assert_eq!(config.hardware.vram_reserve_bytes, 2_147_483_648);
+        assert_eq!(config.hardware.refresh_interval_secs, 60);
+    }
+
+    #[test]
+    fn parse_hardware_section_empty_defaults() {
+        let toml = "[hardware]\n";
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.hardware.cache_ttl_secs, 300);
+        assert!(config.hardware.disabled_backends.is_empty());
+        assert_eq!(config.hardware.vram_reserve_bytes, 0);
+        assert_eq!(config.hardware.refresh_interval_secs, 30);
+    }
+
+    #[test]
+    fn parse_no_hardware_section() {
+        let toml = "[server]\nport = 9000\n";
+        let config: HooshConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.hardware.cache_ttl_secs, 300); // default
     }
 }

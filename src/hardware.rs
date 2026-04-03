@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ai_hwaccel::{
-    AcceleratorFamily, AcceleratorProfile, AcceleratorRegistry, DiskCachedRegistry,
-    ShardingStrategy, SystemIo, TimedDetection,
+    AcceleratorFamily, AcceleratorProfile, AcceleratorRegistry, Backend, DiskCachedRegistry,
+    RuntimeEnvironment, ShardingStrategy, SystemIo, TimedDetection,
+    cost::{self, CloudProvider, InstanceRecommendation},
 };
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,40 @@ impl HardwareManager {
         let registry_arc: Arc<AcceleratorRegistry> = cache.get();
         // Clone out of Arc — the cache keeps its own copy.
         let registry = (*registry_arc).clone();
+        Self {
+            registry,
+            detection_timings: None,
+        }
+    }
+
+    /// Run hardware discovery with selective backend control.
+    ///
+    /// Disables backends whose names appear in `disabled` (case-insensitive).
+    /// Unknown names are logged as warnings and ignored.
+    pub fn detect_selective(disabled: &[String]) -> Self {
+        if disabled.is_empty() {
+            return Self::detect();
+        }
+        let mut builder = AcceleratorRegistry::builder();
+        for name in disabled {
+            match parse_backend(name) {
+                Some(b) => {
+                    builder = builder.without(b);
+                    tracing::info!(backend = %name, "hardware backend disabled by config");
+                }
+                None => {
+                    tracing::warn!(backend = %name, "unknown hardware backend in disabled list");
+                }
+            }
+        }
+        Self {
+            registry: builder.detect(),
+            detection_timings: None,
+        }
+    }
+
+    /// Create a manager from an existing registry (for periodic refresh).
+    pub fn from_registry(registry: AcceleratorRegistry) -> Self {
         Self {
             registry,
             detection_timings: None,
@@ -229,6 +264,75 @@ impl HardwareManager {
         self.registry.system_io().estimate_ingestion_secs(bytes)
     }
 
+    // ─── VRAM-aware placement ─────────────────────────────────────────
+
+    /// Available accelerator VRAM in bytes after accounting for current usage and
+    /// a reservation for non-inference GPU workloads (mabda compute, etc.).
+    ///
+    /// Returns `total_accelerator_memory - used - reserved`, floored at 0.
+    #[must_use]
+    pub fn available_vram(&self, reserved: u64) -> u64 {
+        let total = self.registry.total_accelerator_memory();
+        let used: u64 = self
+            .registry
+            .all_profiles()
+            .iter()
+            .filter(|p| p.available && !matches!(p.accelerator, ai_hwaccel::AcceleratorType::Cpu))
+            .filter_map(|p| p.memory_used_bytes)
+            .sum();
+        total.saturating_sub(used).saturating_sub(reserved)
+    }
+
+    /// Whether a model with `model_params` parameters fits in available VRAM
+    /// (after reserving `reserved` bytes for other GPU workloads).
+    #[must_use]
+    #[inline]
+    pub fn fits_model(&self, model_params: u64, reserved: u64) -> bool {
+        let quant = self.registry.suggest_quantization(model_params);
+        let estimated = AcceleratorRegistry::estimate_memory(model_params, &quant);
+        estimated <= self.available_vram(reserved)
+    }
+
+    /// Build GPU telemetry snapshots for the heartbeat tracker.
+    ///
+    /// Maps real runtime fields from `AcceleratorProfile` into `majra`'s
+    /// `GpuTelemetry` struct — utilization, memory, temperature.
+    #[must_use]
+    pub fn gpu_telemetry(&self) -> Vec<majra::heartbeat::GpuTelemetry> {
+        self.gpus()
+            .iter()
+            .map(|gpu| majra::heartbeat::GpuTelemetry {
+                utilization_pct: gpu.gpu_utilization_percent.unwrap_or(0) as f32,
+                memory_used_mb: gpu.memory_used_bytes.unwrap_or(0) / (1024 * 1024),
+                memory_total_mb: gpu.memory_bytes / (1024 * 1024),
+                temperature_c: gpu.temperature_c.map(|t| t as f32),
+            })
+            .collect()
+    }
+
+    /// Runtime environment: Docker, Kubernetes, cloud instance metadata.
+    #[must_use]
+    #[inline]
+    pub fn runtime_environment(&self) -> Option<&RuntimeEnvironment> {
+        self.registry.system_io().environment.as_ref()
+    }
+
+    // ─── Cloud cost ─────────────────────────────────────────────────────
+
+    /// Recommend the cheapest viable cloud GPU instance(s) for a model.
+    ///
+    /// Returns instances sorted by price. Optionally filter to a specific
+    /// cloud provider (AWS, GCP, Azure).
+    #[must_use]
+    pub fn recommend_cloud_instance(
+        &self,
+        model_params: u64,
+        provider: Option<CloudProvider>,
+    ) -> Vec<InstanceRecommendation> {
+        let quant = self.registry.suggest_quantization(model_params);
+        cost::recommend_instance(model_params, &quant, provider)
+    }
+
     // ─── Diagnostics ────────────────────────────────────────────────────
 
     /// Per-backend detection timing summary (only if created with `detect_with_timing`).
@@ -327,10 +431,36 @@ impl HardwareManager {
     }
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Parse a backend name string into a `Backend` variant (case-insensitive).
+fn parse_backend(name: &str) -> Option<Backend> {
+    match name.to_ascii_lowercase().as_str() {
+        "cuda" => Some(Backend::Cuda),
+        "rocm" => Some(Backend::Rocm),
+        "apple" => Some(Backend::Apple),
+        "vulkan" => Some(Backend::Vulkan),
+        "intel_npu" | "intel-npu" => Some(Backend::IntelNpu),
+        "amd_xdna" | "amd-xdna" => Some(Backend::AmdXdna),
+        "tpu" => Some(Backend::Tpu),
+        "gaudi" => Some(Backend::Gaudi),
+        "aws_neuron" | "aws-neuron" => Some(Backend::AwsNeuron),
+        "intel_oneapi" | "intel-oneapi" => Some(Backend::IntelOneApi),
+        "qualcomm" => Some(Backend::Qualcomm),
+        "cerebras" => Some(Backend::Cerebras),
+        "graphcore" => Some(Backend::Graphcore),
+        "groq" => Some(Backend::Groq),
+        "samsung_npu" | "samsung-npu" => Some(Backend::SamsungNpu),
+        "mediatek_apu" | "mediatek-apu" => Some(Backend::MediaTekApu),
+        "windows_wmi" | "windows-wmi" => Some(Backend::WindowsWmi),
+        _ => None,
+    }
+}
+
 // ─── Output types ───────────────────────────────────────────────────────────
 
 /// Recommendation for where and how to run a model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacementRecommendation {
     /// Suggested provider type name.
     pub provider: String,
@@ -480,5 +610,133 @@ mod tests {
         // Should work the same as direct detection
         let _ = hw.has_accelerator();
         let _ = hw.summary();
+    }
+
+    #[test]
+    fn selective_detection_disables_backends() {
+        let disabled = vec!["vulkan".into(), "tpu".into()];
+        let hw = HardwareManager::detect_selective(&disabled);
+        // Should not panic — CPU is always available
+        let _ = hw.has_accelerator();
+        let _ = hw.summary();
+    }
+
+    #[test]
+    fn selective_detection_empty_is_full() {
+        let hw = HardwareManager::detect_selective(&[]);
+        let _ = hw.has_accelerator();
+    }
+
+    #[test]
+    fn selective_detection_unknown_backend_ignored() {
+        let disabled = vec!["nonexistent_backend".into()];
+        let hw = HardwareManager::detect_selective(&disabled);
+        let _ = hw.has_accelerator();
+    }
+
+    #[test]
+    fn available_vram_without_gpus() {
+        let hw = HardwareManager::detect();
+        if !hw.has_accelerator() {
+            assert_eq!(hw.available_vram(0), 0);
+            assert_eq!(hw.available_vram(1024), 0);
+        }
+    }
+
+    #[test]
+    fn available_vram_reservation_saturates() {
+        let hw = HardwareManager::detect();
+        // Reserving more than total should not underflow
+        let result = hw.available_vram(u64::MAX);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn fits_model_without_gpus() {
+        let hw = HardwareManager::detect();
+        if !hw.has_accelerator() {
+            // Without accelerators, nothing fits in VRAM
+            assert!(!hw.fits_model(7_000_000_000, 0));
+        }
+    }
+
+    #[test]
+    fn gpu_telemetry_no_panic() {
+        let hw = HardwareManager::detect();
+        let telemetry = hw.gpu_telemetry();
+        // On systems without GPUs, returns empty vec
+        if !hw.has_accelerator() {
+            assert!(telemetry.is_empty());
+        }
+        for t in &telemetry {
+            assert!(t.memory_total_mb > 0);
+        }
+    }
+
+    #[test]
+    fn runtime_environment_accessible() {
+        let hw = HardwareManager::detect();
+        // May be None if not in container/cloud — that's expected
+        let _ = hw.runtime_environment();
+    }
+
+    #[test]
+    fn cloud_cost_recommendations() {
+        let hw = HardwareManager::detect();
+        let recs = hw.recommend_cloud_instance(70_000_000_000, None);
+        // Should return at least some instances for a 70B model
+        assert!(!recs.is_empty());
+        // Should be sorted by price (cheapest first)
+        for window in recs.windows(2) {
+            assert!(window[0].instance.price_per_hour <= window[1].instance.price_per_hour);
+        }
+    }
+
+    #[test]
+    fn cloud_cost_provider_filter() {
+        let hw = HardwareManager::detect();
+        let aws_recs = hw.recommend_cloud_instance(7_000_000_000, Some(CloudProvider::Aws));
+        for rec in &aws_recs {
+            assert_eq!(rec.instance.provider, "aws");
+        }
+    }
+
+    #[test]
+    fn from_registry_constructor() {
+        let registry = AcceleratorRegistry::from_profiles(vec![AcceleratorProfile::cpu(
+            16 * 1024 * 1024 * 1024,
+        )]);
+        let hw = HardwareManager::from_registry(registry);
+        assert!(!hw.has_accelerator()); // CPU only
+        assert_eq!(hw.available_vram(0), 0);
+    }
+
+    #[test]
+    fn placement_recommendation_serializes() {
+        let rec = PlacementRecommendation {
+            provider: "ollama".into(),
+            quantization: Some("Q4_K_M".into()),
+            estimated_memory_bytes: 4_000_000_000,
+            fits_in_vram: true,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("ollama"));
+        assert!(json.contains("Q4_K_M"));
+    }
+
+    #[test]
+    fn parse_backend_known() {
+        assert_eq!(parse_backend("cuda"), Some(Backend::Cuda));
+        assert_eq!(parse_backend("ROCM"), Some(Backend::Rocm));
+        assert_eq!(parse_backend("Vulkan"), Some(Backend::Vulkan));
+        assert_eq!(parse_backend("intel-npu"), Some(Backend::IntelNpu));
+        assert_eq!(parse_backend("intel_npu"), Some(Backend::IntelNpu));
+        assert_eq!(parse_backend("amd-xdna"), Some(Backend::AmdXdna));
+    }
+
+    #[test]
+    fn parse_backend_unknown() {
+        assert_eq!(parse_backend("nonexistent"), None);
+        assert_eq!(parse_backend(""), None);
     }
 }

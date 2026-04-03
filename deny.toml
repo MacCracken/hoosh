@@ -20,6 +20,7 @@ allow = [
     "Zlib",
     "GPL-3.0-only",
     "GPL-3.0",
+    "AGPL-3.0-only",
     "CC0-1.0",
     "MPL-2.0",
     "Unlicense",

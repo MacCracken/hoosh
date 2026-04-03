@@ -204,6 +204,96 @@ impl Router {
         }
     }
 
+    /// Select a provider with hardware-aware VRAM fitness checking.
+    ///
+    /// Local providers that cannot fit `model_params` in available VRAM
+    /// (after accounting for `vram_reserve` bytes for GPU compute workloads)
+    /// are deprioritized — moved after remote providers — rather than rejected,
+    /// since CPU offloading may still work.
+    ///
+    /// If `model_params` is `None` (unknown model size), falls through to
+    /// standard `select()` behavior.
+    #[cfg(feature = "hwaccel")]
+    #[must_use]
+    pub fn select_with_hardware(
+        &self,
+        model: &str,
+        hw: &crate::hardware::HardwareManager,
+        model_params: Option<u64>,
+        vram_reserve: u64,
+    ) -> Option<&ProviderRoute> {
+        let model_params = match model_params {
+            Some(p) if p > 0 => p,
+            _ => return self.select(model),
+        };
+
+        let all_candidates: Vec<&ProviderRoute> = self
+            .routes
+            .iter()
+            .filter(|r| {
+                r.enabled
+                    && self.matches_model(r, model)
+                    && self.is_provider_healthy(r.provider, &r.base_url)
+            })
+            .collect();
+
+        if all_candidates.is_empty() {
+            return None;
+        }
+
+        let fits = hw.fits_model(model_params, vram_reserve);
+
+        // Partition: local-that-fits first, then remote, then local-that-doesn't-fit
+        let mut prioritized: Vec<&ProviderRoute> = Vec::with_capacity(all_candidates.len());
+        let mut deprioritized: Vec<&ProviderRoute> = Vec::new();
+
+        for c in &all_candidates {
+            if c.provider.is_local() && !fits {
+                tracing::debug!(
+                    provider = %c.provider,
+                    model,
+                    "local provider deprioritized: model exceeds available VRAM"
+                );
+                deprioritized.push(c);
+            } else {
+                prioritized.push(c);
+            }
+        }
+        prioritized.extend(deprioritized);
+
+        if prioritized.is_empty() {
+            return None;
+        }
+
+        match self.strategy {
+            RoutingStrategy::Priority | RoutingStrategy::Direct => prioritized.first().copied(),
+            RoutingStrategy::LowestLatency => {
+                let mut best: Option<(&ProviderRoute, u64)> = None;
+                for c in &prioritized {
+                    let key = (c.provider, c.base_url.clone());
+                    let latency = self
+                        .latencies
+                        .get(&key)
+                        .map(|e| e.value().load(Ordering::Relaxed))
+                        .unwrap_or(u64::MAX);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, best_lat)| latency < *best_lat)
+                    {
+                        best = Some((c, latency));
+                    }
+                }
+                best.map(|(r, _)| r)
+            }
+            RoutingStrategy::RoundRobin => {
+                let idx = self
+                    .round_robin_index
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(prioritized[idx % prioritized.len()])
+            }
+        }
+    }
+
     /// Report observed latency for a provider, updating an exponential moving average.
     pub fn report_latency(&self, provider: ProviderType, base_url: &str, latency_ms: u64) {
         let key = (provider, base_url.to_string());
@@ -660,5 +750,64 @@ mod tests {
             .value()
             .load(Ordering::Relaxed);
         assert_eq!(latency, 106);
+    }
+
+    // ── Hardware-aware routing ──────────────────────────────────────────
+
+    #[cfg(feature = "hwaccel")]
+    #[test]
+    fn select_with_hardware_no_params_falls_through() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let hw = crate::hardware::HardwareManager::detect();
+        let selected = router.select_with_hardware("any", &hw, None, 0).unwrap();
+        assert_eq!(selected.provider, ProviderType::Ollama);
+    }
+
+    #[cfg(feature = "hwaccel")]
+    #[test]
+    fn select_with_hardware_deprioritizes_local_when_no_vram() {
+        let routes = vec![
+            make_route(ProviderType::Ollama, 1, vec![]),
+            make_route(ProviderType::OpenAi, 2, vec![]),
+        ];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let hw = crate::hardware::HardwareManager::detect();
+
+        if !hw.has_accelerator() {
+            // Without GPUs: 200B model can't fit, so Ollama should be deprioritized
+            let selected = router
+                .select_with_hardware("any", &hw, Some(200_000_000_000), 0)
+                .unwrap();
+            assert_eq!(selected.provider, ProviderType::OpenAi);
+        }
+    }
+
+    #[cfg(feature = "hwaccel")]
+    #[test]
+    fn select_with_hardware_local_still_available_as_fallback() {
+        // Even when deprioritized, local providers are still in the candidate list
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let hw = crate::hardware::HardwareManager::detect();
+
+        if !hw.has_accelerator() {
+            // Only local provider, model too big — still returns it (deprioritized, not removed)
+            let selected = router
+                .select_with_hardware("any", &hw, Some(200_000_000_000), 0)
+                .unwrap();
+            assert_eq!(selected.provider, ProviderType::Ollama);
+        }
+    }
+
+    #[cfg(feature = "hwaccel")]
+    #[test]
+    fn select_with_hardware_zero_params_falls_through() {
+        let routes = vec![make_route(ProviderType::Ollama, 1, vec![])];
+        let router = Router::new(routes, RoutingStrategy::Priority);
+        let hw = crate::hardware::HardwareManager::detect();
+        // model_params = 0 should fall through to normal select
+        let selected = router.select_with_hardware("any", &hw, Some(0), 0).unwrap();
+        assert_eq!(selected.provider, ProviderType::Ollama);
     }
 }

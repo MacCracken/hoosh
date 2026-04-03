@@ -285,3 +285,79 @@ impl Drop for StreamBudgetGuard {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hardware (hwaccel feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct HardwareResponse {
+    pub accelerators: Vec<AcceleratorInfo>,
+    pub total_vram_bytes: u64,
+    pub available_vram_bytes: u64,
+    pub vram_reserve_bytes: u64,
+    pub has_fast_interconnect: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentInfo>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct AcceleratorInfo {
+    pub name: String,
+    pub family: String,
+    pub memory_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_used_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_free_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utilization_pct: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_c: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_watts: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth_gbps: Option<f64>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct EnvironmentInfo {
+    pub is_docker: bool,
+    pub is_kubernetes: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_type: Option<String>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Deserialize)]
+pub(crate) struct PlacementRequest {
+    pub model_params: u64,
+    #[serde(default)]
+    pub providers: Vec<String>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct PlacementResponse {
+    pub recommendation: crate::hardware::PlacementRecommendation,
+    pub cloud_alternatives: Vec<CloudInstanceInfo>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct CloudInstanceInfo {
+    pub name: String,
+    pub provider: String,
+    pub gpu: String,
+    pub gpu_count: u32,
+    pub total_gpu_memory_gb: u32,
+    pub price_per_hour: f64,
+    pub memory_headroom_pct: f64,
+}

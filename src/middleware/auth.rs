@@ -113,6 +113,12 @@ mod tests {
             compactor: crate::context::compactor::ContextCompactor::new(0.8, 10, true),
             model_registry: crate::provider::metadata::ModelMetadataRegistry::new(),
             retry_manager: crate::provider::retry::RetryManager::new(Default::default()),
+            #[cfg(feature = "hwaccel")]
+            hardware: std::sync::RwLock::new(crate::hardware::HardwareManager::detect()),
+            #[cfg(feature = "hwaccel")]
+            vram_reserve_bytes: 0,
+            #[cfg(feature = "hwaccel")]
+            hw_cache_ttl: std::time::Duration::from_secs(300),
         })
     }
 
