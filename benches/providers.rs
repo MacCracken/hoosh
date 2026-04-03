@@ -5,6 +5,14 @@ use hoosh::provider::openai_compat::OpenAiCompatibleProvider;
 use hoosh::provider::{ProviderRegistry, ProviderType};
 use hoosh::router::ProviderRoute;
 
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 // ---------------------------------------------------------------------------
 // ProviderRegistry benchmarks
 // ---------------------------------------------------------------------------
@@ -66,6 +74,7 @@ fn bench_registry_lookup(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_provider_construction(c: &mut Criterion) {
+    install_crypto_provider();
     c.bench_function("openai_compat_new", |b| {
         b.iter(|| {
             OpenAiCompatibleProvider::new(

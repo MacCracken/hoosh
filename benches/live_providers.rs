@@ -21,9 +21,18 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Returns (provider, first_model_id) if Ollama is reachable and has models.
 #[cfg(feature = "ollama")]
 fn ollama_if_available() -> Option<(OllamaProvider, String)> {
+    install_crypto_provider();
     let rt = runtime();
     let provider = OllamaProvider::new("http://127.0.0.1:11434", None);
     let healthy = rt.block_on(provider.health_check()).ok()?;

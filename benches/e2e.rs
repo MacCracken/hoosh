@@ -30,8 +30,17 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Spin up a hoosh server with Ollama configured, return the HooshClient and port.
 fn start_hoosh_server(rt: &tokio::runtime::Runtime) -> Option<(HooshClient, u16)> {
+    install_crypto_provider();
     // First check Ollama is available
     let ollama = OllamaProvider::new("http://127.0.0.1:11434", None);
     let healthy = rt.block_on(ollama.health_check()).ok()?;
