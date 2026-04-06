@@ -19,7 +19,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 
 | Capability | Details |
 |------------|---------|
-| **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
+| **15 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
 | **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` — streaming SSE |
 | **Provider routing** | Priority, round-robin, lowest-latency (EMA), direct — with model pattern matching |
 | **Authentication** | Bearer token auth middleware with constant-time comparison |
@@ -70,7 +70,7 @@ See [docs/architecture/overview.md](docs/architecture/overview.md) for the full 
 
 ```toml
 [dependencies]
-hoosh = "0.21"
+hoosh = "1.3"
 ```
 
 ```rust
@@ -139,15 +139,26 @@ curl http://localhost:8088/v1/chat/completions \
 | `whisper` | whisper.cpp STT | no |
 | `piper` | Piper TTS | no |
 | `hwaccel` | ai-hwaccel hardware detection | yes |
+| `sentiment` | bhava emotion/sentiment analysis | no |
+| `tools` | MCP tool use (bote + szal) | no |
+| `tools-audit` | Tamper-proof tool call audit (libro) | no |
+| `tools-events` | Tool lifecycle events (majra pub/sub) | no |
+| `tools-discovery` | Cross-node tool discovery mesh | no |
+| `tools-sandbox` | Sandboxed tool execution (kavach) | no |
+| `tools-full` | All tool features | no |
 | `otel` | OpenTelemetry tracing | no |
+| `dlp` | PII scanning / content classification | no |
 | `all-providers` | All LLM providers | yes |
 
 ```toml
 # Minimal: just Ollama + llama.cpp for local inference
-hoosh = { version = "0.20", default-features = false, features = ["ollama", "llamacpp"] }
+hoosh = { version = "1.3", default-features = false, features = ["ollama", "llamacpp"] }
 
 # With speech-to-text
-hoosh = { version = "0.20", features = ["whisper"] }
+hoosh = { version = "1.3", features = ["whisper"] }
+
+# With full MCP tool integration
+hoosh = { version = "1.3", features = ["tools-full"] }
 ```
 
 ---
@@ -228,7 +239,10 @@ budget.report("agent-123", 2000, 1847);
 
 | Crate | Role |
 |-------|------|
-| [ai-hwaccel](https://crates.io/crates/ai-hwaccel) | Hardware detection for model placement |
+| [ai-hwaccel](https://crates.io/crates/ai-hwaccel) | Hardware detection, model compatibility, what-if analysis |
+| [bote](https://crates.io/crates/bote) | MCP protocol, tool dispatch, audit, discovery, sandboxing |
+| [szal](https://crates.io/crates/szal) | Workflow engine — DAG/parallel execution, retry, rollback |
+| [bhava](https://crates.io/crates/bhava) | Sentiment analysis, emotion detection, custom lexicons |
 | [majra](https://crates.io/crates/majra) | Priority queues, pub/sub events, heartbeat tracking |
 | [axum](https://crates.io/crates/axum) | HTTP server |
 | [reqwest](https://crates.io/crates/reqwest) | HTTP client for remote providers (rustls-tls) |
@@ -259,10 +273,9 @@ budget.report("agent-123", 2000, 1847);
 |---------|-----------|--------|
 | **0.20.3** | Core gateway + providers | Done |
 | **0.21.5** | Auth, observability, messaging | Done |
-| **0.23.4** | Tool use, MCP integration, server refactor | Next |
-| **0.24.0** | Context management, privacy routing | Planned |
-| **0.25.0** | Speech & audio improvements | Planned |
-| **1.0.0** | Stable API, 90%+ coverage | Target |
+| **1.0.0** | Stable API, tool use, MCP integration | Done |
+| **1.2.0** | Context management, heartbeat telemetry | Done |
+| **1.3.0** | Deep integrations (bote, szal, bhava, ai-hwaccel 1.2) | Done |
 
 Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
 
@@ -286,6 +299,16 @@ cargo test
 # Run all CI checks locally
 make check
 ```
+
+### Binary size (release, x86-64 Linux, stripped + LTO)
+
+| Profile | Features | Size |
+|---------|----------|------|
+| Minimal | `--no-default-features` | **4.5 MB** |
+| Default | `all-providers` + `hwaccel` | **5.1 MB** |
+| Full | `--all-features` (providers + hwaccel + whisper + tools-full + sentiment + otel + dlp) | **8.1 MB** |
+
+Release profile: `strip = true`, `lto = true`, `codegen-units = 1`, `opt-level = "s"`, `panic = "abort"`.
 
 ---
 
