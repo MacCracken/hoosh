@@ -827,6 +827,79 @@ mod tests {
         assert!(back.is_positive);
     }
 
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_empty_text() {
+        let result = analyze_response_sentiment("");
+        assert!(result.valence.abs() < 0.5);
+        assert!(result.emotions.is_empty() || result.confidence < 0.1);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_whitespace_only() {
+        let result = analyze_response_sentiment("   \n\t  ");
+        assert!(result.valence.abs() < 0.5);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_single_char() {
+        let result = analyze_response_sentiment("x");
+        // Should not panic; valence near neutral
+        let _ = result.valence;
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn document_sentiment_basic() {
+        let doc = analyze_response_document("I love this. I hate that.");
+        assert_eq!(doc.sentences.len(), 2);
+        assert!(doc.sentences[0].valence > 0.0);
+        assert!(doc.sentences[1].valence < 0.0);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn document_sentiment_empty() {
+        let doc = analyze_response_document("");
+        // Should not panic
+        let _ = doc.aggregate.valence;
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_with_custom_config() {
+        let config = SentimentConfig {
+            extra_positive: vec!["blazing".into()],
+            ..Default::default()
+        };
+        let result = analyze_response_sentiment_with_config("blazing fast", &config);
+        assert!(result.is_positive);
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_emotions_present() {
+        let result = analyze_response_sentiment("I am very happy and excited!");
+        // Should detect at least one emotion
+        assert!(!result.emotions.is_empty());
+    }
+
+    #[cfg(feature = "sentiment")]
+    #[test]
+    fn sentiment_config_serde() {
+        let config = SentimentConfig {
+            extra_positive: vec!["blazing".into()],
+            extra_negative: vec!["glacial".into()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: SentimentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.extra_positive, vec!["blazing"]);
+        assert_eq!(back.extra_negative, vec!["glacial"]);
+    }
+
     #[test]
     fn message_content_text_serde() {
         let msg = Message::new(Role::User, "hello");

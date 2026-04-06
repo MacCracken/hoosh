@@ -1058,7 +1058,7 @@ pub(crate) async fn hardware_models(
             );
             let total = hw.total_accelerator_memory();
             let headroom = if total > 0 {
-                ((total as f64 - estimated as f64) / total as f64) * 100.0
+                (((total as f64 - estimated as f64) / total as f64) * 100.0).max(0.0)
             } else {
                 0.0
             };
@@ -1105,6 +1105,31 @@ pub(crate) async fn hardware_simulate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<super::types::SimulateRequest>,
 ) -> impl IntoResponse {
+    // Input validation
+    if req.model_params == 0 {
+        return super::types::error_response(
+            StatusCode::BAD_REQUEST,
+            "model_params must be greater than 0",
+        )
+        .into_response();
+    }
+    if req.add_devices.len() > 64 {
+        return super::types::error_response(
+            StatusCode::BAD_REQUEST,
+            "add_devices limited to 64 entries",
+        )
+        .into_response();
+    }
+    for d in &req.add_devices {
+        if d.memory_bytes == 0 {
+            return super::types::error_response(
+                StatusCode::BAD_REQUEST,
+                "device memory_bytes must be greater than 0",
+            )
+            .into_response();
+        }
+    }
+
     let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
 
     // Original snapshot
@@ -1161,13 +1186,37 @@ pub(crate) async fn hardware_simulate(
 pub(crate) async fn hardware_format(
     Json(req): Json<super::types::ModelFormatRequest>,
 ) -> impl IntoResponse {
-    let path = std::path::Path::new(&req.path);
-    if !path.exists() {
-        return super::types::error_response(StatusCode::NOT_FOUND, "file not found")
+    let raw = std::path::Path::new(&req.path);
+
+    // Security: reject relative paths and path traversal
+    if !raw.is_absolute() {
+        return super::types::error_response(StatusCode::BAD_REQUEST, "path must be absolute")
             .into_response();
     }
 
-    match crate::hardware::HardwareManager::detect_model_format(path) {
+    // Canonicalize to resolve symlinks and reject non-existent paths
+    let path = match raw.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return super::types::error_response(StatusCode::NOT_FOUND, "file not found")
+                .into_response();
+        }
+    };
+
+    // Only allow model file extensions
+    let valid_ext = matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("safetensors" | "gguf" | "onnx" | "pt" | "bin" | "model")
+    );
+    if !valid_ext {
+        return super::types::error_response(
+            StatusCode::BAD_REQUEST,
+            "unsupported file extension (expected .safetensors, .gguf, .onnx, .pt, .bin, .model)",
+        )
+        .into_response();
+    }
+
+    match crate::hardware::HardwareManager::detect_model_format(&path) {
         Some(meta) => {
             let resp = super::types::ModelFormatResponse {
                 format: format!("{:?}", meta.format),

@@ -28,6 +28,9 @@ pub struct McpBridge {
 }
 
 impl McpBridge {
+    const MAX_ACTIVE_WORKFLOWS: usize = 1024;
+    const MAX_WORKFLOW_TEMPLATES: usize = 256;
+
     /// Create a new bridge with szal's built-in tools + workflow-as-tool.
     ///
     /// Wires up audit, events, discovery, and sandbox integrations
@@ -244,7 +247,37 @@ impl McpBridge {
             );
         }
 
-        let max_concurrency = args["max_concurrency"].as_u64().unwrap_or(16) as usize;
+        if flow_def.steps.is_empty() {
+            return (
+                serde_json::json!({"error": "flow must contain at least one step"}),
+                true,
+            );
+        }
+
+        let max_concurrency = match args["max_concurrency"].as_u64() {
+            Some(v) if v == 0 || v > 1024 => {
+                return (
+                    serde_json::json!({"error": "max_concurrency must be 1-1024"}),
+                    true,
+                );
+            }
+            Some(v) => v as usize,
+            None => 16,
+        };
+
+        // Guard against unbounded active workflow growth
+        {
+            let tokens = self
+                .cancellation_tokens
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if tokens.len() >= Self::MAX_ACTIVE_WORKFLOWS {
+                return (
+                    serde_json::json!({"error": "too many active workflows"}),
+                    true,
+                );
+            }
+        }
 
         // Build engine config with execution store and step-type metrics
         let config = szal::engine::EngineConfig {
@@ -264,9 +297,11 @@ impl McpBridge {
 
         let engine = szal::engine::Engine::new(config, handler);
 
+        // Unique execution ID per invocation (avoids collision on reused flow_def.id)
+        let execution_id = uuid::Uuid::new_v4().to_string();
+
         // Create cancellation token and track it
         let token = szal::engine::CancellationToken::new();
-        let execution_id = flow_def.id.to_string();
         {
             let mut tokens = self
                 .cancellation_tokens
@@ -278,7 +313,7 @@ impl McpBridge {
         let rt = tokio::runtime::Handle::current();
         let result = rt.block_on(engine.run_with_cancellation(&flow_def, token));
 
-        // Clean up cancellation token
+        // Always clean up cancellation token
         {
             let mut tokens = self
                 .cancellation_tokens
@@ -374,6 +409,15 @@ impl McpBridge {
         if let Err(e) = flow_def.validate() {
             return (
                 serde_json::json!({"error": format!("flow validation failed: {e}")}),
+                true,
+            );
+        }
+
+        // Guard against unbounded template growth
+        use szal::storage::WorkflowStorage;
+        if self.workflow_storage.list().len() >= Self::MAX_WORKFLOW_TEMPLATES {
+            return (
+                serde_json::json!({"error": "too many registered workflow templates"}),
                 true,
             );
         }
