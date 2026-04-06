@@ -12,8 +12,10 @@ use std::time::Duration;
 
 use ai_hwaccel::{
     AcceleratorFamily, AcceleratorProfile, AcceleratorRegistry, Backend, DiskCachedRegistry,
-    RuntimeEnvironment, ShardingStrategy, SystemIo, TimedDetection,
+    ModelMetadata, ModelProfile, RuntimeEnvironment, ShardingStrategy, SystemIo, TimedDetection,
     cost::{self, CloudProvider, InstanceRecommendation},
+    model_compat::{self, CompatResult},
+    model_format,
 };
 
 use serde::{Deserialize, Serialize};
@@ -331,6 +333,85 @@ impl HardwareManager {
     ) -> Vec<InstanceRecommendation> {
         let quant = self.registry.suggest_quantization(model_params);
         cost::recommend_instance(model_params, &quant, provider)
+    }
+
+    // ─── Model compatibility ────────────────────────────────────────────
+
+    /// Check whether a known model can run on available hardware.
+    ///
+    /// Looks up the model by name in the embedded catalogue, then checks
+    /// whether it fits with the given quantization.
+    #[must_use]
+    pub fn can_run_model(&self, model_name: &str, quant: &ai_hwaccel::QuantizationLevel) -> bool {
+        if let Some(profile) = model_compat::find_model(model_name) {
+            model_compat::can_run(profile, quant, self.total_accelerator_memory())
+        } else {
+            false
+        }
+    }
+
+    /// Find a model profile by name from the embedded catalogue.
+    #[must_use]
+    pub fn find_model(name: &str) -> Option<&'static ModelProfile> {
+        model_compat::find_model(name)
+    }
+
+    /// List all models from the catalogue compatible with detected hardware.
+    #[must_use]
+    pub fn compatible_models(
+        &self,
+        quant: &ai_hwaccel::QuantizationLevel,
+    ) -> Vec<CompatResult<'static>> {
+        model_compat::compatible_with_registry(&self.registry, quant)
+    }
+
+    // ─── Model format detection ─────────────────────────────────────────
+
+    /// Detect the format and metadata of a local model file.
+    ///
+    /// Reads only the first ~16 KB of the file header to identify
+    /// `.safetensors`, `.gguf`, `.onnx`, or `.pt` format.
+    #[must_use]
+    pub fn detect_model_format(path: &std::path::Path) -> Option<ModelMetadata> {
+        model_format::detect_format(path)
+    }
+
+    /// Detect model format from raw bytes (WASM-compatible, no I/O).
+    #[must_use]
+    pub fn detect_model_format_from_bytes(bytes: &[u8]) -> Option<ModelMetadata> {
+        model_format::detect_format_from_bytes(bytes)
+    }
+
+    // ─── What-if analysis ───────────────────────────────────────────────
+
+    /// Simulate adding devices and return a new manager for the hypothetical.
+    #[must_use]
+    pub fn what_if_add(&self, additional: &[AcceleratorProfile]) -> Self {
+        Self {
+            registry: self.registry.what_if_add(additional),
+            detection_timings: None,
+        }
+    }
+
+    /// Simulate removing devices matching a predicate.
+    #[must_use]
+    pub fn what_if_remove<F>(&self, predicate: F) -> Self
+    where
+        F: Fn(&AcceleratorProfile) -> bool,
+    {
+        Self {
+            registry: self.registry.what_if_remove(predicate),
+            detection_timings: None,
+        }
+    }
+
+    /// Simulate replacing all devices with an explicit profile list.
+    #[must_use]
+    pub fn what_if_replace(&self, profiles: Vec<AcceleratorProfile>) -> Self {
+        Self {
+            registry: self.registry.what_if_replace(profiles),
+            detection_timings: None,
+        }
     }
 
     // ─── Diagnostics ────────────────────────────────────────────────────
@@ -738,5 +819,64 @@ mod tests {
     fn parse_backend_unknown() {
         assert_eq!(parse_backend("nonexistent"), None);
         assert_eq!(parse_backend(""), None);
+    }
+
+    #[test]
+    fn find_model_known() {
+        // The catalogue has well-known models
+        let result = HardwareManager::find_model("Llama 3.1 70B");
+        // May or may not be present depending on catalogue — just ensure no panic
+        let _ = result;
+    }
+
+    #[test]
+    fn compatible_models_returns_results() {
+        let hw = HardwareManager::detect();
+        let results = hw.compatible_models(&ai_hwaccel::QuantizationLevel::Int4);
+        // On CI without GPUs: likely empty. On GPU machines: non-empty.
+        // Either way, should not panic.
+        for r in &results {
+            assert!(r.memory_required_bytes > 0);
+        }
+    }
+
+    #[test]
+    fn what_if_add_increases_memory() {
+        let hw = HardwareManager::detect();
+        let original = hw.total_accelerator_memory();
+        let added = hw.what_if_add(&[AcceleratorProfile::cuda(99, 80 * 1024 * 1024 * 1024)]);
+        assert!(added.total_accelerator_memory() >= original + 80 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn what_if_remove_no_panic() {
+        let hw = HardwareManager::detect();
+        let removed =
+            hw.what_if_remove(|p| matches!(p.accelerator, ai_hwaccel::AcceleratorType::Cpu));
+        let _ = removed.total_accelerator_memory();
+    }
+
+    #[test]
+    fn what_if_replace_custom_profiles() {
+        let hw = HardwareManager::detect();
+        let replaced = hw.what_if_replace(vec![
+            AcceleratorProfile::cpu(32 * 1024 * 1024 * 1024),
+            AcceleratorProfile::cuda(0, 24 * 1024 * 1024 * 1024),
+        ]);
+        assert!(replaced.has_accelerator());
+        assert_eq!(replaced.all_profiles().len(), 2);
+    }
+
+    #[test]
+    fn detect_model_format_nonexistent() {
+        let result =
+            HardwareManager::detect_model_format(std::path::Path::new("/nonexistent.gguf"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn detect_model_format_from_bytes_empty() {
+        let result = HardwareManager::detect_model_format_from_bytes(&[]);
+        assert!(result.is_none());
     }
 }

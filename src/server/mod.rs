@@ -356,7 +356,10 @@ pub fn build_app(config: ServerConfig) -> (Router, Arc<AppState>) {
     {
         app = app
             .route("/v1/hardware", get(handlers::hardware_info))
-            .route("/v1/hardware/placement", post(handlers::hardware_placement));
+            .route("/v1/hardware/placement", post(handlers::hardware_placement))
+            .route("/v1/hardware/models", post(handlers::hardware_models))
+            .route("/v1/hardware/simulate", post(handlers::hardware_simulate))
+            .route("/v1/hardware/format", post(handlers::hardware_format));
     }
 
     #[cfg(any(feature = "whisper", feature = "piper"))]

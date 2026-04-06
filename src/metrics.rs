@@ -72,6 +72,38 @@ pub fn record_request(
     }
 }
 
+// Workflow step metrics
+static WORKFLOW_STEPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "hoosh_workflow_steps_total",
+            "Total workflow steps executed"
+        ),
+        &["step_type", "status"]
+    )
+    .unwrap()
+});
+
+static WORKFLOW_STEP_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "hoosh_workflow_step_duration_ms",
+            "Workflow step duration in milliseconds",
+            vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 30000.0]
+        ),
+        &["step_type"]
+    )
+    .unwrap()
+});
+
+/// Record a workflow step execution for Prometheus.
+pub fn record_workflow_step(step_type: &str, status: &str, duration_ms: u64) {
+    WORKFLOW_STEPS.with_label_values(&[step_type, status]).inc();
+    WORKFLOW_STEP_DURATION
+        .with_label_values(&[step_type])
+        .observe(duration_ms as f64);
+}
+
 pub fn set_providers_configured(count: i64) {
     PROVIDERS_CONFIGURED.set(count);
 }

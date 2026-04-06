@@ -971,18 +971,25 @@ pub(crate) async fn hardware_info(State(state): State<Arc<AppState>>) -> impl In
         })
         .collect();
 
-    let environment = hw
-        .runtime_environment()
-        .map(|env| super::types::EnvironmentInfo {
-            is_docker: env.is_docker,
-            is_kubernetes: env.is_kubernetes,
-            namespace: env.kubernetes_namespace.clone(),
-            cloud_provider: env.cloud_instance.as_ref().map(|c| c.provider.clone()),
-            instance_type: env
-                .cloud_instance
-                .as_ref()
-                .and_then(|c| c.instance_type.clone()),
-        });
+    let environment =
+        hw.runtime_environment()
+            .map(|env| super::types::EnvironmentInfo {
+                is_docker: env.is_docker,
+                is_kubernetes: env.is_kubernetes,
+                namespace: env.kubernetes_namespace.clone(),
+                cloud_provider: env.cloud_instance.as_ref().map(|c| c.provider.clone()),
+                instance_type: env
+                    .cloud_instance
+                    .as_ref()
+                    .and_then(|c| c.instance_type.clone()),
+                kubernetes_gpu: env.kubernetes_gpu.as_ref().map(|k| {
+                    super::types::KubernetesGpuInfo {
+                        device_ids: k.device_ids.clone(),
+                        gpu_count: k.gpu_count,
+                        source: k.source.clone(),
+                    }
+                }),
+            });
 
     let resp = super::types::HardwareResponse {
         accelerators,
@@ -1026,6 +1033,166 @@ pub(crate) async fn hardware_placement(
         cloud_alternatives: cloud_instances,
     };
     (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[cfg(feature = "hwaccel")]
+pub(crate) async fn hardware_models(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<super::types::ModelCompatRequest>,
+) -> impl IntoResponse {
+    let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
+
+    let quant = req
+        .quantization
+        .as_deref()
+        .and_then(parse_quantization)
+        .unwrap_or_else(|| hw.registry().suggest_quantization(7_000_000_000));
+
+    // If a specific model was requested, check just that one.
+    if let Some(name) = &req.model {
+        if let Some(profile) = crate::hardware::HardwareManager::find_model(name) {
+            let can_run = hw.can_run_model(name, &quant);
+            let estimated = ai_hwaccel::AcceleratorRegistry::estimate_memory(
+                (profile.params_billions * 1e9) as u64,
+                &quant,
+            );
+            let total = hw.total_accelerator_memory();
+            let headroom = if total > 0 {
+                ((total as f64 - estimated as f64) / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let info = super::types::CompatibleModelInfo {
+                name: profile.name.clone(),
+                family: profile.family.clone(),
+                params_billions: profile.params_billions,
+                memory_required_bytes: estimated,
+                headroom_pct: headroom,
+            };
+            let resp = serde_json::json!({
+                "model": info,
+                "can_run": can_run,
+                "total_vram_bytes": total,
+            });
+            return (StatusCode::OK, Json(resp)).into_response();
+        }
+        return super::types::error_response(StatusCode::NOT_FOUND, "model not found in catalogue")
+            .into_response();
+    }
+
+    // List all compatible models.
+    let results = hw.compatible_models(&quant);
+    let compatible: Vec<super::types::CompatibleModelInfo> = results
+        .iter()
+        .map(|r| super::types::CompatibleModelInfo {
+            name: r.model.name.clone(),
+            family: r.model.family.clone(),
+            params_billions: r.model.params_billions,
+            memory_required_bytes: r.memory_required_bytes,
+            headroom_pct: r.headroom_pct,
+        })
+        .collect();
+
+    let resp = super::types::ModelCompatResponse {
+        compatible,
+        total_vram_bytes: hw.total_accelerator_memory(),
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[cfg(feature = "hwaccel")]
+pub(crate) async fn hardware_simulate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<super::types::SimulateRequest>,
+) -> impl IntoResponse {
+    let hw = state.hardware.read().unwrap_or_else(|e| e.into_inner());
+
+    // Original snapshot
+    let original = super::types::SimulateSnapshot {
+        device_count: hw.available_profiles().len(),
+        total_vram_bytes: hw.total_accelerator_memory(),
+        sharding: hw.plan_sharding(req.model_params),
+    };
+
+    // Build hypothetical: remove by replacing with a filtered profile list.
+    let mut hypothetical = if req.remove_count > 0 {
+        let mut profiles: Vec<ai_hwaccel::AcceleratorProfile> =
+            hw.registry().all_profiles().to_vec();
+        let mut removed = 0usize;
+        profiles.retain(|p| {
+            if removed < req.remove_count
+                && !matches!(p.accelerator, ai_hwaccel::AcceleratorType::Cpu)
+            {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        hw.what_if_replace(profiles)
+    } else {
+        crate::hardware::HardwareManager::from_registry(hw.registry().clone())
+    };
+
+    if !req.add_devices.is_empty() {
+        let additional: Vec<ai_hwaccel::AcceleratorProfile> = req
+            .add_devices
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ai_hwaccel::AcceleratorProfile::cuda(i as u32, d.memory_bytes))
+            .collect();
+        hypothetical = hypothetical.what_if_add(&additional);
+    }
+
+    let simulated = super::types::SimulateSnapshot {
+        device_count: hypothetical.available_profiles().len(),
+        total_vram_bytes: hypothetical.total_accelerator_memory(),
+        sharding: hypothetical.plan_sharding(req.model_params),
+    };
+
+    let resp = super::types::SimulateResponse {
+        original,
+        simulated,
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[cfg(feature = "hwaccel")]
+pub(crate) async fn hardware_format(
+    Json(req): Json<super::types::ModelFormatRequest>,
+) -> impl IntoResponse {
+    let path = std::path::Path::new(&req.path);
+    if !path.exists() {
+        return super::types::error_response(StatusCode::NOT_FOUND, "file not found")
+            .into_response();
+    }
+
+    match crate::hardware::HardwareManager::detect_model_format(path) {
+        Some(meta) => {
+            let resp = super::types::ModelFormatResponse {
+                format: format!("{:?}", meta.format),
+                param_count: meta.param_count,
+                dtype: meta.dtype,
+                tensor_count: meta.tensor_count,
+                format_version: meta.format_version,
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        None => super::types::error_response(StatusCode::BAD_REQUEST, "unrecognized model format")
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "hwaccel")]
+fn parse_quantization(s: &str) -> Option<ai_hwaccel::QuantizationLevel> {
+    match s.to_lowercase().as_str() {
+        "fp32" | "f32" | "none" => Some(ai_hwaccel::QuantizationLevel::None),
+        "fp16" | "f16" | "float16" => Some(ai_hwaccel::QuantizationLevel::Float16),
+        "bf16" | "bfloat16" => Some(ai_hwaccel::QuantizationLevel::BFloat16),
+        "int8" | "i8" | "q8" => Some(ai_hwaccel::QuantizationLevel::Int8),
+        "int4" | "i4" | "q4" => Some(ai_hwaccel::QuantizationLevel::Int4),
+        _ => None,
+    }
 }
 
 #[cfg(all(test, feature = "hwaccel"))]

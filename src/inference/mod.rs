@@ -215,6 +215,14 @@ pub struct InferenceResponse {
     pub latency_ms: u64,
 }
 
+/// Detected emotion with intensity.
+#[cfg(feature = "sentiment")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmotionScore {
+    pub emotion: String,
+    pub intensity: f32,
+}
+
 /// Sentiment analysis result for an inference response.
 #[cfg(feature = "sentiment")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +235,83 @@ pub struct SentimentAnalysis {
     pub is_positive: bool,
     /// Whether the overall sentiment is negative.
     pub is_negative: bool,
+    /// Emotion breakdown with intensities.
+    pub emotions: Vec<EmotionScore>,
+    /// Keywords that contributed to the classification.
+    pub matched_keywords: Vec<String>,
+}
+
+/// Per-sentence sentiment breakdown.
+#[cfg(feature = "sentiment")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentenceSentiment {
+    pub text: String,
+    pub valence: f32,
+    pub confidence: f32,
+}
+
+/// Document-level sentiment with per-sentence breakdown.
+#[cfg(feature = "sentiment")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSentiment {
+    /// Aggregate sentiment across all sentences.
+    pub aggregate: SentimentAnalysis,
+    /// Per-sentence breakdown.
+    pub sentences: Vec<SentenceSentiment>,
+}
+
+/// Custom sentiment configuration for domain-specific analysis.
+#[cfg(feature = "sentiment")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SentimentConfig {
+    /// Additional positive keywords for the domain.
+    #[serde(default)]
+    pub extra_positive: Vec<String>,
+    /// Additional negative keywords for the domain.
+    #[serde(default)]
+    pub extra_negative: Vec<String>,
+    /// Additional trust keywords.
+    #[serde(default)]
+    pub extra_trust: Vec<String>,
+    /// Additional curiosity keywords.
+    #[serde(default)]
+    pub extra_curiosity: Vec<String>,
+    /// Additional frustration keywords.
+    #[serde(default)]
+    pub extra_frustration: Vec<String>,
+}
+
+#[cfg(feature = "sentiment")]
+impl SentimentConfig {
+    fn to_bhava_config(&self) -> bhava::sentiment::SentimentConfig {
+        let mut cfg = bhava::sentiment::SentimentConfig::new();
+        cfg.extra_positive = self.extra_positive.clone();
+        cfg.extra_negative = self.extra_negative.clone();
+        cfg.extra_trust = self.extra_trust.clone();
+        cfg.extra_curiosity = self.extra_curiosity.clone();
+        cfg.extra_frustration = self.extra_frustration.clone();
+        cfg
+    }
+}
+
+/// Convert a bhava SentimentResult to hoosh's SentimentAnalysis.
+#[cfg(feature = "sentiment")]
+fn from_bhava_result(result: &bhava::sentiment::SentimentResult) -> SentimentAnalysis {
+    SentimentAnalysis {
+        valence: result.valence,
+        confidence: result.confidence,
+        is_positive: result.is_positive(),
+        is_negative: result.is_negative(),
+        emotions: result
+            .emotions
+            .iter()
+            .map(|(emotion, intensity)| EmotionScore {
+                emotion: format!("{emotion:?}"),
+                intensity: *intensity,
+            })
+            .collect(),
+        matched_keywords: result.matched_keywords.clone(),
+    }
 }
 
 /// Analyze response text for sentiment (requires `sentiment` feature).
@@ -234,11 +319,60 @@ pub struct SentimentAnalysis {
 #[must_use]
 pub fn analyze_response_sentiment(text: &str) -> SentimentAnalysis {
     let result = bhava::sentiment::analyze(text);
-    SentimentAnalysis {
-        valence: result.valence,
-        confidence: result.confidence,
-        is_positive: result.is_positive(),
-        is_negative: result.is_negative(),
+    from_bhava_result(&result)
+}
+
+/// Analyze response text with a custom configuration.
+#[cfg(feature = "sentiment")]
+#[must_use]
+pub fn analyze_response_sentiment_with_config(
+    text: &str,
+    config: &SentimentConfig,
+) -> SentimentAnalysis {
+    let bhava_cfg = config.to_bhava_config();
+    let result = bhava::sentiment::analyze_with_config(text, &bhava_cfg);
+    from_bhava_result(&result)
+}
+
+/// Analyze response text at the document level with per-sentence breakdown.
+#[cfg(feature = "sentiment")]
+#[must_use]
+pub fn analyze_response_document(text: &str) -> DocumentSentiment {
+    let doc = bhava::sentiment::analyze_sentences(text);
+    DocumentSentiment {
+        aggregate: from_bhava_result(&doc.aggregate),
+        sentences: doc
+            .sentences
+            .iter()
+            .map(|s| SentenceSentiment {
+                text: s.text.clone(),
+                valence: s.sentiment.valence,
+                confidence: s.sentiment.confidence,
+            })
+            .collect(),
+    }
+}
+
+/// Analyze response text at the document level with custom config.
+#[cfg(feature = "sentiment")]
+#[must_use]
+pub fn analyze_response_document_with_config(
+    text: &str,
+    config: &SentimentConfig,
+) -> DocumentSentiment {
+    let bhava_cfg = config.to_bhava_config();
+    let doc = bhava::sentiment::analyze_sentences_with_config(text, &bhava_cfg);
+    DocumentSentiment {
+        aggregate: from_bhava_result(&doc.aggregate),
+        sentences: doc
+            .sentences
+            .iter()
+            .map(|s| SentenceSentiment {
+                text: s.text.clone(),
+                valence: s.sentiment.valence,
+                confidence: s.sentiment.confidence,
+            })
+            .collect(),
     }
 }
 
@@ -247,12 +381,19 @@ pub fn analyze_response_sentiment(text: &str) -> SentimentAnalysis {
 pub trait ResponseSentiment {
     /// Analyze the sentiment of this response's text.
     fn sentiment(&self) -> SentimentAnalysis;
+
+    /// Analyze with per-sentence breakdown.
+    fn document_sentiment(&self) -> DocumentSentiment;
 }
 
 #[cfg(feature = "sentiment")]
 impl ResponseSentiment for InferenceResponse {
     fn sentiment(&self) -> SentimentAnalysis {
         analyze_response_sentiment(&self.text)
+    }
+
+    fn document_sentiment(&self) -> DocumentSentiment {
+        analyze_response_document(&self.text)
     }
 }
 
@@ -674,6 +815,11 @@ mod tests {
             confidence: 0.9,
             is_positive: true,
             is_negative: false,
+            emotions: vec![EmotionScore {
+                emotion: "Joy".into(),
+                intensity: 0.8,
+            }],
+            matched_keywords: vec!["great".into()],
         };
         let json = serde_json::to_string(&sa).unwrap();
         let back: SentimentAnalysis = serde_json::from_str(&json).unwrap();

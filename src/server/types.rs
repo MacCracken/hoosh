@@ -333,6 +333,16 @@ pub(crate) struct EnvironmentInfo {
     pub cloud_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kubernetes_gpu: Option<KubernetesGpuInfo>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct KubernetesGpuInfo {
+    pub device_ids: Vec<String>,
+    pub gpu_count: u32,
+    pub source: String,
 }
 
 #[cfg(feature = "hwaccel")]
@@ -360,4 +370,101 @@ pub(crate) struct CloudInstanceInfo {
     pub total_gpu_memory_gb: u32,
     pub price_per_hour: f64,
     pub memory_headroom_pct: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Model compatibility (hwaccel 1.2.0)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "hwaccel")]
+#[derive(Deserialize)]
+pub(crate) struct ModelCompatRequest {
+    /// Model name to look up (e.g. "Llama 3.1 70B").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Quantization level (e.g. "Q4_K_M", "BFloat16"). Defaults to auto.
+    #[serde(default)]
+    pub quantization: Option<String>,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct ModelCompatResponse {
+    /// Compatible models that fit on detected hardware.
+    pub compatible: Vec<CompatibleModelInfo>,
+    /// Total accelerator memory available.
+    pub total_vram_bytes: u64,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct CompatibleModelInfo {
+    pub name: String,
+    pub family: String,
+    pub params_billions: f64,
+    pub memory_required_bytes: u64,
+    pub headroom_pct: f64,
+}
+
+// ---------------------------------------------------------------------------
+// What-if simulation (hwaccel 1.2.0)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "hwaccel")]
+#[derive(Deserialize)]
+pub(crate) struct SimulateRequest {
+    /// Devices to add (memory_bytes per device).
+    #[serde(default)]
+    pub add_devices: Vec<SimulatedDevice>,
+    /// Number of current devices to remove (by index).
+    #[serde(default)]
+    pub remove_count: usize,
+    /// Model parameter count to plan sharding for.
+    pub model_params: u64,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Deserialize)]
+pub(crate) struct SimulatedDevice {
+    pub memory_bytes: u64,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct SimulateResponse {
+    pub original: SimulateSnapshot,
+    pub simulated: SimulateSnapshot,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct SimulateSnapshot {
+    pub device_count: usize,
+    pub total_vram_bytes: u64,
+    pub sharding: crate::hardware::ShardingSummary,
+}
+
+// ---------------------------------------------------------------------------
+// Model format detection (hwaccel 1.2.0)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "hwaccel")]
+#[derive(Deserialize)]
+pub(crate) struct ModelFormatRequest {
+    /// Path to a local model file.
+    pub path: String,
+}
+
+#[cfg(feature = "hwaccel")]
+#[derive(Serialize)]
+pub(crate) struct ModelFormatResponse {
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dtype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tensor_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
 }
