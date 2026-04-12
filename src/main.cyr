@@ -23,6 +23,7 @@ include "lib/sigil.cyr"
 include "lib/toml.cyr"
 include "lib/json.cyr"
 include "lib/tagged.cyr"
+include "lib/http.cyr"
 include "lib/net.cyr"
 include "lib/chrono.cyr"
 include "lib/syscalls.cyr"
@@ -120,21 +121,36 @@ fn provider_name(prov) {
     return "unknown";
 }
 
+fn _to_lower(s) {
+    var len = strlen(s);
+    var out = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    store8(out + len, 0);
+    return out;
+}
+
 fn provider_parse(name) {
-    if (streq(name, "ollama") == 1) { return PROV_OLLAMA; }
-    if (streq(name, "llamacpp") == 1) { return PROV_LLAMACPP; }
-    if (streq(name, "synapse") == 1) { return PROV_SYNAPSE; }
-    if (streq(name, "lmstudio") == 1) { return PROV_LMSTUDIO; }
-    if (streq(name, "localai") == 1) { return PROV_LOCALAI; }
-    if (streq(name, "openai") == 1) { return PROV_OPENAI; }
-    if (streq(name, "anthropic") == 1) { return PROV_ANTHROPIC; }
-    if (streq(name, "deepseek") == 1) { return PROV_DEEPSEEK; }
-    if (streq(name, "mistral") == 1) { return PROV_MISTRAL; }
-    if (streq(name, "google") == 1) { return PROV_GOOGLE; }
-    if (streq(name, "groq") == 1) { return PROV_GROQ; }
-    if (streq(name, "grok") == 1) { return PROV_GROK; }
-    if (streq(name, "openrouter") == 1) { return PROV_OPENROUTER; }
-    if (streq(name, "whisper") == 1) { return PROV_WHISPER; }
+    var lname = _to_lower(name);
+    if (streq(lname, "ollama") == 1) { return PROV_OLLAMA; }
+    if (streq(lname, "llamacpp") == 1) { return PROV_LLAMACPP; }
+    if (streq(lname, "synapse") == 1) { return PROV_SYNAPSE; }
+    if (streq(lname, "lmstudio") == 1) { return PROV_LMSTUDIO; }
+    if (streq(lname, "localai") == 1) { return PROV_LOCALAI; }
+    if (streq(lname, "openai") == 1) { return PROV_OPENAI; }
+    if (streq(lname, "anthropic") == 1) { return PROV_ANTHROPIC; }
+    if (streq(lname, "deepseek") == 1) { return PROV_DEEPSEEK; }
+    if (streq(lname, "mistral") == 1) { return PROV_MISTRAL; }
+    if (streq(lname, "google") == 1) { return PROV_GOOGLE; }
+    if (streq(lname, "groq") == 1) { return PROV_GROQ; }
+    if (streq(lname, "grok") == 1) { return PROV_GROK; }
+    if (streq(lname, "openrouter") == 1) { return PROV_OPENROUTER; }
+    if (streq(lname, "whisper") == 1) { return PROV_WHISPER; }
     return 0 - 1;  # -1 = unknown
 }
 
@@ -216,10 +232,14 @@ fn route_matches_model(r, model) {
     while (i < count) {
         var pattern = load64(arr + i * 8);
         var plen = strlen(pattern);
-        if (plen > 0 && load8(pattern + plen - 1) == 42) {
-            if (memeq(model, pattern, plen - 1) == 1) { return 1; }
-        } else {
-            if (streq(model, pattern) == 1) { return 1; }
+        if (plen > 0) {
+            if (load8(pattern + plen - 1) == 42) {
+                # Wildcard prefix match
+                if (memeq(model, pattern, plen - 1) == 1) { return 1; }
+            } else {
+                # Exact match
+                if (streq(model, pattern) == 1) { return 1; }
+            }
         }
         i = i + 1;
     }
@@ -272,9 +292,11 @@ fn router_select(rt, model) {
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1 && route_matches_model(r, model) == 1) {
-            store64(cand + cn * 8, r);
-            cn = cn + 1;
+        if (route_enabled(r) == 1) {
+            if (route_matches_model(r, model) == 1) {
+                store64(cand + cn * 8, r);
+                cn = cn + 1;
+            }
         }
         i = i + 1;
     }
@@ -395,6 +417,243 @@ fn cache_insert(c, key, value) {
     }
     map_set(load64(c + CACHE_ENTRIES), key, value);
     return 0;
+}
+
+# ================================================================
+# HTTP client — POST with JSON body to provider backends
+# ================================================================
+
+# Build HTTP POST request header into buffer, return length written
+fn _build_post_header(buf, path, host, body_len) {
+    var pos = 0;
+    memcpy(buf + pos, "POST ", 5); pos = pos + 5;
+    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
+    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
+    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
+    var cl_buf = alloc(32);
+    var cl_len = fmt_int_buf(body_len, cl_buf);
+    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    return pos;
+}
+
+# Simple HTTP POST to localhost. Returns response struct or 0.
+fn http_post_local(port, path, body, body_len) {
+
+    var fd = syscall(SYS_SOCKET, 2, 1, 0);  # AF_INET=2, SOCK_STREAM=1
+
+    if (fd < 0) { return 0; }
+    var sa = sockaddr_in(0x0100007F, port);
+    var cr = syscall(SYS_CONNECT, fd, sa, 16);
+
+    if (cr < 0) { syscall(3, fd); return 0; }
+    # Build and send request
+    var hdr = alloc(2048);
+    var hlen = _build_post_header(hdr, path, "localhost", body_len);
+    syscall(SYS_WRITE, fd, hdr, hlen);
+    syscall(SYS_WRITE, fd, body, body_len);
+    # Read response
+    var rbuf = alloc(131072);
+    var total = 0;
+    var n = 1;
+    while (n > 0) {
+        n = syscall(SYS_READ, fd, rbuf + total, 131072 - total);
+        if (n > 0) { total = total + n; }
+    }
+    syscall(3, fd);
+
+    if (total == 0) { return 0; }
+    return _http_parse_response(rbuf, total);
+}
+
+# ================================================================
+# Provider backends — Ollama + OpenAI-compatible
+# ================================================================
+
+# Forward inference to Ollama native API
+# Build chat request JSON body
+fn _build_chat_body(model, prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    var s = str_builder_build(sb);
+    return to_cstr(s);
+}
+
+# Forward to Ollama native API
+fn ollama_infer(port, model, prompt) {
+    var body = _build_chat_body(model, prompt);
+
+    return http_post_local(port, "/api/chat", body, strlen(body));
+}
+
+# Forward to OpenAI-compatible endpoint
+fn openai_compat_infer(port, model, prompt) {
+    var body = _build_chat_body(model, prompt);
+    return http_post_local(port, "/v1/chat/completions", body, strlen(body));
+}
+
+# Extract text from Ollama response JSON
+fn ollama_extract_text(resp_body, resp_len) {
+    if (resp_body == 0) { return ""; }
+    if (resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    # Find "content":" in the response body (simple string search)
+    var needle = "\"content\":\"";
+    var nlen = 11;
+    var i = 0;
+    while (i < resp_len - nlen) {
+        if (memeq(resp_body + i, needle, nlen) == 1) {
+            i = i + nlen;
+            var start = i;
+            # Find closing quote (handle escaped quotes)
+            while (i < resp_len) {
+                if (load8(resp_body + i) == 34) {
+                    # Check it's not escaped
+                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
+                    break;
+                }
+                i = i + 1;
+            }
+            var tlen = i - start;
+            var text = alloc(tlen + 1);
+            memcpy(text, resp_body + start, tlen);
+            store8(text + tlen, 0);
+            return text;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+# Extract text from OpenAI-compatible response JSON
+fn openai_extract_text(resp_body, resp_len) {
+    if (resp_body == 0 || resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    # OpenAI response: {"choices":[{"message":{"content":"..."}}]}
+    # Simple: find "content":" and extract
+    var i = 0;
+    while (i < resp_len - 10) {
+        if (memeq(resp_body + i, "\"content\":", 10) == 1) {
+            i = i + 10;
+            # Skip whitespace and opening quote
+            while (i < resp_len && load8(resp_body + i) == 32) { i = i + 1; }
+            if (i < resp_len && load8(resp_body + i) == 34) {
+                i = i + 1;
+                var start = i;
+                while (i < resp_len && load8(resp_body + i) != 34) { i = i + 1; }
+                var tlen = i - start;
+                var text = alloc(tlen + 1);
+                memcpy(text, resp_body + start, tlen);
+                store8(text + tlen, 0);
+                return text;
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+# Forward request to the appropriate provider backend
+fn provider_forward(route, model, prompt) {
+    var prov = route_provider(route);
+    var url = route_base_url(route);
+    # Extract port from URL
+    var fwd_port = 11434;  # default Ollama port
+    # Find port in URL: http://host:PORT/...
+    var ui = 7;  # skip http://
+    while (load8(url + ui) != 0) {
+        if (load8(url + ui) == 58) { fwd_port = atoi(url + ui + 1); break; }
+        if (load8(url + ui) == 47) { break; }
+        ui = ui + 1;
+    }
+    var start_ns = clock_now_ns();
+    var resp = 0;
+    var extract_fn = 0;
+
+    if (prov == PROV_OLLAMA) {
+        resp = ollama_infer(fwd_port, model, prompt);
+        extract_fn = 1;
+    } else {
+        resp = openai_compat_infer(fwd_port, model, prompt);
+        extract_fn = 2;
+    }
+
+    var elapsed_ns = clock_now_ns() - start_ns;
+    var latency_ms = elapsed_ns / 1000000;
+
+    if (resp == 0) { return 0; }
+
+    var status = http_status(resp);
+    var body = http_body(resp);
+    var blen = http_body_len(resp);
+
+    if (status < 200) { return 0; }
+    if (status >= 300) { return 0; }
+
+    var text = "";
+    if (extract_fn == 1) { text = ollama_extract_text(body, blen); }
+    else { text = openai_extract_text(body, blen); }
+
+    # Record metrics
+    metrics_record(0, 0);  # TODO: extract token counts from response
+
+    # Report latency for routing decisions
+    router_report_latency(_router, url, latency_ms);
+
+    # Build result: text(8) latency_ms(8) = 16
+    var result = alloc(16);
+    store64(result, text);
+    store64(result + 8, latency_ms);
+    return result;
+}
+
+# ================================================================
+# Auth middleware — bearer token verification
+# ================================================================
+
+fn auth_check(req_buf, req_len) {
+    # If no auth tokens configured, allow all
+    if (vec_len(_auth_tokens) == 0) { return 1; }
+    # Find Authorization header
+    var i = 0;
+    while (i < req_len - 14) {
+        if (memeq(req_buf + i, "Authorization:", 14) == 1) {
+            i = i + 14;
+            while (i < req_len && load8(req_buf + i) == 32) { i = i + 1; }
+            # Skip "Bearer "
+            if (i < req_len - 7 && memeq(req_buf + i, "Bearer ", 7) == 1) {
+                i = i + 7;
+                var tok_start = i;
+                while (i < req_len && load8(req_buf + i) != 13 && load8(req_buf + i) != 10) { i = i + 1; }
+                var tok_len = i - tok_start;
+                # Check against configured tokens
+                var ti = 0;
+                while (ti < vec_len(_auth_tokens)) {
+                    var expected = vec_get(_auth_tokens, ti);
+                    if (ct_eq(req_buf + tok_start, tok_len, expected, strlen(expected)) == 1) {
+                        return 1;
+                    }
+                    ti = ti + 1;
+                }
+            }
+            return 0;  # Authorization header present but token invalid
+        }
+        i = i + 1;
+    }
+    return 0;  # No Authorization header found
 }
 
 # ================================================================
@@ -530,7 +789,7 @@ fn http_parse_method(buf, len) {
     return "UNKNOWN";
 }
 
-fn http_parse_body(buf, len) {
+fn req_parse_body(buf, len) {
     # Find \r\n\r\n
     var i = 0;
     while (i < len - 3) {
@@ -542,8 +801,8 @@ fn http_parse_body(buf, len) {
     return 0;
 }
 
-fn http_body_len(buf, total_len) {
-    var body = http_parse_body(buf, total_len);
+fn req_body_len(buf, total_len) {
+    var body = req_parse_body(buf, total_len);
     if (body == 0) { return 0; }
     return total_len - (body - buf);
 }
@@ -699,17 +958,62 @@ fn handle_chat(cfd, body_ptr, body_len) {
         return http_error(cfd, "404", "Not Found", "no provider for model");
     }
 
-    # TODO: forward request to provider backend via HTTP client
-    # For now, return a stub response
+    # Extract messages JSON from request for forwarding
+    var messages_val = json_get(pairs, str_from("messages"));
+    var messages_json = 0;
+    if (messages_val != 0) {
+        # Pass messages through as raw JSON string
+        # For now, build a simple user message from the first content
+        messages_json = 0;  # Let provider build default message from prompt
+    }
+
+    # Extract prompt — from "prompt" field or last message content
+    var prompt_cstr = "hello";
+    var prompt_val = json_get(pairs, str_from("prompt"));
+    if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
+    # If no prompt, extract content from the raw request body
+    if (prompt_val == 0) {
+        # Find last "content":"..." in the request body
+        var rbody = req_parse_body(body_ptr - (body_ptr - body_ptr), body_len + (body_ptr - body_ptr));
+        # Simple: search for "content":" in the POST body
+        var ci = 0;
+        var bstr = body_ptr;
+        var blast = 0;
+        while (ci < body_len - 11) {
+            if (memeq(bstr + ci, "\"content\":\"", 11) == 1) {
+                blast = ci + 11;
+            }
+            ci = ci + 1;
+        }
+        if (blast > 0) {
+            var cstart = blast;
+            ci = blast;
+            while (ci < body_len) {
+                if (load8(bstr + ci) == 34) { break; }
+                ci = ci + 1;
+            }
+            var clen = ci - cstart;
+            prompt_cstr = alloc(clen + 1);
+            memcpy(prompt_cstr, bstr + cstart, clen);
+            store8(prompt_cstr + clen, 0);
+        }
+    }
+
+    # Forward to provider backend
+    var result = provider_forward(route, model_cstr, prompt_cstr);
+    if (result == 0) {
+        return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable");
+    }
+
+    var resp_text = load64(result);
+    var resp_latency = load64(result + 8);
+
+    # Build OpenAI-compatible response
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",\"object\":\"chat.completion\",\"model\":\"");
-    str_builder_add_str(sb, model);
+    str_builder_add_cstr(sb, model_cstr);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"");
-    str_builder_add_cstr(sb, "hoosh gateway ready — provider: ");
-    str_builder_add_cstr(sb, provider_name(route_provider(route)));
-    str_builder_add_cstr(sb, " (");
-    str_builder_add_cstr(sb, route_base_url(route));
-    str_builder_add_cstr(sb, ")");
+    str_builder_add_cstr(sb, resp_text);
     str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}");
     var resp = str_builder_build(sb);
     return http_json_ok(cfd, resp);
@@ -738,6 +1042,13 @@ fn http_route(cfd, method, path, buf, buf_len) {
         return 0;
     }
 
+    # Auth check (skip for health and metrics)
+    if (streq(path, "/v1/health") != 1 && streq(path, "/metrics") != 1) {
+        if (auth_check(buf, buf_len) == 0) {
+            return http_error(cfd, "401", "Unauthorized", "invalid or missing bearer token");
+        }
+    }
+
     # GET routes
     if (streq(path, "/v1/health") == 1) { return handle_health(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
@@ -748,8 +1059,8 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
     # POST routes
     if (streq(path, "/v1/chat/completions") == 1) {
-        var body = http_parse_body(buf, buf_len);
-        var blen = http_body_len(buf, buf_len);
+        var body = req_parse_body(buf, buf_len);
+        var blen = req_body_len(buf, buf_len);
         return handle_chat(cfd, body, blen);
     }
 
@@ -812,13 +1123,41 @@ fn load_config(path) {
 
             var route = route_new(ptype, ppri, purl);
 
-            # Parse model patterns
+            # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = toml_get(pp, str_from("models"));
             if (models_str != 0) {
-                # Simple: treat as single pattern for now
-                var pats = alloc(8);
-                store64(pats, to_cstr(models_str));
-                route_set_patterns(route, pats, 1);
+                var ms = to_cstr(models_str);
+                var ms_len = strlen(ms);
+                # Parse comma-separated patterns, stripping [ ] "
+                var pats = alloc(64);  # up to 8 patterns
+                var pat_count = 0;
+                var pi = 0;
+                while (pi < ms_len) {
+                    var mc = load8(ms + pi);
+                    # Skip [ ] , whitespace "
+                    if (mc == 91 || mc == 93 || mc == 44 || mc == 32 || mc == 34) {
+                        pi = pi + 1;
+                    } else {
+                        # Start of pattern
+                        var ps = pi;
+                        while (pi < ms_len) {
+                            mc = load8(ms + pi);
+                            if (mc == 34 || mc == 44 || mc == 93) { break; }
+                            pi = pi + 1;
+                        }
+                        var plen = pi - ps;
+                        if (plen > 0) {
+                            var pat = alloc(plen + 1);
+                            memcpy(pat, ms + ps, plen);
+                            store8(pat + plen, 0);
+                            store64(pats + pat_count * 8, pat);
+                            pat_count = pat_count + 1;
+                        }
+                    }
+                }
+                if (pat_count > 0) {
+                    route_set_patterns(route, pats, pat_count);
+                }
             }
 
             store64(routes + ri * 8, route);
@@ -839,6 +1178,17 @@ fn load_config(path) {
             budget_add_pool(_budget, pool_new(to_cstr(bname), str_to_int(bcap_str)));
         }
         bi = bi + 1;
+    }
+
+    # Parse [[auth]] section
+    var auth_secs = toml_get_sections(sections, str_from("auth"));
+    if (vec_len(auth_secs) > 0) {
+        var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
+        var tok_str = toml_get(auth_p, str_from("tokens"));
+        if (tok_str != 0) {
+            # Simple: single token for now
+            vec_push(_auth_tokens, to_cstr(tok_str));
+        }
     }
 
     return 1;
