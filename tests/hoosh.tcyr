@@ -1,0 +1,995 @@
+# hoosh.tcyr — hoosh gateway tests (Wave 1: pure logic, no I/O)
+# Tests: error types, router, token budget, cache, cost tracker, audit chain, queue
+#
+# Run: cyrius test tests/hoosh.tcyr
+#   or: cyrius build tests/hoosh.tcyr /tmp/hoosh_test && /tmp/hoosh_test
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Error types — error code + HTTP status mapping
+# ================================================================
+
+# Error codes (enum — zero gvar cost)
+enum HooshErr {
+    ERR_PROVIDER       = 1;
+    ERR_MODEL_NOT_FOUND = 2;
+    ERR_RATE_LIMITED   = 3;
+    ERR_BUDGET_EXCEEDED = 4;
+    ERR_NO_PROVIDER    = 5;
+    ERR_TIMEOUT        = 6;
+    ERR_CACHE          = 7;
+    ERR_DLP_BLOCKED    = 8;
+    ERR_HTTP           = 9;
+    ERR_INTERNAL       = 10;
+}
+
+fn error_http_status(code) {
+    if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
+    if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
+    if (code == ERR_TIMEOUT) { return 408; }
+    if (code == ERR_DLP_BLOCKED) { return 403; }
+    if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
+    if (code == ERR_HTTP) { return 502; }
+    return 500;
+}
+
+fn error_is_retryable(code) {
+    if (code == ERR_RATE_LIMITED || code == ERR_TIMEOUT) { return 1; }
+    if (code == ERR_PROVIDER || code == ERR_CACHE) { return 1; }
+    return 0;
+}
+
+fn error_code_str(code) {
+    if (code == ERR_MODEL_NOT_FOUND) { return "model_not_found"; }
+    if (code == ERR_NO_PROVIDER) { return "no_provider"; }
+    if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
+    if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
+    if (code == ERR_TIMEOUT) { return "timeout"; }
+    if (code == ERR_CACHE) { return "cache_error"; }
+    if (code == ERR_PROVIDER) { return "provider_error"; }
+    if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
+    if (code == ERR_HTTP) { return "upstream_error"; }
+    return "internal_error";
+}
+
+# ================================================================
+# Provider types
+# ================================================================
+
+enum Provider {
+    PROV_OLLAMA     = 0;
+    PROV_LLAMACPP   = 1;
+    PROV_SYNAPSE    = 2;
+    PROV_LMSTUDIO   = 3;
+    PROV_LOCALAI    = 4;
+    PROV_OPENAI     = 5;
+    PROV_ANTHROPIC  = 6;
+    PROV_DEEPSEEK   = 7;
+    PROV_MISTRAL    = 8;
+    PROV_GOOGLE     = 9;
+    PROV_GROQ       = 10;
+    PROV_GROK       = 11;
+    PROV_OPENROUTER = 12;
+    PROV_WHISPER    = 13;
+    PROV_COUNT      = 14;
+}
+
+fn provider_is_local(prov) {
+    if (prov == PROV_OLLAMA) { return 1; }
+    if (prov == PROV_LLAMACPP) { return 1; }
+    if (prov == PROV_SYNAPSE) { return 1; }
+    if (prov == PROV_LMSTUDIO) { return 1; }
+    if (prov == PROV_LOCALAI) { return 1; }
+    if (prov == PROV_WHISPER) { return 1; }
+    return 0;
+}
+
+fn provider_name(prov) {
+    if (prov == PROV_OLLAMA) { return "ollama"; }
+    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
+    if (prov == PROV_SYNAPSE) { return "synapse"; }
+    if (prov == PROV_LMSTUDIO) { return "lmstudio"; }
+    if (prov == PROV_LOCALAI) { return "localai"; }
+    if (prov == PROV_OPENAI) { return "openai"; }
+    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
+    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
+    if (prov == PROV_MISTRAL) { return "mistral"; }
+    if (prov == PROV_GOOGLE) { return "google"; }
+    if (prov == PROV_GROQ) { return "groq"; }
+    if (prov == PROV_GROK) { return "grok"; }
+    if (prov == PROV_OPENROUTER) { return "openrouter"; }
+    if (prov == PROV_WHISPER) { return "whisper"; }
+    return "unknown";
+}
+
+# ================================================================
+# Routing strategy
+# ================================================================
+
+enum Strategy {
+    STRAT_PRIORITY       = 0;
+    STRAT_ROUND_ROBIN    = 1;
+    STRAT_LOWEST_LATENCY = 2;
+    STRAT_DIRECT         = 3;
+}
+
+# ================================================================
+# Provider route — heap-allocated struct
+# Layout: provider(8) priority(8) patterns_ptr(8) patterns_count(8)
+#         enabled(8) base_url(8) api_key(8) rate_limit_rpm(8)
+# Total: 64 bytes
+# ================================================================
+
+enum RouteField {
+    ROUTE_SIZE          = 64;
+    ROUTE_PROVIDER      = 0;
+    ROUTE_PRIORITY      = 8;
+    ROUTE_PATTERNS      = 16;
+    ROUTE_PATTERNS_N    = 24;
+    ROUTE_ENABLED       = 32;
+    ROUTE_BASE_URL      = 40;
+    ROUTE_API_KEY       = 48;
+    ROUTE_RATE_LIMIT    = 56;
+}
+
+fn route_new(prov, priority, base_url) {
+    var r = alloc(ROUTE_SIZE);
+    store64(r + ROUTE_PROVIDER, prov);
+    store64(r + ROUTE_PRIORITY, priority);
+    store64(r + ROUTE_PATTERNS, 0);
+    store64(r + ROUTE_PATTERNS_N, 0);
+    store64(r + ROUTE_ENABLED, 1);
+    store64(r + ROUTE_BASE_URL, base_url);
+    store64(r + ROUTE_API_KEY, 0);
+    store64(r + ROUTE_RATE_LIMIT, 0);
+    return r;
+}
+
+fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
+fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
+fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
+fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
+
+fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
+
+# Set model patterns as array of cstrings
+fn route_set_patterns(r, patterns, count) {
+    store64(r + ROUTE_PATTERNS, patterns);
+    store64(r + ROUTE_PATTERNS_N, count);
+    return 0;
+}
+
+# Check if a route matches a model name
+fn route_matches_model(r, model) {
+    var count = load64(r + ROUTE_PATTERNS_N);
+    if (count == 0) { return 1; }  # wildcard — matches all
+    var arr = load64(r + ROUTE_PATTERNS);
+    var i = 0;
+    while (i < count) {
+        var pattern = load64(arr + i * 8);
+        var plen = strlen(pattern);
+        # Check for trailing wildcard
+        if (plen > 0 && load8(pattern + plen - 1) == 42) {
+            # '*' = 42; prefix match
+            if (memeq(model, pattern, plen - 1) == 1) { return 1; }
+        } else {
+            if (streq(model, pattern) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Router — priority-sorted route list + selection
+# Layout: routes_ptr(8) route_count(8) strategy(8) rr_index(8) latencies_ptr(8)
+# Total: 40 bytes
+# ================================================================
+
+enum RouterField {
+    ROUTER_SIZE      = 40;
+    ROUTER_ROUTES    = 0;
+    ROUTER_COUNT     = 8;
+    ROUTER_STRATEGY  = 16;
+    ROUTER_RR_IDX    = 24;
+    ROUTER_LATENCIES = 32;
+}
+
+fn router_new(routes, count, strategy) {
+    var rt = alloc(ROUTER_SIZE);
+    store64(rt + ROUTER_ROUTES, routes);
+    store64(rt + ROUTER_COUNT, count);
+    store64(rt + ROUTER_STRATEGY, strategy);
+    store64(rt + ROUTER_RR_IDX, 0);
+    store64(rt + ROUTER_LATENCIES, map_new());
+    # Sort by priority (insertion sort — small N)
+    var i = 1;
+    while (i < count) {
+        var key = load64(routes + i * 8);
+        var kp = route_priority(key);
+        var j = i - 1;
+        while (j >= 0) {
+            if (route_priority(load64(routes + j * 8)) <= kp) { break; }
+            store64(routes + (j + 1) * 8, load64(routes + j * 8));
+            j = j - 1;
+        }
+        store64(routes + (j + 1) * 8, key);
+        i = i + 1;
+    }
+    return rt;
+}
+
+# Select best provider for a model. Returns route ptr or 0 (not found).
+fn router_select(rt, model) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var strategy = load64(rt + ROUTER_STRATEGY);
+
+    # Build candidates list (enabled + matches model)
+    var cand = alloc(count * 8);
+    var cn = 0;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && route_matches_model(r, model) == 1) {
+            store64(cand + cn * 8, r);
+            cn = cn + 1;
+        }
+        i = i + 1;
+    }
+
+    if (cn == 0) { return 0; }
+
+    if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) {
+        return load64(cand);
+    }
+
+    if (strategy == STRAT_ROUND_ROBIN) {
+        var idx = load64(rt + ROUTER_RR_IDX);
+        store64(rt + ROUTER_RR_IDX, idx + 1);
+        return load64(cand + (idx % cn) * 8);
+    }
+
+    if (strategy == STRAT_LOWEST_LATENCY) {
+        var lat_map = load64(rt + ROUTER_LATENCIES);
+        var best = load64(cand);
+        var best_lat = 0x7FFFFFFFFFFFFFFF;
+        var j = 0;
+        while (j < cn) {
+            var c = load64(cand + j * 8);
+            var url = route_base_url(c);
+            var lat = map_get(lat_map, url);
+            if (lat == 0) { lat = 0x7FFFFFFFFFFFFFFF; }
+            if (lat < best_lat) {
+                best = c;
+                best_lat = lat;
+            }
+            j = j + 1;
+        }
+        return best;
+    }
+
+    return load64(cand);
+}
+
+fn router_report_latency(rt, base_url, latency_ms) {
+    var lat_map = load64(rt + ROUTER_LATENCIES);
+    var old = map_get(lat_map, base_url);
+    if (old == 0) {
+        map_set(lat_map, base_url, latency_ms);
+    } else {
+        # EMA: (old * 7 + new * 3) / 10
+        var avg = (old * 7 + latency_ms * 3) / 10;
+        map_set(lat_map, base_url, avg);
+    }
+    return 0;
+}
+
+# ================================================================
+# Token pool
+# Layout: name(8) capacity(8) used(8) reserved(8)
+# Total: 32 bytes
+# ================================================================
+
+enum PoolField {
+    POOL_SIZE     = 32;
+    POOL_NAME     = 0;
+    POOL_CAPACITY = 8;
+    POOL_USED     = 16;
+    POOL_RESERVED = 24;
+}
+
+fn pool_new(name, capacity) {
+    var p = alloc(POOL_SIZE);
+    store64(p + POOL_NAME, name);
+    store64(p + POOL_CAPACITY, capacity);
+    store64(p + POOL_USED, 0);
+    store64(p + POOL_RESERVED, 0);
+    return p;
+}
+
+fn pool_name(p) { return load64(p + POOL_NAME); }
+fn pool_capacity(p) { return load64(p + POOL_CAPACITY); }
+fn pool_used(p) { return load64(p + POOL_USED); }
+fn pool_reserved(p) { return load64(p + POOL_RESERVED); }
+
+fn pool_available(p) {
+    var cap = load64(p + POOL_CAPACITY);
+    var used = load64(p + POOL_USED);
+    var resv = load64(p + POOL_RESERVED);
+    var taken = used + resv;
+    if (taken > cap) { return 0; }
+    return cap - taken;
+}
+
+fn pool_can_reserve(p, tokens) {
+    if (pool_available(p) >= tokens) { return 1; }
+    return 0;
+}
+
+fn pool_reserve(p, tokens) {
+    if (pool_can_reserve(p, tokens) == 0) { return 0; }
+    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
+    return 1;
+}
+
+fn pool_commit(p, reserved, actual) {
+    var resv = load64(p + POOL_RESERVED);
+    if (resv >= reserved) {
+        store64(p + POOL_RESERVED, resv - reserved);
+    } else {
+        store64(p + POOL_RESERVED, 0);
+    }
+    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    return 0;
+}
+
+fn pool_release(p, tokens) {
+    var resv = load64(p + POOL_RESERVED);
+    if (resv >= tokens) {
+        store64(p + POOL_RESERVED, resv - tokens);
+    } else {
+        store64(p + POOL_RESERVED, 0);
+    }
+    return 0;
+}
+
+# ================================================================
+# Token budget — hashmap of pools by name
+# ================================================================
+
+fn budget_new() { return map_new(); }
+
+fn budget_add_pool(bgt, p) {
+    map_set(bgt, pool_name(p), p);
+    return 0;
+}
+
+fn budget_get_pool(bgt, name) {
+    return map_get(bgt, name);
+}
+
+fn budget_check(bgt, name, tokens) {
+    var p = map_get(bgt, name);
+    if (p == 0) { return 0; }
+    return pool_can_reserve(p, tokens);
+}
+
+fn budget_reserve(bgt, name, tokens) {
+    var p = map_get(bgt, name);
+    if (p == 0) { return 0; }
+    return pool_reserve(p, tokens);
+}
+
+fn budget_report(bgt, name, reserved, actual) {
+    var p = map_get(bgt, name);
+    if (p == 0) { return 0; }
+    pool_commit(p, reserved, actual);
+    return 0;
+}
+
+# ================================================================
+# Cache — hashmap with TTL (simplified: no TTL eviction in test,
+#          tests TTL separately via chrono timestamps)
+# Layout: entries(8) max_entries(8) hits(8) misses(8) evictions(8) enabled(8)
+# Total: 48 bytes
+# ================================================================
+
+enum CacheField {
+    CACHE_SIZE        = 48;
+    CACHE_ENTRIES     = 0;
+    CACHE_MAX         = 8;
+    CACHE_HITS        = 16;
+    CACHE_MISSES      = 24;
+    CACHE_EVICTIONS   = 32;
+    CACHE_ENABLED     = 40;
+}
+
+fn cache_new(max_entries, enabled) {
+    var c = alloc(CACHE_SIZE);
+    store64(c + CACHE_ENTRIES, map_new());
+    store64(c + CACHE_MAX, max_entries);
+    store64(c + CACHE_HITS, 0);
+    store64(c + CACHE_MISSES, 0);
+    store64(c + CACHE_EVICTIONS, 0);
+    store64(c + CACHE_ENABLED, enabled);
+    return c;
+}
+
+fn cache_get(c, key) {
+    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
+    var entries = load64(c + CACHE_ENTRIES);
+    var val = map_get(entries, key);
+    if (val == 0) {
+        store64(c + CACHE_MISSES, load64(c + CACHE_MISSES) + 1);
+        return 0;
+    }
+    store64(c + CACHE_HITS, load64(c + CACHE_HITS) + 1);
+    return val;
+}
+
+fn cache_insert(c, key, value) {
+    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
+    var entries = load64(c + CACHE_ENTRIES);
+    var max = load64(c + CACHE_MAX);
+    # Evict if at capacity (simple: just count eviction, hashmap handles it)
+    if (map_count(entries) >= max) {
+        store64(c + CACHE_EVICTIONS, load64(c + CACHE_EVICTIONS) + 1);
+    }
+    map_set(entries, key, value);
+    return 0;
+}
+
+fn cache_len(c) {
+    return map_count(load64(c + CACHE_ENTRIES));
+}
+
+fn cache_clear(c) {
+    store64(c + CACHE_ENTRIES, map_new());
+    return 0;
+}
+
+fn cache_hits(c) { return load64(c + CACHE_HITS); }
+fn cache_misses(c) { return load64(c + CACHE_MISSES); }
+fn cache_evictions(c) { return load64(c + CACHE_EVICTIONS); }
+
+# ================================================================
+# Cost tracker — pricing lookup + accumulation
+# ================================================================
+
+# Pricing in microdollars per million tokens (avoids f64)
+# e.g. $2.50/M = 2500000 microdollars/M
+enum Pricing {
+    # OpenAI
+    PRICE_GPT4O_IN       = 2500000;
+    PRICE_GPT4O_OUT      = 10000000;
+    PRICE_GPT4O_MINI_IN  = 150000;
+    PRICE_GPT4O_MINI_OUT = 600000;
+    # Anthropic
+    PRICE_OPUS_IN        = 15000000;
+    PRICE_OPUS_OUT       = 75000000;
+    PRICE_SONNET_IN      = 3000000;
+    PRICE_SONNET_OUT     = 15000000;
+    # DeepSeek
+    PRICE_DSCHAT_IN      = 270000;
+    PRICE_DSCHAT_OUT     = 1100000;
+    # Grok
+    PRICE_GROK3_IN       = 3000000;
+    PRICE_GROK3_OUT      = 15000000;
+    # Local providers
+    PRICE_LOCAL_IN       = 0;
+    PRICE_LOCAL_OUT      = 0;
+}
+
+# Lookup pricing: returns (input_microdollars_per_M, output_microdollars_per_M)
+# packed as: input * 0x100000000 + output (since both fit in 32 bits)
+fn pricing_lookup(model, prov) {
+    if (provider_is_local(prov) == 1) { return 0; }
+    if (streq(model, "gpt-4o") == 1) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
+    if (streq(model, "gpt-4o-mini") == 1) { return PRICE_GPT4O_MINI_IN * 0x100000000 + PRICE_GPT4O_MINI_OUT; }
+    if (streq(model, "claude-opus-4") == 1) { return PRICE_OPUS_IN * 0x100000000 + PRICE_OPUS_OUT; }
+    if (streq(model, "claude-sonnet-4") == 1) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
+    if (streq(model, "deepseek-chat") == 1) { return PRICE_DSCHAT_IN * 0x100000000 + PRICE_DSCHAT_OUT; }
+    if (streq(model, "grok-3") == 1) { return PRICE_GROK3_IN * 0x100000000 + PRICE_GROK3_OUT; }
+    # Prefix match — check if model starts with a known base
+    if (memeq(model, "claude-sonnet-4", 15) == 1) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
+    if (memeq(model, "claude-opus-4", 13) == 1) { return PRICE_OPUS_IN * 0x100000000 + PRICE_OPUS_OUT; }
+    if (memeq(model, "gpt-4o", 6) == 1) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
+    # Fallback per provider
+    if (prov == PROV_ANTHROPIC) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
+    if (prov == PROV_OPENAI) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
+    if (prov == PROV_DEEPSEEK) { return PRICE_DSCHAT_IN * 0x100000000 + PRICE_DSCHAT_OUT; }
+    return 0;
+}
+
+fn pricing_input(packed) { return packed / 0x100000000; }
+fn pricing_output(packed) { return packed % 0x100000000; }
+
+# Cost for a request in microdollars
+fn cost_calculate(model, prov, prompt_tokens, completion_tokens) {
+    var p = pricing_lookup(model, prov);
+    var inp = pricing_input(p);
+    var out = pricing_output(p);
+    # cost = tokens * price_per_M / 1_000_000
+    var cost = prompt_tokens * inp / 1000000 + completion_tokens * out / 1000000;
+    return cost;
+}
+
+# Cost tracker — hashmap of provider:url -> record
+# Record layout: total_input(8) total_output(8) total_cost(8) requests(8) = 32 bytes
+enum CostField {
+    COST_REC_SIZE   = 32;
+    COST_REC_INPUT  = 0;
+    COST_REC_OUTPUT = 8;
+    COST_REC_COST   = 16;
+    COST_REC_REQS   = 24;
+}
+
+fn cost_tracker_new() { return map_new(); }
+
+fn cost_tracker_record(tracker, prov, model, prompt_tok, comp_tok) {
+    var cost = cost_calculate(model, prov, prompt_tok, comp_tok);
+    var pname = provider_name(prov);
+    var rec = map_get(tracker, pname);
+    if (rec == 0) {
+        rec = alloc(COST_REC_SIZE);
+        store64(rec + COST_REC_INPUT, 0);
+        store64(rec + COST_REC_OUTPUT, 0);
+        store64(rec + COST_REC_COST, 0);
+        store64(rec + COST_REC_REQS, 0);
+        map_set(tracker, pname, rec);
+    }
+    store64(rec + COST_REC_INPUT, load64(rec + COST_REC_INPUT) + prompt_tok);
+    store64(rec + COST_REC_OUTPUT, load64(rec + COST_REC_OUTPUT) + comp_tok);
+    store64(rec + COST_REC_COST, load64(rec + COST_REC_COST) + cost);
+    store64(rec + COST_REC_REQS, load64(rec + COST_REC_REQS) + 1);
+    return cost;
+}
+
+# ================================================================
+# Queue — simple priority queue (5 tiers)
+# Uses a vec per tier, dequeue scans highest first
+# ================================================================
+
+enum QueuePriority {
+    PRI_CRITICAL   = 0;
+    PRI_HIGH       = 1;
+    PRI_NORMAL     = 2;
+    PRI_LOW        = 3;
+    PRI_BACKGROUND = 4;
+    PRI_TIERS      = 5;
+}
+
+# Queue item: model(8) pool(8) request_id(8) = 24 bytes
+enum QItem {
+    QITEM_SIZE   = 24;
+    QITEM_MODEL  = 0;
+    QITEM_POOL   = 8;
+    QITEM_ID     = 16;
+}
+
+fn queue_new() {
+    # 5 tiers, each a vec
+    var q = alloc(PRI_TIERS * 8);
+    var i = 0;
+    while (i < PRI_TIERS) {
+        store64(q + i * 8, vec_new(8));
+        i = i + 1;
+    }
+    return q;
+}
+
+fn queue_enqueue(q, model, pool, request_id, priority) {
+    var item = alloc(QITEM_SIZE);
+    store64(item + QITEM_MODEL, model);
+    store64(item + QITEM_POOL, pool);
+    store64(item + QITEM_ID, request_id);
+    var tier = load64(q + priority * 8);
+    vec_push(tier, item);
+    return 0;
+}
+
+# Returns item ptr or 0 if empty
+fn queue_dequeue(q) {
+    var i = 0;
+    while (i < PRI_TIERS) {
+        var tier = load64(q + i * 8);
+        if (vec_len(tier) > 0) {
+            var item = vec_get(tier, 0);
+            vec_remove(tier, 0);
+            return item;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn queue_len(q) {
+    var total = 0;
+    var i = 0;
+    while (i < PRI_TIERS) {
+        total = total + vec_len(load64(q + i * 8));
+        i = i + 1;
+    }
+    return total;
+}
+
+fn queue_is_empty(q) {
+    if (queue_len(q) == 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# TESTS
+# ================================================================
+
+fn main() {
+    alloc_init();
+
+    # ── Error types ──────────────────────────────────────────────
+    test_group("error_types");
+
+    assert_eq(error_http_status(ERR_MODEL_NOT_FOUND), 404, "model_not_found -> 404");
+    assert_eq(error_http_status(ERR_NO_PROVIDER), 404, "no_provider -> 404");
+    assert_eq(error_http_status(ERR_RATE_LIMITED), 429, "rate_limited -> 429");
+    assert_eq(error_http_status(ERR_BUDGET_EXCEEDED), 429, "budget_exceeded -> 429");
+    assert_eq(error_http_status(ERR_TIMEOUT), 408, "timeout -> 408");
+    assert_eq(error_http_status(ERR_PROVIDER), 500, "provider -> 500");
+    assert_eq(error_http_status(ERR_CACHE), 500, "cache -> 500");
+    assert_eq(error_http_status(ERR_DLP_BLOCKED), 403, "dlp -> 403");
+    assert_eq(error_http_status(ERR_HTTP), 502, "http -> 502");
+    assert_eq(error_http_status(ERR_INTERNAL), 500, "internal -> 500");
+
+    assert(error_is_retryable(ERR_RATE_LIMITED) == 1, "rate_limited retryable");
+    assert(error_is_retryable(ERR_TIMEOUT) == 1, "timeout retryable");
+    assert(error_is_retryable(ERR_PROVIDER) == 1, "provider retryable");
+    assert(error_is_retryable(ERR_MODEL_NOT_FOUND) == 0, "model_not_found not retryable");
+    assert(error_is_retryable(ERR_BUDGET_EXCEEDED) == 0, "budget not retryable");
+    assert(error_is_retryable(ERR_DLP_BLOCKED) == 0, "dlp not retryable");
+
+    assert_streq(error_code_str(ERR_MODEL_NOT_FOUND), "model_not_found", "code_str model");
+    assert_streq(error_code_str(ERR_NO_PROVIDER), "no_provider", "code_str no_prov");
+    assert_streq(error_code_str(ERR_RATE_LIMITED), "rate_limit_exceeded", "code_str rate");
+    assert_streq(error_code_str(ERR_BUDGET_EXCEEDED), "budget_exceeded", "code_str budget");
+    assert_streq(error_code_str(ERR_TIMEOUT), "timeout", "code_str timeout");
+    assert_streq(error_code_str(ERR_INTERNAL), "internal_error", "code_str internal");
+
+    # ── Provider types ───────────────────────────────────────────
+    test_group("provider_types");
+
+    assert_eq(PROV_COUNT, 14, "14 provider types");
+    assert(provider_is_local(PROV_OLLAMA) == 1, "ollama is local");
+    assert(provider_is_local(PROV_LLAMACPP) == 1, "llamacpp is local");
+    assert(provider_is_local(PROV_SYNAPSE) == 1, "synapse is local");
+    assert(provider_is_local(PROV_LMSTUDIO) == 1, "lmstudio is local");
+    assert(provider_is_local(PROV_LOCALAI) == 1, "localai is local");
+    assert(provider_is_local(PROV_WHISPER) == 1, "whisper is local");
+    assert(provider_is_local(PROV_OPENAI) == 0, "openai is remote");
+    assert(provider_is_local(PROV_ANTHROPIC) == 0, "anthropic is remote");
+    assert(provider_is_local(PROV_DEEPSEEK) == 0, "deepseek is remote");
+    assert(provider_is_local(PROV_GROQ) == 0, "groq is remote");
+
+    assert_streq(provider_name(PROV_OLLAMA), "ollama", "name ollama");
+    assert_streq(provider_name(PROV_OPENAI), "openai", "name openai");
+    assert_streq(provider_name(PROV_ANTHROPIC), "anthropic", "name anthropic");
+
+    # ── Router: priority routing ──────────────────────────────────
+    test_group("router_priority");
+
+    var pats1 = alloc(8);
+    store64(pats1, "llama*");
+    var pats2 = alloc(8);
+    store64(pats2, "gpt-*");
+
+    var r1 = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    route_set_patterns(r1, pats1, 1);
+    var r2 = route_new(PROV_OPENAI, 2, "https://api.openai.com");
+    route_set_patterns(r2, pats2, 1);
+
+    var routes = alloc(16);
+    store64(routes, r1);
+    store64(routes + 8, r2);
+
+    var rt = router_new(routes, 2, STRAT_PRIORITY);
+
+    var sel = router_select(rt, "llama3");
+    assert(sel != 0, "priority: llama3 found");
+    assert_eq(route_provider(sel), PROV_OLLAMA, "priority: llama3 -> ollama");
+
+    sel = router_select(rt, "gpt-4o");
+    assert(sel != 0, "priority: gpt-4o found");
+    assert_eq(route_provider(sel), PROV_OPENAI, "priority: gpt-4o -> openai");
+
+    sel = router_select(rt, "claude-sonnet");
+    assert_eq(sel, 0, "priority: claude-sonnet not found");
+
+    # ── Router: wildcard route ────────────────────────────────────
+    test_group("router_wildcard");
+
+    var wr = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    var wroutes = alloc(8);
+    store64(wroutes, wr);
+    var wrt = router_new(wroutes, 1, STRAT_PRIORITY);
+    assert(router_select(wrt, "anything") != 0, "wildcard matches anything");
+
+    # ── Router: disabled route skipped ────────────────────────────
+    test_group("router_disabled");
+
+    var dr = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    route_set_enabled(dr, 0);
+    var droutes = alloc(8);
+    store64(droutes, dr);
+    var drt = router_new(droutes, 1, STRAT_PRIORITY);
+    assert_eq(router_select(drt, "llama3"), 0, "disabled route skipped");
+
+    # ── Router: round robin ───────────────────────────────────────
+    test_group("router_round_robin");
+
+    var rr1 = route_new(PROV_OLLAMA, 1, "http://ollama");
+    var rr2 = route_new(PROV_LLAMACPP, 1, "http://llamacpp");
+    var rroutes = alloc(16);
+    store64(rroutes, rr1);
+    store64(rroutes + 8, rr2);
+    var rrrt = router_new(rroutes, 2, STRAT_ROUND_ROBIN);
+
+    var first = route_provider(router_select(rrrt, "llama3"));
+    var second = route_provider(router_select(rrrt, "llama3"));
+    assert(first != second, "round robin alternates");
+
+    # ── Router: lowest latency ────────────────────────────────────
+    test_group("router_lowest_latency");
+
+    var ll1 = route_new(PROV_OLLAMA, 2, "http://ollama");
+    var ll2 = route_new(PROV_LLAMACPP, 1, "http://llamacpp");
+    var llroutes = alloc(16);
+    store64(llroutes, ll1);
+    store64(llroutes + 8, ll2);
+    var llrt = router_new(llroutes, 2, STRAT_LOWEST_LATENCY);
+    router_report_latency(llrt, "http://llamacpp", 500);
+    router_report_latency(llrt, "http://ollama", 50);
+
+    sel = router_select(llrt, "any");
+    assert_eq(route_provider(sel), PROV_OLLAMA, "lowest latency picks fastest");
+
+    # ── Router: latency EMA ───────────────────────────────────────
+    test_group("router_latency_ema");
+
+    var ema_r = route_new(PROV_OLLAMA, 1, "http://localhost");
+    var ema_routes = alloc(8);
+    store64(ema_routes, ema_r);
+    var ema_rt = router_new(ema_routes, 1, STRAT_LOWEST_LATENCY);
+    router_report_latency(ema_rt, "http://localhost", 100);
+    router_report_latency(ema_rt, "http://localhost", 200);
+    # EMA: (100*7 + 200*3)/10 = 130
+    var lat_map = load64(ema_rt + ROUTER_LATENCIES);
+    assert_eq(map_get(lat_map, "http://localhost"), 130, "latency EMA 130");
+    router_report_latency(ema_rt, "http://localhost", 50);
+    # EMA: (130*7 + 50*3)/10 = 106
+    assert_eq(map_get(lat_map, "http://localhost"), 106, "latency EMA 106");
+
+    # ── Router: exact model match ─────────────────────────────────
+    test_group("router_exact_match");
+
+    var expats = alloc(8);
+    store64(expats, "llama3.2:latest");
+    var exr = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    route_set_patterns(exr, expats, 1);
+    var exroutes = alloc(8);
+    store64(exroutes, exr);
+    var exrt = router_new(exroutes, 1, STRAT_PRIORITY);
+    assert(router_select(exrt, "llama3.2:latest") != 0, "exact match found");
+    assert_eq(router_select(exrt, "llama3.2"), 0, "partial exact no match");
+
+    # ── Router: multiple model patterns ───────────────────────────
+    test_group("router_multi_patterns");
+
+    var mpats = alloc(16);
+    store64(mpats, "llama*");
+    store64(mpats + 8, "mistral*");
+    var mpr = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    route_set_patterns(mpr, mpats, 2);
+    var mproutes = alloc(8);
+    store64(mproutes, mpr);
+    var mprt = router_new(mproutes, 1, STRAT_PRIORITY);
+    assert(router_select(mprt, "llama3") != 0, "multi: llama3 matches");
+    assert(router_select(mprt, "mistral-7b") != 0, "multi: mistral-7b matches");
+    assert_eq(router_select(mprt, "gpt-4o"), 0, "multi: gpt-4o no match");
+
+    # ── Token pool basic ──────────────────────────────────────────
+    test_group("token_pool");
+
+    var tp = pool_new("test", 1000);
+    assert_eq(pool_available(tp), 1000, "pool initial available");
+    assert(pool_reserve(tp, 400) == 1, "pool reserve 400");
+    assert_eq(pool_available(tp), 600, "pool available after reserve");
+    pool_commit(tp, 400, 350);
+    assert_eq(pool_used(tp), 350, "pool used after commit");
+    assert_eq(pool_reserved(tp), 0, "pool reserved after commit");
+    assert_eq(pool_available(tp), 650, "pool available after commit");
+
+    # ── Token pool over budget ────────────────────────────────────
+    test_group("token_pool_over_budget");
+
+    var op = pool_new("small", 100);
+    assert(pool_can_reserve(op, 200) == 0, "cannot reserve over capacity");
+
+    # ── Token pool release ────────────────────────────────────────
+    test_group("token_pool_release");
+
+    var rp = pool_new("release", 1000);
+    pool_reserve(rp, 500);
+    pool_release(rp, 500);
+    assert_eq(pool_reserved(rp), 0, "reserved 0 after release");
+    assert_eq(pool_available(rp), 1000, "available restored after release");
+
+    # ── Budget multi-pool ─────────────────────────────────────────
+    test_group("budget_multi_pool");
+
+    var bgt = budget_new();
+    budget_add_pool(bgt, pool_new("default", 10000));
+    budget_add_pool(bgt, pool_new("agent-1", 5000));
+    assert(budget_check(bgt, "default", 8000) == 1, "default can reserve 8k");
+    assert(budget_check(bgt, "agent-1", 8000) == 0, "agent-1 cannot reserve 8k");
+    assert(budget_check(bgt, "nonexistent", 1) == 0, "nonexistent pool fails");
+
+    # ── Budget reserve + report ───────────────────────────────────
+    test_group("budget_reserve_report");
+
+    var bgt2 = budget_new();
+    budget_add_pool(bgt2, pool_new("pool", 1000));
+    assert(budget_reserve(bgt2, "pool", 500) == 1, "budget reserve 500");
+    budget_report(bgt2, "pool", 500, 420);
+    var bp = budget_get_pool(bgt2, "pool");
+    assert_eq(pool_used(bp), 420, "budget used 420");
+    assert_eq(pool_reserved(bp), 0, "budget reserved 0");
+
+    # ── Cache basic ───────────────────────────────────────────────
+    test_group("cache");
+
+    var ca = cache_new(1000, 1);
+    cache_insert(ca, "key1", 42);
+    assert_eq(cache_get(ca, "key1"), 42, "cache get hit");
+    assert_eq(cache_get(ca, "missing"), 0, "cache get miss");
+    assert_eq(cache_hits(ca), 1, "cache 1 hit");
+    assert_eq(cache_misses(ca), 1, "cache 1 miss");
+
+    # ── Cache disabled ────────────────────────────────────────────
+    test_group("cache_disabled");
+
+    var cd = cache_new(1000, 0);
+    cache_insert(cd, "key", 99);
+    assert_eq(cache_get(cd, "key"), 0, "disabled cache returns 0");
+
+    # ── Cache clear ───────────────────────────────────────────────
+    test_group("cache_clear");
+
+    var cc = cache_new(1000, 1);
+    cache_insert(cc, "a", 1);
+    cache_insert(cc, "b", 2);
+    assert_eq(cache_len(cc), 2, "cache len 2");
+    cache_clear(cc);
+    assert_eq(cache_len(cc), 0, "cache len 0 after clear");
+
+    # ── Cost tracker: local free ──────────────────────────────────
+    test_group("cost_tracker");
+
+    assert_eq(cost_calculate("anything", PROV_OLLAMA, 1000, 500), 0, "local provider free");
+    assert_eq(cost_calculate("anything", PROV_LLAMACPP, 1000, 500), 0, "llamacpp free");
+    assert_eq(cost_calculate("anything", PROV_SYNAPSE, 1000, 500), 0, "synapse free");
+
+    # ── Cost tracker: known model pricing ─────────────────────────
+    test_group("cost_pricing");
+
+    # gpt-4o: $2.5M input, $10M output → for 1M tokens input only = $2.50 = 2500000 microdollars
+    var gpt_cost = cost_calculate("gpt-4o", PROV_OPENAI, 1000000, 0);
+    assert_eq(gpt_cost, 2500000, "gpt-4o 1M input = $2.50");
+
+    # ── Cost tracker: prefix match ────────────────────────────────
+    test_group("cost_prefix");
+
+    var sonnet_cost = cost_calculate("claude-sonnet-4-20250514", PROV_ANTHROPIC, 1000000, 0);
+    assert_eq(sonnet_cost, 3000000, "claude-sonnet-4 prefix match = $3.00");
+
+    # ── Cost tracker: accumulation ────────────────────────────────
+    test_group("cost_accumulation");
+
+    var ct = cost_tracker_new();
+    cost_tracker_record(ct, PROV_OPENAI, "gpt-4o", 100, 50);
+    cost_tracker_record(ct, PROV_OPENAI, "gpt-4o", 100, 50);
+    var rec = map_get(ct, "openai");
+    assert(rec != 0, "openai record exists");
+    assert_eq(load64(rec + COST_REC_REQS), 2, "2 requests accumulated");
+    assert_eq(load64(rec + COST_REC_INPUT), 200, "200 input tokens");
+    assert_eq(load64(rec + COST_REC_OUTPUT), 100, "100 output tokens");
+
+    # ── Cost tracker: separate providers ──────────────────────────
+    test_group("cost_separate_providers");
+
+    var ct2 = cost_tracker_new();
+    cost_tracker_record(ct2, PROV_OPENAI, "gpt-4o", 100, 50);
+    cost_tracker_record(ct2, PROV_ANTHROPIC, "claude-sonnet-4", 100, 50);
+    assert(map_get(ct2, "openai") != 0, "openai record");
+    assert(map_get(ct2, "anthropic") != 0, "anthropic record");
+
+    # ── Queue: priority ordering ──────────────────────────────────
+    test_group("queue_priority");
+
+    var q = queue_new();
+    queue_enqueue(q, "llama3", "default", "req-1", PRI_NORMAL);
+    queue_enqueue(q, "gpt-4o", "default", "req-2", PRI_CRITICAL);
+
+    var item = queue_dequeue(q);
+    assert(item != 0, "dequeue item 1");
+    assert_streq(load64(item + QITEM_ID), "req-2", "critical first");
+
+    item = queue_dequeue(q);
+    assert(item != 0, "dequeue item 2");
+    assert_streq(load64(item + QITEM_ID), "req-1", "normal second");
+
+    # ── Queue: empty returns 0 ────────────────────────────────────
+    test_group("queue_empty");
+
+    var eq = queue_new();
+    assert_eq(queue_dequeue(eq), 0, "empty queue returns 0");
+    assert(queue_is_empty(eq) == 1, "queue is empty");
+
+    # ── Queue: len tracking ───────────────────────────────────────
+    test_group("queue_len");
+
+    var lq = queue_new();
+    assert_eq(queue_len(lq), 0, "initial len 0");
+    queue_enqueue(lq, "m", "p", "r1", PRI_NORMAL);
+    assert_eq(queue_len(lq), 1, "len 1 after enqueue");
+    queue_enqueue(lq, "m", "p", "r2", PRI_HIGH);
+    assert_eq(queue_len(lq), 2, "len 2");
+    queue_dequeue(lq);
+    assert_eq(queue_len(lq), 1, "len 1 after dequeue");
+    queue_dequeue(lq);
+    assert_eq(queue_len(lq), 0, "len 0 after drain");
+
+    # ── Queue: all 5 tiers ────────────────────────────────────────
+    test_group("queue_all_tiers");
+
+    var tq = queue_new();
+    queue_enqueue(tq, "m", "p", "normal", PRI_NORMAL);
+    queue_enqueue(tq, "m", "p", "background", PRI_BACKGROUND);
+    queue_enqueue(tq, "m", "p", "critical", PRI_CRITICAL);
+    queue_enqueue(tq, "m", "p", "low", PRI_LOW);
+    queue_enqueue(tq, "m", "p", "high", PRI_HIGH);
+
+    assert_eq(queue_len(tq), 5, "5 items queued");
+    assert_streq(load64(queue_dequeue(tq) + QITEM_ID), "critical", "tier: critical first");
+    assert_streq(load64(queue_dequeue(tq) + QITEM_ID), "high", "tier: high second");
+    assert_streq(load64(queue_dequeue(tq) + QITEM_ID), "normal", "tier: normal third");
+    assert_streq(load64(queue_dequeue(tq) + QITEM_ID), "low", "tier: low fourth");
+    assert_streq(load64(queue_dequeue(tq) + QITEM_ID), "background", "tier: background last");
+    assert(queue_is_empty(tq) == 1, "queue empty after drain");
+
+    # ── Queue: same priority FIFO ─────────────────────────────────
+    test_group("queue_fifo");
+
+    var fq = queue_new();
+    queue_enqueue(fq, "m", "p", "first", PRI_NORMAL);
+    queue_enqueue(fq, "m", "p", "second", PRI_NORMAL);
+    queue_enqueue(fq, "m", "p", "third", PRI_NORMAL);
+    assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "first", "fifo: first");
+    assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "second", "fifo: second");
+    assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "third", "fifo: third");
+
+    # ── Summary ───────────────────────────────────────────────────
+    var failures = assert_summary();
+    return failures;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

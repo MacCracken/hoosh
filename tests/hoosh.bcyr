@@ -1,0 +1,449 @@
+# hoosh.bcyr — hoosh gateway benchmarks (Wave 1: pure logic)
+# Benchmarks: routing, token budget, cache, cost, queue
+#
+# Run: cyrius bench tests/hoosh.bcyr
+#   or: cyrius build tests/hoosh.bcyr /tmp/hoosh_bench && /tmp/hoosh_bench
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/hashmap.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+
+# ================================================================
+# Inline all types from the test file (same definitions)
+# These will be factored into src/ modules during the actual port
+# ================================================================
+
+# Provider types
+enum Provider {
+    PROV_OLLAMA     = 0;
+    PROV_LLAMACPP   = 1;
+    PROV_SYNAPSE    = 2;
+    PROV_LMSTUDIO   = 3;
+    PROV_LOCALAI    = 4;
+    PROV_OPENAI     = 5;
+    PROV_ANTHROPIC  = 6;
+    PROV_DEEPSEEK   = 7;
+    PROV_MISTRAL    = 8;
+    PROV_GOOGLE     = 9;
+    PROV_GROQ       = 10;
+    PROV_GROK       = 11;
+    PROV_OPENROUTER = 12;
+    PROV_WHISPER    = 13;
+    PROV_COUNT      = 14;
+}
+
+fn provider_is_local(prov) {
+    if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
+    if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
+    return 0;
+}
+
+fn provider_name(prov) {
+    if (prov == PROV_OLLAMA) { return "ollama"; }
+    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
+    if (prov == PROV_OPENAI) { return "openai"; }
+    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
+    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
+    return "unknown";
+}
+
+# Route struct
+enum RouteField {
+    ROUTE_SIZE       = 64;
+    ROUTE_PROVIDER   = 0;
+    ROUTE_PRIORITY   = 8;
+    ROUTE_PATTERNS   = 16;
+    ROUTE_PATTERNS_N = 24;
+    ROUTE_ENABLED    = 32;
+    ROUTE_BASE_URL   = 40;
+}
+
+fn route_new(prov, priority, base_url) {
+    var r = alloc(ROUTE_SIZE);
+    store64(r + ROUTE_PROVIDER, prov);
+    store64(r + ROUTE_PRIORITY, priority);
+    store64(r + ROUTE_PATTERNS, 0);
+    store64(r + ROUTE_PATTERNS_N, 0);
+    store64(r + ROUTE_ENABLED, 1);
+    store64(r + ROUTE_BASE_URL, base_url);
+    return r;
+}
+
+fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
+fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
+fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
+fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
+
+fn route_set_patterns(r, patterns, count) {
+    store64(r + ROUTE_PATTERNS, patterns);
+    store64(r + ROUTE_PATTERNS_N, count);
+    return 0;
+}
+
+fn route_matches_model(r, model) {
+    var count = load64(r + ROUTE_PATTERNS_N);
+    if (count == 0) { return 1; }
+    var arr = load64(r + ROUTE_PATTERNS);
+    var i = 0;
+    while (i < count) {
+        var pattern = load64(arr + i * 8);
+        var plen = strlen(pattern);
+        if (plen > 0 && load8(pattern + plen - 1) == 42) {
+            if (memeq(model, pattern, plen - 1) == 1) { return 1; }
+        } else {
+            if (streq(model, pattern) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Router
+enum RouterField {
+    ROUTER_SIZE      = 40;
+    ROUTER_ROUTES    = 0;
+    ROUTER_COUNT     = 8;
+    ROUTER_STRATEGY  = 16;
+    ROUTER_RR_IDX    = 24;
+    ROUTER_LATENCIES = 32;
+}
+
+enum Strategy {
+    STRAT_PRIORITY       = 0;
+    STRAT_ROUND_ROBIN    = 1;
+    STRAT_LOWEST_LATENCY = 2;
+    STRAT_DIRECT         = 3;
+}
+
+fn router_new(routes, count, strategy) {
+    var rt = alloc(ROUTER_SIZE);
+    store64(rt + ROUTER_ROUTES, routes);
+    store64(rt + ROUTER_COUNT, count);
+    store64(rt + ROUTER_STRATEGY, strategy);
+    store64(rt + ROUTER_RR_IDX, 0);
+    store64(rt + ROUTER_LATENCIES, map_new());
+    var i = 1;
+    while (i < count) {
+        var key = load64(routes + i * 8);
+        var kp = route_priority(key);
+        var j = i - 1;
+        while (j >= 0) {
+            if (route_priority(load64(routes + j * 8)) <= kp) { break; }
+            store64(routes + (j + 1) * 8, load64(routes + j * 8));
+            j = j - 1;
+        }
+        store64(routes + (j + 1) * 8, key);
+        i = i + 1;
+    }
+    return rt;
+}
+
+fn router_select(rt, model) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var strategy = load64(rt + ROUTER_STRATEGY);
+    var cand = alloc(count * 8);
+    var cn = 0;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && route_matches_model(r, model) == 1) {
+            store64(cand + cn * 8, r);
+            cn = cn + 1;
+        }
+        i = i + 1;
+    }
+    if (cn == 0) { return 0; }
+    if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) { return load64(cand); }
+    if (strategy == STRAT_ROUND_ROBIN) {
+        var idx = load64(rt + ROUTER_RR_IDX);
+        store64(rt + ROUTER_RR_IDX, idx + 1);
+        return load64(cand + (idx % cn) * 8);
+    }
+    return load64(cand);
+}
+
+# Token pool
+enum PoolField {
+    POOL_SIZE = 32; POOL_NAME = 0; POOL_CAPACITY = 8; POOL_USED = 16; POOL_RESERVED = 24;
+}
+
+fn pool_new(name, capacity) {
+    var p = alloc(POOL_SIZE);
+    store64(p + POOL_NAME, name);
+    store64(p + POOL_CAPACITY, capacity);
+    store64(p + POOL_USED, 0);
+    store64(p + POOL_RESERVED, 0);
+    return p;
+}
+
+fn pool_available(p) {
+    var taken = load64(p + POOL_USED) + load64(p + POOL_RESERVED);
+    var cap = load64(p + POOL_CAPACITY);
+    if (taken > cap) { return 0; }
+    return cap - taken;
+}
+
+fn pool_reserve(p, tokens) {
+    if (pool_available(p) < tokens) { return 0; }
+    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
+    return 1;
+}
+
+fn pool_commit(p, reserved, actual) {
+    var resv = load64(p + POOL_RESERVED);
+    if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
+    else { store64(p + POOL_RESERVED, 0); }
+    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    return 0;
+}
+
+# Cache
+fn cache_new(max, enabled) {
+    var c = alloc(48);
+    store64(c, map_new());
+    store64(c + 8, max);
+    store64(c + 16, 0);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, enabled);
+    return c;
+}
+
+fn cache_get(c, key) {
+    if (load64(c + 40) == 0) { return 0; }
+    var val = map_get(load64(c), key);
+    if (val == 0) { store64(c + 24, load64(c + 24) + 1); return 0; }
+    store64(c + 16, load64(c + 16) + 1);
+    return val;
+}
+
+fn cache_insert(c, key, val) {
+    if (load64(c + 40) == 0) { return 0; }
+    map_set(load64(c), key, val);
+    return 0;
+}
+
+# Queue
+enum QueuePriority {
+    PRI_CRITICAL = 0; PRI_HIGH = 1; PRI_NORMAL = 2; PRI_LOW = 3; PRI_BACKGROUND = 4; PRI_TIERS = 5;
+}
+
+fn queue_new() {
+    var q = alloc(PRI_TIERS * 8);
+    var i = 0;
+    while (i < PRI_TIERS) { store64(q + i * 8, vec_new(8)); i = i + 1; }
+    return q;
+}
+
+fn queue_enqueue(q, model, pool, rid, pri) {
+    var item = alloc(24);
+    store64(item, model); store64(item + 8, pool); store64(item + 16, rid);
+    vec_push(load64(q + pri * 8), item);
+    return 0;
+}
+
+fn queue_dequeue(q) {
+    var i = 0;
+    while (i < PRI_TIERS) {
+        var tier = load64(q + i * 8);
+        if (vec_len(tier) > 0) { var item = vec_get(tier, 0); vec_remove(tier, 0); return item; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Benchmark globals for callbacks
+# ================================================================
+
+var _b_router = 0;
+var _b_pool = 0;
+var _b_cache = 0;
+var _b_queue = 0;
+
+# ================================================================
+# BENCHMARKS
+# ================================================================
+
+fn main() {
+    alloc_init();
+
+    println("=== hoosh benchmarks ===");
+    println("");
+
+    # ── Setup: 20-provider router (matches Rust bench) ────────────
+    var routes = alloc(20 * 8);
+    var i = 0;
+    while (i < 20) {
+        var prov = i % PROV_COUNT;
+        var r = route_new(prov, i + 1, "http://localhost");
+        var pats = alloc(8);
+        store64(pats, "llama*");
+        route_set_patterns(r, pats, 1);
+        store64(routes + i * 8, r);
+        i = i + 1;
+    }
+    _b_router = router_new(routes, 20, STRAT_PRIORITY);
+
+    # ── Benchmark: route_select_20_providers ──────────────────────
+    var b = bench_new("route_select_20_providers");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        router_select(_b_router, "llama3");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: route_round_robin_10 ───────────────────────────
+    var rr_routes = alloc(10 * 8);
+    i = 0;
+    while (i < 10) {
+        var r = route_new(i % PROV_COUNT, 1, "http://localhost");
+        store64(rr_routes + i * 8, r);
+        i = i + 1;
+    }
+    var rr_rt = router_new(rr_routes, 10, STRAT_ROUND_ROBIN);
+
+    b = bench_new("route_round_robin_10");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        router_select(rr_rt, "anything");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: pool_reserve_commit_cycle ──────────────────────
+    b = bench_new("pool_reserve_commit");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        var p = pool_new("bench", 1000000);
+        pool_reserve(p, 500);
+        pool_commit(p, 500, 420);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: pool_available ─────────────────────────────────
+    _b_pool = pool_new("bench", 1000000);
+    pool_reserve(_b_pool, 50000);
+
+    b = bench_new("pool_available");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        pool_available(_b_pool);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # ── Benchmark: cache_get_hit ──────────────────────────────────
+    _b_cache = cache_new(10000, 1);
+    cache_insert(_b_cache, "prompt-hash-1", 42);
+
+    b = bench_new("cache_get_hit");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        cache_get(_b_cache, "prompt-hash-1");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: cache_get_miss ─────────────────────────────────
+    b = bench_new("cache_get_miss");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        cache_get(_b_cache, "nonexistent-key");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: cache_insert ───────────────────────────────────
+    b = bench_new("cache_insert");
+    var ci_cache = cache_new(100000, 1);
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        cache_insert(ci_cache, "key", i);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: queue_enqueue_dequeue ──────────────────────────
+    b = bench_new("queue_enqueue_dequeue");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        var q = queue_new();
+        queue_enqueue(q, "m", "p", "r", PRI_NORMAL);
+        queue_dequeue(q);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: queue_priority_sort (5 tiers) ──────────────────
+    b = bench_new("queue_5tier_sort");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        var q = queue_new();
+        queue_enqueue(q, "m", "p", "n", PRI_NORMAL);
+        queue_enqueue(q, "m", "p", "b", PRI_BACKGROUND);
+        queue_enqueue(q, "m", "p", "c", PRI_CRITICAL);
+        queue_enqueue(q, "m", "p", "l", PRI_LOW);
+        queue_enqueue(q, "m", "p", "h", PRI_HIGH);
+        queue_dequeue(q);
+        queue_dequeue(q);
+        queue_dequeue(q);
+        queue_dequeue(q);
+        queue_dequeue(q);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: route_matches_model (pattern match) ────────────
+    var pats = alloc(16);
+    store64(pats, "llama*");
+    store64(pats + 8, "mistral*");
+    var mr = route_new(PROV_OLLAMA, 1, "http://localhost");
+    route_set_patterns(mr, pats, 2);
+
+    b = bench_new("route_matches_model");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        route_matches_model(mr, "llama3.2:latest");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    println("");
+    println("done");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
