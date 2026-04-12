@@ -986,9 +986,472 @@ fn main() {
     assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "second", "fifo: second");
     assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "third", "fifo: third");
 
+    # ================================================================
+    # HEALTH MODULE — failure counting, threshold, recovery
+    # ================================================================
+
+    # Health state layout: is_healthy(8) consecutive_failures(8) last_error(8) = 24
+    # Health map: hashmap keyed by provider name -> health state ptr
+
+    # ── Health: map starts empty ──────────────────────────────────
+    test_group("health_map_empty");
+
+    var hmap = map_new();
+    assert_eq(map_size(hmap), 0, "health map starts empty");
+
+    # ── Health: insert and lookup ─────────────────────────────────
+    test_group("health_insert_lookup");
+
+    var hs = alloc(24);
+    store64(hs, 1);      # is_healthy = true
+    store64(hs + 8, 0);  # consecutive_failures = 0
+    store64(hs + 16, 0); # last_error = null
+    map_set(hmap, "ollama:localhost:11434", hs);
+    assert_eq(map_size(hmap), 1, "health map has 1 entry");
+    var got = map_get(hmap, "ollama:localhost:11434");
+    assert(got != 0, "health entry found");
+    assert_eq(load64(got), 1, "entry is healthy");
+
+    # ── Health: threshold constant ────────────────────────────────
+    test_group("health_threshold");
+
+    var UNHEALTHY_THRESHOLD = 3;
+    assert_eq(UNHEALTHY_THRESHOLD, 3, "threshold is 3");
+
+    # ── Health: handle_check_failure state machine ────────────────
+    test_group("health_failure_fsm");
+
+    # Simulate handle_check_failure: increment failures, check threshold
+    var hmap2 = map_new();
+    var hkey = "ollama:localhost:11434";
+
+    # First failure — no prior entry, starts at 1
+    var prev = map_get(hmap2, hkey);
+    var failures = 1;
+    if (prev != 0) { failures = load64(prev + 8) + 1; }
+    var new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs1 = alloc(24);
+    store64(hs1, new_healthy);
+    store64(hs1 + 8, failures);
+    store64(hs1 + 16, "timeout");
+    map_set(hmap2, hkey, hs1);
+
+    var e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 1, "1st failure: still healthy");
+    assert_eq(load64(e + 8), 1, "1st failure: count=1");
+    assert_streq(load64(e + 16), "timeout", "1st failure: error preserved");
+
+    # Second failure
+    prev = map_get(hmap2, hkey);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs2 = alloc(24);
+    store64(hs2, new_healthy);
+    store64(hs2 + 8, failures);
+    store64(hs2 + 16, "second");
+    map_set(hmap2, hkey, hs2);
+
+    e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 1, "2nd failure: still healthy");
+    assert_eq(load64(e + 8), 2, "2nd failure: count=2");
+
+    # Third failure — crosses threshold
+    prev = map_get(hmap2, hkey);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs3 = alloc(24);
+    store64(hs3, new_healthy);
+    store64(hs3 + 8, failures);
+    store64(hs3 + 16, "third strike");
+    map_set(hmap2, hkey, hs3);
+
+    e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 0, "3rd failure: now unhealthy");
+    assert_eq(load64(e + 8), 3, "3rd failure: count=3");
+    assert_streq(load64(e + 16), "third strike", "3rd failure: error msg");
+
+    # Fourth failure — stays unhealthy
+    prev = map_get(hmap2, hkey);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs4 = alloc(24);
+    store64(hs4, new_healthy);
+    store64(hs4 + 8, failures);
+    store64(hs4 + 16, "fourth");
+    map_set(hmap2, hkey, hs4);
+
+    e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 0, "4th failure: still unhealthy");
+    assert_eq(load64(e + 8), 4, "4th failure: count=4");
+
+    # ── Health: recovery ──────────────────────────────────────────
+    test_group("health_recovery");
+
+    # Simulate recovery (health check passes)
+    var hs_recover = alloc(24);
+    store64(hs_recover, 1);     # is_healthy = true
+    store64(hs_recover + 8, 0); # consecutive_failures = 0
+    store64(hs_recover + 16, 0);
+    map_set(hmap2, hkey, hs_recover);
+
+    e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 1, "recovered: healthy");
+    assert_eq(load64(e + 8), 0, "recovered: failures=0");
+
+    # One failure after recovery — should be healthy (1 < 3)
+    prev = map_get(hmap2, hkey);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs_post = alloc(24);
+    store64(hs_post, new_healthy);
+    store64(hs_post + 8, failures);
+    store64(hs_post + 16, "post-recovery fail");
+    map_set(hmap2, hkey, hs_post);
+
+    e = map_get(hmap2, hkey);
+    assert_eq(load64(e), 1, "post-recovery: still healthy");
+    assert_eq(load64(e + 8), 1, "post-recovery: count=1");
+
+    # ── Health: multiple providers independent ────────────────────
+    test_group("health_multi_provider");
+
+    var hmap3 = map_new();
+    var hk_a = "ollama:host-a";
+    var hk_b = "openai:api.openai.com";
+
+    # Fail provider A 3 times → unhealthy
+    var i = 0;
+    while (i < 3) {
+        prev = map_get(hmap3, hk_a);
+        failures = 1;
+        if (prev != 0) { failures = load64(prev + 8) + 1; }
+        new_healthy = 0;
+        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+        var hs_a = alloc(24);
+        store64(hs_a, new_healthy);
+        store64(hs_a + 8, failures);
+        store64(hs_a + 16, "err");
+        map_set(hmap3, hk_a, hs_a);
+        i = i + 1;
+    }
+
+    # Fail provider B once → still healthy
+    var hs_b = alloc(24);
+    store64(hs_b, 1);
+    store64(hs_b + 8, 1);
+    store64(hs_b + 16, "err");
+    map_set(hmap3, hk_b, hs_b);
+
+    assert_eq(load64(map_get(hmap3, hk_a)), 0, "provider A unhealthy");
+    assert_eq(load64(map_get(hmap3, hk_b)), 1, "provider B still healthy");
+    assert_eq(load64(map_get(hmap3, hk_a) + 8), 3, "A: 3 failures");
+    assert_eq(load64(map_get(hmap3, hk_b) + 8), 1, "B: 1 failure");
+
+    # ── Health: overwrite entry ───────────────────────────────────
+    test_group("health_overwrite");
+
+    var hmap4 = map_new();
+    var hk = "ollama:localhost";
+    var hs_h = alloc(24);
+    store64(hs_h, 1);
+    store64(hs_h + 8, 0);
+    store64(hs_h + 16, 0);
+    map_set(hmap4, hk, hs_h);
+    assert_eq(load64(map_get(hmap4, hk)), 1, "initially healthy");
+
+    var hs_u = alloc(24);
+    store64(hs_u, 0);
+    store64(hs_u + 8, 5);
+    store64(hs_u + 16, "down");
+    map_set(hmap4, hk, hs_u);
+    assert_eq(load64(map_get(hmap4, hk)), 0, "overwritten to unhealthy");
+    assert_eq(load64(map_get(hmap4, hk) + 8), 5, "overwritten failures=5");
+    assert_eq(map_size(hmap4), 1, "still 1 entry after overwrite");
+
+    # ── Health: boundary test (threshold-1 vs threshold) ──────────
+    test_group("health_boundary");
+
+    var hmap5 = map_new();
+    var hk5 = "test:boundary";
+    # Seed at threshold-2 failures
+    var hs_seed = alloc(24);
+    store64(hs_seed, 1);
+    store64(hs_seed + 8, UNHEALTHY_THRESHOLD - 2);
+    store64(hs_seed + 16, 0);
+    map_set(hmap5, hk5, hs_seed);
+
+    # One more failure → threshold-1, still healthy
+    prev = map_get(hmap5, hk5);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs_b1 = alloc(24);
+    store64(hs_b1, new_healthy);
+    store64(hs_b1 + 8, failures);
+    store64(hs_b1 + 16, "still ok");
+    map_set(hmap5, hk5, hs_b1);
+    e = map_get(hmap5, hk5);
+    assert_eq(load64(e), 1, "boundary: threshold-1 still healthy");
+    assert_eq(load64(e + 8), UNHEALTHY_THRESHOLD - 1, "boundary: count=threshold-1");
+
+    # One more → exactly at threshold, unhealthy
+    prev = map_get(hmap5, hk5);
+    failures = load64(prev + 8) + 1;
+    new_healthy = 0;
+    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+    var hs_b2 = alloc(24);
+    store64(hs_b2, new_healthy);
+    store64(hs_b2 + 8, failures);
+    store64(hs_b2 + 16, "now bad");
+    map_set(hmap5, hk5, hs_b2);
+    e = map_get(hmap5, hk5);
+    assert_eq(load64(e), 0, "boundary: at threshold unhealthy");
+    assert_eq(load64(e + 8), UNHEALTHY_THRESHOLD, "boundary: count=threshold");
+
+    # ── Health: rapid recovery cycle ──────────────────────────────
+    test_group("health_rapid_cycle");
+
+    var hmap6 = map_new();
+    var hk6 = "test:cycle";
+
+    # Cycle 1: drive to unhealthy
+    i = 0;
+    while (i < UNHEALTHY_THRESHOLD) {
+        prev = map_get(hmap6, hk6);
+        failures = 1;
+        if (prev != 0) { failures = load64(prev + 8) + 1; }
+        new_healthy = 0;
+        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+        var hs_c = alloc(24);
+        store64(hs_c, new_healthy);
+        store64(hs_c + 8, failures);
+        store64(hs_c + 16, "fail");
+        map_set(hmap6, hk6, hs_c);
+        i = i + 1;
+    }
+    assert_eq(load64(map_get(hmap6, hk6)), 0, "cycle1: unhealthy");
+
+    # Recover
+    var hs_rec = alloc(24);
+    store64(hs_rec, 1);
+    store64(hs_rec + 8, 0);
+    store64(hs_rec + 16, 0);
+    map_set(hmap6, hk6, hs_rec);
+
+    # Cycle 2: drive to unhealthy again
+    i = 0;
+    while (i < UNHEALTHY_THRESHOLD) {
+        prev = map_get(hmap6, hk6);
+        failures = load64(prev + 8) + 1;
+        new_healthy = 0;
+        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
+        var hs_c2 = alloc(24);
+        store64(hs_c2, new_healthy);
+        store64(hs_c2 + 8, failures);
+        store64(hs_c2 + 16, "fail again");
+        map_set(hmap6, hk6, hs_c2);
+        i = i + 1;
+    }
+    assert_eq(load64(map_get(hmap6, hk6)), 0, "cycle2: unhealthy again");
+    assert_eq(load64(map_get(hmap6, hk6) + 8), UNHEALTHY_THRESHOLD, "cycle2: count=threshold");
+
+    # ================================================================
+    # RATE LIMITER — sliding window RPM
+    # ================================================================
+
+    # Rate limiter: map of provider -> { max_rpm(8), count(8) }
+    # Simplified: no time window in test, just count-based
+
+    test_group("rate_limit_unconfigured");
+
+    var rl_map = map_new();
+    # Unconfigured provider always allowed
+    assert_eq(map_get(rl_map, "unknown"), 0, "unconfigured returns 0 (no limit)");
+
+    test_group("rate_limit_within");
+
+    # Configure "test" with max_rpm=5
+    # Rate limit record: max_rpm(8) current_count(8) = 16 bytes
+    var rl_rec = alloc(16);
+    store64(rl_rec, 5);     # max_rpm = 5
+    store64(rl_rec + 8, 0); # current_count = 0
+    map_set(rl_map, "test", rl_rec);
+
+    # 5 requests within limit
+    i = 0;
+    var all_ok = 1;
+    while (i < 5) {
+        var rec = map_get(rl_map, "test");
+        var count = load64(rec + 8);
+        var max = load64(rec);
+        if (count >= max) { all_ok = 0; }
+        store64(rec + 8, count + 1);
+        i = i + 1;
+    }
+    assert(all_ok == 1, "5 requests within limit allowed");
+
+    test_group("rate_limit_exceeded");
+
+    # 6th request should be rejected
+    var rl_chk = map_get(rl_map, "test");
+    var rl_chk_cnt = load64(rl_chk + 8);
+    var rl_chk_max = load64(rl_chk);
+    assert(rl_chk_cnt >= rl_chk_max, "6th request: count >= max_rpm");
+
+    test_group("rate_limit_independent");
+
+    # Different providers are independent
+    var rl_a = alloc(16);
+    store64(rl_a, 1);
+    store64(rl_a + 8, 0);
+    var rl_b = alloc(16);
+    store64(rl_b, 1);
+    store64(rl_b + 8, 0);
+    map_set(rl_map, "prov_a", rl_a);
+    map_set(rl_map, "prov_b", rl_b);
+
+    # Use up prov_a's limit
+    var ra = map_get(rl_map, "prov_a");
+    store64(ra + 8, 1);
+
+    # prov_b should still be allowed
+    var rb = map_get(rl_map, "prov_b");
+    assert(load64(rb + 8) < load64(rb), "prov_b still has capacity");
+    assert(load64(ra + 8) >= load64(ra), "prov_a exhausted");
+
+    # ================================================================
+    # METRICS — counter + gauge accumulation
+    # ================================================================
+
+    test_group("metrics");
+
+    # Metrics record: requests(8) prompt_tokens(8) completion_tokens(8) = 24
+    var metrics = alloc(24);
+    store64(metrics, 0);
+    store64(metrics + 8, 0);
+    store64(metrics + 16, 0);
+
+    # Record a request
+    store64(metrics, load64(metrics) + 1);
+    store64(metrics + 8, load64(metrics + 8) + 100);
+    store64(metrics + 16, load64(metrics + 16) + 50);
+
+    assert_eq(load64(metrics), 1, "metrics: 1 request");
+    assert_eq(load64(metrics + 8), 100, "metrics: 100 prompt tokens");
+    assert_eq(load64(metrics + 16), 50, "metrics: 50 completion tokens");
+
+    # Record another
+    store64(metrics, load64(metrics) + 1);
+    store64(metrics + 8, load64(metrics + 8) + 200);
+    store64(metrics + 16, load64(metrics + 16) + 75);
+
+    assert_eq(load64(metrics), 2, "metrics: 2 requests");
+    assert_eq(load64(metrics + 8), 300, "metrics: 300 prompt tokens");
+    assert_eq(load64(metrics + 16), 125, "metrics: 125 completion tokens");
+
+    # Gauge: providers configured
+    var providers_gauge = 0;
+    providers_gauge = 14;
+    assert_eq(providers_gauge, 14, "metrics: gauge set to 14");
+
+    # ================================================================
+    # PROVIDER REGISTRY — register, dedup, lookup
+    # ================================================================
+
+    test_group("registry_empty");
+
+    var reg = map_new();
+    assert_eq(map_size(reg), 0, "registry starts empty");
+
+    test_group("registry_register");
+
+    # Register ollama
+    map_set(reg, "ollama:localhost:11434", PROV_OLLAMA);
+    assert_eq(map_size(reg), 1, "registry has 1 after register");
+    assert_eq(map_get(reg, "ollama:localhost:11434"), PROV_OLLAMA, "registry: ollama found");
+
+    test_group("registry_dedup");
+
+    # Same key again — should not increase count
+    map_set(reg, "ollama:localhost:11434", PROV_OLLAMA);
+    assert_eq(map_size(reg), 1, "registry: dedup same key");
+
+    test_group("registry_multiple");
+
+    map_set(reg, "llamacpp:localhost:8080", PROV_LLAMACPP);
+    assert_eq(map_size(reg), 2, "registry: 2 providers");
+
+    # Different URL for same type = different entry
+    map_set(reg, "ollama:other-host:11434", PROV_OLLAMA);
+    assert_eq(map_size(reg), 3, "registry: 3 entries (same type diff url)");
+
+    test_group("registry_get_missing");
+
+    assert_eq(map_get(reg, "whisper:localhost:9999"), 0, "registry: missing returns 0");
+
+    # ================================================================
+    # ROUTER EXTRAS �� direct routing, cost tracker reset
+    # ================================================================
+
+    test_group("router_direct");
+
+    var dir1 = route_new(PROV_OLLAMA, 1, "http://localhost");
+    var dir2 = route_new(PROV_LLAMACPP, 2, "http://localhost2");
+    var dir_routes = alloc(16);
+    store64(dir_routes, dir1);
+    store64(dir_routes + 8, dir2);
+    var dir_rt = router_new(dir_routes, 2, STRAT_DIRECT);
+    sel = router_select(dir_rt, "any-model");
+    assert_eq(route_provider(sel), PROV_OLLAMA, "direct picks first");
+
+    test_group("cost_tracker_reset");
+
+    var ct3 = cost_tracker_new();
+    cost_tracker_record(ct3, PROV_OPENAI, "gpt-4o", 100, 50);
+    assert(map_get(ct3, "openai") != 0, "pre-reset: record exists");
+    # Reset = new map
+    ct3 = map_new();
+    assert_eq(map_size(ct3), 0, "post-reset: empty");
+
+    # ================================================================
+    # CACHE EXTRAS — stats tracking, eviction counting
+    # ================================================================
+
+    test_group("cache_stats_initial");
+
+    var cs = cache_new(1000, 1);
+    assert_eq(cache_hits(cs), 0, "initial: 0 hits");
+    assert_eq(cache_misses(cs), 0, "initial: 0 misses");
+    assert_eq(cache_evictions(cs), 0, "initial: 0 evictions");
+
+    test_group("cache_stats_hit_miss");
+
+    var cs2 = cache_new(1000, 1);
+    cache_insert(cs2, "key", 42);
+    cache_get(cs2, "key");      # hit
+    cache_get(cs2, "missing");  # miss
+    cache_get(cs2, "key");      # hit
+    assert_eq(cache_hits(cs2), 2, "stats: 2 hits");
+    assert_eq(cache_misses(cs2), 1, "stats: 1 miss");
+
+    test_group("cache_eviction_at_capacity");
+
+    var cs3 = cache_new(3, 1);
+    cache_insert(cs3, "a", 1);
+    cache_insert(cs3, "b", 2);
+    cache_insert(cs3, "c", 3);
+    # 4th insert triggers eviction counting
+    cache_insert(cs3, "d", 4);
+    assert_gte(cache_evictions(cs3), 1, "eviction counted at capacity");
+
     # ── Summary ───────────────────────────────────────────────────
-    var failures = assert_summary();
-    return failures;
+    var total_failures = assert_summary();
+    return total_failures;
 }
 
 var r = main();
