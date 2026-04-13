@@ -3,8 +3,12 @@ name = "hoosh"
 version = "2.0.0"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
-repository = "https://github.com/MacCracken/hoosh"
+language = "cyrius"
+cyrius = "3.10.0"
 
 [build]
-src = "src/main.cyr"
-output = "build/hoosh"
+entry = "src/main.cyr"
+output = "hoosh"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "assert", "bench"]

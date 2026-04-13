@@ -7,28 +7,9 @@
 #   hoosh version          Show version
 #   hoosh help             Show help
 
-# ================================================================
-# Standard library
-# ================================================================
+# Stdlib auto-included via cyrius.toml
 
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/fs.cyr"
-include "lib/args.cyr"
-include "lib/hashmap.cyr"
-include "lib/freelist.cyr"
-include "lib/sigil.cyr"
-include "lib/toml.cyr"
-include "lib/json.cyr"
-include "lib/tagged.cyr"
-include "lib/http.cyr"
-include "lib/net.cyr"
-include "lib/chrono.cyr"
-include "lib/syscalls.cyr"
+# Hoosh modules
 
 # ================================================================
 # Hoosh modules
