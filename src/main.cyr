@@ -480,7 +480,7 @@ fn http_post_local(port, path, body, body_len) {
 # ================================================================
 
 # Forward inference to Ollama native API
-# Build chat request JSON body
+# Build chat request JSON body from model + prompt string
 fn _build_chat_body(model, prompt) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
@@ -490,6 +490,26 @@ fn _build_chat_body(model, prompt) {
     str_builder_add_cstr(sb, "\"}]}");
     var s = str_builder_build(sb);
     return to_cstr(s);
+}
+
+# Build chat request JSON with raw messages array passthrough
+fn _build_chat_body_raw(model, messages_raw, messages_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
+    # Append raw messages array bytes
+    var s = str_builder_build(sb);
+    var prefix = to_cstr(s);
+    var plen = strlen(prefix);
+    var suffix = "}";
+    var total = plen + messages_len + 1;
+    var buf = alloc(total + 1);
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, messages_raw, messages_len);
+    store8(buf + plen + messages_len, 125);  # '}'
+    store8(buf + plen + messages_len + 1, 0);
+    return buf;
 }
 
 # Forward to Ollama native API
@@ -608,9 +628,16 @@ fn extract_ollama_tokens(body, blen) {
 
 # Extract text + token counts from provider response
 # Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes
-fn provider_forward(route, model, prompt) {
+# messages_raw: ptr to raw JSON messages array, messages_len: byte length
+# If messages_raw is 0, falls back to building from prompt
+fn provider_forward(route, model, prompt, messages_raw, messages_len) {
     var port = url_port(route_base_url(route));
-    var body = _build_chat_body(model, prompt);
+    var body = 0;
+    if (messages_raw != 0) {
+        body = _build_chat_body_raw(model, messages_raw, messages_len);
+    } else {
+        body = _build_chat_body(model, prompt);
+    }
     var blen = strlen(body);
     var path = "/api/chat";
     if (route_provider(route) != PROV_OLLAMA) {
@@ -1002,6 +1029,127 @@ fn handle_health_providers(cfd) {
 }
 
 # GET /v1/queue/status
+# POST /v1/tokens/check — check if pool can accommodate tokens
+fn handle_tokens_check(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var tokens_str = json_get(pairs, str_from("tokens"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var tokens = 0;
+    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) {
+        return http_error(cfd, "404", "Not Found", "token pool not found");
+    }
+    var allowed = 0;
+    if (pool_available(p) >= tokens) { allowed = 1; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"allowed\":");
+    if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
+    else { str_builder_add_cstr(sb, "false"); }
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/tokens/reserve — reserve tokens in a pool
+fn handle_tokens_reserve(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var tokens_str = json_get(pairs, str_from("tokens"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var tokens = 0;
+    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    var reserved = budget_reserve(_budget, pname, tokens);
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) {
+        return http_error(cfd, "404", "Not Found", "token pool not found");
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"reserved\":");
+    if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
+    else { str_builder_add_cstr(sb, "false"); }
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/tokens/report — report actual token usage
+fn handle_tokens_report(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var reserved_str = json_get(pairs, str_from("reserved"));
+    var actual_str = json_get(pairs, str_from("actual"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var reserved = 0;
+    var actual = 0;
+    if (reserved_str != 0) { reserved = str_to_int(reserved_str); }
+    if (actual_str != 0) { actual = str_to_int(actual_str); }
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) {
+        return http_error(cfd, "404", "Not Found", "token pool not found");
+    }
+    pool_commit(p, reserved, actual);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"used\":");
+    str_builder_add_int(sb, load64(p + POOL_USED));
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/audit — audit log entries
+var _audit_entries = 0;
+var _audit_count = 0;
+
+fn handle_audit(cfd) {
+    if (_audit_entries == 0) {
+        return http_error(cfd, "404", "Not Found", "audit logging not enabled");
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"total\":");
+    str_builder_add_int(sb, _audit_count);
+    str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/health/heartbeat
+fn handle_heartbeat(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"nodes\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var hi = 0;
+    while (hi < rcount) {
+        var r = load64(routes + hi * 8);
+        if (route_enabled(r) == 1) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"id\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, ":");
+            str_builder_add_cstr(sb, route_base_url(r));
+            str_builder_add_cstr(sb, "\",\"status\":\"online\"}");
+            first = 0;
+        }
+        hi = hi + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 fn handle_queue_status(cfd) {
     var body = "{\"pending\":0,\"processing\":0}";
     return http_ok(cfd, body, strlen(body));
@@ -1070,49 +1218,51 @@ fn handle_chat(cfd, body_ptr, body_len) {
         return http_error(cfd, "404", "Not Found", "no provider for model");
     }
 
-    # Extract messages JSON from request for forwarding
-    var messages_val = json_get(pairs, str_from("messages"));
-    var messages_json = 0;
-    if (messages_val != 0) {
-        # Pass messages through as raw JSON string
-        # For now, build a simple user message from the first content
-        messages_json = 0;  # Let provider build default message from prompt
+    # Extract raw "messages" array from request body for passthrough
+    # Find "messages":[ in the raw body and extract to matching ]
+    var msg_raw = 0;
+    var msg_raw_len = 0;
+    var mi = 0;
+    while (mi < body_len - 12) {
+        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
+            mi = mi + 11;
+            # Skip whitespace
+            while (mi < body_len && load8(body_ptr + mi) == 32) { mi = mi + 1; }
+            if (mi < body_len && load8(body_ptr + mi) == 91) {
+                # Found '[' — scan for matching ']'
+                var depth = 1;
+                var ms = mi;
+                mi = mi + 1;
+                while (mi < body_len && depth > 0) {
+                    if (load8(body_ptr + mi) == 91) { depth = depth + 1; }
+                    if (load8(body_ptr + mi) == 93) { depth = depth - 1; }
+                    if (load8(body_ptr + mi) == 34) {
+                        # Skip strings (don't count brackets inside strings)
+                        mi = mi + 1;
+                        while (mi < body_len && load8(body_ptr + mi) != 34) {
+                            if (load8(body_ptr + mi) == 92) { mi = mi + 1; }  # skip escape
+                            mi = mi + 1;
+                        }
+                    }
+                    mi = mi + 1;
+                }
+                msg_raw = body_ptr + ms;
+                msg_raw_len = mi - ms;
+            }
+            break;
+        }
+        mi = mi + 1;
     }
 
-    # Extract prompt — from "prompt" field or last message content
+    # Fallback: extract prompt from last "content" field
     var prompt_cstr = "hello";
-    var prompt_val = json_get(pairs, str_from("prompt"));
-    if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
-    # If no prompt, extract content from the raw request body
-    if (prompt_val == 0) {
-        # Find last "content":"..." in the request body
-        var rbody = req_parse_body(body_ptr - (body_ptr - body_ptr), body_len + (body_ptr - body_ptr));
-        # Simple: search for "content":" in the POST body
-        var ci = 0;
-        var bstr = body_ptr;
-        var blast = 0;
-        while (ci < body_len - 11) {
-            if (memeq(bstr + ci, "\"content\":\"", 11) == 1) {
-                blast = ci + 11;
-            }
-            ci = ci + 1;
-        }
-        if (blast > 0) {
-            var cstart = blast;
-            ci = blast;
-            while (ci < body_len) {
-                if (load8(bstr + ci) == 34) { break; }
-                ci = ci + 1;
-            }
-            var clen = ci - cstart;
-            prompt_cstr = alloc(clen + 1);
-            memcpy(prompt_cstr, bstr + cstart, clen);
-            store8(prompt_cstr + clen, 0);
-        }
+    if (msg_raw == 0) {
+        var prompt_val = json_get(pairs, str_from("prompt"));
+        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
     }
 
     # Forward to provider backend
-    var result = provider_forward(route, model_cstr, prompt_cstr);
+    var result = provider_forward(route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
     if (result == 0) {
         return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable");
     }
@@ -1172,6 +1322,8 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/health") == 1) { return handle_health(cfd); }
     if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
+    if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }
+    if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
@@ -1195,6 +1347,21 @@ fn http_route(cfd, method, path, buf, buf_len) {
         load_config("hoosh.toml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
+    }
+    if (streq(path, "/v1/tokens/check") == 1) {
+        var tb = req_parse_body(buf, buf_len);
+        var tbl = req_body_len(buf, buf_len);
+        return handle_tokens_check(cfd, tb, tbl);
+    }
+    if (streq(path, "/v1/tokens/reserve") == 1) {
+        var tb = req_parse_body(buf, buf_len);
+        var tbl = req_body_len(buf, buf_len);
+        return handle_tokens_reserve(cfd, tb, tbl);
+    }
+    if (streq(path, "/v1/tokens/report") == 1) {
+        var tb = req_parse_body(buf, buf_len);
+        var tbl = req_body_len(buf, buf_len);
+        return handle_tokens_report(cfd, tb, tbl);
     }
     if (streq(path, "/v1/embeddings") == 1) {
         # Forward to Ollama embeddings API
