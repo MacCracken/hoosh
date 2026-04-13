@@ -4,8 +4,7 @@
 #           provider.cyr, hardware.cyr
 
 # Globals shared with main
-var _audit_entries = 1;  # enabled by default
-var _audit_count = 0;
+var _audit_entries = 1;
 
 # GET /v1/health
 fn handle_health(cfd) {
@@ -244,13 +243,12 @@ fn handle_tokens_report(cfd, body_ptr, body_len) {
 
 # GET /v1/audit
 fn handle_audit(cfd) {
-    if (_audit_entries == 0) {
-        return http_error(cfd, "404", "Not Found", "audit logging not enabled");
+    if (_audit_chain == 0) {
+        return http_error(cfd, "404", "Not Found",
+        "audit logging not enabled");
     }
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"total\":");
-        str_builder_add_int(sb, _audit_count);
-        str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
+    audit_json(_audit_chain, sb, 50);
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -290,6 +288,92 @@ fn handle_hardware(cfd) {
     var sb = str_builder_new();
     hw_summary_json(sb);
     return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/hardware/placement
+fn handle_hw_placement(cfd, body_ptr, body_len) {
+    if (body_len == 0) {
+        return http_bad_request(cfd, "empty body");
+    }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) {
+        return http_bad_request(cfd, "invalid JSON");
+    }
+    var mp_str = json_get(pairs, str_from("model_params"));
+    var model_params = 0;
+    if (mp_str != 0) { model_params = str_to_int(mp_str); }
+    # Also try extracting from model name
+    if (model_params == 0) {
+        var mn = json_get(pairs, str_from("model"));
+        if (mn != 0) {
+            model_params = _parse_model_params(to_cstr(mn));
+        }
+    }
+    if (model_params == 0) { model_params = 7000000000; }
+    var quant = 0;
+    var q_str = json_get(pairs, str_from("quantization"));
+    if (q_str != 0) {
+        var qs = to_cstr(q_str);
+        if (streq(qs, "fp16") == 1) { quant = QUANT_FP16; }
+        if (streq(qs, "bf16") == 1) { quant = QUANT_BF16; }
+        if (streq(qs, "int8") == 1) { quant = QUANT_INT8; }
+        if (streq(qs, "int4") == 1) { quant = QUANT_INT4; }
+    }
+    var sb = str_builder_new();
+    hw_placement_json(sb, model_params, quant);
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/hardware/models
+fn handle_hw_models(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"models\":[");
+        # Check common model sizes
+        var sizes = alloc(48);
+        store64(sizes, 1000000000);
+        store64(sizes + 8, 3000000000);
+        store64(sizes + 16, 7000000000);
+        store64(sizes + 24, 13000000000);
+        store64(sizes + 32, 70000000000);
+        store64(sizes + 40, 405000000000);
+        var names = alloc(48);
+        store64(names, "1B");
+        store64(names + 8, "3B");
+        store64(names + 16, "7B");
+        store64(names + 24, "13B");
+        store64(names + 32, "70B");
+        store64(names + 40, "405B");
+        var first = 1;
+        var i = 0;
+        while (i < 6) {
+            var params = load64(sizes + i * 8);
+            var quant = hw_suggest_quant(params);
+            var needed = reg_estimate_memory(params, quant);
+            var fits = 0;
+            var best = hw_best_device();
+            if (best != 0) {
+                if (needed <= profile_memory_bytes(best)) {
+                    fits = 1;
+                }
+            }
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"size\":\"");
+                str_builder_add_cstr(sb, load64(names + i * 8));
+                str_builder_add_cstr(sb, "\",\"quant\":\"");
+                str_builder_add_cstr(sb, quant_name(quant));
+                str_builder_add_cstr(sb, "\",\"memory_bytes\":");
+                str_builder_add_int(sb, needed);
+                str_builder_add_cstr(sb, ",\"fits\":");
+                if (fits == 1) {
+                    str_builder_add_cstr(sb, "true}");
+            } else {
+                str_builder_add_cstr(sb, "false}");
+        }
+        first = 0;
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+return http_json_ok(cfd, str_builder_build(sb));
 }
 
 # GET /metrics
@@ -359,6 +443,190 @@ fn _validate_chat(pairs, body_ptr, body_len) {
     return 0;
 }
 
+# Check if request has "stream":true
+fn _req_is_stream(body_ptr, body_len) {
+    var i = 0;
+    while (i < body_len - 13) {
+        if (memeq(body_ptr + i, "\"stream\":true", 13) == 1) {
+            return 1;
+        }
+        if (memeq(body_ptr + i, "\"stream\": true", 14) == 1) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Extract raw "messages" array from request body
+fn _extract_messages(body_ptr, body_len) {
+    var mi = 0;
+    while (mi < body_len - 12) {
+        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
+            mi = mi + 11;
+            while (mi < body_len) {
+                if (load8(body_ptr + mi) != 32) { break; }
+                mi = mi + 1;
+            }
+            if (mi < body_len) {
+                if (load8(body_ptr + mi) == 91) {
+                    var depth = 1;
+                    var ms = mi;
+                    mi = mi + 1;
+                    while (mi < body_len && depth > 0) {
+                        var ch = load8(body_ptr + mi);
+                        if (ch == 91) { depth = depth + 1; }
+                        if (ch == 93) { depth = depth - 1; }
+                        if (ch == 34) {
+                            mi = mi + 1;
+                            while (mi < body_len) {
+                                if (load8(body_ptr + mi) == 34) { break; }
+                                if (load8(body_ptr + mi) == 92) {
+                                    mi = mi + 1;
+                                }
+                                mi = mi + 1;
+                            }
+                        }
+                        mi = mi + 1;
+                    }
+                    # Return packed: ptr * 0x100000000 + len
+                    var mlen = mi - ms;
+                    var result = alloc(16);
+                    store64(result, body_ptr + ms);
+                    store64(result + 8, mlen);
+                    return result;
+                }
+            }
+            break;
+        }
+        mi = mi + 1;
+    }
+    return 0;
+}
+
+# Stream one SSE chunk wrapping a content token
+fn _sse_chunk(cfd, model, content, content_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+        str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+        str_builder_add_cstr(sb, "\"model\":\"");
+        str_builder_add_cstr(sb, model);
+        str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+            str_builder_add_cstr(sb, "\"delta\":{\"content\":\"");
+                # Add content (already escaped from provider)
+                var cs = str_builder_build(sb);
+                var prefix = to_cstr(cs);
+                var plen = strlen(prefix);
+                var suffix = "\"},\"finish_reason\":null}]}";
+    var slen = strlen(suffix);
+    var total = plen + content_len + slen;
+    var buf = alloc(total + 1);
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, content, content_len);
+    memcpy(buf + plen + content_len, suffix, slen);
+    store8(buf + total, 0);
+    http_sse_event(cfd, buf, total);
+    return 0;
+}
+
+# Send the final SSE stop chunk
+fn _sse_stop(cfd, model) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+        str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+        str_builder_add_cstr(sb, "\"model\":\"");
+        str_builder_add_cstr(sb, model);
+        str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+            str_builder_add_cstr(sb, "\"delta\":{},");
+            str_builder_add_cstr(sb, "\"finish_reason\":\"stop\"}]}");
+    var s = str_builder_build(sb);
+    var d = to_cstr(s);
+    http_sse_event(cfd, d, str_len(s));
+    http_sse_done(cfd);
+    return 0;
+}
+
+# Streaming handler: proxy NDJSON/SSE from backend to client
+fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
+    var bfd = retry_forward_stream(
+    _retry_cfg, route, model, msg_raw, msg_len);
+    if (bfd < 0) {
+        return http_error(cfd, "502", "Bad Gateway",
+        "provider backend unreachable");
+    }
+
+    http_sse_begin(cfd);
+
+    # Read backend response line by line
+    var lbuf = alloc(65536);
+    var lpos = 0;
+    var is_ollama = (route_provider(route) == PROV_OLLAMA);
+    var token_count = 0;
+
+    var rbuf = alloc(4096);
+    var done = 0;
+    while (done == 0) {
+        var n = syscall(SYS_READ, bfd, rbuf, 4096);
+        if (n <= 0) { done = 1; break; }
+        var ri = 0;
+        while (ri < n) {
+            var ch = load8(rbuf + ri);
+            if (ch == 10) {
+                # Complete line in lbuf[0..lpos]
+                if (lpos > 0) {
+                    store8(lbuf + lpos, 0);
+                    if (is_ollama == 1) {
+                        # Ollama NDJSON: extract "content"
+                        var txt = ollama_extract_text(lbuf, lpos);
+                        if (strlen(txt) > 0) {
+                            _sse_chunk(cfd, model,
+                            txt, strlen(txt));
+                            token_count = token_count + 1;
+                        }
+                    } else {
+                        # OpenAI SSE: lines start with "data: "
+                        if (lpos > 6) {
+                            if (memeq(lbuf, "data: ", 6) == 1) {
+                                var dptr = lbuf + 6;
+                                var dlen = lpos - 6;
+                                if (memeq(dptr, "[DONE]", 6) == 1) {
+                                    done = 1;
+                                } else {
+                                    var txt = ollama_extract_text(
+                                    dptr, dlen);
+                                    if (strlen(txt) > 0) {
+                                        _sse_chunk(cfd, model,
+                                        txt, strlen(txt));
+                                        token_count = token_count + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                lpos = 0;
+            } else {
+                if (ch != 13) {
+                    if (lpos < 65535) {
+                        store8(lbuf + lpos, ch);
+                        lpos = lpos + 1;
+                    }
+                }
+            }
+            ri = ri + 1;
+        }
+    }
+
+    _sse_stop(cfd, model);
+    syscall(3, bfd);
+    metrics_record(0, token_count);
+    if (_audit_chain != 0) {
+        audit_record(_audit_chain, "inference.stream",
+        "info", "streaming inference", provider_name(route_provider(route)), model);
+    }
+    return 0;
+}
+
 # POST /v1/chat/completions
 fn handle_chat(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
@@ -374,79 +642,90 @@ fn handle_chat(cfd, body_ptr, body_len) {
     var model_cstr = to_cstr(model);
 
     var route = router_select(_router, model_cstr);
-    if (route == 0) { return http_error(cfd, "404", "Not Found", "no provider for model"); }
+    if (route == 0) {
+        return http_error(cfd, "404", "Not Found",
+        "no provider for model");
+    }
+
+    # Rate limit check
+    var rl = route_rate_limiter(route);
+    if (ratelimit_check(rl) == 0) {
+        return http_error(cfd, "429", "Too Many Requests",
+        "provider rate limit exceeded");
+    }
 
     # Token budget: reserve before inference
     var pool_name = "default";
     var pool_str = json_get(pairs, str_from("pool"));
     if (pool_str != 0) { pool_name = to_cstr(pool_str); }
-    var est_tokens = 2048;  # conservative estimate
+    var est_tokens = 2048;
     var max_tok_str = json_get(pairs, str_from("max_tokens"));
     if (max_tok_str != 0) { est_tokens = str_to_int(max_tok_str); }
     var bpool = budget_get_pool(_budget, pool_name);
     if (bpool != 0) {
         if (pool_available(bpool) < est_tokens) {
-            return http_error(cfd, "429", "Too Many Requests", "token budget exceeded");
+            return http_error(cfd, "429", "Too Many Requests",
+            "token budget exceeded");
         }
         pool_reserve(bpool, est_tokens);
     }
 
-    # Extract raw "messages" array for passthrough
+    # Extract raw messages array
+    var msgs = _extract_messages(body_ptr, body_len);
     var msg_raw = 0;
     var msg_raw_len = 0;
-    var mi = 0;
-    while (mi < body_len - 12) {
-        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
-            mi = mi + 11;
-            while (mi < body_len && load8(body_ptr + mi) == 32) { mi = mi + 1; }
-            if (mi < body_len && load8(body_ptr + mi) == 91) {
-                var depth = 1;
-                var ms = mi;
-                mi = mi + 1;
-                while (mi < body_len && depth > 0) {
-                    if (load8(body_ptr + mi) == 91) { depth = depth + 1; }
-                    if (load8(body_ptr + mi) == 93) { depth = depth - 1; }
-                    if (load8(body_ptr + mi) == 34) {
-                        mi = mi + 1;
-                        while (mi < body_len && load8(body_ptr + mi) != 34) {
-                            if (load8(body_ptr + mi) == 92) { mi = mi + 1; }
-                            mi = mi + 1;
-                        }
-                    }
-                    mi = mi + 1;
-                }
-                msg_raw = body_ptr + ms;
-                msg_raw_len = mi - ms;
-            }
-            break;
+    if (msgs != 0) {
+        msg_raw = load64(msgs);
+        msg_raw_len = load64(msgs + 8);
+        # Context compaction: limit to est_tokens budget
+        if (msg_raw_len > 0) {
+            var compacted = compact_messages(
+            msg_raw, msg_raw_len, est_tokens * 2);
+            msg_raw = load64(compacted);
+            msg_raw_len = load64(compacted + 8);
         }
-        mi = mi + 1;
     }
 
+    # Streaming path
+    if (_req_is_stream(body_ptr, body_len) == 1) {
+        if (msg_raw == 0) {
+            return http_bad_request(cfd,
+            "streaming requires messages array");
+        }
+        var sr = handle_chat_stream(
+        cfd, route, model_cstr, msg_raw, msg_raw_len);
+        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+        return sr;
+    }
+
+    # Non-streaming path
     var prompt_cstr = "hello";
     if (msg_raw == 0) {
         var prompt_val = json_get(pairs, str_from("prompt"));
         if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
     }
 
-    var result = provider_forward(route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
+    var result = retry_forward(
+    _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
     if (result == 0) {
-        # Release reserved tokens on failure
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
-        return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable");
+        return http_error(cfd, "502", "Bad Gateway",
+        "provider backend unreachable");
     }
 
     var resp_text = load64(result);
     var resp_ptok = load64(result + 16);
     var resp_ctok = load64(result + 24);
 
-    # Report actual token usage to budget pool
     if (bpool != 0) {
         pool_commit(bpool, est_tokens, resp_ptok + resp_ctok);
     }
 
-    # Record audit entry
-    _audit_count = _audit_count + 1;
+    if (_audit_chain != 0) {
+        audit_record(_audit_chain, "inference.request",
+        "info", "inference completed",
+        provider_name(route_provider(route)), model_cstr);
+    }
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");

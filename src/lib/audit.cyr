@@ -1,0 +1,215 @@
+# audit.cyr — HMAC-SHA256 linked audit chain
+# Each entry is signed with HMAC and links to the previous entry's hash.
+# Provides tamper detection for request/response logging.
+# Requires: sigil.cyr (sha256, hmac_sign), chrono.cyr (clock_epoch_ns)
+
+# Entry layout (96 bytes):
+#   0: id (i64)              — monotonic counter
+#   8: timestamp_ms (i64)    — epoch milliseconds
+#  16: event (ptr)           — event type string
+#  24: level (ptr)           — "info", "warn", "error"
+#  32: message (ptr)         — description
+#  40: provider (ptr)        — provider name or 0
+#  48: model (ptr)           — model name or 0
+#  56: signature (ptr)       — HMAC-SHA256 hex (64 chars)
+#  64: prev_hash (ptr)       — previous entry hash hex
+#  72: entry_hash (ptr)      — this entry's SHA256 hex
+#  80: next (ptr)            — next entry in chain
+#  88: (reserved)
+
+var AUDIT_ENTRY_SIZE = 96;
+
+# Chain layout (48 bytes):
+#   0: key (ptr)       — signing key
+#   8: key_len (i64)
+#  16: last_hash (ptr) — hash of most recent entry
+#  24: head (ptr)      — first entry
+#  32: tail (ptr)      — last entry
+#  40: count (i64)
+#  48: max_entries (i64)
+#  56: next_id (i64)
+
+var AUDIT_CHAIN_SIZE = 64;
+var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn audit_chain_new(key, key_len, max_entries) {
+    var c = alloc(AUDIT_CHAIN_SIZE);
+    store64(c, key);
+    store64(c + 8, key_len);
+    store64(c + 16, GENESIS_HASH);
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, 0);
+    store64(c + 48, max_entries);
+    store64(c + 56, 1);
+    return c;
+}
+
+fn audit_count(c) { return load64(c + 40); }
+
+# Compute SHA256 hex of the entry data fields
+fn _audit_entry_hash(id, ts, event, level, message, provider, model) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, id);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_int(sb, ts);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, event);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, level);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, message);
+    if (provider != 0) {
+        str_builder_add_cstr(sb, ":");
+        str_builder_add_cstr(sb, provider);
+    }
+    if (model != 0) {
+        str_builder_add_cstr(sb, ":");
+        str_builder_add_cstr(sb, model);
+    }
+    var s = str_builder_build(sb);
+    var data = to_cstr(s);
+    return sha256_hex(data, str_len(s));
+}
+
+# Record an audit event. Returns the new entry pointer.
+fn audit_record(chain, event, level, message, provider, model) {
+    var id = load64(chain + 56);
+    store64(chain + 56, id + 1);
+    var ts = clock_epoch_ns() / 1000000;
+
+    # Compute entry hash
+    var ehash = _audit_entry_hash(
+    id, ts, event, level, message, provider, model);
+
+    # Sign: HMAC(entry_hash:prev_hash, key)
+    var prev_hash = load64(chain + 16);
+    var sig_sb = str_builder_new();
+    str_builder_add_cstr(sig_sb, ehash);
+    str_builder_add_cstr(sig_sb, ":");
+    str_builder_add_cstr(sig_sb, prev_hash);
+    var sig_s = str_builder_build(sig_sb);
+    var sig_data = to_cstr(sig_s);
+    var sig_len = str_len(sig_s);
+    var key = load64(chain);
+    var key_len = load64(chain + 8);
+    var sig = hmac_sign(key, key_len, sig_data, sig_len);
+
+    # Build entry
+    var e = alloc(AUDIT_ENTRY_SIZE);
+    store64(e, id);
+    store64(e + 8, ts);
+    store64(e + 16, event);
+    store64(e + 24, level);
+    store64(e + 32, message);
+    store64(e + 40, provider);
+    store64(e + 48, model);
+    store64(e + 56, sig);
+    store64(e + 64, prev_hash);
+    store64(e + 72, ehash);
+    store64(e + 80, 0);
+
+    # Append to chain
+    var tail = load64(chain + 32);
+    if (tail != 0) {
+        store64(tail + 80, e);
+    } else {
+        store64(chain + 24, e);
+    }
+    store64(chain + 32, e);
+    store64(chain + 16, ehash);
+    var count = load64(chain + 40) + 1;
+    store64(chain + 40, count);
+
+    # Evict oldest if over max
+    var max = load64(chain + 48);
+    if (count > max) {
+        var head = load64(chain + 24);
+        if (head != 0) {
+            store64(chain + 24, load64(head + 80));
+            store64(chain + 40, count - 1);
+        }
+    }
+
+    return e;
+}
+
+# Verify chain integrity. Returns 1 if valid, 0 if tampered.
+fn audit_verify(chain) {
+    var key = load64(chain);
+    var key_len = load64(chain + 8);
+    var e = load64(chain + 24);
+    while (e != 0) {
+        var id = load64(e);
+        var ts = load64(e + 8);
+        var event = load64(e + 16);
+        var level = load64(e + 24);
+        var message = load64(e + 32);
+        var provider = load64(e + 40);
+        var model = load64(e + 48);
+        var sig = load64(e + 56);
+        var prev = load64(e + 64);
+        var ehash = load64(e + 72);
+
+        # Recompute entry hash
+        var check = _audit_entry_hash(
+        id, ts, event, level, message, provider, model);
+        if (streq(check, ehash) != 1) { return 0; }
+
+        # Verify HMAC signature
+        var sig_sb = str_builder_new();
+        str_builder_add_cstr(sig_sb, ehash);
+        str_builder_add_cstr(sig_sb, ":");
+        str_builder_add_cstr(sig_sb, prev);
+        var sig_s = str_builder_build(sig_sb);
+        var sig_data = to_cstr(sig_s);
+        var expected = hmac_sign(key, key_len, sig_data, str_len(sig_s));
+        if (streq(sig, expected) != 1) { return 0; }
+
+        e = load64(e + 80);
+    }
+    return 1;
+}
+
+# JSON output for /v1/audit endpoint
+fn audit_json(chain, sb, max_recent) {
+    str_builder_add_cstr(sb, "{\"count\":");
+        str_builder_add_int(sb, audit_count(chain));
+        str_builder_add_cstr(sb, ",\"valid\":");
+        if (audit_verify(chain) == 1) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"entries\":[");
+
+        # Walk from tail backwards max_recent entries
+        # (simple: walk forward, skip to last N)
+        var count = audit_count(chain);
+        var skip = 0;
+        if (count > max_recent) { skip = count - max_recent; }
+        var e = load64(chain + 24);
+        var idx = 0;
+        var first = 1;
+        while (e != 0) {
+            if (idx >= skip) {
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "{\"id\":");
+                    str_builder_add_int(sb, load64(e));
+                    str_builder_add_cstr(sb, ",\"timestamp\":");
+                    str_builder_add_int(sb, load64(e + 8));
+                    str_builder_add_cstr(sb, ",\"event\":\"");
+                    str_builder_add_cstr(sb, load64(e + 16));
+                    str_builder_add_cstr(sb, "\",\"level\":\"");
+                    str_builder_add_cstr(sb, load64(e + 24));
+                    str_builder_add_cstr(sb, "\",\"message\":\"");
+                    str_builder_add_cstr(sb, load64(e + 32));
+                    str_builder_add_cstr(sb, "\"}");
+                first = 0;
+            }
+            idx = idx + 1;
+            e = load64(e + 80);
+        }
+        str_builder_add_cstr(sb, "]}");
+    return 0;
+}

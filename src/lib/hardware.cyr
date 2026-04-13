@@ -123,3 +123,66 @@ fn hw_summary_json(sb) {
     str_builder_add_cstr(sb, "]}");
 return 0;
 }
+
+# Placement recommendation for a model
+fn hw_placement_json(sb, model_params, quant) {
+    if (_hw_registry == 0) {
+        str_builder_add_cstr(sb, "{\"error\":\"no hardware detected\"}");
+        return 0;
+    }
+    if (quant == 0) { quant = hw_suggest_quant(model_params); }
+    var needed = reg_estimate_memory(model_params, quant);
+    var plan = hw_plan(model_params, quant);
+
+    str_builder_add_cstr(sb, "{\"model_params\":");
+        str_builder_add_int(sb, model_params);
+        str_builder_add_cstr(sb, ",\"quantization\":\"");
+        str_builder_add_cstr(sb, quant_name(quant));
+        str_builder_add_cstr(sb, "\",\"memory_required_bytes\":");
+        str_builder_add_int(sb, needed);
+        str_builder_add_cstr(sb, ",\"fits_single_device\":");
+        var best = hw_best_device();
+        if (best != 0) {
+            if (needed <= profile_memory_bytes(best)) {
+                str_builder_add_cstr(sb, "true");
+            } else {
+                str_builder_add_cstr(sb, "false");
+            }
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"suggested_quant\":\"");
+        str_builder_add_cstr(sb, quant_name(hw_suggest_quant(model_params)));
+        str_builder_add_cstr(sb, "\"}");
+    return 0;
+}
+
+# Parse model size from name like "llama-70b" -> 70B params
+fn _parse_model_params(name) {
+    var i = 0;
+    var len = strlen(name);
+    while (i < len) {
+        if (load8(name + i) == 98 || load8(name + i) == 66) {
+            # found 'b' or 'B', look backwards for digits
+            var j = i - 1;
+            while (j >= 0) {
+                var c = load8(name + j);
+                if (c < 48 || c > 57) {
+                    if (c != 46) { break; }
+                }
+                j = j - 1;
+            }
+            j = j + 1;
+            if (j < i) {
+                var num = atoi(name + j);
+                if (num > 0) {
+                    if (num < 10000) {
+                        return num * 1000000000;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}

@@ -46,6 +46,43 @@ fn http_post_local(port, path, body, body_len) {
     return _http_parse_response(rbuf, total);
 }
 
+# HTTP POST that returns the open fd for streaming reads.
+# Caller must skip HTTP headers then read chunks.
+# Returns fd (>= 0) or -1 on failure.
+fn http_post_stream(port, path, body, body_len) {
+    var fd = syscall(SYS_SOCKET, 2, 1, 0);
+    if (fd < 0) { return 0 - 1; }
+    var sa = sockaddr_in(0x0100007F, port);
+    var cr = syscall(SYS_CONNECT, fd, sa, 16);
+    if (cr < 0) { syscall(3, fd); return 0 - 1; }
+    var hdr = alloc(2048);
+    var hlen = _build_post_header(hdr, path, "localhost", body_len);
+    syscall(SYS_WRITE, fd, hdr, hlen);
+    syscall(SYS_WRITE, fd, body, body_len);
+    return fd;
+}
+
+# Skip HTTP response headers on a streaming fd.
+# Returns offset into buf where body starts, or -1.
+fn stream_skip_headers(fd, buf, buf_sz) {
+    var total = 0;
+    while (total < buf_sz - 1) {
+        var n = syscall(SYS_READ, fd, buf + total, 1);
+        if (n <= 0) { return 0 - 1; }
+        total = total + 1;
+        if (total >= 4) {
+            var b0 = load8(buf + total - 4) == 13;
+            var b1 = load8(buf + total - 3) == 10;
+            var b2 = load8(buf + total - 2) == 13;
+            var b3 = load8(buf + total - 1) == 10;
+            if (b0 && b1 && b2 && b3) {
+                return total;
+            }
+        }
+    }
+    return 0 - 1;
+}
+
 # Extract port number from URL like "http://localhost:11434"
 fn url_port(url) {
     var i = 7;

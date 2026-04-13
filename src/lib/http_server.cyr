@@ -42,6 +42,40 @@ fn http_respond(cfd, status, status_text, body, body_len) {
     return 0;
 }
 
+# Send SSE stream header (no Content-Length, chunked)
+fn http_sse_begin(cfd) {
+    var cr = make_crlf();
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 200 OK");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Content-Type: text/event-stream");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Cache-Control: no-cache");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: *");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Connection: keep-alive");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, cr);
+    var hdr = str_builder_build(sb);
+    syscall(SYS_WRITE, cfd, to_cstr(hdr), str_len(hdr));
+    return 0;
+}
+
+# Send one SSE data event
+fn http_sse_event(cfd, data, data_len) {
+    syscall(SYS_WRITE, cfd, "data: ", 6);
+    syscall(SYS_WRITE, cfd, data, data_len);
+    syscall(SYS_WRITE, cfd, "\n\n", 2);
+    return 0;
+}
+
+# Send SSE [DONE] marker
+fn http_sse_done(cfd) {
+    syscall(SYS_WRITE, cfd, "data: [DONE]\n\n", 14);
+    return 0;
+}
+
 fn http_ok(cfd, body, body_len) {
     return http_respond(cfd, "200", "OK", body, body_len);
 }

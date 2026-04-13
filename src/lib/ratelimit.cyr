@@ -1,0 +1,53 @@
+# ratelimit.cyr — per-provider sliding window rate limiter
+# Uses a simple token bucket: tokens refill at rpm/60 per second.
+#
+# Limiter layout (32 bytes per entry):
+#   0: rpm_limit (i64)     — max requests per minute (0 = unlimited)
+#   8: tokens (i64)        — current available tokens (x1000 fixed-point)
+#  16: last_refill_ms (i64) — last refill timestamp
+#  24: (reserved)
+
+var RL_SIZE = 32;
+
+fn ratelimit_new(rpm) {
+    var rl = alloc(RL_SIZE);
+    store64(rl, rpm);
+    store64(rl + 8, rpm * 1000);
+    store64(rl + 16, clock_now_ms());
+    return rl;
+}
+
+fn rl_rpm(rl) { return load64(rl); }
+
+# Refill tokens based on elapsed time
+fn _rl_refill(rl) {
+    var now = clock_now_ms();
+    var last = load64(rl + 16);
+    var elapsed_ms = now - last;
+    if (elapsed_ms <= 0) { return 0; }
+    var rpm = load64(rl);
+    if (rpm == 0) { return 0; }
+    # tokens_to_add = rpm * elapsed_ms / 60000 (x1000 fixed-point)
+    var add = rpm * elapsed_ms * 1000 / 60000;
+    var cur = load64(rl + 8);
+    var max_tokens = rpm * 1000;
+    cur = cur + add;
+    if (cur > max_tokens) { cur = max_tokens; }
+    store64(rl + 8, cur);
+    store64(rl + 16, now);
+    return 0;
+}
+
+# Try to consume one request token. Returns 1 if allowed, 0 if rate limited.
+fn ratelimit_check(rl) {
+    if (rl == 0) { return 1; }
+    var rpm = load64(rl);
+    if (rpm == 0) { return 1; }
+    _rl_refill(rl);
+    var cur = load64(rl + 8);
+    if (cur >= 1000) {
+        store64(rl + 8, cur - 1000);
+        return 1;
+    }
+    return 0;
+}

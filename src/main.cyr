@@ -16,6 +16,7 @@
 # ================================================================
 
 include "src/lib/types.cyr"
+include "src/lib/ratelimit.cyr"
 include "src/lib/route.cyr"
 include "src/lib/router.cyr"
 include "src/lib/budget.cyr"
@@ -25,6 +26,9 @@ include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 include "src/lib/http_client.cyr"
 include "src/lib/provider.cyr"
+include "src/lib/compact.cyr"
+include "src/lib/audit.cyr"
+include "src/lib/retry.cyr"
 include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
 include "src/lib/config.cyr"
@@ -42,6 +46,8 @@ var _cost_map = 0;
 var _auth_tokens = 0;
 var _config_path = 0;
 var _http_port = 8088;
+var _retry_cfg = 0;
+var _audit_chain = 0;
 
 # ================================================================
 # HTTP route dispatch
@@ -86,6 +92,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
     if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
+    if (streq(path, "/v1/hardware/models") == 1) { return handle_hw_models(cfd); }
     if (streq(path, "/metrics") == 1) { return handle_metrics(cfd); }
 
     # POST routes
@@ -111,17 +118,36 @@ fn http_route(cfd, method, path, buf, buf_len) {
         var tb = req_parse_body(buf, buf_len);
         return handle_tokens_report(cfd, tb, req_body_len(buf, buf_len));
     }
+    if (streq(path, "/v1/hardware/placement") == 1) {
+        var hb = req_parse_body(buf, buf_len);
+        return handle_hw_placement(cfd, hb, req_body_len(buf, buf_len));
+    }
     if (streq(path, "/v1/embeddings") == 1) {
         var eb = req_parse_body(buf, buf_len);
         var ebl = req_body_len(buf, buf_len);
         if (ebl > 0) {
-            var eresp = http_post_local(11434, "/api/embeddings", eb, ebl);
-            if (eresp != 0) {
-                if (http_status(eresp) >= 200) {
-                    if (http_status(eresp) < 300) {
-                        return http_ok(cfd, http_body(eresp), http_body_len(eresp));
+            # Route through first available provider
+            var routes = load64(_router + ROUTER_ROUTES);
+            var rcount = load64(_router + ROUTER_COUNT);
+            var ei = 0;
+            while (ei < rcount) {
+                var er = load64(routes + ei * 8);
+                if (route_enabled(er) == 1) {
+                    var eport = url_port(route_base_url(er));
+                    var epath = "/api/embeddings";
+                    if (route_provider(er) != PROV_OLLAMA) {
+                        epath = "/v1/embeddings";
+                    }
+                    var eresp = http_post_local(eport, epath, eb, ebl);
+                    if (eresp != 0) {
+                        if (http_status(eresp) >= 200) {
+                            if (http_status(eresp) < 300) {
+                                return http_ok(cfd, http_body(eresp), http_body_len(eresp));
+                            }
+                        }
                     }
                 }
+                ei = ei + 1;
             }
         }
         return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
@@ -234,6 +260,77 @@ fn cmd_info() {
     return 0;
 }
 
+fn cmd_models() {
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    println("Configured providers:");
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        syscall(1, 1, "  ", 2);
+        var name = provider_name(route_provider(r));
+        syscall(1, 1, name, strlen(name));
+        syscall(1, 1, " @ ", 3);
+        var url = route_base_url(r);
+        syscall(1, 1, url, strlen(url));
+        if (route_enabled(r) != 1) {
+            syscall(1, 1, " [disabled]", 11);
+        }
+        println("");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmd_health() {
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var all_ok = 1;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var port = url_port(route_base_url(r));
+            var up = 0;
+            var fd = syscall(SYS_SOCKET, 2, 1, 0);
+            if (fd >= 0) {
+                var sa = sockaddr_in(0x0100007F, port);
+                var cr = syscall(SYS_CONNECT, fd, sa, 16);
+                if (cr >= 0) { up = 1; }
+                syscall(3, fd);
+            }
+            syscall(1, 1, "  ", 2);
+            var name = provider_name(route_provider(r));
+            syscall(1, 1, name, strlen(name));
+            if (up == 1) {
+                println(" — ok");
+            } else {
+                println(" — DOWN");
+                all_ok = 0;
+            }
+        }
+        i = i + 1;
+    }
+    if (all_ok == 1) { return 0; }
+    return 1;
+}
+
+fn cmd_infer(model, prompt) {
+    var route = router_select(_router, model);
+    if (route == 0) {
+        println("error: no provider for model");
+        return 1;
+    }
+    var result = provider_forward(route, model, prompt, 0, 0);
+    if (result == 0) {
+        println("error: inference failed");
+        return 1;
+    }
+    var text = load64(result);
+    println(text);
+    return 0;
+}
+
 fn cmd_help() {
     println("hoosh — AI inference gateway");
     println("");
@@ -241,6 +338,9 @@ fn cmd_help() {
     println("");
     println("Commands:");
     println("  serve [port]       start the gateway server (default: 8088)");
+    println("  models             list configured providers");
+    println("  health             check provider connectivity");
+    println("  infer <model> <p>  one-shot inference");
     println("  info               show system information");
     println("  help               show this help");
     println("  version            show version");
@@ -264,6 +364,8 @@ fn main() {
     _rate_map = map_new();
     _cost_map = map_new();
     _auth_tokens = vec_new(8);
+    _retry_cfg = retry_config_default();
+    _audit_chain = audit_chain_new("hoosh-audit-key", 15, 10000);
 
     # Default router: single ollama route
     var default_routes = alloc(8);
@@ -289,6 +391,15 @@ fn main() {
             if (port <= 0) { port = 8088; }
         }
         return cmd_serve(port);
+    }
+    if (streq(cmd, "models") == 1) { return cmd_models(); }
+    if (streq(cmd, "health") == 1) { return cmd_health(); }
+    if (streq(cmd, "infer") == 1) {
+        if (ac < 4) {
+            println("Usage: hoosh infer <model> <prompt>");
+            return 1;
+        }
+        return cmd_infer(argv(2), argv(3));
     }
     if (streq(cmd, "info") == 1) { return cmd_info(); }
     if (streq(cmd, "help") == 1) { return cmd_help(); }

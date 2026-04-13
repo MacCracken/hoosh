@@ -31,7 +31,14 @@ fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
 fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
 fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
 fn route_api_key(r) { return load64(r + ROUTE_API_KEY); }
+fn route_rate_limiter(r) { return load64(r + ROUTE_RATE_LIMIT); }
 fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
+fn route_set_rate_limit(r, rpm) {
+    if (rpm > 0) {
+        store64(r + ROUTE_RATE_LIMIT, ratelimit_new(rpm));
+    }
+    return 0;
+}
 
 fn route_set_patterns(r, patterns, count) {
     store64(r + ROUTE_PATTERNS, patterns);

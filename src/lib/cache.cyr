@@ -1,8 +1,20 @@
-# cache.cyr — response cache with hit/miss/eviction stats
+# cache.cyr — response cache with LRU eviction and stats
+# Each entry stores value + access timestamp for eviction ordering.
 
 enum CacheField {
     CACHE_SIZE = 48; CACHE_ENTRIES = 0; CACHE_MAX = 8;
-    CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32; CACHE_ENABLED = 40;
+    CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32;
+    CACHE_ENABLED = 40;
+}
+
+# Entry layout: 0=value(8), 8=last_access_ms(8)
+var CACHE_ENTRY_SIZE = 16;
+
+fn _cache_entry_new(value) {
+    var e = alloc(CACHE_ENTRY_SIZE);
+    store64(e, value);
+    store64(e + 8, clock_now_ms());
+    return e;
 }
 
 fn cache_new(max_entries, enabled) {
@@ -18,17 +30,56 @@ fn cache_new(max_entries, enabled) {
 
 fn cache_get(c, key) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    var val = map_get(load64(c + CACHE_ENTRIES), key);
-    if (val == 0) { store64(c + CACHE_MISSES, load64(c + CACHE_MISSES) + 1); return 0; }
-    store64(c + CACHE_HITS, load64(c + CACHE_HITS) + 1);
-    return val;
+    var entry = map_get(load64(c + CACHE_ENTRIES), key);
+    if (entry == 0) {
+        var m = load64(c + CACHE_MISSES);
+        store64(c + CACHE_MISSES, m + 1);
+        return 0;
+    }
+    # Update access timestamp (LRU touch)
+    store64(entry + 8, clock_now_ms());
+    var h = load64(c + CACHE_HITS);
+    store64(c + CACHE_HITS, h + 1);
+    return load64(entry);
+}
+
+# Evict the least recently used entry
+fn _cache_evict_lru(c) {
+    var m = load64(c + CACHE_ENTRIES);
+    var keys = map_keys(m);
+    var n = vec_len(keys);
+    if (n == 0) { return 0; }
+    var oldest_key = 0;
+    var oldest_time = 0x7FFFFFFFFFFFFFFF;
+    var i = 0;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var entry = map_get(m, k);
+        if (entry != 0) {
+            var t = load64(entry + 8);
+            if (t < oldest_time) {
+                oldest_time = t;
+                oldest_key = k;
+            }
+        }
+        i = i + 1;
+    }
+    if (oldest_key != 0) {
+        map_delete(m, oldest_key);
+        var ev = load64(c + CACHE_EVICTIONS);
+        store64(c + CACHE_EVICTIONS, ev + 1);
+    }
+    return 0;
 }
 
 fn cache_insert(c, key, value) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    if (map_count(load64(c + CACHE_ENTRIES)) >= load64(c + CACHE_MAX)) {
-        store64(c + CACHE_EVICTIONS, load64(c + CACHE_EVICTIONS) + 1);
+    var m = load64(c + CACHE_ENTRIES);
+    var count = map_count(m);
+    var max = load64(c + CACHE_MAX);
+    if (count >= max) {
+        _cache_evict_lru(c);
     }
-    map_set(load64(c + CACHE_ENTRIES), key, value);
+    map_set(m, key, _cache_entry_new(value));
     return 0;
 }

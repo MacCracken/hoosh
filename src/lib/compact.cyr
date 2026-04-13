@@ -1,0 +1,171 @@
+# compact.cyr — context compaction for long conversations
+# Truncates messages array to fit within a token budget.
+# Strategy: keep system message + last N messages that fit.
+#
+# Token estimation: ~4 chars per token (rough approximation)
+
+var CHARS_PER_TOKEN = 4;
+
+# Estimate token count from a messages JSON array
+fn estimate_tokens(messages, msg_len) {
+    return msg_len / CHARS_PER_TOKEN;
+}
+
+# Compact a messages array to fit within max_tokens.
+# Returns new (ptr, len) packed in a 16-byte struct,
+# or the original if already fits.
+# Strategy: find system message (keep it), then keep
+# as many recent messages as fit in the budget.
+fn compact_messages(msg_ptr, msg_len, max_tokens) {
+    var est = estimate_tokens(msg_ptr, msg_len);
+    if (est <= max_tokens) {
+        # Already fits
+        var r = alloc(16);
+        store64(r, msg_ptr);
+        store64(r + 8, msg_len);
+        return r;
+    }
+
+    # Find the system message (first message with "system" role)
+    var sys_start = 0;
+    var sys_end = 0;
+    var has_system = 0;
+    var i = 0;
+    while (i < msg_len - 8) {
+        if (memeq(msg_ptr + i, "\"role\":\"system\"", 15) == 1) {
+            # Walk backwards to find the { for this message
+                var j = i;
+                while (j > 0) {
+                    if (load8(msg_ptr + j) == 123) { sys_start = j; break; }
+                    j = j - 1;
+                }
+                # Walk forward to find the } for this message
+            j = i + 15;
+            var depth = 0;
+            while (j < msg_len) {
+                if (load8(msg_ptr + j) == 123) { depth = depth + 1; }
+                if (load8(msg_ptr + j) == 125) {
+                    if (depth == 0) { sys_end = j + 1; break; }
+                    depth = depth - 1;
+                }
+                if (load8(msg_ptr + j) == 34) {
+                    j = j + 1;
+                    while (j < msg_len) {
+                        if (load8(msg_ptr + j) == 34) { break; }
+                        if (load8(msg_ptr + j) == 92) { j = j + 1; }
+                        j = j + 1;
+                    }
+                }
+                j = j + 1;
+            }
+            has_system = 1;
+            break;
+        }
+        i = i + 1;
+    }
+
+    # Budget: max chars = max_tokens * CHARS_PER_TOKEN
+    var budget = max_tokens * CHARS_PER_TOKEN;
+    var sys_chars = 0;
+    if (has_system == 1) { sys_chars = sys_end - sys_start; }
+    var remaining = budget - sys_chars - 10;
+    if (remaining < 100) { remaining = 100; }
+
+    # Find message boundaries (scan for {"role": patterns)
+        # Collect start offsets of each message
+        var offsets = alloc(1024);
+        var msg_count = 0;
+        i = 0;
+        while (i < msg_len - 6) {
+            if (load8(msg_ptr + i) == 123) {
+                if (i + 10 < msg_len) {
+                    if (memeq(msg_ptr + i + 1, "\"role\"", 6) == 1) {
+                        store64(offsets + msg_count * 8, i);
+                        msg_count = msg_count + 1;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+
+        # Take messages from the end until budget fills
+        var keep_from = msg_count;
+        var chars_used = 0;
+        while (keep_from > 0) {
+            var idx = keep_from - 1;
+            var start = load64(offsets + idx * 8);
+            # Skip system message
+            if (has_system == 1) {
+                if (start == sys_start) {
+                    keep_from = keep_from - 1;
+                    continue;
+                }
+            }
+            var end = msg_len - 1;
+            if (idx + 1 < msg_count) {
+                end = load64(offsets + (idx + 1) * 8);
+            }
+            var mchars = end - start;
+            if (chars_used + mchars > remaining) { break; }
+            chars_used = chars_used + mchars;
+            keep_from = keep_from - 1;
+        }
+
+        # Build compacted array: [system_msg, ...recent_msgs]
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "[");
+        var first = 1;
+        if (has_system == 1) {
+            var sys_buf = alloc(sys_chars + 1);
+            memcpy(sys_buf, msg_ptr + sys_start, sys_chars);
+            store8(sys_buf + sys_chars, 0);
+            str_builder_add_cstr(sb, sys_buf);
+            first = 0;
+        }
+        i = keep_from;
+        while (i < msg_count) {
+            var start = load64(offsets + i * 8);
+            if (has_system == 1) {
+                if (start == sys_start) { i = i + 1; continue; }
+            }
+            var end = msg_len - 1;
+            if (i + 1 < msg_count) {
+                end = load64(offsets + (i + 1) * 8);
+            }
+            # Find actual end of this message object
+            var j = start;
+            var depth = 0;
+            while (j < msg_len) {
+                if (load8(msg_ptr + j) == 123) { depth = depth + 1; }
+                if (load8(msg_ptr + j) == 125) {
+                    depth = depth - 1;
+                    if (depth == 0) { end = j + 1; break; }
+                }
+                if (load8(msg_ptr + j) == 34) {
+                    j = j + 1;
+                    while (j < msg_len) {
+                        if (load8(msg_ptr + j) == 34) { break; }
+                        if (load8(msg_ptr + j) == 92) { j = j + 1; }
+                        j = j + 1;
+                    }
+                }
+                j = j + 1;
+            }
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            var mlen = end - start;
+            var mbuf = alloc(mlen + 1);
+            memcpy(mbuf, msg_ptr + start, mlen);
+            store8(mbuf + mlen, 0);
+            str_builder_add_cstr(sb, mbuf);
+            first = 0;
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+        var result_str = str_builder_build(sb);
+        var result_data = to_cstr(result_str);
+        var result_len = str_len(result_str);
+        var r = alloc(16);
+        store64(r, result_data);
+        store64(r + 8, result_len);
+        return r;
+    }

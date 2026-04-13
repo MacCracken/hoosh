@@ -1,0 +1,77 @@
+# retry.cyr — exponential backoff retry for provider calls
+# Jittered delay: base_ms * 2^attempt, capped at max_ms
+# Jitter from nanosecond clock low bits to prevent thundering herd
+
+# Retry config layout (24 bytes):
+#   0: max_retries (i64)
+#   8: base_delay_ms (i64)
+#  16: max_delay_ms (i64)
+
+fn retry_config_new(max_retries, base_ms, max_ms) {
+    var c = alloc(24);
+    store64(c, max_retries);
+    store64(c + 8, base_ms);
+    store64(c + 16, max_ms);
+    return c;
+}
+
+fn retry_config_default() {
+    return retry_config_new(3, 500, 30000);
+}
+
+fn retry_max(c) { return load64(c); }
+fn retry_base(c) { return load64(c + 8); }
+fn retry_cap(c) { return load64(c + 16); }
+
+# Compute delay for attempt N (0-based)
+# delay = min(base * 2^attempt, max) + jitter
+fn retry_delay_ms(cfg, attempt) {
+    var base = retry_base(cfg);
+    var cap = retry_cap(cfg);
+    var delay = base;
+    var i = 0;
+    while (i < attempt) {
+        delay = delay * 2;
+        if (delay > cap) { delay = cap; break; }
+        i = i + 1;
+    }
+    if (delay > cap) { delay = cap; }
+    # Jitter: add 0-25% from nanosecond clock low bits
+    var ns = clock_now_ns();
+    var jitter = (ns % (delay / 4 + 1));
+    return delay + jitter;
+}
+
+# Retry provider_forward with backoff.
+# Returns result pointer (same as provider_forward) or 0.
+fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len) {
+    var max = retry_max(cfg);
+    var attempt = 0;
+    while (attempt <= max) {
+        var result = provider_forward(
+        route, model, prompt, msg_raw, msg_len);
+        if (result != 0) { return result; }
+        if (attempt >= max) { return 0; }
+        var delay = retry_delay_ms(cfg, attempt);
+        sleep_ms(delay);
+        attempt = attempt + 1;
+    }
+    return 0;
+}
+
+# Retry streaming forward with backoff.
+# Returns backend fd or -1.
+fn retry_forward_stream(cfg, route, model, msg_raw, msg_len) {
+    var max = retry_max(cfg);
+    var attempt = 0;
+    while (attempt <= max) {
+        var fd = provider_forward_stream(
+        route, model, msg_raw, msg_len);
+        if (fd >= 0) { return fd; }
+        if (attempt >= max) { return 0 - 1; }
+        var delay = retry_delay_ms(cfg, attempt);
+        sleep_ms(delay);
+        attempt = attempt + 1;
+    }
+    return 0 - 1;
+}

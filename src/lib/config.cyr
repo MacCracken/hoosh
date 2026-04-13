@@ -50,6 +50,18 @@ fn load_config(path) {
 
             var route = route_new(ptype, ppri, purl);
 
+            # Parse API key
+            var apikey_str = toml_get(pp, str_from("api_key"));
+            if (apikey_str != 0) {
+                store64(route + ROUTE_API_KEY, to_cstr(apikey_str));
+            }
+
+            # Parse rate limit (RPM)
+            var rpm_str = toml_get(pp, str_from("rate_limit"));
+            if (rpm_str != 0) {
+                route_set_rate_limit(route, str_to_int(rpm_str));
+            }
+
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = toml_get(pp, str_from("models"));
             if (models_str != 0) {
@@ -104,6 +116,22 @@ fn load_config(path) {
             }
         }
         bi = bi + 1;
+    }
+
+    # Parse [[retry]] section
+    var retry_secs = toml_get_sections(sections, str_from("retry"));
+    if (vec_len(retry_secs) > 0) {
+        var rp = toml_section_pairs(vec_get(retry_secs, 0));
+        var mr_str = toml_get(rp, str_from("max_retries"));
+        var bd_str = toml_get(rp, str_from("base_delay_ms"));
+        var md_str = toml_get(rp, str_from("max_delay_ms"));
+        var mr = 3;
+        var bd = 500;
+        var md = 30000;
+        if (mr_str != 0) { mr = str_to_int(mr_str); }
+        if (bd_str != 0) { bd = str_to_int(bd_str); }
+        if (md_str != 0) { md = str_to_int(md_str); }
+        _retry_cfg = retry_config_new(mr, bd, md);
     }
 
     # Parse [[auth]] section
