@@ -34,24 +34,24 @@ fn handle_health(cfd) {
 fn handle_models(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\"}");
-            first = 0;
+        var routes = load64(_router + ROUTER_ROUTES);
+        var count = load64(_router + ROUTER_COUNT);
+        var first = 1;
+        var i = 0;
+        while (i < count) {
+            var r = load64(routes + i * 8);
+            if (route_enabled(r) == 1) {
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "{\"id\":\"");
+                    str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+                    str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                    str_builder_add_cstr(sb, "\"}");
+                first = 0;
+            }
+            i = i + 1;
         }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
+        str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -59,14 +59,14 @@ fn handle_models(cfd) {
 fn handle_cache_stats(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"entries\":");
-    str_builder_add_int(sb, map_count(load64(_cache + CACHE_ENTRIES)));
-    str_builder_add_cstr(sb, ",\"hits\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_HITS));
-    str_builder_add_cstr(sb, ",\"misses\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_MISSES));
-    str_builder_add_cstr(sb, ",\"evictions\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_EVICTIONS));
-    str_builder_add_cstr(sb, "}");
+        str_builder_add_int(sb, map_count(load64(_cache + CACHE_ENTRIES)));
+        str_builder_add_cstr(sb, ",\"hits\":");
+        str_builder_add_int(sb, load64(_cache + CACHE_HITS));
+        str_builder_add_cstr(sb, ",\"misses\":");
+        str_builder_add_int(sb, load64(_cache + CACHE_MISSES));
+        str_builder_add_cstr(sb, ",\"evictions\":");
+        str_builder_add_int(sb, load64(_cache + CACHE_EVICTIONS));
+        str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -74,26 +74,26 @@ fn handle_cache_stats(cfd) {
 fn handle_token_pools(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"pools\":[");
-    var keys = map_keys(_budget);
-    var first = 1;
-    var i = 0;
-    while (i < vec_len(keys)) {
-        var name = vec_get(keys, i);
-        var p = map_get(_budget, name);
-        if (first == 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"name\":\"");
-        str_builder_add_cstr(sb, name);
-        str_builder_add_cstr(sb, "\",\"capacity\":");
-        str_builder_add_int(sb, load64(p + POOL_CAPACITY));
-        str_builder_add_cstr(sb, ",\"used\":");
-        str_builder_add_int(sb, load64(p + POOL_USED));
-        str_builder_add_cstr(sb, ",\"available\":");
-        str_builder_add_int(sb, pool_available(p));
-        str_builder_add_cstr(sb, "}");
-        first = 0;
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
+        var keys = map_keys(_budget);
+        var first = 1;
+        var i = 0;
+        while (i < vec_len(keys)) {
+            var name = vec_get(keys, i);
+            var p = map_get(_budget, name);
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"name\":\"");
+                str_builder_add_cstr(sb, name);
+                str_builder_add_cstr(sb, "\",\"capacity\":");
+                str_builder_add_int(sb, load64(p + POOL_CAPACITY));
+                str_builder_add_cstr(sb, ",\"used\":");
+                str_builder_add_int(sb, load64(p + POOL_USED));
+                str_builder_add_cstr(sb, ",\"available\":");
+                str_builder_add_int(sb, pool_available(p));
+                str_builder_add_cstr(sb, "}");
+            first = 0;
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -101,31 +101,31 @@ fn handle_token_pools(cfd) {
 fn handle_costs(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"total_requests\":");
-    str_builder_add_int(sb, _met_requests);
-    str_builder_add_cstr(sb, ",\"total_prompt_tokens\":");
-    str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
-    str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, ",\"providers\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var ci = 0;
-    while (ci < rcount) {
-        var r = load64(routes + ci * 8);
-        if (first == 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"provider\":\"");
-        str_builder_add_cstr(sb, provider_name(route_provider(r)));
-        str_builder_add_cstr(sb, "\",\"base_url\":\"");
-        str_builder_add_cstr(sb, route_base_url(r));
-        str_builder_add_cstr(sb, "\",\"is_local\":");
-        if (provider_is_local(route_provider(r)) == 1) { str_builder_add_cstr(sb, "true"); }
-        else { str_builder_add_cstr(sb, "false"); }
-        str_builder_add_cstr(sb, "}");
-        first = 0;
-        ci = ci + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
+        str_builder_add_int(sb, _met_requests);
+        str_builder_add_cstr(sb, ",\"total_prompt_tokens\":");
+        str_builder_add_int(sb, _met_prompt_tokens);
+        str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
+        str_builder_add_int(sb, _met_comp_tokens);
+        str_builder_add_cstr(sb, ",\"providers\":[");
+        var routes = load64(_router + ROUTER_ROUTES);
+        var rcount = load64(_router + ROUTER_COUNT);
+        var first = 1;
+        var ci = 0;
+        while (ci < rcount) {
+            var r = load64(routes + ci * 8);
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"provider\":\"");
+                str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                str_builder_add_cstr(sb, "\",\"base_url\":\"");
+                str_builder_add_cstr(sb, route_base_url(r));
+                str_builder_add_cstr(sb, "\",\"is_local\":");
+                if (provider_is_local(route_provider(r)) == 1) { str_builder_add_cstr(sb, "true"); }
+                else { str_builder_add_cstr(sb, "false"); }
+                str_builder_add_cstr(sb, "}");
+            first = 0;
+            ci = ci + 1;
+        }
+        str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -133,36 +133,36 @@ fn handle_costs(cfd) {
 fn handle_health_providers(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"providers\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var hi = 0;
-    while (hi < rcount) {
-        var r = load64(routes + hi * 8);
-        if (route_enabled(r) == 1) {
-            var port = url_port(route_base_url(r));
-            var up = 0;
-            var fd = syscall(SYS_SOCKET, 2, 1, 0);
-            if (fd >= 0) {
-                var sa = sockaddr_in(0x0100007F, port);
-                var cr = syscall(SYS_CONNECT, fd, sa, 16);
-                if (cr >= 0) { up = 1; }
-                syscall(3, fd);
+        var routes = load64(_router + ROUTER_ROUTES);
+        var rcount = load64(_router + ROUTER_COUNT);
+        var first = 1;
+        var hi = 0;
+        while (hi < rcount) {
+            var r = load64(routes + hi * 8);
+            if (route_enabled(r) == 1) {
+                var port = url_port(route_base_url(r));
+                var up = 0;
+                var fd = syscall(SYS_SOCKET, 2, 1, 0);
+                if (fd >= 0) {
+                    var sa = sockaddr_in(0x0100007F, port);
+                    var cr = syscall(SYS_CONNECT, fd, sa, 16);
+                    if (cr >= 0) { up = 1; }
+                    syscall(3, fd);
+                }
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "{\"provider\":\"");
+                    str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                    str_builder_add_cstr(sb, "\",\"base_url\":\"");
+                    str_builder_add_cstr(sb, route_base_url(r));
+                    str_builder_add_cstr(sb, "\",\"healthy\":");
+                    if (up == 1) { str_builder_add_cstr(sb, "true"); }
+                    else { str_builder_add_cstr(sb, "false"); }
+                    str_builder_add_cstr(sb, "}");
+                first = 0;
             }
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"provider\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"base_url\":\"");
-            str_builder_add_cstr(sb, route_base_url(r));
-            str_builder_add_cstr(sb, "\",\"healthy\":");
-            if (up == 1) { str_builder_add_cstr(sb, "true"); }
-            else { str_builder_add_cstr(sb, "false"); }
-            str_builder_add_cstr(sb, "}");
-            first = 0;
+            hi = hi + 1;
         }
-        hi = hi + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
+        str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -183,11 +183,11 @@ fn handle_tokens_check(cfd, body_ptr, body_len) {
     if (pool_available(p) >= tokens) { allowed = 1; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"allowed\":");
-    if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
-    else { str_builder_add_cstr(sb, "false"); }
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
+        if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
+        else { str_builder_add_cstr(sb, "false"); }
+        str_builder_add_cstr(sb, ",\"available\":");
+        str_builder_add_int(sb, pool_available(p));
+        str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -207,11 +207,11 @@ fn handle_tokens_reserve(cfd, body_ptr, body_len) {
     if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"reserved\":");
-    if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
-    else { str_builder_add_cstr(sb, "false"); }
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
+        if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
+        else { str_builder_add_cstr(sb, "false"); }
+        str_builder_add_cstr(sb, ",\"available\":");
+        str_builder_add_int(sb, pool_available(p));
+        str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -234,10 +234,10 @@ fn handle_tokens_report(cfd, body_ptr, body_len) {
     pool_commit(p, reserved, actual);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"used\":");
-    str_builder_add_int(sb, load64(p + POOL_USED));
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
+        str_builder_add_int(sb, load64(p + POOL_USED));
+        str_builder_add_cstr(sb, ",\"available\":");
+        str_builder_add_int(sb, pool_available(p));
+        str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -248,8 +248,8 @@ fn handle_audit(cfd) {
     }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"total\":");
-    str_builder_add_int(sb, _audit_count);
-    str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
+        str_builder_add_int(sb, _audit_count);
+        str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -257,24 +257,24 @@ fn handle_audit(cfd) {
 fn handle_heartbeat(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"nodes\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var hi = 0;
-    while (hi < rcount) {
-        var r = load64(routes + hi * 8);
-        if (route_enabled(r) == 1) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, ":");
-            str_builder_add_cstr(sb, route_base_url(r));
-            str_builder_add_cstr(sb, "\",\"status\":\"online\"}");
-            first = 0;
+        var routes = load64(_router + ROUTER_ROUTES);
+        var rcount = load64(_router + ROUTER_COUNT);
+        var first = 1;
+        var hi = 0;
+        while (hi < rcount) {
+            var r = load64(routes + hi * 8);
+            if (route_enabled(r) == 1) {
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "{\"id\":\"");
+                    str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                    str_builder_add_cstr(sb, ":");
+                    str_builder_add_cstr(sb, route_base_url(r));
+                    str_builder_add_cstr(sb, "\",\"status\":\"online\"}");
+                first = 0;
+            }
+            hi = hi + 1;
         }
-        hi = hi + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
+        str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
@@ -297,7 +297,8 @@ fn handle_metrics(cfd) {
     str_builder_add_int(sb, _met_prompt_tokens);
     str_builder_add_cstr(sb, "\nhoosh_tokens_completion_total ");
     str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_providers_configured Number of configured providers\n");
+    str_builder_add_cstr(sb, "\n# HELP hoosh_providers_configured ");
+    str_builder_add_cstr(sb, "Number of configured providers\n");
     str_builder_add_cstr(sb, "# TYPE hoosh_providers_configured gauge\n");
     str_builder_add_cstr(sb, "hoosh_providers_configured ");
     str_builder_add_int(sb, _met_providers);
@@ -440,16 +441,21 @@ fn handle_chat(cfd, body_ptr, body_len) {
     _audit_count = _audit_count + 1;
 
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",\"object\":\"chat.completion\",\"model\":\"");
-    str_builder_add_cstr(sb, model_cstr);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"");
-    str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, resp_ptok);
-    str_builder_add_cstr(sb, ",\"completion_tokens\":");
-    str_builder_add_int(sb, resp_ctok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, resp_ptok + resp_ctok);
-    str_builder_add_cstr(sb, "}}");
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+        str_builder_add_cstr(sb, "\"object\":\"chat.completion\",");
+        str_builder_add_cstr(sb, "\"model\":\"");
+        str_builder_add_cstr(sb, model_cstr);
+        str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+            str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
+                str_builder_add_cstr(sb, "\"content\":\"");
+                str_builder_add_cstr(sb, resp_text);
+                str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],");
+        str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
+            str_builder_add_int(sb, resp_ptok);
+            str_builder_add_cstr(sb, ",\"completion_tokens\":");
+            str_builder_add_int(sb, resp_ctok);
+            str_builder_add_cstr(sb, ",\"total_tokens\":");
+            str_builder_add_int(sb, resp_ptok + resp_ctok);
+            str_builder_add_cstr(sb, "}}");
     return http_json_ok(cfd, str_builder_build(sb));
 }

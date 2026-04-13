@@ -1,6 +1,10 @@
+[package]
 name = "hoosh"
 version = "2.0.0"
-license = "GPL-3.0-only"
-entry = "src/main.cyr"
-output = "hoosh"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/hoosh"
+
+[build]
+src = "src/main.cyr"
+output = "build/hoosh"

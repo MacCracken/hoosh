@@ -60,8 +60,8 @@ fn http_not_found(cfd) {
 fn http_bad_request(cfd, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
+            str_builder_add_cstr(sb, msg);
+            str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
     return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
@@ -70,8 +70,8 @@ fn http_bad_request(cfd, msg) {
 fn http_error(cfd, status, status_text, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
+            str_builder_add_cstr(sb, msg);
+            str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
     return http_respond(cfd, status, status_text, bd, str_len(body));
@@ -102,7 +102,11 @@ fn http_parse_method(buf, len) {
 fn req_parse_body(buf, len) {
     var i = 0;
     while (i < len - 3) {
-        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) {
+        var b0 = load8(buf + i) == 13;
+        var b1 = load8(buf + i + 1) == 10;
+        var b2 = load8(buf + i + 2) == 13;
+        var b3 = load8(buf + i + 3) == 10;
+        if (b0 && b1 && b2 && b3) {
             return buf + i + 4;
         }
         i = i + 1;

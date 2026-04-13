@@ -222,7 +222,8 @@ fn cmd_info() {
     println("AI inference gateway — multi-provider LLM routing");
     println("");
     println("Local providers: ollama, llamacpp, synapse, lmstudio, localai");
-    println("Remote providers: openai, anthropic, deepseek, mistral, groq, grok, openrouter, google");
+    println("Remote providers: openai, anthropic, deepseek, mistral,");
+    println("                  groq, grok, openrouter, google");
     println("");
     syscall(1, 1, "Default port: ", 14);
     fmt_int(_http_port);
