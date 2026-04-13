@@ -1,13 +1,15 @@
 # hoosh — AI inference gateway
-# Cyrius port from 22,956 lines of Rust
 # Multi-provider LLM routing, token budgets, caching, OpenAI-compatible API
 #
 # Usage:
-#   hoosh serve                    Start the gateway (port 8088)
-#   hoosh serve 9000               Custom port
-#   hoosh health                   Check provider health
-#   hoosh info                     System info
-#   hoosh help                     Show help
+#   hoosh serve [port]     Start the gateway (default: 8088)
+#   hoosh info             System info
+#   hoosh version          Show version
+#   hoosh help             Show help
+
+# ================================================================
+# Standard library
+# ================================================================
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -29,695 +31,24 @@ include "lib/chrono.cyr"
 include "lib/syscalls.cyr"
 
 # ================================================================
-# Version
+# Hoosh modules
 # ================================================================
 
-var HOOSH_VERSION = "2.0.0";
+include "src/lib/types.cyr"
+include "src/lib/route.cyr"
+include "src/lib/router.cyr"
+include "src/lib/budget.cyr"
+include "src/lib/cache.cyr"
+include "src/lib/metrics.cyr"
+include "src/lib/auth.cyr"
+include "src/lib/http_server.cyr"
+include "src/lib/http_client.cyr"
+include "src/lib/provider.cyr"
+include "src/lib/handlers.cyr"
+include "src/lib/config.cyr"
 
 # ================================================================
-# Error types
-# ================================================================
-
-enum HooshErr {
-    ERR_NONE           = 0;
-    ERR_PROVIDER       = 1;
-    ERR_MODEL_NOT_FOUND = 2;
-    ERR_RATE_LIMITED   = 3;
-    ERR_BUDGET_EXCEEDED = 4;
-    ERR_NO_PROVIDER    = 5;
-    ERR_TIMEOUT        = 6;
-    ERR_CACHE          = 7;
-    ERR_DLP_BLOCKED    = 8;
-    ERR_HTTP           = 9;
-    ERR_INTERNAL       = 10;
-}
-
-fn error_http_status(code) {
-    if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
-    if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
-    if (code == ERR_TIMEOUT) { return 408; }
-    if (code == ERR_DLP_BLOCKED) { return 403; }
-    if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
-    if (code == ERR_HTTP) { return 502; }
-    return 500;
-}
-
-fn error_code_str(code) {
-    if (code == ERR_MODEL_NOT_FOUND) { return "model_not_found"; }
-    if (code == ERR_NO_PROVIDER) { return "no_provider"; }
-    if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
-    if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
-    if (code == ERR_TIMEOUT) { return "timeout"; }
-    if (code == ERR_CACHE) { return "cache_error"; }
-    if (code == ERR_PROVIDER) { return "provider_error"; }
-    if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
-    if (code == ERR_HTTP) { return "upstream_error"; }
-    return "internal_error";
-}
-
-# ================================================================
-# Provider types
-# ================================================================
-
-enum Provider {
-    PROV_OLLAMA     = 0;
-    PROV_LLAMACPP   = 1;
-    PROV_SYNAPSE    = 2;
-    PROV_LMSTUDIO   = 3;
-    PROV_LOCALAI    = 4;
-    PROV_OPENAI     = 5;
-    PROV_ANTHROPIC  = 6;
-    PROV_DEEPSEEK   = 7;
-    PROV_MISTRAL    = 8;
-    PROV_GOOGLE     = 9;
-    PROV_GROQ       = 10;
-    PROV_GROK       = 11;
-    PROV_OPENROUTER = 12;
-    PROV_WHISPER    = 13;
-    PROV_COUNT      = 14;
-}
-
-fn provider_is_local(prov) {
-    if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
-    if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
-    return 0;
-}
-
-fn provider_name(prov) {
-    if (prov == PROV_OLLAMA) { return "ollama"; }
-    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
-    if (prov == PROV_SYNAPSE) { return "synapse"; }
-    if (prov == PROV_LMSTUDIO) { return "lmstudio"; }
-    if (prov == PROV_LOCALAI) { return "localai"; }
-    if (prov == PROV_OPENAI) { return "openai"; }
-    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
-    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
-    if (prov == PROV_MISTRAL) { return "mistral"; }
-    if (prov == PROV_GOOGLE) { return "google"; }
-    if (prov == PROV_GROQ) { return "groq"; }
-    if (prov == PROV_GROK) { return "grok"; }
-    if (prov == PROV_OPENROUTER) { return "openrouter"; }
-    if (prov == PROV_WHISPER) { return "whisper"; }
-    return "unknown";
-}
-
-fn _to_lower(s) {
-    var len = strlen(s);
-    var out = alloc(len + 1);
-    var i = 0;
-    while (i < len) {
-        var c = load8(s + i);
-        if (c >= 65) { if (c <= 90) { c = c + 32; } }
-        store8(out + i, c);
-        i = i + 1;
-    }
-    store8(out + len, 0);
-    return out;
-}
-
-fn provider_parse(name) {
-    var lname = _to_lower(name);
-    if (streq(lname, "ollama") == 1) { return PROV_OLLAMA; }
-    if (streq(lname, "llamacpp") == 1) { return PROV_LLAMACPP; }
-    if (streq(lname, "synapse") == 1) { return PROV_SYNAPSE; }
-    if (streq(lname, "lmstudio") == 1) { return PROV_LMSTUDIO; }
-    if (streq(lname, "localai") == 1) { return PROV_LOCALAI; }
-    if (streq(lname, "openai") == 1) { return PROV_OPENAI; }
-    if (streq(lname, "anthropic") == 1) { return PROV_ANTHROPIC; }
-    if (streq(lname, "deepseek") == 1) { return PROV_DEEPSEEK; }
-    if (streq(lname, "mistral") == 1) { return PROV_MISTRAL; }
-    if (streq(lname, "google") == 1) { return PROV_GOOGLE; }
-    if (streq(lname, "groq") == 1) { return PROV_GROQ; }
-    if (streq(lname, "grok") == 1) { return PROV_GROK; }
-    if (streq(lname, "openrouter") == 1) { return PROV_OPENROUTER; }
-    if (streq(lname, "whisper") == 1) { return PROV_WHISPER; }
-    return 0 - 1;  # -1 = unknown
-}
-
-fn provider_default_url(prov) {
-    if (prov == PROV_OLLAMA) { return "http://localhost:11434"; }
-    if (prov == PROV_LLAMACPP) { return "http://localhost:8080"; }
-    if (prov == PROV_SYNAPSE) { return "http://localhost:7860"; }
-    if (prov == PROV_LMSTUDIO) { return "http://localhost:1234"; }
-    if (prov == PROV_LOCALAI) { return "http://localhost:8080"; }
-    if (prov == PROV_OPENAI) { return "https://api.openai.com"; }
-    if (prov == PROV_ANTHROPIC) { return "https://api.anthropic.com"; }
-    if (prov == PROV_DEEPSEEK) { return "https://api.deepseek.com"; }
-    if (prov == PROV_MISTRAL) { return "https://api.mistral.ai"; }
-    if (prov == PROV_GOOGLE) { return "https://generativelanguage.googleapis.com"; }
-    if (prov == PROV_GROQ) { return "https://api.groq.com"; }
-    if (prov == PROV_GROK) { return "https://api.x.ai"; }
-    if (prov == PROV_OPENROUTER) { return "https://openrouter.ai/api"; }
-    return "http://localhost:8080";
-}
-
-# ================================================================
-# Routing strategy
-# ================================================================
-
-enum Strategy {
-    STRAT_PRIORITY       = 0;
-    STRAT_ROUND_ROBIN    = 1;
-    STRAT_LOWEST_LATENCY = 2;
-    STRAT_DIRECT         = 3;
-}
-
-# ================================================================
-# Route — provider routing configuration
-# ================================================================
-
-enum RouteField {
-    ROUTE_SIZE       = 64;
-    ROUTE_PROVIDER   = 0;
-    ROUTE_PRIORITY   = 8;
-    ROUTE_PATTERNS   = 16;
-    ROUTE_PATTERNS_N = 24;
-    ROUTE_ENABLED    = 32;
-    ROUTE_BASE_URL   = 40;
-    ROUTE_API_KEY    = 48;
-    ROUTE_RATE_LIMIT = 56;
-}
-
-fn route_new(prov, priority, base_url) {
-    var r = alloc(ROUTE_SIZE);
-    store64(r + ROUTE_PROVIDER, prov);
-    store64(r + ROUTE_PRIORITY, priority);
-    store64(r + ROUTE_PATTERNS, 0);
-    store64(r + ROUTE_PATTERNS_N, 0);
-    store64(r + ROUTE_ENABLED, 1);
-    store64(r + ROUTE_BASE_URL, base_url);
-    store64(r + ROUTE_API_KEY, 0);
-    store64(r + ROUTE_RATE_LIMIT, 0);
-    return r;
-}
-
-fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
-fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
-fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
-fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
-fn route_api_key(r) { return load64(r + ROUTE_API_KEY); }
-fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
-
-fn route_set_patterns(r, patterns, count) {
-    store64(r + ROUTE_PATTERNS, patterns);
-    store64(r + ROUTE_PATTERNS_N, count);
-    return 0;
-}
-
-fn route_matches_model(r, model) {
-    var count = load64(r + ROUTE_PATTERNS_N);
-    if (count == 0) { return 1; }
-    var arr = load64(r + ROUTE_PATTERNS);
-    var i = 0;
-    while (i < count) {
-        var pattern = load64(arr + i * 8);
-        var plen = strlen(pattern);
-        if (plen > 0) {
-            if (load8(pattern + plen - 1) == 42) {
-                # Wildcard prefix match
-                if (memeq(model, pattern, plen - 1) == 1) { return 1; }
-            } else {
-                # Exact match
-                if (streq(model, pattern) == 1) { return 1; }
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# ================================================================
-# Router — provider selection + load balancing
-# ================================================================
-
-enum RouterField {
-    ROUTER_SIZE      = 40;
-    ROUTER_ROUTES    = 0;
-    ROUTER_COUNT     = 8;
-    ROUTER_STRATEGY  = 16;
-    ROUTER_RR_IDX    = 24;
-    ROUTER_LATENCIES = 32;
-}
-
-fn router_new(routes, count, strategy) {
-    var rt = alloc(ROUTER_SIZE);
-    store64(rt + ROUTER_ROUTES, routes);
-    store64(rt + ROUTER_COUNT, count);
-    store64(rt + ROUTER_STRATEGY, strategy);
-    store64(rt + ROUTER_RR_IDX, 0);
-    store64(rt + ROUTER_LATENCIES, map_new());
-    # Sort by priority (insertion sort)
-    var i = 1;
-    while (i < count) {
-        var key = load64(routes + i * 8);
-        var kp = route_priority(key);
-        var j = i - 1;
-        while (j >= 0) {
-            if (route_priority(load64(routes + j * 8)) <= kp) { break; }
-            store64(routes + (j + 1) * 8, load64(routes + j * 8));
-            j = j - 1;
-        }
-        store64(routes + (j + 1) * 8, key);
-        i = i + 1;
-    }
-    return rt;
-}
-
-fn router_select(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
-    var strategy = load64(rt + ROUTER_STRATEGY);
-    var cand = alloc(count * 8);
-    var cn = 0;
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (route_matches_model(r, model) == 1) {
-                store64(cand + cn * 8, r);
-                cn = cn + 1;
-            }
-        }
-        i = i + 1;
-    }
-    if (cn == 0) { return 0; }
-    if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) { return load64(cand); }
-    if (strategy == STRAT_ROUND_ROBIN) {
-        var idx = load64(rt + ROUTER_RR_IDX);
-        store64(rt + ROUTER_RR_IDX, idx + 1);
-        return load64(cand + (idx % cn) * 8);
-    }
-    if (strategy == STRAT_LOWEST_LATENCY) {
-        var lat_map = load64(rt + ROUTER_LATENCIES);
-        var best = load64(cand);
-        var best_lat = 0x7FFFFFFFFFFFFFFF;
-        var k = 0;
-        while (k < cn) {
-            var c = load64(cand + k * 8);
-            var url = route_base_url(c);
-            var lat = map_get(lat_map, url);
-            if (lat == 0) { lat = 0x7FFFFFFFFFFFFFFF; }
-            if (lat < best_lat) { best = c; best_lat = lat; }
-            k = k + 1;
-        }
-        return best;
-    }
-    return load64(cand);
-}
-
-fn router_report_latency(rt, base_url, latency_ms) {
-    var lat_map = load64(rt + ROUTER_LATENCIES);
-    var old = map_get(lat_map, base_url);
-    if (old == 0) { map_set(lat_map, base_url, latency_ms); }
-    else { map_set(lat_map, base_url, (old * 7 + latency_ms * 3) / 10); }
-    return 0;
-}
-
-# ================================================================
-# Token budget
-# ================================================================
-
-enum PoolField {
-    POOL_SIZE = 32; POOL_NAME = 0; POOL_CAPACITY = 8; POOL_USED = 16; POOL_RESERVED = 24;
-}
-
-fn pool_new(name, capacity) {
-    var p = alloc(POOL_SIZE);
-    store64(p + POOL_NAME, name);
-    store64(p + POOL_CAPACITY, capacity);
-    store64(p + POOL_USED, 0);
-    store64(p + POOL_RESERVED, 0);
-    return p;
-}
-
-fn pool_available(p) {
-    var taken = load64(p + POOL_USED) + load64(p + POOL_RESERVED);
-    var cap = load64(p + POOL_CAPACITY);
-    if (taken > cap) { return 0; }
-    return cap - taken;
-}
-
-fn pool_reserve(p, tokens) {
-    if (pool_available(p) < tokens) { return 0; }
-    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
-    return 1;
-}
-
-fn pool_commit(p, reserved, actual) {
-    var resv = load64(p + POOL_RESERVED);
-    if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
-    else { store64(p + POOL_RESERVED, 0); }
-    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
-    return 0;
-}
-
-# Budget: hashmap of name -> pool
-fn budget_new() { return map_new(); }
-fn budget_add_pool(bgt, p) { map_set(bgt, load64(p + POOL_NAME), p); return 0; }
-fn budget_get_pool(bgt, name) { return map_get(bgt, name); }
-
-fn budget_reserve(bgt, name, tokens) {
-    var p = map_get(bgt, name);
-    if (p == 0) { return 0; }
-    return pool_reserve(p, tokens);
-}
-
-# ================================================================
-# Cache — response cache with stats
-# ================================================================
-
-enum CacheField {
-    CACHE_SIZE = 48; CACHE_ENTRIES = 0; CACHE_MAX = 8;
-    CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32; CACHE_ENABLED = 40;
-}
-
-fn cache_new(max_entries, enabled) {
-    var c = alloc(CACHE_SIZE);
-    store64(c + CACHE_ENTRIES, map_new());
-    store64(c + CACHE_MAX, max_entries);
-    store64(c + CACHE_HITS, 0);
-    store64(c + CACHE_MISSES, 0);
-    store64(c + CACHE_EVICTIONS, 0);
-    store64(c + CACHE_ENABLED, enabled);
-    return c;
-}
-
-fn cache_get(c, key) {
-    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    var val = map_get(load64(c + CACHE_ENTRIES), key);
-    if (val == 0) { store64(c + CACHE_MISSES, load64(c + CACHE_MISSES) + 1); return 0; }
-    store64(c + CACHE_HITS, load64(c + CACHE_HITS) + 1);
-    return val;
-}
-
-fn cache_insert(c, key, value) {
-    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    if (map_count(load64(c + CACHE_ENTRIES)) >= load64(c + CACHE_MAX)) {
-        store64(c + CACHE_EVICTIONS, load64(c + CACHE_EVICTIONS) + 1);
-    }
-    map_set(load64(c + CACHE_ENTRIES), key, value);
-    return 0;
-}
-
-# ================================================================
-# HTTP client — POST with JSON body to provider backends
-# ================================================================
-
-# Build HTTP POST request header into buffer, return length written
-fn _build_post_header(buf, path, host, body_len) {
-    var pos = 0;
-    memcpy(buf + pos, "POST ", 5); pos = pos + 5;
-    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
-    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
-    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
-    var cl_buf = alloc(32);
-    var cl_len = fmt_int_buf(body_len, cl_buf);
-    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    return pos;
-}
-
-# Simple HTTP POST to localhost. Returns response struct or 0.
-fn http_post_local(port, path, body, body_len) {
-
-    var fd = syscall(SYS_SOCKET, 2, 1, 0);  # AF_INET=2, SOCK_STREAM=1
-
-    if (fd < 0) { return 0; }
-    var sa = sockaddr_in(0x0100007F, port);
-    var cr = syscall(SYS_CONNECT, fd, sa, 16);
-
-    if (cr < 0) { syscall(3, fd); return 0; }
-    # Build and send request
-    var hdr = alloc(2048);
-    var hlen = _build_post_header(hdr, path, "localhost", body_len);
-    syscall(SYS_WRITE, fd, hdr, hlen);
-    syscall(SYS_WRITE, fd, body, body_len);
-    # Read response
-    var rbuf = alloc(131072);
-    var total = 0;
-    var n = 1;
-    while (n > 0) {
-        n = syscall(SYS_READ, fd, rbuf + total, 131072 - total);
-        if (n > 0) { total = total + n; }
-    }
-    syscall(3, fd);
-
-    if (total == 0) { return 0; }
-    return _http_parse_response(rbuf, total);
-}
-
-# ================================================================
-# Provider backends — Ollama + OpenAI-compatible
-# ================================================================
-
-# Forward inference to Ollama native API
-# Build chat request JSON body from model + prompt string
-fn _build_chat_body(model, prompt) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"");
-    str_builder_add_cstr(sb, prompt);
-    str_builder_add_cstr(sb, "\"}]}");
-    var s = str_builder_build(sb);
-    return to_cstr(s);
-}
-
-# Build chat request JSON with raw messages array passthrough
-fn _build_chat_body_raw(model, messages_raw, messages_len) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
-    # Append raw messages array bytes
-    var s = str_builder_build(sb);
-    var prefix = to_cstr(s);
-    var plen = strlen(prefix);
-    var suffix = "}";
-    var total = plen + messages_len + 1;
-    var buf = alloc(total + 1);
-    memcpy(buf, prefix, plen);
-    memcpy(buf + plen, messages_raw, messages_len);
-    store8(buf + plen + messages_len, 125);  # '}'
-    store8(buf + plen + messages_len + 1, 0);
-    return buf;
-}
-
-# Forward to Ollama native API
-fn ollama_infer(port, model, prompt) {
-    var body = _build_chat_body(model, prompt);
-
-    return http_post_local(port, "/api/chat", body, strlen(body));
-}
-
-# Forward to OpenAI-compatible endpoint
-fn openai_compat_infer(port, model, prompt) {
-    var body = _build_chat_body(model, prompt);
-    return http_post_local(port, "/v1/chat/completions", body, strlen(body));
-}
-
-# Extract text from Ollama response JSON
-fn ollama_extract_text(resp_body, resp_len) {
-    if (resp_body == 0) { return ""; }
-    if (resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    # Find "content":" in the response body (simple string search)
-    var needle = "\"content\":\"";
-    var nlen = 11;
-    var i = 0;
-    while (i < resp_len - nlen) {
-        if (memeq(resp_body + i, needle, nlen) == 1) {
-            i = i + nlen;
-            var start = i;
-            # Find closing quote (handle escaped quotes)
-            while (i < resp_len) {
-                if (load8(resp_body + i) == 34) {
-                    # Check it's not escaped
-                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
-                    break;
-                }
-                i = i + 1;
-            }
-            var tlen = i - start;
-            var text = alloc(tlen + 1);
-            memcpy(text, resp_body + start, tlen);
-            store8(text + tlen, 0);
-            return text;
-        }
-        i = i + 1;
-    }
-    return "";
-}
-
-# Extract text from OpenAI-compatible response JSON
-fn openai_extract_text(resp_body, resp_len) {
-    if (resp_body == 0 || resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    # OpenAI response: {"choices":[{"message":{"content":"..."}}]}
-    # Simple: find "content":" and extract
-    var i = 0;
-    while (i < resp_len - 10) {
-        if (memeq(resp_body + i, "\"content\":", 10) == 1) {
-            i = i + 10;
-            # Skip whitespace and opening quote
-            while (i < resp_len && load8(resp_body + i) == 32) { i = i + 1; }
-            if (i < resp_len && load8(resp_body + i) == 34) {
-                i = i + 1;
-                var start = i;
-                while (i < resp_len && load8(resp_body + i) != 34) { i = i + 1; }
-                var tlen = i - start;
-                var text = alloc(tlen + 1);
-                memcpy(text, resp_body + start, tlen);
-                store8(text + tlen, 0);
-                return text;
-            }
-        }
-        i = i + 1;
-    }
-    return "";
-}
-
-# Extract port from URL like http://host:PORT/path
-fn url_port(url) {
-    var i = 7;  # skip http://
-    while (load8(url + i) != 0) {
-        if (load8(url + i) == 58) { return atoi(url + i + 1); }
-        if (load8(url + i) == 47) { return 80; }
-        i = i + 1;
-    }
-    return 80;
-}
-
-# Extract token counts from Ollama response body
-# Returns packed: prompt_tokens * 0x100000000 + completion_tokens
-fn extract_ollama_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen == 0) { return 0; }
-    store8(body + blen, 0);  # null-terminate for atoi
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 13) {
-        if (memeq(body + i, "\"prompt_eval_count\":", 19) == 1) {
-            prompt = atoi(body + i + 19);
-        }
-        # Match "eval_count": but not "prompt_eval_count":
-        if (memeq(body + i, "\"eval_count\":", 13) == 1) {
-            # Make sure it's not preceded by "prompt_"
-            if (i < 8) {
-                comp = atoi(body + i + 13);
-            } else {
-                if (memeq(body + i - 8, "\"prompt_", 8) != 1) {
-                    comp = atoi(body + i + 13);
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return prompt * 0x100000000 + comp;
-}
-
-# Extract text + token counts from provider response
-# Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes
-# messages_raw: ptr to raw JSON messages array, messages_len: byte length
-# If messages_raw is 0, falls back to building from prompt
-fn provider_forward(route, model, prompt, messages_raw, messages_len) {
-    var port = url_port(route_base_url(route));
-    var body = 0;
-    if (messages_raw != 0) {
-        body = _build_chat_body_raw(model, messages_raw, messages_len);
-    } else {
-        body = _build_chat_body(model, prompt);
-    }
-    var blen = strlen(body);
-    var path = "/api/chat";
-    if (route_provider(route) != PROV_OLLAMA) {
-        path = "/v1/chat/completions";
-    }
-    var resp = http_post_local(port, path, body, blen);
-    if (resp == 0) { return 0; }
-    if (http_status(resp) < 200) { return 0; }
-    if (http_status(resp) >= 300) { return 0; }
-
-    var rb = http_body(resp);
-    var rbl = http_body_len(resp);
-    var text = ollama_extract_text(rb, rbl);
-    var tokens = extract_ollama_tokens(rb, rbl);
-    var ptok = tokens / 0x100000000;
-    var ctok = tokens % 0x100000000;
-    metrics_record(ptok, ctok);
-
-    var result = alloc(32);
-    store64(result, text);
-    store64(result + 8, 0);
-    store64(result + 16, ptok);
-    store64(result + 24, ctok);
-    return result;
-}
-
-# ================================================================
-# Auth middleware — bearer token verification
-# ================================================================
-
-fn auth_check(req_buf, req_len) {
-    # If no auth tokens configured, allow all
-    if (vec_len(_auth_tokens) == 0) { return 1; }
-    # Find Authorization header
-    var i = 0;
-    while (i < req_len - 14) {
-        if (memeq(req_buf + i, "Authorization:", 14) == 1) {
-            i = i + 14;
-            while (i < req_len && load8(req_buf + i) == 32) { i = i + 1; }
-            # Skip "Bearer "
-            if (i < req_len - 7 && memeq(req_buf + i, "Bearer ", 7) == 1) {
-                i = i + 7;
-                var tok_start = i;
-                while (i < req_len && load8(req_buf + i) != 13 && load8(req_buf + i) != 10) { i = i + 1; }
-                var tok_len = i - tok_start;
-                # Check against configured tokens
-                var ti = 0;
-                while (ti < vec_len(_auth_tokens)) {
-                    var expected = vec_get(_auth_tokens, ti);
-                    if (ct_eq(req_buf + tok_start, tok_len, expected, strlen(expected)) == 1) {
-                        return 1;
-                    }
-                    ti = ti + 1;
-                }
-            }
-            return 0;  # Authorization header present but token invalid
-        }
-        i = i + 1;
-    }
-    return 0;  # No Authorization header found
-}
-
-# ================================================================
-# Metrics — request counter, token counters
-# ================================================================
-
-var _met_requests = 0;
-var _met_prompt_tokens = 0;
-var _met_comp_tokens = 0;
-var _met_providers = 0;
-
-fn metrics_record(prompt_tok, comp_tok) {
-    _met_requests = _met_requests + 1;
-    _met_prompt_tokens = _met_prompt_tokens + prompt_tok;
-    _met_comp_tokens = _met_comp_tokens + comp_tok;
-    return 0;
-}
-
-# ================================================================
-# Server state
+# Server state (globals)
 # ================================================================
 
 var _router = 0;
@@ -726,570 +57,12 @@ var _cache = 0;
 var _health_map = 0;
 var _rate_map = 0;
 var _cost_map = 0;
-var _auth_tokens = 0;  # vec of token strings
+var _auth_tokens = 0;
 var _config_path = 0;
 var _http_port = 8088;
 
 # ================================================================
-# HTTP response helpers (from vidya pattern)
-# ================================================================
-
-fn make_crlf() {
-    var buf = alloc(3);
-    store8(buf, 13);      # \r
-    store8(buf + 1, 10);  # \n
-    store8(buf + 2, 0);   # null terminator
-    return buf;
-}
-
-fn to_cstr(s) {
-    if (s == 0) { return ""; }
-    var len = str_len(s);
-    var buf = alloc(len + 1);
-    memcpy(buf, str_data(s), len);
-    store8(buf + len, 0);
-    return buf;
-}
-
-fn http_respond(cfd, status, status_text, body, body_len) {
-    var cr = make_crlf();
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_cstr(sb, status);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, status_text);
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Type: application/json");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: *");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Length: ");
-    str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, cr);
-    var header = str_builder_build(sb);
-    var hdr_cstr = to_cstr(header);
-    syscall(SYS_WRITE, cfd, hdr_cstr, str_len(header));
-    syscall(SYS_WRITE, cfd, body, body_len);
-    return 0;
-}
-
-fn http_ok(cfd, body, body_len) {
-    return http_respond(cfd, "200", "OK", body, body_len);
-}
-
-fn http_json_ok(cfd, json_str) {
-    var data = str_data(json_str);
-    var len = str_len(json_str);
-    return http_ok(cfd, data, len);
-}
-
-fn http_not_found(cfd) {
-    var body = "{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}";
-    return http_respond(cfd, "404", "Not Found", body, strlen(body));
-}
-
-fn http_bad_request(cfd, msg) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
-    var body = str_builder_build(sb);
-    var bd = to_cstr(body);
-    return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
-}
-
-fn http_error(cfd, status, status_text, msg) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
-    var body = str_builder_build(sb);
-    var bd = to_cstr(body);
-    return http_respond(cfd, status, status_text, bd, str_len(body));
-}
-
-fn http_parse_path(buf, len) {
-    var i = 0;
-    while (i < len && load8(buf + i) != 32) { i = i + 1; }
-    i = i + 1;
-    if (i >= len) { return 0; }
-    var start = i;
-    while (i < len && load8(buf + i) != 32 && load8(buf + i) != 10 && load8(buf + i) != 13) {
-        i = i + 1;
-    }
-    var path = alloc(i - start + 1);
-    memcpy(path, buf + start, i - start);
-    store8(path + i - start, 0);
-    return path;
-}
-
-fn http_parse_method(buf, len) {
-    if (memeq(buf, "GET", 3) == 1) { return "GET"; }
-    if (memeq(buf, "POST", 4) == 1) { return "POST"; }
-    if (memeq(buf, "OPTIONS", 7) == 1) { return "OPTIONS"; }
-    return "UNKNOWN";
-}
-
-fn req_parse_body(buf, len) {
-    # Find \r\n\r\n
-    var i = 0;
-    while (i < len - 3) {
-        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) {
-            return buf + i + 4;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-fn req_body_len(buf, total_len) {
-    var body = req_parse_body(buf, total_len);
-    if (body == 0) { return 0; }
-    return total_len - (body - buf);
-}
-
-# ================================================================
-# API handlers
-# ================================================================
-
-# GET /v1/health — check gateway + probe first provider
-fn handle_health(cfd) {
-    # Quick probe: can we connect to the first enabled provider?
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var healthy = 1;
-    if (count > 0) {
-        var r = load64(routes);
-        var port = url_port(route_base_url(r));
-        var fd = syscall(SYS_SOCKET, 2, 1, 0);
-        if (fd >= 0) {
-            var sa = sockaddr_in(0x0100007F, port);
-            var cr = syscall(SYS_CONNECT, fd, sa, 16);
-            if (cr < 0) { healthy = 0; }
-            syscall(3, fd);
-        } else { healthy = 0; }
-    }
-    if (healthy == 1) {
-        var body = "{\"status\":\"ok\"}";
-        return http_ok(cfd, body, strlen(body));
-    }
-    var body = "{\"status\":\"degraded\",\"providers_down\":1}";
-    return http_respond(cfd, "503", "Service Unavailable", body, strlen(body));
-}
-
-# GET /v1/models
-fn handle_models(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    # List routes from router
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\"}");
-            first = 0;
-        }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    var body = str_builder_build(sb);
-    return http_json_ok(cfd, body);
-}
-
-# GET /v1/cache/stats
-fn handle_cache_stats(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"entries\":");
-    str_builder_add_int(sb, map_count(load64(_cache + CACHE_ENTRIES)));
-    str_builder_add_cstr(sb, ",\"hits\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_HITS));
-    str_builder_add_cstr(sb, ",\"misses\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_MISSES));
-    str_builder_add_cstr(sb, ",\"evictions\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_EVICTIONS));
-    str_builder_add_cstr(sb, "}");
-    var body = str_builder_build(sb);
-    return http_json_ok(cfd, body);
-}
-
-# GET /v1/tokens/pools
-fn handle_token_pools(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"pools\":[");
-    # Iterate budget pools
-    var keys = map_keys(_budget);
-    var first = 1;
-    var i = 0;
-    while (i < vec_len(keys)) {
-        var name = vec_get(keys, i);
-        var p = map_get(_budget, name);
-        if (first == 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"name\":\"");
-        str_builder_add_cstr(sb, name);
-        str_builder_add_cstr(sb, "\",\"capacity\":");
-        str_builder_add_int(sb, load64(p + POOL_CAPACITY));
-        str_builder_add_cstr(sb, ",\"used\":");
-        str_builder_add_int(sb, load64(p + POOL_USED));
-        str_builder_add_cstr(sb, ",\"available\":");
-        str_builder_add_int(sb, pool_available(p));
-        str_builder_add_cstr(sb, "}");
-        first = 0;
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    var body = str_builder_build(sb);
-    return http_json_ok(cfd, body);
-}
-
-# GET /v1/costs
-fn handle_costs(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"total_requests\":");
-    str_builder_add_int(sb, _met_requests);
-    str_builder_add_cstr(sb, ",\"total_prompt_tokens\":");
-    str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
-    str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, ",\"providers\":[");
-    # List routes with their request counts
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var ci = 0;
-    while (ci < rcount) {
-        var r = load64(routes + ci * 8);
-        if (first == 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"provider\":\"");
-        str_builder_add_cstr(sb, provider_name(route_provider(r)));
-        str_builder_add_cstr(sb, "\",\"base_url\":\"");
-        str_builder_add_cstr(sb, route_base_url(r));
-        str_builder_add_cstr(sb, "\",\"is_local\":");
-        if (provider_is_local(route_provider(r)) == 1) {
-            str_builder_add_cstr(sb, "true");
-        } else {
-            str_builder_add_cstr(sb, "false");
-        }
-        str_builder_add_cstr(sb, "}");
-        first = 0;
-        ci = ci + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    var body = str_builder_build(sb);
-    return http_json_ok(cfd, body);
-}
-
-# GET /v1/health/providers — per-provider health status
-fn handle_health_providers(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"providers\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var hi = 0;
-    while (hi < rcount) {
-        var r = load64(routes + hi * 8);
-        if (route_enabled(r) == 1) {
-            # Probe provider
-            var port = url_port(route_base_url(r));
-            var up = 0;
-            var fd = syscall(SYS_SOCKET, 2, 1, 0);
-            if (fd >= 0) {
-                var sa = sockaddr_in(0x0100007F, port);
-                var cr = syscall(SYS_CONNECT, fd, sa, 16);
-                if (cr >= 0) { up = 1; }
-                syscall(3, fd);
-            }
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"provider\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"base_url\":\"");
-            str_builder_add_cstr(sb, route_base_url(r));
-            str_builder_add_cstr(sb, "\",\"healthy\":");
-            if (up == 1) { str_builder_add_cstr(sb, "true"); }
-            else { str_builder_add_cstr(sb, "false"); }
-            str_builder_add_cstr(sb, "}");
-            first = 0;
-        }
-        hi = hi + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    var body = str_builder_build(sb);
-    return http_json_ok(cfd, body);
-}
-
-# GET /v1/queue/status
-# POST /v1/tokens/check — check if pool can accommodate tokens
-fn handle_tokens_check(cfd, body_ptr, body_len) {
-    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
-    var pairs = json_parse(str_new(body_ptr, body_len));
-    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var tokens_str = json_get(pairs, str_from("tokens"));
-    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
-    var pname = to_cstr(pool_name);
-    var tokens = 0;
-    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
-    var p = budget_get_pool(_budget, pname);
-    if (p == 0) {
-        return http_error(cfd, "404", "Not Found", "token pool not found");
-    }
-    var allowed = 0;
-    if (pool_available(p) >= tokens) { allowed = 1; }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"allowed\":");
-    if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
-    else { str_builder_add_cstr(sb, "false"); }
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
-    return http_json_ok(cfd, str_builder_build(sb));
-}
-
-# POST /v1/tokens/reserve — reserve tokens in a pool
-fn handle_tokens_reserve(cfd, body_ptr, body_len) {
-    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
-    var pairs = json_parse(str_new(body_ptr, body_len));
-    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var tokens_str = json_get(pairs, str_from("tokens"));
-    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
-    var pname = to_cstr(pool_name);
-    var tokens = 0;
-    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
-    var reserved = budget_reserve(_budget, pname, tokens);
-    var p = budget_get_pool(_budget, pname);
-    if (p == 0) {
-        return http_error(cfd, "404", "Not Found", "token pool not found");
-    }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"reserved\":");
-    if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
-    else { str_builder_add_cstr(sb, "false"); }
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
-    return http_json_ok(cfd, str_builder_build(sb));
-}
-
-# POST /v1/tokens/report — report actual token usage
-fn handle_tokens_report(cfd, body_ptr, body_len) {
-    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
-    var pairs = json_parse(str_new(body_ptr, body_len));
-    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var reserved_str = json_get(pairs, str_from("reserved"));
-    var actual_str = json_get(pairs, str_from("actual"));
-    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
-    var pname = to_cstr(pool_name);
-    var reserved = 0;
-    var actual = 0;
-    if (reserved_str != 0) { reserved = str_to_int(reserved_str); }
-    if (actual_str != 0) { actual = str_to_int(actual_str); }
-    var p = budget_get_pool(_budget, pname);
-    if (p == 0) {
-        return http_error(cfd, "404", "Not Found", "token pool not found");
-    }
-    pool_commit(p, reserved, actual);
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"used\":");
-    str_builder_add_int(sb, load64(p + POOL_USED));
-    str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
-    str_builder_add_cstr(sb, "}");
-    return http_json_ok(cfd, str_builder_build(sb));
-}
-
-# GET /v1/audit — audit log entries
-var _audit_entries = 0;
-var _audit_count = 0;
-
-fn handle_audit(cfd) {
-    if (_audit_entries == 0) {
-        return http_error(cfd, "404", "Not Found", "audit logging not enabled");
-    }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"total\":");
-    str_builder_add_int(sb, _audit_count);
-    str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
-    return http_json_ok(cfd, str_builder_build(sb));
-}
-
-# GET /v1/health/heartbeat
-fn handle_heartbeat(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"nodes\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
-    var first = 1;
-    var hi = 0;
-    while (hi < rcount) {
-        var r = load64(routes + hi * 8);
-        if (route_enabled(r) == 1) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, ":");
-            str_builder_add_cstr(sb, route_base_url(r));
-            str_builder_add_cstr(sb, "\",\"status\":\"online\"}");
-            first = 0;
-        }
-        hi = hi + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    return http_json_ok(cfd, str_builder_build(sb));
-}
-
-fn handle_queue_status(cfd) {
-    var body = "{\"pending\":0,\"processing\":0}";
-    return http_ok(cfd, body, strlen(body));
-}
-
-# GET /metrics (prometheus format)
-fn handle_metrics(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "# HELP hoosh_requests_total Total inference requests\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_requests_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_requests_total ");
-    str_builder_add_int(sb, _met_requests);
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, "# HELP hoosh_tokens_total Total tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
-    str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_completion_total ");
-    str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, "# HELP hoosh_providers_configured Number of configured providers\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_providers_configured gauge\n");
-    str_builder_add_cstr(sb, "hoosh_providers_configured ");
-    str_builder_add_int(sb, _met_providers);
-    str_builder_add_cstr(sb, "\n");
-    var body = str_builder_build(sb);
-    var bd = to_cstr(body);
-    # Metrics use text/plain, not JSON
-    var cr = make_crlf();
-    var hdr = str_builder_new();
-    str_builder_add_cstr(hdr, "HTTP/1.1 200 OK");
-    str_builder_add_cstr(hdr, cr);
-    str_builder_add_cstr(hdr, "Content-Type: text/plain; charset=utf-8");
-    str_builder_add_cstr(hdr, cr);
-    str_builder_add_cstr(hdr, "Content-Length: ");
-    str_builder_add_int(hdr, str_len(body));
-    str_builder_add_cstr(hdr, cr);
-    str_builder_add_cstr(hdr, cr);
-    var hdr_s = str_builder_build(hdr);
-    var hdr_c = to_cstr(hdr_s);
-    syscall(SYS_WRITE, cfd, hdr_c, str_len(hdr_s));
-    syscall(SYS_WRITE, cfd, bd, str_len(body));
-    return 0;
-}
-
-# POST /v1/chat/completions — main inference endpoint
-fn handle_chat(cfd, body_ptr, body_len) {
-    if (body_len == 0) {
-        return http_bad_request(cfd, "empty request body");
-    }
-    var body_str = str_new(body_ptr, body_len);
-    var pairs = json_parse(body_str);
-    if (pairs == 0) {
-        return http_bad_request(cfd, "invalid JSON");
-    }
-    var model = json_get(pairs, str_from("model"));
-    if (model == 0) {
-        return http_bad_request(cfd, "missing 'model' field");
-    }
-    var model_cstr = to_cstr(model);
-
-    # Find route for this model
-    var route = router_select(_router, model_cstr);
-    if (route == 0) {
-        return http_error(cfd, "404", "Not Found", "no provider for model");
-    }
-
-    # Extract raw "messages" array from request body for passthrough
-    # Find "messages":[ in the raw body and extract to matching ]
-    var msg_raw = 0;
-    var msg_raw_len = 0;
-    var mi = 0;
-    while (mi < body_len - 12) {
-        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
-            mi = mi + 11;
-            # Skip whitespace
-            while (mi < body_len && load8(body_ptr + mi) == 32) { mi = mi + 1; }
-            if (mi < body_len && load8(body_ptr + mi) == 91) {
-                # Found '[' — scan for matching ']'
-                var depth = 1;
-                var ms = mi;
-                mi = mi + 1;
-                while (mi < body_len && depth > 0) {
-                    if (load8(body_ptr + mi) == 91) { depth = depth + 1; }
-                    if (load8(body_ptr + mi) == 93) { depth = depth - 1; }
-                    if (load8(body_ptr + mi) == 34) {
-                        # Skip strings (don't count brackets inside strings)
-                        mi = mi + 1;
-                        while (mi < body_len && load8(body_ptr + mi) != 34) {
-                            if (load8(body_ptr + mi) == 92) { mi = mi + 1; }  # skip escape
-                            mi = mi + 1;
-                        }
-                    }
-                    mi = mi + 1;
-                }
-                msg_raw = body_ptr + ms;
-                msg_raw_len = mi - ms;
-            }
-            break;
-        }
-        mi = mi + 1;
-    }
-
-    # Fallback: extract prompt from last "content" field
-    var prompt_cstr = "hello";
-    if (msg_raw == 0) {
-        var prompt_val = json_get(pairs, str_from("prompt"));
-        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
-    }
-
-    # Forward to provider backend
-    var result = provider_forward(route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
-    if (result == 0) {
-        return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable");
-    }
-
-    var resp_text = load64(result);
-    var resp_ptok = load64(result + 16);
-    var resp_ctok = load64(result + 24);
-
-    # Build OpenAI-compatible response
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",\"object\":\"chat.completion\",\"model\":\"");
-    str_builder_add_cstr(sb, model_cstr);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"");
-    str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, resp_ptok);
-    str_builder_add_cstr(sb, ",\"completion_tokens\":");
-    str_builder_add_int(sb, resp_ctok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, resp_ptok + resp_ctok);
-    str_builder_add_cstr(sb, "}}");
-    var resp = str_builder_build(sb);
-    return http_json_ok(cfd, resp);
-}
-
-# ================================================================
-# HTTP router
+# HTTP route dispatch
 # ================================================================
 
 fn http_route(cfd, method, path, buf, buf_len) {
@@ -1311,20 +84,22 @@ fn http_route(cfd, method, path, buf, buf_len) {
         return 0;
     }
 
-    # Auth check (skip for health and metrics)
-    if (streq(path, "/v1/health") != 1 && streq(path, "/metrics") != 1) {
-        if (auth_check(buf, buf_len) == 0) {
-            return http_error(cfd, "401", "Unauthorized", "invalid or missing bearer token");
+    # Auth check (skip health + metrics)
+    if (streq(path, "/v1/health") != 1) {
+        if (streq(path, "/metrics") != 1) {
+            if (auth_check(buf, buf_len, _auth_tokens) == 0) {
+                return http_error(cfd, "401", "Unauthorized", "invalid or missing bearer token");
+            }
         }
     }
 
     # GET routes
     if (streq(path, "/v1/health") == 1) { return handle_health(cfd); }
-    if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
     if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }
-    if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
+    if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
+    if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
@@ -1332,39 +107,28 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
     # POST routes
     if (streq(path, "/v1/costs/reset") == 1) {
-        _met_requests = 0;
-        _met_prompt_tokens = 0;
-        _met_comp_tokens = 0;
+        metrics_reset();
         var body = "{\"status\":\"reset\"}";
         return http_ok(cfd, body, strlen(body));
     }
     if (streq(path, "/v1/admin/reload") == 1) {
-        if (_config_path != 0) {
-            load_config(_config_path);
-            var body = "{\"status\":\"reloaded\"}";
-            return http_ok(cfd, body, strlen(body));
-        }
         load_config("hoosh.toml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
     }
     if (streq(path, "/v1/tokens/check") == 1) {
         var tb = req_parse_body(buf, buf_len);
-        var tbl = req_body_len(buf, buf_len);
-        return handle_tokens_check(cfd, tb, tbl);
+        return handle_tokens_check(cfd, tb, req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/tokens/reserve") == 1) {
         var tb = req_parse_body(buf, buf_len);
-        var tbl = req_body_len(buf, buf_len);
-        return handle_tokens_reserve(cfd, tb, tbl);
+        return handle_tokens_reserve(cfd, tb, req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/tokens/report") == 1) {
         var tb = req_parse_body(buf, buf_len);
-        var tbl = req_body_len(buf, buf_len);
-        return handle_tokens_report(cfd, tb, tbl);
+        return handle_tokens_report(cfd, tb, req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/embeddings") == 1) {
-        # Forward to Ollama embeddings API
         var eb = req_parse_body(buf, buf_len);
         var ebl = req_body_len(buf, buf_len);
         if (ebl > 0) {
@@ -1381,8 +145,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     }
     if (streq(path, "/v1/chat/completions") == 1) {
         var body = req_parse_body(buf, buf_len);
-        var blen = req_body_len(buf, buf_len);
-        return handle_chat(cfd, body, blen);
+        return handle_chat(cfd, body, req_body_len(buf, buf_len));
     }
 
     # Root
@@ -1395,179 +158,44 @@ fn http_route(cfd, method, path, buf, buf_len) {
 }
 
 # ================================================================
-# Config loader
-# ================================================================
-
-fn load_config(path) {
-    var sections = toml_parse_file(path);
-    if (vec_len(sections) == 0) { return 0; }
-
-    # Parse [[server]] section
-    var srv_secs = toml_get_sections(sections, str_from("server"));
-    if (vec_len(srv_secs) > 0) {
-        var srv = toml_section_pairs(vec_get(srv_secs, 0));
-        var port_str = toml_get(srv, str_from("port"));
-        if (port_str != 0) { _http_port = str_to_int(port_str); }
-    }
-
-    # Parse [[cache]] section
-    var cache_secs = toml_get_sections(sections, str_from("cache"));
-    if (vec_len(cache_secs) > 0) {
-        var cache_p = toml_section_pairs(vec_get(cache_secs, 0));
-        var max_str = toml_get(cache_p, str_from("max_entries"));
-        var enabled_str = toml_get(cache_p, str_from("enabled"));
-        var max_e = 10000;
-        var enabled = 1;
-        if (max_str != 0) { max_e = str_to_int(max_str); }
-        if (enabled_str != 0 && str_eq_cstr(enabled_str, "false") == 1) { enabled = 0; }
-        _cache = cache_new(max_e, enabled);
-    }
-
-    # Parse [[providers]] sections
-    var prov_secs = toml_get_sections(sections, str_from("providers"));
-    var route_count = vec_len(prov_secs);
-    if (route_count > 0) {
-        var routes = alloc(route_count * 8);
-        var ri = 0;
-        while (ri < route_count) {
-            var pp = toml_section_pairs(vec_get(prov_secs, ri));
-            var ptype_str = toml_get(pp, str_from("type"));
-            var purl_str = toml_get(pp, str_from("base_url"));
-            var ppri_str = toml_get(pp, str_from("priority"));
-
-            var ptype = PROV_OLLAMA;
-            if (ptype_str != 0) { ptype = provider_parse(to_cstr(ptype_str)); }
-            var purl = provider_default_url(ptype);
-            if (purl_str != 0) { purl = to_cstr(purl_str); }
-            var ppri = 1;
-            if (ppri_str != 0) { ppri = str_to_int(ppri_str); }
-
-            var route = route_new(ptype, ppri, purl);
-
-            # Parse model patterns — TOML array: ["llama*", "mistral*"]
-            var models_str = toml_get(pp, str_from("models"));
-            if (models_str != 0) {
-                var ms = to_cstr(models_str);
-                var ms_len = strlen(ms);
-                # Parse comma-separated patterns, stripping [ ] "
-                var pats = alloc(64);  # up to 8 patterns
-                var pat_count = 0;
-                var pi = 0;
-                while (pi < ms_len) {
-                    var mc = load8(ms + pi);
-                    # Skip [ ] , whitespace "
-                    if (mc == 91 || mc == 93 || mc == 44 || mc == 32 || mc == 34) {
-                        pi = pi + 1;
-                    } else {
-                        # Start of pattern
-                        var ps = pi;
-                        while (pi < ms_len) {
-                            mc = load8(ms + pi);
-                            if (mc == 34 || mc == 44 || mc == 93) { break; }
-                            pi = pi + 1;
-                        }
-                        var plen = pi - ps;
-                        if (plen > 0) {
-                            var pat = alloc(plen + 1);
-                            memcpy(pat, ms + ps, plen);
-                            store8(pat + plen, 0);
-                            store64(pats + pat_count * 8, pat);
-                            pat_count = pat_count + 1;
-                        }
-                    }
-                }
-                if (pat_count > 0) {
-                    route_set_patterns(route, pats, pat_count);
-                }
-            }
-
-            store64(routes + ri * 8, route);
-            ri = ri + 1;
-        }
-        _router = router_new(routes, route_count, STRAT_PRIORITY);
-        _met_providers = route_count;
-    }
-
-    # Parse [[budgets]] sections
-    var bud_secs = toml_get_sections(sections, str_from("budgets"));
-    var bi = 0;
-    while (bi < vec_len(bud_secs)) {
-        var bp = toml_section_pairs(vec_get(bud_secs, bi));
-        var bname = toml_get(bp, str_from("name"));
-        var bcap_str = toml_get(bp, str_from("capacity"));
-        if (bname != 0 && bcap_str != 0) {
-            budget_add_pool(_budget, pool_new(to_cstr(bname), str_to_int(bcap_str)));
-        }
-        bi = bi + 1;
-    }
-
-    # Parse [[auth]] section
-    var auth_secs = toml_get_sections(sections, str_from("auth"));
-    if (vec_len(auth_secs) > 0) {
-        var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
-        var tok_str = toml_get(auth_p, str_from("tokens"));
-        if (tok_str != 0) {
-            # Simple: single token for now
-            vec_push(_auth_tokens, to_cstr(tok_str));
-        }
-    }
-
-    return 1;
-}
-
-# ================================================================
-# Server — accept loop
+# Server accept loop
 # ================================================================
 
 fn cmd_serve(port) {
     _http_port = port;
-
-    var sfd = tcp_socket();
-    if (is_err_result(sfd) == 1) {
-        println("error: failed to create socket");
-        return 1;
-    }
-    sfd = payload(sfd);
+    var sfd_r = tcp_socket();
+    if (is_err_result(sfd_r) == 1) { println("error: failed to create socket"); return 1; }
+    var sfd = payload(sfd_r);
     sock_reuse(sfd);
 
     var br = sock_bind(sfd, INADDR_ANY(), _http_port);
-    if (is_err_result(br) == 1) {
-        println("error: failed to bind");
-        return 1;
-    }
+    if (is_err_result(br) == 1) { println("error: failed to bind"); return 1; }
 
     var lr = sock_listen(sfd, 128);
-    if (is_err_result(lr) == 1) {
-        println("error: failed to listen");
-        return 1;
-    }
+    if (is_err_result(lr) == 1) { println("error: failed to listen"); return 1; }
 
     syscall(1, 1, "hoosh v", 7);
     syscall(1, 1, HOOSH_VERSION, strlen(HOOSH_VERSION));
     syscall(1, 1, " listening on 0.0.0.0:", 22);
-    var pbuf[32];
-    var plen = fmt_int_buf(_http_port, &pbuf);
-    syscall(1, 1, &pbuf, plen);
+    var pbuf = alloc(32);
+    var plen = fmt_int_buf(_http_port, pbuf);
+    syscall(1, 1, pbuf, plen);
     println("");
-
     syscall(1, 1, "OpenAI-compatible API: http://localhost:", 40);
-    syscall(1, 1, &pbuf, plen);
+    syscall(1, 1, pbuf, plen);
     println("/v1/chat/completions");
-
-    var route_count = load64(_router + ROUTER_COUNT);
-    fmt_int(route_count);
+    var rc = load64(_router + ROUTER_COUNT);
+    fmt_int(rc);
     println(" provider route(s) configured");
 
-    # Accept loop
     while (1 == 1) {
         var client = sock_accept(sfd);
         if (is_err_result(client) == 1) { continue; }
         var cfd = payload(client);
-
         var req_buf = alloc(65536);
-        var recv_result = sock_recv(cfd, req_buf, 65535);
-        if (is_err_result(recv_result) == 1) { sock_close(cfd); continue; }
-        var req_len = payload(recv_result);
+        var recv_r = sock_recv(cfd, req_buf, 65535);
+        if (is_err_result(recv_r) == 1) { sock_close(cfd); continue; }
+        var req_len = payload(recv_r);
         if (req_len > 0) {
             store8(req_buf + req_len, 0);
             var method = http_parse_method(req_buf, req_len);
@@ -1624,7 +252,7 @@ fn main() {
     args_init();
     sha256_global_init();
 
-    # Initialize defaults
+    # Initialize state
     _budget = budget_new();
     budget_add_pool(_budget, pool_new("default", 10000000));
     _cache = cache_new(10000, 1);
@@ -1639,21 +267,19 @@ fn main() {
     _router = router_new(default_routes, 1, STRAT_PRIORITY);
     _met_providers = 1;
 
-    # Try loading config
+    # Load config
     load_config("hoosh.toml");
 
-    # Parse CLI args
-    var argc = argc();
-    if (argc < 2) {
-        return cmd_serve(_http_port);
-    }
+    # CLI
+    var ac = argc();
+    if (ac < 2) { return cmd_serve(_http_port); }
 
     var cmd = argv(1);
     if (streq(cmd, "serve") == 1) {
         var port = _http_port;
-        if (argc >= 3) {
+        if (ac >= 3) {
             port = atoi(argv(2));
-            if (port <= 0 || port > 65535) { port = 8088; }
+            if (port <= 0) { port = 8088; }
         }
         return cmd_serve(port);
     }
@@ -1661,12 +287,7 @@ fn main() {
     if (streq(cmd, "help") == 1) { return cmd_help(); }
     if (streq(cmd, "--help") == 1) { return cmd_help(); }
     if (streq(cmd, "-h") == 1) { return cmd_help(); }
-    if (streq(cmd, "version") == 1) {
-        syscall(1, 1, "hoosh v", 7);
-        println(HOOSH_VERSION);
-        return 0;
-    }
-    if (streq(cmd, "--version") == 1) {
+    if (streq(cmd, "version") == 1 || streq(cmd, "--version") == 1) {
         syscall(1, 1, "hoosh v", 7);
         println(HOOSH_VERSION);
         return 0;

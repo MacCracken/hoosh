@@ -1,0 +1,60 @@
+# route.cyr — provider route struct and model pattern matching
+# Requires: types.cyr
+
+enum RouteField {
+    ROUTE_SIZE       = 64;
+    ROUTE_PROVIDER   = 0;
+    ROUTE_PRIORITY   = 8;
+    ROUTE_PATTERNS   = 16;
+    ROUTE_PATTERNS_N = 24;
+    ROUTE_ENABLED    = 32;
+    ROUTE_BASE_URL   = 40;
+    ROUTE_API_KEY    = 48;
+    ROUTE_RATE_LIMIT = 56;
+}
+
+fn route_new(prov, priority, base_url) {
+    var r = alloc(ROUTE_SIZE);
+    store64(r + ROUTE_PROVIDER, prov);
+    store64(r + ROUTE_PRIORITY, priority);
+    store64(r + ROUTE_PATTERNS, 0);
+    store64(r + ROUTE_PATTERNS_N, 0);
+    store64(r + ROUTE_ENABLED, 1);
+    store64(r + ROUTE_BASE_URL, base_url);
+    store64(r + ROUTE_API_KEY, 0);
+    store64(r + ROUTE_RATE_LIMIT, 0);
+    return r;
+}
+
+fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
+fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
+fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
+fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
+fn route_api_key(r) { return load64(r + ROUTE_API_KEY); }
+fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
+
+fn route_set_patterns(r, patterns, count) {
+    store64(r + ROUTE_PATTERNS, patterns);
+    store64(r + ROUTE_PATTERNS_N, count);
+    return 0;
+}
+
+fn route_matches_model(r, model) {
+    var count = load64(r + ROUTE_PATTERNS_N);
+    if (count == 0) { return 1; }
+    var arr = load64(r + ROUTE_PATTERNS);
+    var i = 0;
+    while (i < count) {
+        var pattern = load64(arr + i * 8);
+        var plen = strlen(pattern);
+        if (plen > 0) {
+            if (load8(pattern + plen - 1) == 42) {
+                if (memeq(model, pattern, plen - 1) == 1) { return 1; }
+            } else {
+                if (streq(model, pattern) == 1) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}

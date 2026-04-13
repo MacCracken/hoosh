@@ -1,0 +1,152 @@
+# types.cyr — enums, error codes, provider types for hoosh
+# All shared constants and type definitions.
+
+var HOOSH_VERSION = "2.0.0";
+
+# ================================================================
+# Error types
+# ================================================================
+
+enum HooshErr {
+    ERR_NONE           = 0;
+    ERR_PROVIDER       = 1;
+    ERR_MODEL_NOT_FOUND = 2;
+    ERR_RATE_LIMITED   = 3;
+    ERR_BUDGET_EXCEEDED = 4;
+    ERR_NO_PROVIDER    = 5;
+    ERR_TIMEOUT        = 6;
+    ERR_CACHE          = 7;
+    ERR_DLP_BLOCKED    = 8;
+    ERR_HTTP           = 9;
+    ERR_INTERNAL       = 10;
+}
+
+fn error_http_status(code) {
+    if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
+    if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
+    if (code == ERR_TIMEOUT) { return 408; }
+    if (code == ERR_DLP_BLOCKED) { return 403; }
+    if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
+    if (code == ERR_HTTP) { return 502; }
+    return 500;
+}
+
+fn error_code_str(code) {
+    if (code == ERR_MODEL_NOT_FOUND) { return "model_not_found"; }
+    if (code == ERR_NO_PROVIDER) { return "no_provider"; }
+    if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
+    if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
+    if (code == ERR_TIMEOUT) { return "timeout"; }
+    if (code == ERR_CACHE) { return "cache_error"; }
+    if (code == ERR_PROVIDER) { return "provider_error"; }
+    if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
+    if (code == ERR_HTTP) { return "upstream_error"; }
+    return "internal_error";
+}
+
+# ================================================================
+# Provider types
+# ================================================================
+
+enum Provider {
+    PROV_OLLAMA     = 0;
+    PROV_LLAMACPP   = 1;
+    PROV_SYNAPSE    = 2;
+    PROV_LMSTUDIO   = 3;
+    PROV_LOCALAI    = 4;
+    PROV_OPENAI     = 5;
+    PROV_ANTHROPIC  = 6;
+    PROV_DEEPSEEK   = 7;
+    PROV_MISTRAL    = 8;
+    PROV_GOOGLE     = 9;
+    PROV_GROQ       = 10;
+    PROV_GROK       = 11;
+    PROV_OPENROUTER = 12;
+    PROV_WHISPER    = 13;
+    PROV_COUNT      = 14;
+}
+
+fn provider_is_local(prov) {
+    if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
+    if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
+    return 0;
+}
+
+fn provider_name(prov) {
+    if (prov == PROV_OLLAMA) { return "ollama"; }
+    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
+    if (prov == PROV_SYNAPSE) { return "synapse"; }
+    if (prov == PROV_LMSTUDIO) { return "lmstudio"; }
+    if (prov == PROV_LOCALAI) { return "localai"; }
+    if (prov == PROV_OPENAI) { return "openai"; }
+    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
+    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
+    if (prov == PROV_MISTRAL) { return "mistral"; }
+    if (prov == PROV_GOOGLE) { return "google"; }
+    if (prov == PROV_GROQ) { return "groq"; }
+    if (prov == PROV_GROK) { return "grok"; }
+    if (prov == PROV_OPENROUTER) { return "openrouter"; }
+    if (prov == PROV_WHISPER) { return "whisper"; }
+    return "unknown";
+}
+
+fn _to_lower(s) {
+    var len = strlen(s);
+    var out = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    store8(out + len, 0);
+    return out;
+}
+
+fn provider_parse(name) {
+    var lname = _to_lower(name);
+    if (streq(lname, "ollama") == 1) { return PROV_OLLAMA; }
+    if (streq(lname, "llamacpp") == 1) { return PROV_LLAMACPP; }
+    if (streq(lname, "synapse") == 1) { return PROV_SYNAPSE; }
+    if (streq(lname, "lmstudio") == 1) { return PROV_LMSTUDIO; }
+    if (streq(lname, "localai") == 1) { return PROV_LOCALAI; }
+    if (streq(lname, "openai") == 1) { return PROV_OPENAI; }
+    if (streq(lname, "anthropic") == 1) { return PROV_ANTHROPIC; }
+    if (streq(lname, "deepseek") == 1) { return PROV_DEEPSEEK; }
+    if (streq(lname, "mistral") == 1) { return PROV_MISTRAL; }
+    if (streq(lname, "google") == 1) { return PROV_GOOGLE; }
+    if (streq(lname, "groq") == 1) { return PROV_GROQ; }
+    if (streq(lname, "grok") == 1) { return PROV_GROK; }
+    if (streq(lname, "openrouter") == 1) { return PROV_OPENROUTER; }
+    if (streq(lname, "whisper") == 1) { return PROV_WHISPER; }
+    return 0 - 1;
+}
+
+fn provider_default_url(prov) {
+    if (prov == PROV_OLLAMA) { return "http://localhost:11434"; }
+    if (prov == PROV_LLAMACPP) { return "http://localhost:8080"; }
+    if (prov == PROV_SYNAPSE) { return "http://localhost:7860"; }
+    if (prov == PROV_LMSTUDIO) { return "http://localhost:1234"; }
+    if (prov == PROV_LOCALAI) { return "http://localhost:8080"; }
+    if (prov == PROV_OPENAI) { return "https://api.openai.com"; }
+    if (prov == PROV_ANTHROPIC) { return "https://api.anthropic.com"; }
+    if (prov == PROV_DEEPSEEK) { return "https://api.deepseek.com"; }
+    if (prov == PROV_MISTRAL) { return "https://api.mistral.ai"; }
+    if (prov == PROV_GOOGLE) { return "https://generativelanguage.googleapis.com"; }
+    if (prov == PROV_GROQ) { return "https://api.groq.com"; }
+    if (prov == PROV_GROK) { return "https://api.x.ai"; }
+    if (prov == PROV_OPENROUTER) { return "https://openrouter.ai/api"; }
+    return "http://localhost:8080";
+}
+
+# ================================================================
+# Routing strategy
+# ================================================================
+
+enum Strategy {
+    STRAT_PRIORITY       = 0;
+    STRAT_ROUND_ROBIN    = 1;
+    STRAT_LOWEST_LATENCY = 2;
+    STRAT_DIRECT         = 3;
+}

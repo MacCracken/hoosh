@@ -1,0 +1,20 @@
+# metrics.cyr — request/token counters, Prometheus output
+
+var _met_requests = 0;
+var _met_prompt_tokens = 0;
+var _met_comp_tokens = 0;
+var _met_providers = 0;
+
+fn metrics_record(prompt_tok, comp_tok) {
+    _met_requests = _met_requests + 1;
+    _met_prompt_tokens = _met_prompt_tokens + prompt_tok;
+    _met_comp_tokens = _met_comp_tokens + comp_tok;
+    return 0;
+}
+
+fn metrics_reset() {
+    _met_requests = 0;
+    _met_prompt_tokens = 0;
+    _met_comp_tokens = 0;
+    return 0;
+}

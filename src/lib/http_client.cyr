@@ -1,0 +1,58 @@
+# http_client.cyr — HTTP POST client for forwarding to provider backends
+# Uses raw TCP sockets with proper CRLF byte construction
+
+fn _build_post_header(buf, path, host, body_len) {
+    var pos = 0;
+    memcpy(buf + pos, "POST ", 5); pos = pos + 5;
+    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
+    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
+    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
+    var cl_buf = alloc(32);
+    var cl_len = fmt_int_buf(body_len, cl_buf);
+    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    return pos;
+}
+
+# HTTP POST to localhost:port. Returns _http_parse_response result or 0.
+fn http_post_local(port, path, body, body_len) {
+    var fd = syscall(SYS_SOCKET, 2, 1, 0);
+    if (fd < 0) { return 0; }
+    var sa = sockaddr_in(0x0100007F, port);
+    var cr = syscall(SYS_CONNECT, fd, sa, 16);
+    if (cr < 0) { syscall(3, fd); return 0; }
+    var hdr = alloc(2048);
+    var hlen = _build_post_header(hdr, path, "localhost", body_len);
+    syscall(SYS_WRITE, fd, hdr, hlen);
+    syscall(SYS_WRITE, fd, body, body_len);
+    var rbuf = alloc(131072);
+    var total = 0;
+    var n = 1;
+    while (n > 0) {
+        n = syscall(SYS_READ, fd, rbuf + total, 131072 - total);
+        if (n > 0) { total = total + n; }
+    }
+    syscall(3, fd);
+    if (total == 0) { return 0; }
+    return _http_parse_response(rbuf, total);
+}
+
+# Extract port number from URL like "http://localhost:11434"
+fn url_port(url) {
+    var i = 7;
+    while (load8(url + i) != 0) {
+        if (load8(url + i) == 58) { return atoi(url + i + 1); }
+        if (load8(url + i) == 47) { return 80; }
+        i = i + 1;
+    }
+    return 80;
+}

@@ -1,0 +1,143 @@
+# provider.cyr — LLM provider forwarding (Ollama + OpenAI-compatible)
+# Handles request building, response parsing, and text/token extraction.
+# Requires: types.cyr, route.cyr, http_client.cyr, metrics.cyr
+
+# Build chat request JSON from model + prompt
+fn _build_chat_body(model, prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    var s = str_builder_build(sb);
+    return to_cstr(s);
+}
+
+# Build chat request JSON with raw messages array passthrough
+fn _build_chat_body_raw(model, messages_raw, messages_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
+    var s = str_builder_build(sb);
+    var prefix = to_cstr(s);
+    var plen = strlen(prefix);
+    var total = plen + messages_len + 1;
+    var buf = alloc(total + 1);
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, messages_raw, messages_len);
+    store8(buf + plen + messages_len, 125);
+    store8(buf + plen + messages_len + 1, 0);
+    return buf;
+}
+
+# Forward to Ollama native API
+fn ollama_infer(port, model, prompt) {
+    var body = _build_chat_body(model, prompt);
+    return http_post_local(port, "/api/chat", body, strlen(body));
+}
+
+# Forward to OpenAI-compatible endpoint
+fn openai_compat_infer(port, model, prompt) {
+    var body = _build_chat_body(model, prompt);
+    return http_post_local(port, "/v1/chat/completions", body, strlen(body));
+}
+
+# Extract "content":"..." from JSON response body (handles nested objects)
+fn ollama_extract_text(resp_body, resp_len) {
+    if (resp_body == 0) { return ""; }
+    if (resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    var needle = "\"content\":\"";
+    var nlen = 11;
+    var i = 0;
+    while (i < resp_len - nlen) {
+        if (memeq(resp_body + i, needle, nlen) == 1) {
+            i = i + nlen;
+            var start = i;
+            while (i < resp_len) {
+                if (load8(resp_body + i) == 34) {
+                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
+                    break;
+                }
+                i = i + 1;
+            }
+            var tlen = i - start;
+            var text = alloc(tlen + 1);
+            memcpy(text, resp_body + start, tlen);
+            store8(text + tlen, 0);
+            return text;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+# Also works for OpenAI-format responses (same "content" field structure)
+fn openai_extract_text(resp_body, resp_len) {
+    return ollama_extract_text(resp_body, resp_len);
+}
+
+# Extract token counts from Ollama response
+# Returns packed: prompt_tokens * 0x100000000 + completion_tokens
+fn extract_ollama_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen == 0) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 13) {
+        if (memeq(body + i, "\"prompt_eval_count\":", 19) == 1) {
+            prompt = atoi(body + i + 19);
+        }
+        if (memeq(body + i, "\"eval_count\":", 13) == 1) {
+            if (i < 8) {
+                comp = atoi(body + i + 13);
+            } else {
+                if (memeq(body + i - 8, "\"prompt_", 8) != 1) {
+                    comp = atoi(body + i + 13);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+# Forward request to provider and extract text + tokens
+# Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes, or 0 on failure
+fn provider_forward(route, model, prompt, messages_raw, messages_len) {
+    var port = url_port(route_base_url(route));
+    var body = 0;
+    if (messages_raw != 0) {
+        body = _build_chat_body_raw(model, messages_raw, messages_len);
+    } else {
+        body = _build_chat_body(model, prompt);
+    }
+    var blen = strlen(body);
+    var path = "/api/chat";
+    if (route_provider(route) != PROV_OLLAMA) {
+        path = "/v1/chat/completions";
+    }
+    var resp = http_post_local(port, path, body, blen);
+    if (resp == 0) { return 0; }
+    if (http_status(resp) < 200) { return 0; }
+    if (http_status(resp) >= 300) { return 0; }
+
+    var rb = http_body(resp);
+    var rbl = http_body_len(resp);
+    var text = ollama_extract_text(rb, rbl);
+    var tokens = extract_ollama_tokens(rb, rbl);
+    var ptok = tokens / 0x100000000;
+    var ctok = tokens % 0x100000000;
+    metrics_record(ptok, ctok);
+
+    var result = alloc(32);
+    store64(result, text);
+    store64(result + 8, 0);
+    store64(result + 16, ptok);
+    store64(result + 24, ctok);
+    return result;
+}

@@ -1,0 +1,46 @@
+# budget.cyr — token pool management and budget tracking
+
+enum PoolField {
+    POOL_SIZE = 32; POOL_NAME = 0; POOL_CAPACITY = 8; POOL_USED = 16; POOL_RESERVED = 24;
+}
+
+fn pool_new(name, capacity) {
+    var p = alloc(POOL_SIZE);
+    store64(p + POOL_NAME, name);
+    store64(p + POOL_CAPACITY, capacity);
+    store64(p + POOL_USED, 0);
+    store64(p + POOL_RESERVED, 0);
+    return p;
+}
+
+fn pool_available(p) {
+    var taken = load64(p + POOL_USED) + load64(p + POOL_RESERVED);
+    var cap = load64(p + POOL_CAPACITY);
+    if (taken > cap) { return 0; }
+    return cap - taken;
+}
+
+fn pool_reserve(p, tokens) {
+    if (pool_available(p) < tokens) { return 0; }
+    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
+    return 1;
+}
+
+fn pool_commit(p, reserved, actual) {
+    var resv = load64(p + POOL_RESERVED);
+    if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
+    else { store64(p + POOL_RESERVED, 0); }
+    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    return 0;
+}
+
+# Budget: hashmap of name -> pool ptr
+fn budget_new() { return map_new(); }
+fn budget_add_pool(bgt, p) { map_set(bgt, load64(p + POOL_NAME), p); return 0; }
+fn budget_get_pool(bgt, name) { return map_get(bgt, name); }
+
+fn budget_reserve(bgt, name, tokens) {
+    var p = map_get(bgt, name);
+    if (p == 0) { return 0; }
+    return pool_reserve(p, tokens);
+}

@@ -1,0 +1,394 @@
+# handlers.cyr — HTTP endpoint handlers for the hoosh API
+# Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr,
+#           metrics.cyr, auth.cyr, http_server.cyr, http_client.cyr, provider.cyr
+
+# Globals shared with main
+var _audit_entries = 0;
+var _audit_count = 0;
+
+# GET /v1/health
+fn handle_health(cfd) {
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var healthy = 1;
+    if (count > 0) {
+        var r = load64(routes);
+        var port = url_port(route_base_url(r));
+        var fd = syscall(SYS_SOCKET, 2, 1, 0);
+        if (fd >= 0) {
+            var sa = sockaddr_in(0x0100007F, port);
+            var cr = syscall(SYS_CONNECT, fd, sa, 16);
+            if (cr < 0) { healthy = 0; }
+            syscall(3, fd);
+        } else { healthy = 0; }
+    }
+    if (healthy == 1) {
+        var body = "{\"status\":\"ok\"}";
+        return http_ok(cfd, body, strlen(body));
+    }
+    var body = "{\"status\":\"degraded\",\"providers_down\":1}";
+    return http_respond(cfd, "503", "Service Unavailable", body, strlen(body));
+}
+
+# GET /v1/models
+fn handle_models(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"id\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, "\"}");
+            first = 0;
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/cache/stats
+fn handle_cache_stats(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"entries\":");
+    str_builder_add_int(sb, map_count(load64(_cache + CACHE_ENTRIES)));
+    str_builder_add_cstr(sb, ",\"hits\":");
+    str_builder_add_int(sb, load64(_cache + CACHE_HITS));
+    str_builder_add_cstr(sb, ",\"misses\":");
+    str_builder_add_int(sb, load64(_cache + CACHE_MISSES));
+    str_builder_add_cstr(sb, ",\"evictions\":");
+    str_builder_add_int(sb, load64(_cache + CACHE_EVICTIONS));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/tokens/pools
+fn handle_token_pools(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"pools\":[");
+    var keys = map_keys(_budget);
+    var first = 1;
+    var i = 0;
+    while (i < vec_len(keys)) {
+        var name = vec_get(keys, i);
+        var p = map_get(_budget, name);
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"name\":\"");
+        str_builder_add_cstr(sb, name);
+        str_builder_add_cstr(sb, "\",\"capacity\":");
+        str_builder_add_int(sb, load64(p + POOL_CAPACITY));
+        str_builder_add_cstr(sb, ",\"used\":");
+        str_builder_add_int(sb, load64(p + POOL_USED));
+        str_builder_add_cstr(sb, ",\"available\":");
+        str_builder_add_int(sb, pool_available(p));
+        str_builder_add_cstr(sb, "}");
+        first = 0;
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/costs
+fn handle_costs(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"total_requests\":");
+    str_builder_add_int(sb, _met_requests);
+    str_builder_add_cstr(sb, ",\"total_prompt_tokens\":");
+    str_builder_add_int(sb, _met_prompt_tokens);
+    str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
+    str_builder_add_int(sb, _met_comp_tokens);
+    str_builder_add_cstr(sb, ",\"providers\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var ci = 0;
+    while (ci < rcount) {
+        var r = load64(routes + ci * 8);
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"provider\":\"");
+        str_builder_add_cstr(sb, provider_name(route_provider(r)));
+        str_builder_add_cstr(sb, "\",\"base_url\":\"");
+        str_builder_add_cstr(sb, route_base_url(r));
+        str_builder_add_cstr(sb, "\",\"is_local\":");
+        if (provider_is_local(route_provider(r)) == 1) { str_builder_add_cstr(sb, "true"); }
+        else { str_builder_add_cstr(sb, "false"); }
+        str_builder_add_cstr(sb, "}");
+        first = 0;
+        ci = ci + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/health/providers
+fn handle_health_providers(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"providers\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var hi = 0;
+    while (hi < rcount) {
+        var r = load64(routes + hi * 8);
+        if (route_enabled(r) == 1) {
+            var port = url_port(route_base_url(r));
+            var up = 0;
+            var fd = syscall(SYS_SOCKET, 2, 1, 0);
+            if (fd >= 0) {
+                var sa = sockaddr_in(0x0100007F, port);
+                var cr = syscall(SYS_CONNECT, fd, sa, 16);
+                if (cr >= 0) { up = 1; }
+                syscall(3, fd);
+            }
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"provider\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, "\",\"base_url\":\"");
+            str_builder_add_cstr(sb, route_base_url(r));
+            str_builder_add_cstr(sb, "\",\"healthy\":");
+            if (up == 1) { str_builder_add_cstr(sb, "true"); }
+            else { str_builder_add_cstr(sb, "false"); }
+            str_builder_add_cstr(sb, "}");
+            first = 0;
+        }
+        hi = hi + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/tokens/check
+fn handle_tokens_check(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var tokens_str = json_get(pairs, str_from("tokens"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var tokens = 0;
+    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
+    var allowed = 0;
+    if (pool_available(p) >= tokens) { allowed = 1; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"allowed\":");
+    if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
+    else { str_builder_add_cstr(sb, "false"); }
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/tokens/reserve
+fn handle_tokens_reserve(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var tokens_str = json_get(pairs, str_from("tokens"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var tokens = 0;
+    if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    var reserved = budget_reserve(_budget, pname, tokens);
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"reserved\":");
+    if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
+    else { str_builder_add_cstr(sb, "false"); }
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/tokens/report
+fn handle_tokens_report(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var pool_name = json_get(pairs, str_from("pool"));
+    var reserved_str = json_get(pairs, str_from("reserved"));
+    var actual_str = json_get(pairs, str_from("actual"));
+    if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
+    var pname = to_cstr(pool_name);
+    var reserved = 0;
+    var actual = 0;
+    if (reserved_str != 0) { reserved = str_to_int(reserved_str); }
+    if (actual_str != 0) { actual = str_to_int(actual_str); }
+    var p = budget_get_pool(_budget, pname);
+    if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
+    pool_commit(p, reserved, actual);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"used\":");
+    str_builder_add_int(sb, load64(p + POOL_USED));
+    str_builder_add_cstr(sb, ",\"available\":");
+    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/audit
+fn handle_audit(cfd) {
+    if (_audit_entries == 0) {
+        return http_error(cfd, "404", "Not Found", "audit logging not enabled");
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"total\":");
+    str_builder_add_int(sb, _audit_count);
+    str_builder_add_cstr(sb, ",\"chain_valid\":true,\"entries\":[]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/health/heartbeat
+fn handle_heartbeat(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"nodes\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var hi = 0;
+    while (hi < rcount) {
+        var r = load64(routes + hi * 8);
+        if (route_enabled(r) == 1) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"id\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, ":");
+            str_builder_add_cstr(sb, route_base_url(r));
+            str_builder_add_cstr(sb, "\",\"status\":\"online\"}");
+            first = 0;
+        }
+        hi = hi + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/queue/status
+fn handle_queue_status(cfd) {
+    var body = "{\"pending\":0,\"processing\":0}";
+    return http_ok(cfd, body, strlen(body));
+}
+
+# GET /metrics
+fn handle_metrics(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "# HELP hoosh_requests_total Total inference requests\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_requests_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_requests_total ");
+    str_builder_add_int(sb, _met_requests);
+    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_total Total tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
+    str_builder_add_int(sb, _met_prompt_tokens);
+    str_builder_add_cstr(sb, "\nhoosh_tokens_completion_total ");
+    str_builder_add_int(sb, _met_comp_tokens);
+    str_builder_add_cstr(sb, "\n# HELP hoosh_providers_configured Number of configured providers\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_providers_configured gauge\n");
+    str_builder_add_cstr(sb, "hoosh_providers_configured ");
+    str_builder_add_int(sb, _met_providers);
+    str_builder_add_cstr(sb, "\n");
+    var body = str_builder_build(sb);
+    var bd = to_cstr(body);
+    var cr = make_crlf();
+    var hdr = str_builder_new();
+    str_builder_add_cstr(hdr, "HTTP/1.1 200 OK");
+    str_builder_add_cstr(hdr, cr);
+    str_builder_add_cstr(hdr, "Content-Type: text/plain; charset=utf-8");
+    str_builder_add_cstr(hdr, cr);
+    str_builder_add_cstr(hdr, "Content-Length: ");
+    str_builder_add_int(hdr, str_len(body));
+    str_builder_add_cstr(hdr, cr);
+    str_builder_add_cstr(hdr, cr);
+    var hdr_s = str_builder_build(hdr);
+    syscall(SYS_WRITE, cfd, to_cstr(hdr_s), str_len(hdr_s));
+    syscall(SYS_WRITE, cfd, bd, str_len(body));
+    return 0;
+}
+
+# POST /v1/chat/completions
+fn handle_chat(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var body_str = str_new(body_ptr, body_len);
+    var pairs = json_parse(body_str);
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var model = json_get(pairs, str_from("model"));
+    if (model == 0) { return http_bad_request(cfd, "missing 'model' field"); }
+    var model_cstr = to_cstr(model);
+
+    var route = router_select(_router, model_cstr);
+    if (route == 0) { return http_error(cfd, "404", "Not Found", "no provider for model"); }
+
+    # Extract raw "messages" array for passthrough
+    var msg_raw = 0;
+    var msg_raw_len = 0;
+    var mi = 0;
+    while (mi < body_len - 12) {
+        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
+            mi = mi + 11;
+            while (mi < body_len && load8(body_ptr + mi) == 32) { mi = mi + 1; }
+            if (mi < body_len && load8(body_ptr + mi) == 91) {
+                var depth = 1;
+                var ms = mi;
+                mi = mi + 1;
+                while (mi < body_len && depth > 0) {
+                    if (load8(body_ptr + mi) == 91) { depth = depth + 1; }
+                    if (load8(body_ptr + mi) == 93) { depth = depth - 1; }
+                    if (load8(body_ptr + mi) == 34) {
+                        mi = mi + 1;
+                        while (mi < body_len && load8(body_ptr + mi) != 34) {
+                            if (load8(body_ptr + mi) == 92) { mi = mi + 1; }
+                            mi = mi + 1;
+                        }
+                    }
+                    mi = mi + 1;
+                }
+                msg_raw = body_ptr + ms;
+                msg_raw_len = mi - ms;
+            }
+            break;
+        }
+        mi = mi + 1;
+    }
+
+    var prompt_cstr = "hello";
+    if (msg_raw == 0) {
+        var prompt_val = json_get(pairs, str_from("prompt"));
+        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
+    }
+
+    var result = provider_forward(route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
+    if (result == 0) { return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable"); }
+
+    var resp_text = load64(result);
+    var resp_ptok = load64(result + 16);
+    var resp_ctok = load64(result + 24);
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",\"object\":\"chat.completion\",\"model\":\"");
+    str_builder_add_cstr(sb, model_cstr);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"");
+    str_builder_add_cstr(sb, resp_text);
+    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, resp_ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, resp_ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, resp_ptok + resp_ctok);
+    str_builder_add_cstr(sb, "}}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}

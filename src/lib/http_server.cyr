@@ -1,0 +1,117 @@
+# http_server.cyr — HTTP response helpers, request parsing, CRLF handling
+
+fn make_crlf() {
+    var buf = alloc(3);
+    store8(buf, 13);
+    store8(buf + 1, 10);
+    store8(buf + 2, 0);
+    return buf;
+}
+
+fn to_cstr(s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc(len + 1);
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
+fn http_respond(cfd, status, status_text, body, body_len) {
+    var cr = make_crlf();
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 ");
+    str_builder_add_cstr(sb, status);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, status_text);
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Content-Type: application/json");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: *");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Connection: close");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, body_len);
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, cr);
+    var header = str_builder_build(sb);
+    var hdr_cstr = to_cstr(header);
+    syscall(SYS_WRITE, cfd, hdr_cstr, str_len(header));
+    syscall(SYS_WRITE, cfd, body, body_len);
+    return 0;
+}
+
+fn http_ok(cfd, body, body_len) {
+    return http_respond(cfd, "200", "OK", body, body_len);
+}
+
+fn http_json_ok(cfd, json_str) {
+    var data = str_data(json_str);
+    var len = str_len(json_str);
+    return http_ok(cfd, data, len);
+}
+
+fn http_not_found(cfd) {
+    var body = "{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}";
+    return http_respond(cfd, "404", "Not Found", body, strlen(body));
+}
+
+fn http_bad_request(cfd, msg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
+    var body = str_builder_build(sb);
+    var bd = to_cstr(body);
+    return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
+}
+
+fn http_error(cfd, status, status_text, msg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
+    var body = str_builder_build(sb);
+    var bd = to_cstr(body);
+    return http_respond(cfd, status, status_text, bd, str_len(body));
+}
+
+fn http_parse_path(buf, len) {
+    var i = 0;
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    i = i + 1;
+    if (i >= len) { return 0; }
+    var start = i;
+    while (i < len && load8(buf + i) != 32 && load8(buf + i) != 10 && load8(buf + i) != 13) {
+        i = i + 1;
+    }
+    var path = alloc(i - start + 1);
+    memcpy(path, buf + start, i - start);
+    store8(path + i - start, 0);
+    return path;
+}
+
+fn http_parse_method(buf, len) {
+    if (memeq(buf, "GET", 3) == 1) { return "GET"; }
+    if (memeq(buf, "POST", 4) == 1) { return "POST"; }
+    if (memeq(buf, "OPTIONS", 7) == 1) { return "OPTIONS"; }
+    return "UNKNOWN";
+}
+
+fn req_parse_body(buf, len) {
+    var i = 0;
+    while (i < len - 3) {
+        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) {
+            return buf + i + 4;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn req_body_len(buf, total_len) {
+    var body = req_parse_body(buf, total_len);
+    if (body == 0) { return 0; }
+    return total_len - (body - buf);
+}

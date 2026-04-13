@@ -1,0 +1,34 @@
+# cache.cyr — response cache with hit/miss/eviction stats
+
+enum CacheField {
+    CACHE_SIZE = 48; CACHE_ENTRIES = 0; CACHE_MAX = 8;
+    CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32; CACHE_ENABLED = 40;
+}
+
+fn cache_new(max_entries, enabled) {
+    var c = alloc(CACHE_SIZE);
+    store64(c + CACHE_ENTRIES, map_new());
+    store64(c + CACHE_MAX, max_entries);
+    store64(c + CACHE_HITS, 0);
+    store64(c + CACHE_MISSES, 0);
+    store64(c + CACHE_EVICTIONS, 0);
+    store64(c + CACHE_ENABLED, enabled);
+    return c;
+}
+
+fn cache_get(c, key) {
+    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
+    var val = map_get(load64(c + CACHE_ENTRIES), key);
+    if (val == 0) { store64(c + CACHE_MISSES, load64(c + CACHE_MISSES) + 1); return 0; }
+    store64(c + CACHE_HITS, load64(c + CACHE_HITS) + 1);
+    return val;
+}
+
+fn cache_insert(c, key, value) {
+    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
+    if (map_count(load64(c + CACHE_ENTRIES)) >= load64(c + CACHE_MAX)) {
+        store64(c + CACHE_EVICTIONS, load64(c + CACHE_EVICTIONS) + 1);
+    }
+    map_set(load64(c + CACHE_ENTRIES), key, value);
+    return 0;
+}

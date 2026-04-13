@@ -1,0 +1,120 @@
+# config.cyr — TOML configuration loader for hoosh.toml
+# Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr
+# Reads: [[server]], [[providers]], [[cache]], [[budgets]], [[auth]]
+
+fn load_config(path) {
+    var sections = toml_parse_file(path);
+    if (vec_len(sections) == 0) { return 0; }
+
+    # Parse [[server]] section
+    var srv_secs = toml_get_sections(sections, str_from("server"));
+    if (vec_len(srv_secs) > 0) {
+        var srv = toml_section_pairs(vec_get(srv_secs, 0));
+        var port_str = toml_get(srv, str_from("port"));
+        if (port_str != 0) { _http_port = str_to_int(port_str); }
+    }
+
+    # Parse [[cache]] section
+    var cache_secs = toml_get_sections(sections, str_from("cache"));
+    if (vec_len(cache_secs) > 0) {
+        var cache_p = toml_section_pairs(vec_get(cache_secs, 0));
+        var max_str = toml_get(cache_p, str_from("max_entries"));
+        var enabled_str = toml_get(cache_p, str_from("enabled"));
+        var max_e = 10000;
+        var enabled = 1;
+        if (max_str != 0) { max_e = str_to_int(max_str); }
+        if (enabled_str != 0) {
+            if (str_eq_cstr(enabled_str, "false") == 1) { enabled = 0; }
+        }
+        _cache = cache_new(max_e, enabled);
+    }
+
+    # Parse [[providers]] sections
+    var prov_secs = toml_get_sections(sections, str_from("providers"));
+    var route_count = vec_len(prov_secs);
+    if (route_count > 0) {
+        var routes = alloc(route_count * 8);
+        var ri = 0;
+        while (ri < route_count) {
+            var pp = toml_section_pairs(vec_get(prov_secs, ri));
+            var ptype_str = toml_get(pp, str_from("type"));
+            var purl_str = toml_get(pp, str_from("base_url"));
+            var ppri_str = toml_get(pp, str_from("priority"));
+
+            var ptype = PROV_OLLAMA;
+            if (ptype_str != 0) { ptype = provider_parse(to_cstr(ptype_str)); }
+            var purl = provider_default_url(ptype);
+            if (purl_str != 0) { purl = to_cstr(purl_str); }
+            var ppri = 1;
+            if (ppri_str != 0) { ppri = str_to_int(ppri_str); }
+
+            var route = route_new(ptype, ppri, purl);
+
+            # Parse model patterns — TOML array: ["llama*", "mistral*"]
+            var models_str = toml_get(pp, str_from("models"));
+            if (models_str != 0) {
+                var ms = to_cstr(models_str);
+                var ms_len = strlen(ms);
+                var pats = alloc(64);
+                var pat_count = 0;
+                var pi = 0;
+                while (pi < ms_len) {
+                    var mc = load8(ms + pi);
+                    if (mc == 91 || mc == 93 || mc == 44 || mc == 32 || mc == 34) {
+                        pi = pi + 1;
+                    } else {
+                        var ps = pi;
+                        while (pi < ms_len) {
+                            mc = load8(ms + pi);
+                            if (mc == 34 || mc == 44 || mc == 93) { break; }
+                            pi = pi + 1;
+                        }
+                        var plen = pi - ps;
+                        if (plen > 0) {
+                            var pat = alloc(plen + 1);
+                            memcpy(pat, ms + ps, plen);
+                            store8(pat + plen, 0);
+                            store64(pats + pat_count * 8, pat);
+                            pat_count = pat_count + 1;
+                        }
+                    }
+                }
+                if (pat_count > 0) {
+                    route_set_patterns(route, pats, pat_count);
+                }
+            }
+
+            store64(routes + ri * 8, route);
+            ri = ri + 1;
+        }
+        _router = router_new(routes, route_count, STRAT_PRIORITY);
+        _met_providers = route_count;
+    }
+
+    # Parse [[budgets]] sections
+    var bud_secs = toml_get_sections(sections, str_from("budgets"));
+    var bi = 0;
+    while (bi < vec_len(bud_secs)) {
+        var bp = toml_section_pairs(vec_get(bud_secs, bi));
+        var bname = toml_get(bp, str_from("name"));
+        var bcap_str = toml_get(bp, str_from("capacity"));
+        if (bname != 0) {
+            if (bcap_str != 0) {
+                budget_add_pool(_budget, pool_new(to_cstr(bname), str_to_int(bcap_str)));
+            }
+        }
+        bi = bi + 1;
+    }
+
+    # Parse [[auth]] section
+    var auth_secs = toml_get_sections(sections, str_from("auth"));
+    if (vec_len(auth_secs) > 0) {
+        var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
+        var tok_str = toml_get(auth_p, str_from("tokens"));
+        if (tok_str != 0) {
+            vec_push(_auth_tokens, to_cstr(tok_str));
+        }
+    }
+
+    return 1;
+}
