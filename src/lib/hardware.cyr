@@ -1,0 +1,125 @@
+# hardware.cyr — hardware-aware model placement via ai-hwaccel
+# Wraps ai-hwaccel to provide:
+#   - Hardware detection at startup
+#   - Device summary for /v1/hardware endpoint
+#   - Quantization suggestions for model placement
+#   - Sharding plans for multi-GPU inference
+# Requires: ai-hwaccel modules (types, registry, plan, quantization)
+
+# Global registry — initialized once at startup
+var _hw_registry = 0;
+
+# Detect hardware and populate the global registry
+fn hw_init() {
+    _hw_registry = registry_detect();
+    return _hw_registry;
+}
+
+# Whether hardware detection has run
+fn hw_ready() {
+    if (_hw_registry != 0) { return 1; }
+    return 0;
+}
+
+# Number of detected devices (including CPU)
+fn hw_device_count() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_num_profiles(_hw_registry);
+}
+
+# Whether any GPU/NPU/TPU is available
+fn hw_has_accelerator() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_has_accelerator(_hw_registry);
+}
+
+# Total accelerator memory in bytes (excludes CPU)
+fn hw_accel_memory() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_total_accel_memory(_hw_registry);
+}
+
+# Total system memory in bytes (all devices)
+fn hw_total_memory() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_total_memory(_hw_registry);
+}
+
+# Best available device profile pointer (or 0)
+fn hw_best_device() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_best_available(_hw_registry);
+}
+
+# Suggest quantization level for a model with N params
+fn hw_suggest_quant(model_params) {
+    if (_hw_registry == 0) { return QUANT_INT4; }
+    return reg_suggest_quant(_hw_registry, model_params);
+}
+
+# Plan sharding for a model with N params at given quant
+fn hw_plan(model_params, quant) {
+    if (_hw_registry == 0) { return 0; }
+    return reg_plan_sharding(_hw_registry, model_params, quant);
+}
+
+# GPU count (family = GPU)
+fn hw_gpu_count() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_count_by_family(_hw_registry, FAMILY_GPU);
+}
+
+# --- JSON summary for API responses ---
+
+fn hw_summary_json(sb) {
+    str_builder_add_cstr(sb, "{\"detected\":");
+        if (_hw_registry == 0) {
+            str_builder_add_cstr(sb, "false}");
+        return 0;
+    }
+    str_builder_add_cstr(sb, "true,\"devices\":");
+    str_builder_add_int(sb, hw_device_count());
+    str_builder_add_cstr(sb, ",\"accelerators\":");
+    str_builder_add_int(sb, hw_gpu_count());
+    str_builder_add_cstr(sb, ",\"accel_memory_bytes\":");
+    str_builder_add_int(sb, hw_accel_memory());
+    str_builder_add_cstr(sb, ",\"total_memory_bytes\":");
+    str_builder_add_int(sb, hw_total_memory());
+
+    # Best device info
+    var best = hw_best_device();
+    if (best != 0) {
+        str_builder_add_cstr(sb, ",\"best_device\":{");
+            str_builder_add_cstr(sb, "\"type\":\"");
+            str_builder_add_cstr(sb, accel_name(profile_accel_type(best)));
+            str_builder_add_cstr(sb, "\",\"family\":\"");
+            str_builder_add_cstr(sb, family_name(profile_family(best)));
+            str_builder_add_cstr(sb, "\",\"memory_bytes\":");
+            str_builder_add_int(sb, profile_memory_bytes(best));
+            str_builder_add_cstr(sb, "}");
+    }
+
+    str_builder_add_cstr(sb, ",\"profiles\":[");
+    var n = hw_device_count();
+    var i = 0;
+    while (i < n) {
+        var p = reg_get_profile(_hw_registry, i);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"type\":\"");
+            str_builder_add_cstr(sb, accel_name(profile_accel_type(p)));
+            str_builder_add_cstr(sb, "\",\"family\":\"");
+            str_builder_add_cstr(sb, family_name(profile_family(p)));
+            str_builder_add_cstr(sb, "\",\"memory_bytes\":");
+            str_builder_add_int(sb, profile_memory_bytes(p));
+            str_builder_add_cstr(sb, ",\"available\":");
+            if (profile_available(p) == 1) {
+                str_builder_add_cstr(sb, "true");
+            } else {
+                str_builder_add_cstr(sb, "false");
+            }
+            str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+return 0;
+}

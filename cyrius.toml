@@ -11,4 +11,10 @@ entry = "src/main.cyr"
 output = "hoosh"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "assert", "bench"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "fnptr", "assert", "bench"]
+
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel"
+path = "../ai-hwaccel"
+tag = "2.0.0"
+modules = ["src/units.cyr", "src/error.cyr", "src/types.cyr", "src/quantization.cyr", "src/profile.cyr", "src/system_io.cyr", "src/detect/platform.cyr", "src/detect/command.cyr", "src/detect/cuda.cyr", "src/detect/rocm.cyr", "src/detect/tpu.cyr", "src/detect/gaudi.cyr", "src/detect/neuron.cyr", "src/detect/vulkan.cyr", "src/detect/apple.cyr", "src/detect/intel.cyr", "src/detect/amd_xdna.cyr", "src/detect/edge.cyr", "src/detect/cloud_asic.cyr", "src/detect/bandwidth.cyr", "src/detect/pcie.cyr", "src/detect/numa.cyr", "src/detect/interconnect.cyr", "src/detect/disk.cyr", "src/detect/environment.cyr", "src/registry.cyr", "src/plan.cyr"]

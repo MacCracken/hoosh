@@ -1,6 +1,7 @@
 # handlers.cyr — HTTP endpoint handlers for the hoosh API
 # Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr,
-#           metrics.cyr, auth.cyr, http_server.cyr, http_client.cyr, provider.cyr
+#           metrics.cyr, auth.cyr, http_server.cyr, http_client.cyr,
+#           provider.cyr, hardware.cyr
 
 # Globals shared with main
 var _audit_entries = 1;  # enabled by default
@@ -282,6 +283,13 @@ fn handle_heartbeat(cfd) {
 fn handle_queue_status(cfd) {
     var body = "{\"pending\":0,\"processing\":0}";
     return http_ok(cfd, body, strlen(body));
+}
+
+# GET /v1/hardware
+fn handle_hardware(cfd) {
+    var sb = str_builder_new();
+    hw_summary_json(sb);
+    return http_json_ok(cfd, str_builder_build(sb));
 }
 
 # GET /metrics

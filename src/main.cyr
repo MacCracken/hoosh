@@ -25,6 +25,7 @@ include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 include "src/lib/http_client.cyr"
 include "src/lib/provider.cyr"
+include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
 include "src/lib/config.cyr"
 
@@ -84,6 +85,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
+    if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
     if (streq(path, "/metrics") == 1) { return handle_metrics(cfd); }
 
     # POST routes
@@ -168,6 +170,12 @@ fn cmd_serve(port) {
     var rc = load64(_router + ROUTER_COUNT);
     fmt_int(rc);
     println(" provider route(s) configured");
+    if (hw_ready() == 1) {
+        fmt_int(hw_device_count());
+        syscall(1, 1, " hw device(s), ", 15);
+        fmt_int(hw_gpu_count());
+        println(" accelerator(s)");
+    }
 
     while (1 == 1) {
         var client = sock_accept(sfd);
@@ -209,6 +217,20 @@ fn cmd_info() {
     syscall(1, 1, "Default port: ", 14);
     fmt_int(_http_port);
     println("");
+
+    # Hardware summary
+    if (hw_ready() == 1) {
+        syscall(1, 1, "Devices: ", 9);
+        fmt_int(hw_device_count());
+        syscall(1, 1, " (", 2);
+        fmt_int(hw_gpu_count());
+        println(" accelerator(s))");
+        var best = hw_best_device();
+        if (best != 0) {
+            syscall(1, 1, "Best device: ", 13);
+            println(accel_name(profile_accel_type(best)));
+        }
+    }
     return 0;
 }
 
@@ -248,6 +270,9 @@ fn main() {
     store64(default_routes, route_new(PROV_OLLAMA, 1, "http://localhost:11434"));
     _router = router_new(default_routes, 1, STRAT_PRIORITY);
     _met_providers = 1;
+
+    # Detect hardware accelerators
+    hw_init();
 
     # Load config
     load_config("hoosh.toml");
