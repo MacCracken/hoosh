@@ -3,7 +3,7 @@
 #           metrics.cyr, auth.cyr, http_server.cyr, http_client.cyr, provider.cyr
 
 # Globals shared with main
-var _audit_entries = 0;
+var _audit_entries = 1;  # enabled by default
 var _audit_count = 0;
 
 # GET /v1/health
@@ -320,18 +320,67 @@ fn handle_metrics(cfd) {
     return 0;
 }
 
+# Validate chat request fields. Returns 0 if valid, error string if not.
+fn _validate_chat(pairs, body_ptr, body_len) {
+    var model = json_get(pairs, str_from("model"));
+    if (model == 0) { return "model field is required"; }
+    var mc = to_cstr(model);
+    var mlen = strlen(mc);
+    if (mlen == 0) { return "model field is required"; }
+    if (mlen > 256) { return "invalid model name"; }
+    # Check for control chars in model name
+    var vi = 0;
+    while (vi < mlen) {
+        var vc = load8(mc + vi);
+        if (vc < 32) { return "invalid model name"; }
+        vi = vi + 1;
+    }
+    # Check messages array exists
+    var has_messages = 0;
+    vi = 0;
+    while (vi < body_len - 11) {
+        if (memeq(body_ptr + vi, "\"messages\":", 11) == 1) { has_messages = 1; break; }
+        vi = vi + 1;
+    }
+    var has_prompt = 0;
+    if (json_get(pairs, str_from("prompt")) != 0) { has_prompt = 1; }
+    if (has_messages == 0) {
+        if (has_prompt == 0) { return "messages array is required"; }
+    }
+    return 0;
+}
+
 # POST /v1/chat/completions
 fn handle_chat(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var body_str = str_new(body_ptr, body_len);
     var pairs = json_parse(body_str);
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+
+    # Input validation
+    var verr = _validate_chat(pairs, body_ptr, body_len);
+    if (verr != 0) { return http_bad_request(cfd, verr); }
+
     var model = json_get(pairs, str_from("model"));
-    if (model == 0) { return http_bad_request(cfd, "missing 'model' field"); }
     var model_cstr = to_cstr(model);
 
     var route = router_select(_router, model_cstr);
     if (route == 0) { return http_error(cfd, "404", "Not Found", "no provider for model"); }
+
+    # Token budget: reserve before inference
+    var pool_name = "default";
+    var pool_str = json_get(pairs, str_from("pool"));
+    if (pool_str != 0) { pool_name = to_cstr(pool_str); }
+    var est_tokens = 2048;  # conservative estimate
+    var max_tok_str = json_get(pairs, str_from("max_tokens"));
+    if (max_tok_str != 0) { est_tokens = str_to_int(max_tok_str); }
+    var bpool = budget_get_pool(_budget, pool_name);
+    if (bpool != 0) {
+        if (pool_available(bpool) < est_tokens) {
+            return http_error(cfd, "429", "Too Many Requests", "token budget exceeded");
+        }
+        pool_reserve(bpool, est_tokens);
+    }
 
     # Extract raw "messages" array for passthrough
     var msg_raw = 0;
@@ -372,11 +421,23 @@ fn handle_chat(cfd, body_ptr, body_len) {
     }
 
     var result = provider_forward(route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
-    if (result == 0) { return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable"); }
+    if (result == 0) {
+        # Release reserved tokens on failure
+        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+        return http_error(cfd, "502", "Bad Gateway", "provider backend unreachable");
+    }
 
     var resp_text = load64(result);
     var resp_ptok = load64(result + 16);
     var resp_ctok = load64(result + 24);
+
+    # Report actual token usage to budget pool
+    if (bpool != 0) {
+        pool_commit(bpool, est_tokens, resp_ptok + resp_ctok);
+    }
+
+    # Record audit entry
+    _audit_count = _audit_count + 1;
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",\"object\":\"chat.completion\",\"model\":\"");
