@@ -566,57 +566,74 @@ fn openai_extract_text(resp_body, resp_len) {
     return "";
 }
 
-# Forward request to the appropriate provider backend
+# Extract port from URL like http://host:PORT/path
+fn url_port(url) {
+    var i = 7;  # skip http://
+    while (load8(url + i) != 0) {
+        if (load8(url + i) == 58) { return atoi(url + i + 1); }
+        if (load8(url + i) == 47) { return 80; }
+        i = i + 1;
+    }
+    return 80;
+}
+
+# Extract token counts from Ollama response body
+# Returns packed: prompt_tokens * 0x100000000 + completion_tokens
+fn extract_ollama_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen == 0) { return 0; }
+    store8(body + blen, 0);  # null-terminate for atoi
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 13) {
+        if (memeq(body + i, "\"prompt_eval_count\":", 19) == 1) {
+            prompt = atoi(body + i + 19);
+        }
+        # Match "eval_count": but not "prompt_eval_count":
+        if (memeq(body + i, "\"eval_count\":", 13) == 1) {
+            # Make sure it's not preceded by "prompt_"
+            if (i < 8) {
+                comp = atoi(body + i + 13);
+            } else {
+                if (memeq(body + i - 8, "\"prompt_", 8) != 1) {
+                    comp = atoi(body + i + 13);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+# Extract text + token counts from provider response
+# Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes
 fn provider_forward(route, model, prompt) {
-    var prov = route_provider(route);
-    var url = route_base_url(route);
-    # Extract port from URL
-    var fwd_port = 11434;  # default Ollama port
-    # Find port in URL: http://host:PORT/...
-    var ui = 7;  # skip http://
-    while (load8(url + ui) != 0) {
-        if (load8(url + ui) == 58) { fwd_port = atoi(url + ui + 1); break; }
-        if (load8(url + ui) == 47) { break; }
-        ui = ui + 1;
+    var port = url_port(route_base_url(route));
+    var body = _build_chat_body(model, prompt);
+    var blen = strlen(body);
+    var path = "/api/chat";
+    if (route_provider(route) != PROV_OLLAMA) {
+        path = "/v1/chat/completions";
     }
-    var start_ns = clock_now_ns();
-    var resp = 0;
-    var extract_fn = 0;
-
-    if (prov == PROV_OLLAMA) {
-        resp = ollama_infer(fwd_port, model, prompt);
-        extract_fn = 1;
-    } else {
-        resp = openai_compat_infer(fwd_port, model, prompt);
-        extract_fn = 2;
-    }
-
-    var elapsed_ns = clock_now_ns() - start_ns;
-    var latency_ms = elapsed_ns / 1000000;
-
+    var resp = http_post_local(port, path, body, blen);
     if (resp == 0) { return 0; }
+    if (http_status(resp) < 200) { return 0; }
+    if (http_status(resp) >= 300) { return 0; }
 
-    var status = http_status(resp);
-    var body = http_body(resp);
-    var blen = http_body_len(resp);
+    var rb = http_body(resp);
+    var rbl = http_body_len(resp);
+    var text = ollama_extract_text(rb, rbl);
+    var tokens = extract_ollama_tokens(rb, rbl);
+    var ptok = tokens / 0x100000000;
+    var ctok = tokens % 0x100000000;
+    metrics_record(ptok, ctok);
 
-    if (status < 200) { return 0; }
-    if (status >= 300) { return 0; }
-
-    var text = "";
-    if (extract_fn == 1) { text = ollama_extract_text(body, blen); }
-    else { text = openai_extract_text(body, blen); }
-
-    # Record metrics
-    metrics_record(0, 0);  # TODO: extract token counts from response
-
-    # Report latency for routing decisions
-    router_report_latency(_router, url, latency_ms);
-
-    # Build result: text(8) latency_ms(8) = 16
-    var result = alloc(16);
+    var result = alloc(32);
     store64(result, text);
-    store64(result + 8, latency_ms);
+    store64(result + 8, 0);
+    store64(result + 16, ptok);
+    store64(result + 24, ctok);
     return result;
 }
 
@@ -811,10 +828,29 @@ fn req_body_len(buf, total_len) {
 # API handlers
 # ================================================================
 
-# GET /v1/health
+# GET /v1/health — check gateway + probe first provider
 fn handle_health(cfd) {
-    var body = "{\"status\":\"ok\"}";
-    return http_ok(cfd, body, strlen(body));
+    # Quick probe: can we connect to the first enabled provider?
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var healthy = 1;
+    if (count > 0) {
+        var r = load64(routes);
+        var port = url_port(route_base_url(r));
+        var fd = syscall(SYS_SOCKET, 2, 1, 0);
+        if (fd >= 0) {
+            var sa = sockaddr_in(0x0100007F, port);
+            var cr = syscall(SYS_CONNECT, fd, sa, 16);
+            if (cr < 0) { healthy = 0; }
+            syscall(3, fd);
+        } else { healthy = 0; }
+    }
+    if (healthy == 1) {
+        var body = "{\"status\":\"ok\"}";
+        return http_ok(cfd, body, strlen(body));
+    }
+    var body = "{\"status\":\"degraded\",\"providers_down\":1}";
+    return http_respond(cfd, "503", "Service Unavailable", body, strlen(body));
 }
 
 # GET /v1/models
@@ -883,6 +919,82 @@ fn handle_token_pools(cfd) {
         str_builder_add_cstr(sb, "}");
         first = 0;
         i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    var body = str_builder_build(sb);
+    return http_json_ok(cfd, body);
+}
+
+# GET /v1/costs
+fn handle_costs(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"total_requests\":");
+    str_builder_add_int(sb, _met_requests);
+    str_builder_add_cstr(sb, ",\"total_prompt_tokens\":");
+    str_builder_add_int(sb, _met_prompt_tokens);
+    str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
+    str_builder_add_int(sb, _met_comp_tokens);
+    str_builder_add_cstr(sb, ",\"providers\":[");
+    # List routes with their request counts
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var ci = 0;
+    while (ci < rcount) {
+        var r = load64(routes + ci * 8);
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"provider\":\"");
+        str_builder_add_cstr(sb, provider_name(route_provider(r)));
+        str_builder_add_cstr(sb, "\",\"base_url\":\"");
+        str_builder_add_cstr(sb, route_base_url(r));
+        str_builder_add_cstr(sb, "\",\"is_local\":");
+        if (provider_is_local(route_provider(r)) == 1) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, "}");
+        first = 0;
+        ci = ci + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    var body = str_builder_build(sb);
+    return http_json_ok(cfd, body);
+}
+
+# GET /v1/health/providers — per-provider health status
+fn handle_health_providers(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"providers\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var rcount = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var hi = 0;
+    while (hi < rcount) {
+        var r = load64(routes + hi * 8);
+        if (route_enabled(r) == 1) {
+            # Probe provider
+            var port = url_port(route_base_url(r));
+            var up = 0;
+            var fd = syscall(SYS_SOCKET, 2, 1, 0);
+            if (fd >= 0) {
+                var sa = sockaddr_in(0x0100007F, port);
+                var cr = syscall(SYS_CONNECT, fd, sa, 16);
+                if (cr >= 0) { up = 1; }
+                syscall(3, fd);
+            }
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"provider\":\"");
+            str_builder_add_cstr(sb, provider_name(route_provider(r)));
+            str_builder_add_cstr(sb, "\",\"base_url\":\"");
+            str_builder_add_cstr(sb, route_base_url(r));
+            str_builder_add_cstr(sb, "\",\"healthy\":");
+            if (up == 1) { str_builder_add_cstr(sb, "true"); }
+            else { str_builder_add_cstr(sb, "false"); }
+            str_builder_add_cstr(sb, "}");
+            first = 0;
+        }
+        hi = hi + 1;
     }
     str_builder_add_cstr(sb, "]}");
     var body = str_builder_build(sb);
@@ -1006,7 +1118,8 @@ fn handle_chat(cfd, body_ptr, body_len) {
     }
 
     var resp_text = load64(result);
-    var resp_latency = load64(result + 8);
+    var resp_ptok = load64(result + 16);
+    var resp_ctok = load64(result + 24);
 
     # Build OpenAI-compatible response
     var sb = str_builder_new();
@@ -1014,7 +1127,13 @@ fn handle_chat(cfd, body_ptr, body_len) {
     str_builder_add_cstr(sb, model_cstr);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"");
     str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}");
+    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, resp_ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, resp_ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, resp_ptok + resp_ctok);
+    str_builder_add_cstr(sb, "}}");
     var resp = str_builder_build(sb);
     return http_json_ok(cfd, resp);
 }
@@ -1051,6 +1170,8 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
     # GET routes
     if (streq(path, "/v1/health") == 1) { return handle_health(cfd); }
+    if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
+    if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
@@ -1058,6 +1179,39 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/metrics") == 1) { return handle_metrics(cfd); }
 
     # POST routes
+    if (streq(path, "/v1/costs/reset") == 1) {
+        _met_requests = 0;
+        _met_prompt_tokens = 0;
+        _met_comp_tokens = 0;
+        var body = "{\"status\":\"reset\"}";
+        return http_ok(cfd, body, strlen(body));
+    }
+    if (streq(path, "/v1/admin/reload") == 1) {
+        if (_config_path != 0) {
+            load_config(_config_path);
+            var body = "{\"status\":\"reloaded\"}";
+            return http_ok(cfd, body, strlen(body));
+        }
+        load_config("hoosh.toml");
+        var body = "{\"status\":\"reloaded\"}";
+        return http_ok(cfd, body, strlen(body));
+    }
+    if (streq(path, "/v1/embeddings") == 1) {
+        # Forward to Ollama embeddings API
+        var eb = req_parse_body(buf, buf_len);
+        var ebl = req_body_len(buf, buf_len);
+        if (ebl > 0) {
+            var eresp = http_post_local(11434, "/api/embeddings", eb, ebl);
+            if (eresp != 0) {
+                if (http_status(eresp) >= 200) {
+                    if (http_status(eresp) < 300) {
+                        return http_ok(cfd, http_body(eresp), http_body_len(eresp));
+                    }
+                }
+            }
+        }
+        return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
+    }
     if (streq(path, "/v1/chat/completions") == 1) {
         var body = req_parse_body(buf, buf_len);
         var blen = req_body_len(buf, buf_len);

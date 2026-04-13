@@ -1,40 +1,58 @@
 # hoosh
 
-**AI inference gateway for Rust.**
+**AI inference gateway — written in Cyrius.**
 
-Multi-provider LLM routing, local model serving, speech-to-text, and token budget management — in a single crate. OpenAI-compatible HTTP API. Built on [ai-hwaccel](https://crates.io/crates/ai-hwaccel) for hardware-aware model placement.
+Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-compatible HTTP API with zero external dependencies.
 
 > **Name**: Hoosh (Persian: هوش) — intelligence, the word for AI.
-> Extracted from the [AGNOS](https://github.com/MacCracken/agnosticos) LLM gateway as a standalone, reusable engine.
+> Part of the [AGNOS](https://github.com/MacCracken/agnosticos) ecosystem. Ported from Rust.
 
-[![Crates.io](https://img.shields.io/crates/v/hoosh.svg)](https://crates.io/crates/hoosh)
-[![CI](https://github.com/MacCracken/hoosh/actions/workflows/ci.yml/badge.svg)](https://github.com/MacCracken/hoosh/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
+---
+
+## Stats
+
+| Metric | Value |
+|--------|-------|
+| **Language** | Cyrius (cc3 3.6.7+) |
+| **Source** | 1,515 lines / 1 file |
+| **Binary** | 479 KB (static ELF, x86_64) |
+| **Compile time** | 225ms |
+| **Dependencies** | 0 external (stdlib only) |
+| **Tests** | 231 assertions, 81 groups, 0 failures |
+| **Benchmarks** | 10 operations |
+| **Providers** | 14 (6 local, 8 remote) |
+| **API** | OpenAI-compatible `/v1/chat/completions` |
+
+### Port comparison (Rust v1.3.0 → Cyrius v2.0.0)
+
+| | Rust | Cyrius | Ratio |
+|---|------|--------|-------|
+| Source | 22,956 lines / 58 files | 1,515 lines / 1 file | **15x fewer** |
+| Binary | ~5.1 MB | 479 KB | **10.6x smaller** |
+| Compile | ~15s | 225ms | **67x faster** |
+| Dependencies | 40+ crates | 0 | **Zero deps** |
 
 ---
 
 ## What it does
 
-hoosh is the **inference backend** — it routes, caches, rate-limits, and budget-tracks LLM requests across providers. It is not a model trainer (that's [Synapse](https://github.com/MacCracken/synapse)) or a model file manager. Applications build their AI features on top of hoosh.
+hoosh is the **inference backend** — it routes, caches, rate-limits, and budget-tracks LLM requests across providers. Applications build their AI features on top of hoosh.
 
 | Capability | Details |
 |------------|---------|
-| **15 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
-| **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` — streaming SSE |
+| **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
+| **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
 | **Provider routing** | Priority, round-robin, lowest-latency (EMA), direct — with model pattern matching |
-| **Authentication** | Bearer token auth middleware with constant-time comparison |
-| **Rate limiting** | Per-provider sliding window RPM limits |
-| **Token budgets** | Per-agent named pools with reserve/commit/release lifecycle |
-| **Cost tracking** | Per-provider/model cost accumulation with static pricing table |
-| **Observability** | Prometheus `/metrics`, OpenTelemetry (feature-gated), cryptographic audit log |
-| **Health checks** | Background periodic checks, automatic failover, heartbeat tracking (majra) |
-| **Response caching** | Thread-safe DashMap cache with TTL eviction |
-| **Request queuing** | Priority queue for inference requests (majra) |
-| **Event bus** | Pub/sub for provider health changes, inference events (majra) |
-| **Hot-reload** | SIGHUP or `POST /v1/admin/reload` — no restart required |
-| **TLS security** | Certificate pinning for remote providers, mTLS for local |
-| **Speech** | whisper.cpp STT + TTS via HTTP backend (feature-gated) |
-| **Hardware-aware** | ai-hwaccel detects GPUs/TPUs/NPUs for model placement |
+| **Authentication** | Bearer token auth with constant-time comparison (HMAC-SHA256 via sigil) |
+| **Rate limiting** | Per-provider RPM limits |
+| **Token budgets** | Per-agent named pools with reserve/commit lifecycle |
+| **Cost tracking** | Per-provider cost accumulation, reset endpoint |
+| **Observability** | Prometheus `/metrics`, HMAC-SHA256 audit chain |
+| **Health checks** | Per-provider TCP probe via `/v1/health/providers` |
+| **Response caching** | Hashmap cache with eviction stats |
+| **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.toml` |
 | **Local-first** | Prefers on-device inference; remote APIs as fallback |
 
 ---
@@ -42,69 +60,43 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 ## Architecture
 
 ```
-Clients (tarang, daimon, agnoshi, consumer apps)
-    │
-    ▼
-Auth ──▶ Rate Limiter ──▶ Router (priority, round-robin, lowest-latency)
-                              │
-    ┌─────────────────────────┤
-    │                         │
-    ▼                         ▼
-Local backends            Remote APIs (TLS pinned / mTLS)
-(Ollama, llama.cpp, …)   (OpenAI, Anthropic, DeepSeek, …)
-    │                         │
-    └────────┬────────────────┘
-             ▼
-    Cache ◀── Budget ◀── Cost Tracker
-             │
-    Metrics ◀── Audit Log ◀── Event Bus (majra)
+Clients (curl, tarang, daimon, consumer apps)
+    |
+    v
+Auth --> Rate Limiter --> Router (priority, round-robin, lowest-latency)
+                              |
+    +-------------------------+
+    |                         |
+    v                         v
+Local backends            Remote APIs
+(Ollama, llama.cpp, ...)  (OpenAI, Anthropic, DeepSeek, ...)
+    |                         |
+    +------------+------------+
+                 v
+    Cache <-- Budget <-- Cost Tracker
+                 |
+    Metrics <-- Audit Log
 ```
-
-See [docs/architecture/overview.md](docs/architecture/overview.md) for the full architecture document.
 
 ---
 
 ## Quick start
 
-### As a library
-
-```toml
-[dependencies]
-hoosh = "1.3"
-```
-
-```rust
-use hoosh::{HooshClient, InferenceRequest};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let client = HooshClient::new("http://localhost:8088");
-
-    let response = client.infer(&InferenceRequest {
-        model: "llama3".into(),
-        prompt: "Explain Rust ownership in one sentence.".into(),
-        ..Default::default()
-    }).await?;
-
-    println!("{}", response.text);
-    Ok(())
-}
-```
-
-### As a server
-
 ```bash
-# Start the gateway
-hoosh serve --port 8088
+# Build
+cyrius build src/main.cyr build/hoosh
 
-# One-shot inference
-hoosh infer --model llama3 "What is Rust?"
+# Start the gateway (default port 8088)
+./build/hoosh serve
 
-# List models across all providers
-hoosh models
+# Custom port
+./build/hoosh serve 9000
 
-# System info (hardware, providers)
-hoosh info
+# System info
+./build/hoosh info
+
+# Version
+./build/hoosh version
 ```
 
 ### OpenAI-compatible API
@@ -113,144 +105,124 @@ hoosh info
 curl http://localhost:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3",
+    "model": "llama3.2:1b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
+Response:
+```json
+{
+  "id": "chatcmpl-hoosh",
+  "object": "chat.completion",
+  "model": "llama3.2:1b",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "Hello! How can I help?"},
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 26,
+    "completion_tokens": 8,
+    "total_tokens": 34
+  }
+}
+```
+
 ---
 
-## Features
+## API endpoints
 
-| Feature | Backend | Default |
-|---------|---------|---------|
-| `ollama` | Ollama REST API | yes |
-| `llamacpp` | llama.cpp server | yes |
-| `synapse` | Synapse server | yes |
-| `lmstudio` | LM Studio API | yes |
-| `localai` | LocalAI API | yes |
-| `openai` | OpenAI API | yes |
-| `anthropic` | Anthropic Messages API | yes |
-| `deepseek` | DeepSeek API | yes |
-| `mistral` | Mistral API | yes |
-| `groq` | Groq API | yes |
-| `openrouter` | OpenRouter API | yes |
-| `grok` | xAI Grok API | yes |
-| `whisper` | whisper.cpp STT | no |
-| `piper` | Piper TTS | no |
-| `hwaccel` | ai-hwaccel hardware detection | yes |
-| `sentiment` | bhava emotion/sentiment analysis | no |
-| `tools` | MCP tool use (bote + szal) | no |
-| `tools-audit` | Tamper-proof tool call audit (libro) | no |
-| `tools-events` | Tool lifecycle events (majra pub/sub) | no |
-| `tools-discovery` | Cross-node tool discovery mesh | no |
-| `tools-sandbox` | Sandboxed tool execution (kavach) | no |
-| `tools-full` | All tool features | no |
-| `otel` | OpenTelemetry tracing | no |
-| `dlp` | PII scanning / content classification | no |
-| `all-providers` | All LLM providers | yes |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Gateway info |
+| GET | `/v1/health` | Health check (probes first provider) |
+| GET | `/v1/health/providers` | Per-provider health status |
+| GET | `/v1/models` | List configured providers |
+| POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
+| POST | `/v1/embeddings` | Embeddings (forwarded to Ollama) |
+| GET | `/v1/tokens/pools` | Token budget pools |
+| GET | `/v1/costs` | Cost tracking summary |
+| POST | `/v1/costs/reset` | Reset cost counters |
+| GET | `/v1/cache/stats` | Cache hit/miss/eviction stats |
+| GET | `/v1/queue/status` | Request queue status |
+| GET | `/metrics` | Prometheus metrics (text format) |
+| POST | `/v1/admin/reload` | Hot-reload config from `hoosh.toml` |
+| OPTIONS | `*` | CORS preflight |
+
+---
+
+## Configuration
+
+`hoosh.toml`:
 
 ```toml
-# Minimal: just Ollama + llama.cpp for local inference
-hoosh = { version = "1.3", default-features = false, features = ["ollama", "llamacpp"] }
+[[server]]
+port = 8088
 
-# With speech-to-text
-hoosh = { version = "1.3", features = ["whisper"] }
+[[cache]]
+max_entries = 10000
+enabled = true
 
-# With full MCP tool integration
-hoosh = { version = "1.3", features = ["tools-full"] }
+[[providers]]
+type = "Ollama"
+base_url = "http://localhost:11434"
+priority = 1
+models = ["llama*", "mistral*", "qwen*"]
+
+[[providers]]
+type = "OpenAi"
+base_url = "https://api.openai.com"
+priority = 10
+models = ["gpt-*", "o1-*"]
+
+[[budgets]]
+name = "default"
+capacity = 100000
+
+[[budgets]]
+name = "agent-1"
+capacity = 50000
+
+[[auth]]
+tokens = "your-secret-token"
 ```
 
 ---
 
-## Key types
+## Testing
 
-### `HooshClient`
+```bash
+# Run tests (231 assertions)
+cyrius test tests/hoosh.tcyr
 
-HTTP client for downstream consumers. Speaks the OpenAI-compatible API.
-
-```rust
-let client = hoosh::HooshClient::new("http://localhost:8088");
-let healthy = client.health().await?;
-let models = client.list_models().await?;
+# Run benchmarks (10 operations)
+cyrius bench tests/hoosh.bcyr
 ```
 
-### `InferenceRequest` / `InferenceResponse`
+### Test coverage
 
-```rust
-use hoosh::{InferenceRequest, InferenceResponse};
-
-let req = InferenceRequest {
-    model: "claude-sonnet-4-20250514".into(),
-    prompt: "Summarise this document.".into(),
-    system: Some("You are a technical writer.".into()),
-    max_tokens: Some(500),
-    temperature: Some(0.3),
-    stream: false,
-    ..Default::default()
-};
-```
-
-### `Router`
-
-Provider selection with model pattern matching:
-
-```rust
-use hoosh::router::{Router, ProviderRoute, RoutingStrategy};
-use hoosh::ProviderType;
-
-let routes = vec![
-    ProviderRoute {
-        provider: ProviderType::Ollama,
-        priority: 1,
-        model_patterns: vec!["llama*".into(), "mistral*".into()],
-        enabled: true,
-        base_url: "http://localhost:11434".into(),
-        api_key: None,
-        max_tokens_limit: None,
-        rate_limit_rpm: None,
-        tls_config: None,
-    },
-];
-let router = Router::new(routes, RoutingStrategy::Priority);
-let selected = router.select("llama3"); // → Ollama
-```
-
-### `TokenBudget`
-
-Per-agent token accounting:
-
-```rust
-use hoosh::{TokenBudget, TokenPool};
-
-let mut budget = TokenBudget::new();
-budget.add_pool(TokenPool::new("agent-123", 50_000));
-
-// Before inference: reserve estimated tokens
-budget.reserve("agent-123", 2000);
-
-// After inference: report actual usage
-budget.report("agent-123", 2000, 1847);
-```
-
----
-
-## Dependencies
-
-| Crate | Role |
-|-------|------|
-| [ai-hwaccel](https://crates.io/crates/ai-hwaccel) | Hardware detection, model compatibility, what-if analysis |
-| [bote](https://crates.io/crates/bote) | MCP protocol, tool dispatch, audit, discovery, sandboxing |
-| [szal](https://crates.io/crates/szal) | Workflow engine — DAG/parallel execution, retry, rollback |
-| [bhava](https://crates.io/crates/bhava) | Sentiment analysis, emotion detection, custom lexicons |
-| [majra](https://crates.io/crates/majra) | Priority queues, pub/sub events, heartbeat tracking |
-| [axum](https://crates.io/crates/axum) | HTTP server |
-| [reqwest](https://crates.io/crates/reqwest) | HTTP client for remote providers (rustls-tls) |
-| [prometheus](https://crates.io/crates/prometheus) | Metrics endpoint |
-| [dashmap](https://crates.io/crates/dashmap) | Thread-safe caches and registries |
-| [hmac](https://crates.io/crates/hmac) + [sha2](https://crates.io/crates/sha2) | Audit chain cryptography |
-| [whisper-rs](https://crates.io/crates/whisper-rs) | whisper.cpp Rust bindings (optional) |
-| [tokio](https://crates.io/crates/tokio) | Async runtime |
+| Module | Assertions |
+|--------|-----------|
+| Error types | 22 |
+| Provider types | 13 |
+| Router (4 strategies) | 32 |
+| Token budget | 19 |
+| Cache + stats | 14 |
+| Cost tracker | 15 |
+| Queue (5-tier priority) | 15 |
+| Health FSM | 30 |
+| Rate limiter | 5 |
+| Metrics | 8 |
+| Provider registry | 8 |
+| Audit chain (HMAC-SHA256) | 12 |
+| Config (TOML) | 8 |
+| JSON parse/build | 5 |
+| Inference types | 13 |
+| Token counting | 8 |
+| DLP scanning | 6 |
+| Cosine similarity | 3 |
+| Auth (constant-time) | 3 |
 
 ---
 
@@ -258,77 +230,19 @@ budget.report("agent-123", 2000, 1847);
 
 | Project | Usage |
 |---------|-------|
-| **[AGNOS](https://github.com/MacCracken/agnosticos)** (llm-gateway) | Wraps hoosh as the system-wide inference gateway |
-| **[tarang](https://crates.io/crates/tarang)** | Transcription, content description, AI media analysis |
-| **[aethersafta](https://github.com/MacCracken/aethersafta)** | Real-time transcription/captioning for streams |
-| **[AgnosAI](https://github.com/MacCracken/agnosai)** | Agent crew LLM routing |
-| **[Synapse](https://github.com/MacCracken/synapse)** | Inference backend + model management |
-| **All AGNOS consumer apps** | Via daimon or direct HTTP |
+| **[AGNOS](https://github.com/MacCracken/agnosticos)** | System-wide inference gateway |
+| **[tarang](https://github.com/MacCracken/tarang)** | Transcription, AI media analysis |
+| **[daimon](https://github.com/MacCracken/daimon)** | Inference routing daemon |
+| All AGNOS consumer apps | Via daimon or direct HTTP |
 
 ---
 
-## Roadmap
+## Rust reference
 
-| Version | Milestone | Status |
-|---------|-----------|--------|
-| **0.20.3** | Core gateway + providers | Done |
-| **0.21.5** | Auth, observability, messaging | Done |
-| **1.0.0** | Stable API, tool use, MCP integration | Done |
-| **1.2.0** | Context management, heartbeat telemetry | Done |
-| **1.3.0** | Deep integrations (bote, szal, bhava, ai-hwaccel 1.2) | Done |
-
-Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
-
----
-
-## Building from source
-
-```bash
-git clone https://github.com/MacCracken/hoosh.git
-cd hoosh
-
-# Build (all default providers, no whisper)
-cargo build
-
-# Build with whisper support (requires whisper.cpp system lib)
-cargo build --features whisper
-
-# Run tests
-cargo test
-
-# Run all CI checks locally
-make check
-```
-
-### Binary size (release, x86-64 Linux, stripped + LTO)
-
-| Profile | Features | Size |
-|---------|----------|------|
-| Minimal | `--no-default-features` | **4.5 MB** |
-| Default | `all-providers` + `hwaccel` | **5.1 MB** |
-| Full | `--all-features` (providers + hwaccel + whisper + tools-full + sentiment + otel + dlp) | **8.1 MB** |
-
-Release profile: `strip = true`, `lto = true`, `codegen-units = 1`, `opt-level = "s"`, `panic = "abort"`.
-
----
-
-## Versioning
-
-Pre-1.0 releases use `0.D.M` (day.month) SemVer — e.g. `0.20.3` = March 20th.
-Post-1.0 follows standard SemVer.
-
-The `VERSION` file is the single source of truth. Use `./scripts/version-bump.sh <version>` to update.
+The original Rust implementation (v1.3.0, 22,956 lines) is preserved in `rust-old/` for reference during the port. It includes the full test suite (605 tests), Criterion benchmarks, and all 15 provider implementations.
 
 ---
 
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE) for details.
-
----
-
-## Contributing
-
-1. Fork and create a feature branch
-2. Run `make check` (fmt + clippy + test + audit)
-3. Open a PR against `main`
