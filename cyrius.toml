@@ -4,7 +4,7 @@ version = "2.0.0"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "3.10.0"
+cyrius = "4.5.0"
 
 [build]
 entry = "src/main.cyr"
