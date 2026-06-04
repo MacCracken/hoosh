@@ -14,6 +14,17 @@ fn load_config(path) {
         if (port_str != 0) { _http_port = str_to_int(port_str); }
     }
 
+    # Parse [logging] section — sets the sakshi operational log level
+    var log_secs = toml_get_sections(sections, "logging");
+    if (vec_len(log_secs) > 0) {
+        var lp = toml_section_pairs(vec_get(log_secs, 0));
+        var lvl_str = toml_get(lp, "level");
+        if (lvl_str != 0) {
+            var lvl = hlog_level_from_str(to_cstr(lvl_str));
+            if (lvl >= 0) { sakshi_set_level(lvl); }
+        }
+    }
+
     # Parse [[cache]] section
     var cache_secs = toml_get_sections(sections, "cache");
     if (vec_len(cache_secs) > 0) {

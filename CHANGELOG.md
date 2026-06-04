@@ -5,6 +5,29 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.1.2] — 2026-06-04
+
+Structured operational logging via the `sakshi` stdlib module. Internal — no API
+or response changes; the CLI surface is untouched.
+
+### Added
+- **Structured logging** (`src/lib/logging.cyr`, new) — leveled operational logs
+  to **stderr** with timestamps, via sakshi. `hlog_info/warn/error/debug` cstr
+  wrappers + `hlog_request(method, path)`. Log points: server startup, per
+  request (`http_route`), auth rejections, config reload, chat "no provider"
+  (warn) and "backend unreachable" (error), embeddings backend failure.
+- **`[[logging]] level = ...`** in hoosh.toml (fatal/error/warn/info/debug/trace;
+  default info) → `sakshi_set_level`. Parsed in `config.cyr`.
+- Test group `logging_levels` (level-string mapping + set/get round-trip).
+
+### Notes
+- The CLI banner / `info` / `help` / `version` output stays on **stdout** as
+  plain presentation; operational logs go to **stderr**, so piping stdout stays
+  clean.
+- `[[logging]]` uses the double-bracket table form because the TOML parser only
+  honors `[[table]]` sections today (single-bracket support is a queued
+  improvement) — consistent with `[[budgets]]`/`[[providers]]`.
+
 ## [2.1.1] — 2026-06-04
 
 Surfaces ai-hwaccel 2.3.7 planning capabilities that the 2.1.0 dep upgrade pulled

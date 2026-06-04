@@ -1,0 +1,38 @@
+# logging.cyr — operational logging via sakshi (stderr by default).
+#
+# The CLI surface (serve banner, `info`, `help`, `version`) stays on
+# stdout as plain presentation. These wrappers carry operational events
+# (request lifecycle, auth/upstream failures, config reloads) to stderr
+# at the configured level, so piping stdout stays clean while operators
+# still get structured logs. Level is set from hoosh.toml `[logging]`
+# (see config.cyr); default is SK_INFO.
+#
+# Requires: sakshi.cyr (stdlib), string.cyr (strlen).
+
+fn hlog_info(msg) { sakshi_info(msg, strlen(msg)); return 0; }
+fn hlog_warn(msg) { sakshi_warn(msg, strlen(msg)); return 0; }
+fn hlog_error(msg) { sakshi_error(msg, strlen(msg)); return 0; }
+fn hlog_debug(msg) { sakshi_debug(msg, strlen(msg)); return 0; }
+
+# Map a hoosh.toml log-level string to a sakshi LogLevel, or -1 if unknown.
+fn hlog_level_from_str(s) {
+    if (streq(s, "fatal") == 1) { return SK_FATAL; }
+    if (streq(s, "error") == 1) { return SK_ERROR; }
+    if (streq(s, "warn") == 1) { return SK_WARN; }
+    if (streq(s, "info") == 1) { return SK_INFO; }
+    if (streq(s, "debug") == 1) { return SK_DEBUG; }
+    if (streq(s, "trace") == 1) { return SK_TRACE; }
+    return 0 - 1;
+}
+
+# Log "<method> <path>" at info for each request. Built once per call.
+fn hlog_request(method, path) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "request ");
+    str_builder_add_cstr(sb, method);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, path);
+    var s = str_builder_build(sb);
+    sakshi_info(str_data(s), str_len(s));
+    return 0;
+}

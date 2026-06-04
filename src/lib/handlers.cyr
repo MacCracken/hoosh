@@ -741,6 +741,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
 
     var route = router_select(_router, model_cstr);
     if (route == 0) {
+        hlog_warn("chat: no provider for requested model");
         return http_error(cfd, "404", "Not Found",
         "no provider for model");
     }
@@ -807,6 +808,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
     _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+        hlog_error("chat: provider backend unreachable after retries");
         return http_error(cfd, "502", "Bad Gateway",
         "provider backend unreachable");
     }

@@ -82,6 +82,8 @@ The hardening features below continue on the 2.1.x line.
 - [ ] Connection pooling for backend sockets
 
 ### Observability
+- [x] Structured operational logging via sakshi (stderr, leveled; `[[logging]]`
+      config) (2.1.2)
 - [ ] OpenTelemetry trace propagation
 - [ ] Per-provider latency histograms in Prometheus
 

@@ -6,6 +6,13 @@ bind = "127.0.0.1"
 port = 8088
 strategy = "priority"
 
+# Operational logging (stderr). Levels: fatal, error, warn, info, debug, trace.
+# Default is info. The CLI banner / `info` / `help` output stays on stdout.
+# NOTE: double-bracket form — the parser only honors [[table]] sections today
+# (single-bracket support is a queued improvement), matching [[budgets]] below.
+[[logging]]
+level = "info"
+
 [cache]
 max_entries = 1000
 ttl_secs = 300

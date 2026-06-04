@@ -19,6 +19,8 @@ include "lib/toml.cyr"
 include "lib/json.cyr"
 include "lib/syscalls.cyr"
 include "lib/assert.cyr"
+include "lib/sakshi.cyr"
+include "src/lib/logging.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -1938,6 +1940,19 @@ fn main() {
 
     var auth_short = "bearer";
     assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_short, strlen(auth_short)) == 0, "auth: length mismatch rejected");
+
+    # ── Logging level mapping (sakshi) ────────────────────────────
+    test_group("logging_levels");
+    assert(hlog_level_from_str("fatal") == SK_FATAL, "log level: fatal");
+    assert(hlog_level_from_str("error") == SK_ERROR, "log level: error");
+    assert(hlog_level_from_str("warn") == SK_WARN, "log level: warn");
+    assert(hlog_level_from_str("info") == SK_INFO, "log level: info");
+    assert(hlog_level_from_str("debug") == SK_DEBUG, "log level: debug");
+    assert(hlog_level_from_str("trace") == SK_TRACE, "log level: trace");
+    assert(hlog_level_from_str("bogus") == 0 - 1, "log level: unknown rejected");
+    sakshi_set_level(SK_WARN);
+    assert(sakshi_get_level() == SK_WARN, "log level: set/get round-trip");
+    sakshi_set_level(SK_INFO);
 
     # ── Hardware data files (ai-hwaccel cost/model endpoints) ──────
     # load_models scans for top-level `{...}` objects, so models.json

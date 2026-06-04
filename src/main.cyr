@@ -20,6 +20,7 @@ include "lib/ai-hwaccel.cyr"
 # ================================================================
 
 include "src/lib/types.cyr"
+include "src/lib/logging.cyr"
 include "src/lib/ratelimit.cyr"
 include "src/lib/route.cyr"
 include "src/lib/router.cyr"
@@ -58,6 +59,7 @@ var _audit_chain = 0;
 # ================================================================
 
 fn http_route(cfd, method, path, buf, buf_len) {
+    hlog_request(method, path);
     # CORS preflight
     if (streq(method, "OPTIONS") == 1) {
         var cr = make_crlf();
@@ -80,6 +82,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/health") != 1) {
         if (streq(path, "/metrics") != 1) {
             if (auth_check(buf, buf_len, _auth_tokens) == 0) {
+                hlog_warn("auth: rejected request (invalid/missing bearer token)");
                 return http_error(cfd, "401", "Unauthorized", "invalid or missing bearer token");
             }
         }
@@ -108,6 +111,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     }
     if (streq(path, "/v1/admin/reload") == 1) {
         load_config("hoosh.toml");
+        hlog_info("config reloaded from hoosh.toml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
     }
@@ -163,6 +167,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
                 ei = ei + 1;
             }
         }
+        hlog_error("embeddings: no backend produced a usable response");
         return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
     }
     if (streq(path, "/v1/chat/completions") == 1) {
@@ -220,6 +225,16 @@ fn cmd_serve(port) {
         fmt_int(hw_gpu_count());
         println(" accelerator(s)");
     }
+
+    # Operational startup log (stderr) — banner above stays on stdout.
+    store8(pbuf + plen, 0);
+    var lsb = str_builder_new();
+    str_builder_add_cstr(lsb, "hoosh ");
+    str_builder_add_cstr(lsb, HOOSH_VERSION);
+    str_builder_add_cstr(lsb, " serving on :");
+    str_builder_add_cstr(lsb, pbuf);
+    var lmsg = str_builder_build(lsb);
+    sakshi_info(str_data(lmsg), str_len(lmsg));
 
     while (1 == 1) {
         var client = sock_accept(sfd);
