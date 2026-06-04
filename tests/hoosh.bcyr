@@ -240,7 +240,7 @@ enum QueuePriority {
 fn queue_new() {
     var q = alloc(PRI_TIERS * 8);
     var i = 0;
-    while (i < PRI_TIERS) { store64(q + i * 8, vec_new(8)); i = i + 1; }
+    while (i < PRI_TIERS) { store64(q + i * 8, vec_new()); i = i + 1; }
     return q;
 }
 
@@ -446,4 +446,4 @@ fn main() {
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

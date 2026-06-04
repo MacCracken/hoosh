@@ -1,41 +1,52 @@
 #!/usr/bin/env bash
+# Version bump for hoosh — VERSION is the single source of truth.
+# cyrius.cyml carries `version = "${file:VERSION}"`, so the manifest
+# tracks the bump automatically (nothing to edit there).
+#
+# hoosh is a server binary — it publishes no distlib bundle, so there
+# is no dist/ to regenerate. This script:
+#   1. writes VERSION
+#   2. updates the `- **Version**:` line in CLAUDE.md
+#   3. bumps the HOOSH_VERSION constant in src/lib/types.cyr so the
+#      running binary reports the right version
+#   4. adds a CHANGELOG.md stub for the new version (if missing)
+#
+# Tag and push after bumping.
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <new-version>"
-    echo "Example: $0 0.21.3"
-    exit 1
-fi
-
-NEW_VERSION="$1"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-echo "Bumping hoosh to version ${NEW_VERSION}..."
-
-echo "$NEW_VERSION" > "$REPO_ROOT/VERSION"
-echo "  Updated VERSION"
-
-sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "$REPO_ROOT/Cargo.toml"
-echo "  Updated Cargo.toml"
-
+[ $# -ne 1 ] && echo "Usage: $0 <version>  (current: $(cat VERSION))" && exit 1
+NEW="$1"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-cargo generate-lockfile 2>/dev/null
-echo "  Regenerated Cargo.lock"
+OLD="$(tr -d '[:space:]' < VERSION)"
 
-FILE_VERSION=$(cat "$REPO_ROOT/VERSION" | tr -d '[:space:]')
-CARGO_VERSION=$(grep '^version = ' "$REPO_ROOT/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+# 1. VERSION file (source of truth)
+echo "$NEW" > VERSION
+echo "  VERSION: $OLD -> $NEW"
 
-if [ "$FILE_VERSION" != "$NEW_VERSION" ] || [ "$CARGO_VERSION" != "$NEW_VERSION" ]; then
-    echo "ERROR: Version mismatch after bump"
-    exit 1
+# 2. CLAUDE.md `- **Version**:` line
+if [ -f CLAUDE.md ] && grep -q '^- \*\*Version\*\*:' CLAUDE.md; then
+    sed -i "s/^- \*\*Version\*\*:.*/- **Version**: SemVer ${NEW} stable/" CLAUDE.md
+    echo "  CLAUDE.md version line updated"
 fi
 
-echo ""
-echo "Version bumped to ${NEW_VERSION}"
-echo ""
-echo "Next steps:"
-echo "  git add VERSION Cargo.toml Cargo.lock"
-echo "  git commit -m \"bump to ${NEW_VERSION}\""
-echo "  git tag ${NEW_VERSION}"
-echo "  git push && git push --tags"
+# 3. HOOSH_VERSION constant in source
+if [ -f src/lib/types.cyr ]; then
+    sed -i "s/^var HOOSH_VERSION = \".*\";/var HOOSH_VERSION = \"${NEW}\";/" src/lib/types.cyr
+    echo "  src/lib/types.cyr HOOSH_VERSION updated"
+fi
+
+# 4. CHANGELOG.md — add a stub if there is no entry for $NEW yet
+if [ -f CHANGELOG.md ] && ! grep -q "## \[$NEW\]" CHANGELOG.md; then
+    TODAY=$(date -u +%Y-%m-%d)
+    awk -v v="$NEW" -v d="$TODAY" '
+        /^## \[/ && !done {
+            print "## [" v "] — " d "\n\n**TODO:** describe this release.\n"
+            done = 1
+        }
+        { print }
+    ' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+    echo "  CHANGELOG.md stub added for $NEW"
+fi
+
+echo "Bumped to ${NEW}. Fill in CHANGELOG.md, run ./scripts/bench-history.sh, then tag and push."

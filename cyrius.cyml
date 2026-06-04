@@ -1,0 +1,24 @@
+[package]
+name = "hoosh"
+version = "${file:VERSION}"
+description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.0.57"
+repository = "https://github.com/MacCracken/hoosh"
+
+[build]
+entry = "src/main.cyr"
+output = "hoosh"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "ct", "keccak", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "fnptr", "assert", "bench"]
+
+# Hardware accelerator detection — consumed as the single-file distlib
+# bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,
+# included from src/main.cyr). Cyrius does not resolve transitive deps,
+# so ai-hwaccel's own stdlib needs are already covered by [deps] above.
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel"
+tag = "2.3.7"
+modules = ["dist/ai-hwaccel.cyr"]

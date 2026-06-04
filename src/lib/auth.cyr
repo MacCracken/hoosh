@@ -1,5 +1,5 @@
 # auth.cyr — bearer token authentication middleware
-# Uses constant-time comparison from sigil's ct_eq
+# Uses constant-time comparison from the ct stdlib module (ct_eq_bytes_lens)
 
 fn auth_check(req_buf, req_len, tokens) {
     # If no auth tokens configured, allow all
@@ -23,7 +23,7 @@ fn auth_check(req_buf, req_len, tokens) {
                     var ti = 0;
                     while (ti < vec_len(tokens)) {
                         var expected = vec_get(tokens, ti);
-                        if (ct_eq(req_buf + tok_start, tok_len, expected, strlen(expected)) == 1) {
+                        if (ct_eq_bytes_lens(req_buf + tok_start, tok_len, expected, strlen(expected)) == 1) {
                             return 1;
                         }
                         ti = ti + 1;

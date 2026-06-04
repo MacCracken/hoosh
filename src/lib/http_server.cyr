@@ -37,8 +37,8 @@ fn http_respond(cfd, status, status_text, body, body_len) {
     str_builder_add_cstr(sb, cr);
     var header = str_builder_build(sb);
     var hdr_cstr = to_cstr(header);
-    syscall(SYS_WRITE, cfd, hdr_cstr, str_len(header));
-    syscall(SYS_WRITE, cfd, body, body_len);
+    sys_write(cfd, hdr_cstr, str_len(header));
+    sys_write(cfd, body, body_len);
     return 0;
 }
 
@@ -58,21 +58,21 @@ fn http_sse_begin(cfd) {
     str_builder_add_cstr(sb, cr);
     str_builder_add_cstr(sb, cr);
     var hdr = str_builder_build(sb);
-    syscall(SYS_WRITE, cfd, to_cstr(hdr), str_len(hdr));
+    sys_write(cfd, to_cstr(hdr), str_len(hdr));
     return 0;
 }
 
 # Send one SSE data event
 fn http_sse_event(cfd, data, data_len) {
-    syscall(SYS_WRITE, cfd, "data: ", 6);
-    syscall(SYS_WRITE, cfd, data, data_len);
-    syscall(SYS_WRITE, cfd, "\n\n", 2);
+    sys_write(cfd, "data: ", 6);
+    sys_write(cfd, data, data_len);
+    sys_write(cfd, "\n\n", 2);
     return 0;
 }
 
 # Send SSE [DONE] marker
 fn http_sse_done(cfd) {
-    syscall(SYS_WRITE, cfd, "data: [DONE]\n\n", 14);
+    sys_write(cfd, "data: [DONE]\n\n", 14);
     return 0;
 }
 
@@ -94,8 +94,8 @@ fn http_not_found(cfd) {
 fn http_bad_request(cfd, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-            str_builder_add_cstr(sb, msg);
-            str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
     return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
@@ -104,8 +104,8 @@ fn http_bad_request(cfd, msg) {
 fn http_error(cfd, status, status_text, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-            str_builder_add_cstr(sb, msg);
-            str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
     return http_respond(cfd, status, status_text, bd, str_len(body));

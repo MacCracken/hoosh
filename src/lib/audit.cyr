@@ -1,7 +1,7 @@
 # audit.cyr — HMAC-SHA256 linked audit chain
 # Each entry is signed with HMAC and links to the previous entry's hash.
 # Provides tamper detection for request/response logging.
-# Requires: sigil.cyr (sha256, hmac_sign), chrono.cyr (clock_epoch_ns)
+# Requires: sigil.cyr (sha256_hex, hmac_sha256, hex_encode), chrono.cyr (clock_epoch_ns)
 
 # Entry layout (96 bytes):
 #   0: id (i64)              — monotonic counter
@@ -31,6 +31,15 @@ var AUDIT_ENTRY_SIZE = 96;
 
 var AUDIT_CHAIN_SIZE = 64;
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
+
+# HMAC-SHA256 → lowercase hex string. Replaces the old sigil `hmac_sign`
+# (removed in cyrius 6.x): hmac_sha256 writes 32 raw bytes into `out`,
+# then hex_encode renders the hex digest the audit chain stores/compares.
+fn _hmac_hex(key, key_len, msg, msg_len) {
+    var digest = alloc(32);
+    hmac_sha256(key, key_len, msg, msg_len, digest);
+    return hex_encode(digest, 32);
+}
 
 fn audit_chain_new(key, key_len, max_entries) {
     var c = alloc(AUDIT_CHAIN_SIZE);
@@ -93,7 +102,7 @@ fn audit_record(chain, event, level, message, provider, model) {
     var sig_len = str_len(sig_s);
     var key = load64(chain);
     var key_len = load64(chain + 8);
-    var sig = hmac_sign(key, key_len, sig_data, sig_len);
+    var sig = _hmac_hex(key, key_len, sig_data, sig_len);
 
     # Build entry
     var e = alloc(AUDIT_ENTRY_SIZE);
@@ -163,7 +172,7 @@ fn audit_verify(chain) {
         str_builder_add_cstr(sig_sb, prev);
         var sig_s = str_builder_build(sig_sb);
         var sig_data = to_cstr(sig_s);
-        var expected = hmac_sign(key, key_len, sig_data, str_len(sig_s));
+        var expected = _hmac_hex(key, key_len, sig_data, str_len(sig_s));
         if (streq(sig, expected) != 1) { return 0; }
 
         e = load64(e + 80);
@@ -174,42 +183,42 @@ fn audit_verify(chain) {
 # JSON output for /v1/audit endpoint
 fn audit_json(chain, sb, max_recent) {
     str_builder_add_cstr(sb, "{\"count\":");
-        str_builder_add_int(sb, audit_count(chain));
-        str_builder_add_cstr(sb, ",\"valid\":");
-        if (audit_verify(chain) == 1) {
-            str_builder_add_cstr(sb, "true");
-        } else {
-            str_builder_add_cstr(sb, "false");
-        }
-        str_builder_add_cstr(sb, ",\"entries\":[");
+    str_builder_add_int(sb, audit_count(chain));
+    str_builder_add_cstr(sb, ",\"valid\":");
+    if (audit_verify(chain) == 1) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, ",\"entries\":[");
 
-        # Walk from tail backwards max_recent entries
-        # (simple: walk forward, skip to last N)
-        var count = audit_count(chain);
-        var skip = 0;
-        if (count > max_recent) { skip = count - max_recent; }
-        var e = load64(chain + 24);
-        var idx = 0;
-        var first = 1;
-        while (e != 0) {
-            if (idx >= skip) {
-                if (first == 0) { str_builder_add_cstr(sb, ","); }
-                str_builder_add_cstr(sb, "{\"id\":");
-                    str_builder_add_int(sb, load64(e));
-                    str_builder_add_cstr(sb, ",\"timestamp\":");
-                    str_builder_add_int(sb, load64(e + 8));
-                    str_builder_add_cstr(sb, ",\"event\":\"");
-                    str_builder_add_cstr(sb, load64(e + 16));
-                    str_builder_add_cstr(sb, "\",\"level\":\"");
-                    str_builder_add_cstr(sb, load64(e + 24));
-                    str_builder_add_cstr(sb, "\",\"message\":\"");
-                    str_builder_add_cstr(sb, load64(e + 32));
-                    str_builder_add_cstr(sb, "\"}");
-                first = 0;
-            }
-            idx = idx + 1;
-            e = load64(e + 80);
+    # Walk from tail backwards max_recent entries
+    # (simple: walk forward, skip to last N)
+    var count = audit_count(chain);
+    var skip = 0;
+    if (count > max_recent) { skip = count - max_recent; }
+    var e = load64(chain + 24);
+    var idx = 0;
+    var first = 1;
+    while (e != 0) {
+        if (idx >= skip) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"id\":");
+            str_builder_add_int(sb, load64(e));
+            str_builder_add_cstr(sb, ",\"timestamp\":");
+            str_builder_add_int(sb, load64(e + 8));
+            str_builder_add_cstr(sb, ",\"event\":\"");
+            str_builder_add_cstr(sb, load64(e + 16));
+            str_builder_add_cstr(sb, "\",\"level\":\"");
+            str_builder_add_cstr(sb, load64(e + 24));
+            str_builder_add_cstr(sb, "\",\"message\":\"");
+            str_builder_add_cstr(sb, load64(e + 32));
+            str_builder_add_cstr(sb, "\"}");
+            first = 0;
         }
-        str_builder_add_cstr(sb, "]}");
+        idx = idx + 1;
+        e = load64(e + 80);
+    }
+    str_builder_add_cstr(sb, "]}");
     return 0;
 }

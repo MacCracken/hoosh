@@ -7,9 +7,13 @@
 #   hoosh version          Show version
 #   hoosh help             Show help
 
-# Stdlib auto-included via cyrius.toml
+# Stdlib auto-included via cyrius.cyml
 
-# Hoosh modules
+# ================================================================
+# Dependencies (vendored into lib/ by `cyrius deps`)
+# ================================================================
+
+include "lib/ai-hwaccel.cyr"
 
 # ================================================================
 # Hoosh modules
@@ -68,7 +72,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
         str_builder_add_cstr(hdr, cr);
         str_builder_add_cstr(hdr, cr);
         var h = str_builder_build(hdr);
-        syscall(SYS_WRITE, cfd, to_cstr(h), str_len(h));
+        sys_write(cfd, to_cstr(h), str_len(h));
         return 0;
     }
 
@@ -159,8 +163,13 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
     # Root
     if (streq(path, "/") == 1) {
-        var body = "{\"name\":\"hoosh\",\"version\":\"2.0.0\",\"status\":\"ok\"}";
-        return http_ok(cfd, body, strlen(body));
+        var rsb = str_builder_new();
+        str_builder_add_cstr(rsb, "{\"name\":\"hoosh\",\"version\":\"");
+        str_builder_add_cstr(rsb, HOOSH_VERSION);
+        str_builder_add_cstr(rsb, "\",\"status\":\"ok\"}");
+        var rbody = str_builder_build(rsb);
+        var rbd = to_cstr(rbody);
+        return http_ok(cfd, rbd, str_len(rbody));
     }
 
     return http_not_found(cfd);
@@ -183,22 +192,22 @@ fn cmd_serve(port) {
     var lr = sock_listen(sfd, 128);
     if (is_err_result(lr) == 1) { println("error: failed to listen"); return 1; }
 
-    syscall(1, 1, "hoosh v", 7);
-    syscall(1, 1, HOOSH_VERSION, strlen(HOOSH_VERSION));
-    syscall(1, 1, " listening on 0.0.0.0:", 22);
+    sys_write(1, "hoosh v", 7);
+    sys_write(1, HOOSH_VERSION, strlen(HOOSH_VERSION));
+    sys_write(1, " listening on 0.0.0.0:", 22);
     var pbuf = alloc(32);
     var plen = fmt_int_buf(_http_port, pbuf);
-    syscall(1, 1, pbuf, plen);
+    sys_write(1, pbuf, plen);
     println("");
-    syscall(1, 1, "OpenAI-compatible API: http://localhost:", 40);
-    syscall(1, 1, pbuf, plen);
+    sys_write(1, "OpenAI-compatible API: http://localhost:", 40);
+    sys_write(1, pbuf, plen);
     println("/v1/chat/completions");
     var rc = load64(_router + ROUTER_COUNT);
     fmt_int(rc);
     println(" provider route(s) configured");
     if (hw_ready() == 1) {
         fmt_int(hw_device_count());
-        syscall(1, 1, " hw device(s), ", 15);
+        sys_write(1, " hw device(s), ", 15);
         fmt_int(hw_gpu_count());
         println(" accelerator(s)");
     }
@@ -231,7 +240,7 @@ fn cmd_serve(port) {
 # ================================================================
 
 fn cmd_info() {
-    syscall(1, 1, "hoosh v", 7);
+    sys_write(1, "hoosh v", 7);
     println(HOOSH_VERSION);
     println("");
     println("AI inference gateway — multi-provider LLM routing");
@@ -240,20 +249,20 @@ fn cmd_info() {
     println("Remote providers: openai, anthropic, deepseek, mistral,");
     println("                  groq, grok, openrouter, google");
     println("");
-    syscall(1, 1, "Default port: ", 14);
+    sys_write(1, "Default port: ", 14);
     fmt_int(_http_port);
     println("");
 
     # Hardware summary
     if (hw_ready() == 1) {
-        syscall(1, 1, "Devices: ", 9);
+        sys_write(1, "Devices: ", 9);
         fmt_int(hw_device_count());
-        syscall(1, 1, " (", 2);
+        sys_write(1, " (", 2);
         fmt_int(hw_gpu_count());
         println(" accelerator(s))");
         var best = hw_best_device();
         if (best != 0) {
-            syscall(1, 1, "Best device: ", 13);
+            sys_write(1, "Best device: ", 13);
             println(accel_name(profile_accel_type(best)));
         }
     }
@@ -267,14 +276,14 @@ fn cmd_models() {
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
-        syscall(1, 1, "  ", 2);
+        sys_write(1, "  ", 2);
         var name = provider_name(route_provider(r));
-        syscall(1, 1, name, strlen(name));
-        syscall(1, 1, " @ ", 3);
+        sys_write(1, name, strlen(name));
+        sys_write(1, " @ ", 3);
         var url = route_base_url(r);
-        syscall(1, 1, url, strlen(url));
+        sys_write(1, url, strlen(url));
         if (route_enabled(r) != 1) {
-            syscall(1, 1, " [disabled]", 11);
+            sys_write(1, " [disabled]", 11);
         }
         println("");
         i = i + 1;
@@ -292,16 +301,16 @@ fn cmd_health() {
         if (route_enabled(r) == 1) {
             var port = url_port(route_base_url(r));
             var up = 0;
-            var fd = syscall(SYS_SOCKET, 2, 1, 0);
+            var fd = sys_socket(2, 1, 0);
             if (fd >= 0) {
                 var sa = sockaddr_in(0x0100007F, port);
-                var cr = syscall(SYS_CONNECT, fd, sa, 16);
+                var cr = sys_connect(fd, sa, 16);
                 if (cr >= 0) { up = 1; }
-                syscall(3, fd);
+                sys_close(fd);
             }
-            syscall(1, 1, "  ", 2);
+            sys_write(1, "  ", 2);
             var name = provider_name(route_provider(r));
-            syscall(1, 1, name, strlen(name));
+            sys_write(1, name, strlen(name));
             if (up == 1) {
                 println(" — ok");
             } else {
@@ -363,7 +372,7 @@ fn main() {
     _health_map = map_new();
     _rate_map = map_new();
     _cost_map = map_new();
-    _auth_tokens = vec_new(8);
+    _auth_tokens = vec_new();
     _retry_cfg = retry_config_default();
     _audit_chain = audit_chain_new("hoosh-audit-key", 15, 10000);
 
@@ -406,16 +415,16 @@ fn main() {
     if (streq(cmd, "--help") == 1) { return cmd_help(); }
     if (streq(cmd, "-h") == 1) { return cmd_help(); }
     if (streq(cmd, "version") == 1 || streq(cmd, "--version") == 1) {
-        syscall(1, 1, "hoosh v", 7);
+        sys_write(1, "hoosh v", 7);
         println(HOOSH_VERSION);
         return 0;
     }
 
-    syscall(1, 2, "unknown command: ", 17);
-    syscall(1, 2, cmd, strlen(cmd));
+    sys_write(2, "unknown command: ", 17);
+    sys_write(2, cmd, strlen(cmd));
     println("");
     return 1;
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

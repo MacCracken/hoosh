@@ -31,7 +31,24 @@ Hoosh rewritten from Rust to Cyrius. All core gateway functionality ported.
 
 ---
 
-## v2.1.0 — Production Hardening
+## v2.1.0 — Cyrius 6.0 modernization (shipped 2026-06-04)
+
+Toolchain/scaffolding brought up to current Cyrius (6.0.x) conventions. See
+[CHANGELOG](../../CHANGELOG.md) and
+[ADR 007](../decisions/007-cyrius-6-modernization.md).
+
+- [x] Cyrius pin 4.5.0 → 6.0.57; ai-hwaccel 2.0.0 → 2.3.7 (distlib bundle)
+- [x] `cyrius.toml` → `cyrius.cyml` (`${file:VERSION}`), retire `.cyrius-toolchain`
+- [x] Source to green under 6.0.57 (sys_* wrappers, HMAC, toml-cstr config fix)
+- [x] CI/release modernized (canonical installer, lib sync, fmt/lint/vet gates)
+- [x] **Benchmarks mandatory** — hard CI release gate
+- [x] De-Rust scripts (`bench-history.sh`, `version-bump.sh`) + `.gitignore`
+
+---
+
+## v2.1.x — Production Hardening (in progress)
+
+The hardening features below continue on the 2.1.x line.
 
 ### Tool calling & MCP
 - [ ] `/v1/tools/list` — list registered MCP tools
@@ -55,6 +72,19 @@ Hoosh rewritten from Rust to Cyrius. All core gateway functionality ported.
 ### Observability
 - [ ] OpenTelemetry trace propagation
 - [ ] Per-provider latency histograms in Prometheus
+
+### Scaffolding modernization (backlog — from ai-hwaccel/patra review)
+Conventions the modern sibling repos (ai-hwaccel 2.3.7, patra 1.10.3) follow that
+hoosh has not adopted yet. None block 2.1.0; candidates for the 2.1.x line:
+- [ ] `docs/development/state.md` — volatile state (version, test/assertion
+      counts, binary size, recent releases), refreshed each release (patra pattern)
+- [ ] `docs/doc-health.md` — doc inventory / freshness tracking (patra pattern)
+- [ ] Split tests into `tests/tcyr/*.tcyr` + `benches/*.bcyr` per-topic units
+      (ai-hwaccel pattern). Current single `hoosh.tcyr`/`hoosh.bcyr` is fine
+      (patra-style) — only worth it if the suite keeps growing.
+- [ ] Fuzz harnesses (`fuzz/*.fcyr`) + a CI fuzz step (both siblings)
+- [ ] Security-pattern scan in CI (raw `execve`, hardcoded `/etc` paths — patra)
+- [ ] `cyrius deny` policy file + CI gate (currently lint/vet only)
 
 ---
 

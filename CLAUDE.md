@@ -4,10 +4,10 @@
 
 **Hoosh** (Persian: intelligence (the word for AI)) — AI inference gateway — multi-provider LLM routing, token budgets, caching, local model serving
 
-- **Type**: Flat crate with binary (server, port 8088)
+- **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
-- **Version**: SemVer 1.x stable
+- **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.0.57)
+- **Version**: SemVer 2.1.0 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -25,7 +25,7 @@ All AGNOS apps (LLM inference), daimon (inference routing)
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Cleanliness check: `cyrius fmt <file> --check` (all `src/**/*.cyr`, `tests/*.tcyr`, `tests/*.bcyr`), `cyrius lint` (no `warn` lines), `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr`
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
 5. Cleanliness check — must be clean after audit
@@ -37,7 +37,7 @@ All AGNOS apps (LLM inference), daimon (inference routing)
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Cleanliness check: `cyrius fmt <file> --check` (all `src/**/*.cyr`, `tests/*.tcyr`, `tests/*.bcyr`), `cyrius lint` (no `warn` lines), `cyrius vet src/main.cyr`, `cyrius deny src/main.cyr`
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
@@ -46,32 +46,31 @@ All AGNOS apps (LLM inference), daimon (inference routing)
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
-12. Return to step 1
+11. Version check — VERSION (source of truth; `cyrius.cyml` tracks it via `${file:VERSION}`), recipe (in zugot) all in sync. Use `./scripts/version-bump.sh <v>`.
+12. **Release gate — benchmarks are mandatory** (see Key Principles); CI runs `./scripts/bench-history.sh` and fails the build if the suite does not run. Do not tag a release without a green bench run unless the maintainer explicitly waives it.
+13. Return to step 1
 
 ### Key Principles
 
-- **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 85%+ coverage target (currently 88% excl. hardware-gated).
-- **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
+- **Benchmarks are mandatory for every release.** Numbers don't lie; the CSV history (`bench-history.csv`) is the proof. CI runs `./scripts/bench-history.sh` as a hard release gate — a release may ship without a fresh bench run **only** with an explicit maintainer waiver (`CYRIUS_SKIP_BENCH=1` repo var). Never skip benchmarks before claiming a performance change.
+- **Tests + benchmarks are the way.** Keep `tests/hoosh.tcyr` green (`cyrius test`) and `tests/hoosh.bcyr` running (`cyrius bench`).
+- **Own the stack.** If an AGNOS project wraps an external capability, depend on the AGNOS project (e.g. hardware detection via `ai-hwaccel`, consumed as its `dist/` bundle).
 - **No magic.** Every operation is measurable, auditable, traceable.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
-- **`#[inline]`** on hot-path functions.
-- **`write!` over `format!`** — avoid temporary allocations.
-- **Cow over clone** — borrow when you can, allocate only when you must.
+- **Pin the toolchain in `cyrius.cyml`.** Build/CI use the pinned `cyrius` (`~/.cyrius/versions/<pin>/bin/cyrius`); `cyrius lib sync` + `cyrius deps` vendor stdlib + deps into gitignored `lib/`.
+- **Syscalls via `sys_*` wrappers** (`sys_write`/`sys_read`/`sys_close`/`sys_socket`/`sys_connect`/`sys_exit`) — never raw `syscall(N, …)` numbers or bare `SYS_*` enum members.
+- **Single-pass include order** — modules must be `include`d before first use (`include "lib/ai-hwaccel.cyr"` before any module that calls into it).
+- **Build strings with `str_builder`**, allocate with `alloc` only when you must — avoid temporary allocations.
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
-- **Feature-gate optional deps** — consumers pull only what they need.
-- **tracing on all operations** — structured logging for audit trail.
+- **Do not panic in library code** — return error codes / `Result`; reserve fatal exits for `main`.
 
 ## DO NOT
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
 
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not add unnecessary dependencies — keep it lean
-- Do not `unwrap()` or `panic!()` in library code
-- Do not skip benchmarks before claiming performance improvements
-- Do not commit `target/` or `Cargo.lock` (library crates only)
+- Do not panic in library code — return error codes / `Result`
+- Do not skip benchmarks before claiming performance improvements, or before a release (CI-enforced gate)
+- Do not commit `build/` or `lib/` (gitignored, regenerated by `cyrius lib sync`/`cyrius deps`); **do** commit `cyrius.lock`
 
 ## Documentation Structure
 

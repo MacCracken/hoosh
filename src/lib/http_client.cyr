@@ -25,23 +25,23 @@ fn _build_post_header(buf, path, host, body_len) {
 
 # HTTP POST to localhost:port. Returns _http_parse_response result or 0.
 fn http_post_local(port, path, body, body_len) {
-    var fd = syscall(SYS_SOCKET, 2, 1, 0);
+    var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0; }
     var sa = sockaddr_in(0x0100007F, port);
-    var cr = syscall(SYS_CONNECT, fd, sa, 16);
-    if (cr < 0) { syscall(3, fd); return 0; }
+    var cr = sys_connect(fd, sa, 16);
+    if (cr < 0) { sys_close(fd); return 0; }
     var hdr = alloc(2048);
     var hlen = _build_post_header(hdr, path, "localhost", body_len);
-    syscall(SYS_WRITE, fd, hdr, hlen);
-    syscall(SYS_WRITE, fd, body, body_len);
+    sys_write(fd, hdr, hlen);
+    sys_write(fd, body, body_len);
     var rbuf = alloc(131072);
     var total = 0;
     var n = 1;
     while (n > 0) {
-        n = syscall(SYS_READ, fd, rbuf + total, 131072 - total);
+        n = sys_read(fd, rbuf + total, 131072 - total);
         if (n > 0) { total = total + n; }
     }
-    syscall(3, fd);
+    sys_close(fd);
     if (total == 0) { return 0; }
     return _http_parse_response(rbuf, total);
 }
@@ -50,15 +50,15 @@ fn http_post_local(port, path, body, body_len) {
 # Caller must skip HTTP headers then read chunks.
 # Returns fd (>= 0) or -1 on failure.
 fn http_post_stream(port, path, body, body_len) {
-    var fd = syscall(SYS_SOCKET, 2, 1, 0);
+    var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0 - 1; }
     var sa = sockaddr_in(0x0100007F, port);
-    var cr = syscall(SYS_CONNECT, fd, sa, 16);
-    if (cr < 0) { syscall(3, fd); return 0 - 1; }
+    var cr = sys_connect(fd, sa, 16);
+    if (cr < 0) { sys_close(fd); return 0 - 1; }
     var hdr = alloc(2048);
     var hlen = _build_post_header(hdr, path, "localhost", body_len);
-    syscall(SYS_WRITE, fd, hdr, hlen);
-    syscall(SYS_WRITE, fd, body, body_len);
+    sys_write(fd, hdr, hlen);
+    sys_write(fd, body, body_len);
     return fd;
 }
 
@@ -67,7 +67,7 @@ fn http_post_stream(port, path, body, body_len) {
 fn stream_skip_headers(fd, buf, buf_sz) {
     var total = 0;
     while (total < buf_sz - 1) {
-        var n = syscall(SYS_READ, fd, buf + total, 1);
+        var n = sys_read(fd, buf + total, 1);
         if (n <= 0) { return 0 - 1; }
         total = total + 1;
         if (total >= 4) {

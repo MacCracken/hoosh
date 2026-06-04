@@ -13,6 +13,7 @@ include "lib/io.cyr"
 include "lib/hashmap.cyr"
 include "lib/chrono.cyr"
 include "lib/freelist.cyr"
+include "lib/ct.cyr"
 include "lib/sigil.cyr"
 include "lib/toml.cyr"
 include "lib/json.cyr"
@@ -587,7 +588,7 @@ fn queue_new() {
     var q = alloc(PRI_TIERS * 8);
     var i = 0;
     while (i < PRI_TIERS) {
-        store64(q + i * 8, vec_new(8));
+        store64(q + i * 8, vec_new());
         i = i + 1;
     }
     return q;
@@ -1480,7 +1481,7 @@ fn main() {
     # audit_record: create entry, link to chain, sign
 
     # Create chain
-    var ac_entries = vec_new(8);
+    var ac_entries = vec_new();
     var ac_last = GENESIS;
 
     # Record entry 1
@@ -1488,7 +1489,7 @@ fn main() {
     var ae1_msg = "Request to llama3";
     var ae1_hash = sha256_hex(ae1_msg, strlen(ae1_msg));
 
-    # sig = hmac_sign(key, keylen, "hash:prev_hash")
+    # sig = hmac_sha256(key, keylen, "hash:prev_hash", out32)
     # Build sig_input: "hash:prev_hash"
     var ae1_sinp = alloc(200);
     var ae1_slen = 0;
@@ -1499,7 +1500,7 @@ fn main() {
     memcpy(ae1_sinp + ae1_slen, ac_last, strlen(ac_last));
     ae1_slen = ae1_slen + strlen(ac_last);
 
-    var ae1_sig = hmac_sign(a_key, a_keylen, ae1_sinp, ae1_slen);
+    var ae1_sig = alloc(32); hmac_sha256(a_key, a_keylen, ae1_sinp, ae1_slen, ae1_sig);
     var ae1_sig_hex = hex_encode(ae1_sig, 32);
 
     var ae1 = alloc(AE_SIZE);
@@ -1522,7 +1523,7 @@ fn main() {
     ae2_slen = ae2_slen + 1;
     memcpy(ae2_sinp + ae2_slen, ac_last, strlen(ac_last));
     ae2_slen = ae2_slen + strlen(ac_last);
-    var ae2_sig = hmac_sign(a_key, a_keylen, ae2_sinp, ae2_slen);
+    var ae2_sig = alloc(32); hmac_sha256(a_key, a_keylen, ae2_sinp, ae2_slen, ae2_sig);
     var ae2_sig_hex = hex_encode(ae2_sig, 32);
 
     var ae2 = alloc(AE_SIZE);
@@ -1555,7 +1556,7 @@ fn main() {
         ac_vslen = ac_vslen + 1;
         memcpy(ac_vsinp + ac_vslen, ac_prev, strlen(ac_prev));
         ac_vslen = ac_vslen + strlen(ac_prev);
-        var ac_vsig = hmac_sign(a_key, a_keylen, ac_vsinp, ac_vslen);
+        var ac_vsig = alloc(32); hmac_sha256(a_key, a_keylen, ac_vsinp, ac_vslen, ac_vsig);
         var ac_vsig_hex = hex_encode(ac_vsig, 32);
 
         if (streq(ac_vsig_hex, load64(ac_e + AE_SIG)) != 1) { ac_valid = 0; }
@@ -1568,7 +1569,7 @@ fn main() {
     # ── Audit: empty chain verifies ───────────────────────────────
     test_group("audit_empty_verifies");
 
-    var ac_empty = vec_new(8);
+    var ac_empty = vec_new();
     assert_eq(vec_len(ac_empty), 0, "audit: empty chain len=0");
     # Empty chain = trivially valid (no entries to verify)
     assert(1 == 1, "audit: empty chain trivially valid");
@@ -1640,40 +1641,40 @@ fn main() {
     assert(cfg_sections != 0, "config: parsed minimal toml");
 
     # Find [server] section
-    var cfg_srv = toml_get_sections(cfg_sections, str_from("server"));
+    var cfg_srv = toml_get_sections(cfg_sections, "server");
     assert(vec_len(cfg_srv) > 0, "config: server section found");
 
     test_group("config_defaults");
 
     # Verify default values (toml_get returns str, use str_eq_cstr)
     var cfg_pairs = toml_section_pairs(vec_get(cfg_srv, 0));
-    var cfg_bind = toml_get(cfg_pairs, str_from("bind"));
+    var cfg_bind = toml_get(cfg_pairs, "bind");
     assert(str_eq_cstr(cfg_bind, "127.0.0.1") == 1, "config: default bind");
-    var cfg_port = toml_get(cfg_pairs, str_from("port"));
+    var cfg_port = toml_get(cfg_pairs, "port");
     assert(str_eq_cstr(cfg_port, "8088") == 1, "config: default port");
 
     test_group("config_provider_section");
 
     var cfg2_src = str_from("[[server]]\nbind = \"0.0.0.0\"\nport = \"8088\"\n\n[[providers]]\ntype = \"ollama\"\nbase_url = \"http://localhost:11434\"\npriority = \"1\"\n");
     var cfg2_secs = toml_parse(cfg2_src);
-    var cfg2_provs = toml_get_sections(cfg2_secs, str_from("providers"));
+    var cfg2_provs = toml_get_sections(cfg2_secs, "providers");
     assert(vec_len(cfg2_provs) > 0, "config: providers section found");
     var cfg2_pairs = toml_section_pairs(vec_get(cfg2_provs, 0));
-    var cfg2_ptype = toml_get(cfg2_pairs, str_from("type"));
+    var cfg2_ptype = toml_get(cfg2_pairs, "type");
     assert(str_eq_cstr(cfg2_ptype, "ollama") == 1, "config: provider type=ollama");
-    var cfg2_purl = toml_get(cfg2_pairs, str_from("base_url"));
+    var cfg2_purl = toml_get(cfg2_pairs, "base_url");
     assert(str_eq_cstr(cfg2_purl, "http://localhost:11434") == 1, "config: provider base_url");
 
     test_group("config_cache_section");
 
     var cfg3_src = str_from("[[cache]]\nenabled = \"true\"\nmax_entries = \"10000\"\nttl_secs = \"3600\"\n");
     var cfg3_secs = toml_parse(cfg3_src);
-    var cfg3_cache = toml_get_sections(cfg3_secs, str_from("cache"));
+    var cfg3_cache = toml_get_sections(cfg3_secs, "cache");
     assert(vec_len(cfg3_cache) > 0, "config: cache section found");
     var cfg3_pairs = toml_section_pairs(vec_get(cfg3_cache, 0));
-    var cfg3_enabled = toml_get(cfg3_pairs, str_from("enabled"));
+    var cfg3_enabled = toml_get(cfg3_pairs, "enabled");
     assert(str_eq_cstr(cfg3_enabled, "true") == 1, "config: cache enabled=true");
-    var cfg3_max = toml_get(cfg3_pairs, str_from("max_entries"));
+    var cfg3_max = toml_get(cfg3_pairs, "max_entries");
     assert(str_eq_cstr(cfg3_max, "10000") == 1, "config: cache max=10000");
 
     # ================================================================
@@ -1692,7 +1693,7 @@ fn main() {
 
     test_group("json_build");
 
-    var j_out_pairs = vec_new(8);
+    var j_out_pairs = vec_new();
     vec_push(j_out_pairs, json_pair_new(str_from("model"), str_from("gpt-4o")));
     vec_push(j_out_pairs, json_pair_new(str_from("status"), str_from("ok")));
     var j_out = json_build(j_out_pairs);
@@ -1925,18 +1926,18 @@ fn main() {
     var auth_tok1 = "bearer-secret-token-12345";
     var auth_tok2 = "bearer-secret-token-12345";
     var auth_tok3 = "bearer-wrong-token-99999";
-    assert(ct_eq(auth_tok1, strlen(auth_tok1), auth_tok2, strlen(auth_tok2)) == 1, "auth: matching tokens");
-    assert(ct_eq(auth_tok1, strlen(auth_tok1), auth_tok3, strlen(auth_tok3)) == 0, "auth: wrong token rejected");
+    assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_tok2, strlen(auth_tok2)) == 1, "auth: matching tokens");
+    assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_tok3, strlen(auth_tok3)) == 0, "auth: wrong token rejected");
 
     test_group("auth_empty_token");
 
     var auth_empty = "";
-    assert(ct_eq(auth_tok1, strlen(auth_tok1), auth_empty, strlen(auth_empty)) == 0, "auth: empty token rejected");
+    assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_empty, strlen(auth_empty)) == 0, "auth: empty token rejected");
 
     test_group("auth_length_mismatch");
 
     var auth_short = "bearer";
-    assert(ct_eq(auth_tok1, strlen(auth_tok1), auth_short, strlen(auth_short)) == 0, "auth: length mismatch rejected");
+    assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_short, strlen(auth_short)) == 0, "auth: length mismatch rejected");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
@@ -1944,4 +1945,4 @@ fn main() {
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

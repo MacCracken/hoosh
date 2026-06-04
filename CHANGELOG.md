@@ -5,6 +5,57 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] — 2026-06-04
+
+Toolchain & scaffolding modernization to current Cyrius (6.0.x) conventions. No
+gateway behavior changes; the binary builds, tests (231/231), and benchmarks
+clean under the new pin. Two latent correctness fixes shipped along the way
+(audit HMAC + config parsing — see Fixed).
+
+### Changed
+- **Cyrius toolchain pin 4.5.0 → 6.0.57.**
+- **ai-hwaccel dependency 2.0.0 → 2.3.7**, now consumed as the single-file
+  distlib bundle (`[deps.ai-hwaccel] modules = ["dist/ai-hwaccel.cyr"]`,
+  vendored to `lib/ai-hwaccel.cyr` and `include`d from `src/main.cyr`) instead
+  of the old per-source-module list.
+- **Manifest `cyrius.toml` → `cyrius.cyml`** with `version = "${file:VERSION}"`
+  interpolation (VERSION is the single source of truth) and a `repository` field.
+- **Retired `.cyrius-toolchain`** — the pin now lives only in `cyrius.cyml`.
+- **Syscalls go through the `sys_*` stdlib wrappers** (`sys_write`, `sys_read`,
+  `sys_close`, `sys_socket`, `sys_connect`, `sys_exit`) instead of raw
+  `syscall(N, …)` / bare `SYS_*` enum members (no longer global in 6.x).
+- **stdlib deps** now list `ct`, `keccak`, `thread`, `thread_local` explicitly
+  (split out of `sigil` / required by the ai-hwaccel bundle; Cyrius does not
+  resolve transitive deps).
+- **CI/release workflows modernized** — canonical installer reading the pin from
+  `cyrius.cyml`, `cyrius lib sync` + `cyrius deps`, and hard `fmt`/`lint`/`vet`
+  gates; release verifies tag == VERSION == `${file:VERSION}` and that the
+  version is in this changelog.
+- **Scripts de-Rusted** — `bench-history.sh` parses `cyrius bench` output (was
+  `cargo bench`/criterion); `version-bump.sh` drives VERSION + CLAUDE.md +
+  CHANGELOG (was `Cargo.toml`/`cargo generate-lockfile`).
+- Whole tree formatted with `cyrius fmt`.
+
+### Added
+- **Benchmarks are now a hard, CI-enforced release gate** — CI runs
+  `./scripts/bench-history.sh` and fails if the suite does not run or records no
+  data (maintainer waiver via `CYRIUS_SKIP_BENCH=1`). Documented in CLAUDE.md.
+- ADR [007-cyrius-6-modernization](docs/decisions/007-cyrius-6-modernization.md).
+
+### Fixed
+- **Audit chain HMAC** — replaced the removed `hmac_sign` with
+  `hmac_sha256(...)` + `hex_encode` (new `_hmac_hex` helper in `audit.cyr`).
+- **Config parsing under 6.x** — `toml_get_sections`/`toml_get` now take a
+  **cstr** name; `config.cyr` was wrapping every lookup in `str_from(...)`,
+  which silently parsed no sections. Stripped the wrappers (21 sites). Matching
+  test drift (`vec_new(8)` arity, `ct_eq` → `ct_eq_bytes_lens`) fixed too.
+- Stale hardcoded `"version":"2.0.0"` in the `/` response now tracks
+  `HOOSH_VERSION`.
+
+### Removed
+- Rust-era cruft: `cyrius.toml`, `.cyrius-toolchain`, `tarpaulin-report.json`,
+  `tarpaulin.toml`, and Rust/criterion entries in `.gitignore`.
+
 ## [2.0.0] — 2026-04-13
 
 Complete rewrite from Rust to Cyrius. Binary drops from multi-MB to 636KB. All core gateway functionality preserved and ported.

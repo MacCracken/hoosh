@@ -7,19 +7,19 @@ fn load_config(path) {
     if (vec_len(sections) == 0) { return 0; }
 
     # Parse [[server]] section
-    var srv_secs = toml_get_sections(sections, str_from("server"));
+    var srv_secs = toml_get_sections(sections, "server");
     if (vec_len(srv_secs) > 0) {
         var srv = toml_section_pairs(vec_get(srv_secs, 0));
-        var port_str = toml_get(srv, str_from("port"));
+        var port_str = toml_get(srv, "port");
         if (port_str != 0) { _http_port = str_to_int(port_str); }
     }
 
     # Parse [[cache]] section
-    var cache_secs = toml_get_sections(sections, str_from("cache"));
+    var cache_secs = toml_get_sections(sections, "cache");
     if (vec_len(cache_secs) > 0) {
         var cache_p = toml_section_pairs(vec_get(cache_secs, 0));
-        var max_str = toml_get(cache_p, str_from("max_entries"));
-        var enabled_str = toml_get(cache_p, str_from("enabled"));
+        var max_str = toml_get(cache_p, "max_entries");
+        var enabled_str = toml_get(cache_p, "enabled");
         var max_e = 10000;
         var enabled = 1;
         if (max_str != 0) { max_e = str_to_int(max_str); }
@@ -30,16 +30,16 @@ fn load_config(path) {
     }
 
     # Parse [[providers]] sections
-    var prov_secs = toml_get_sections(sections, str_from("providers"));
+    var prov_secs = toml_get_sections(sections, "providers");
     var route_count = vec_len(prov_secs);
     if (route_count > 0) {
         var routes = alloc(route_count * 8);
         var ri = 0;
         while (ri < route_count) {
             var pp = toml_section_pairs(vec_get(prov_secs, ri));
-            var ptype_str = toml_get(pp, str_from("type"));
-            var purl_str = toml_get(pp, str_from("base_url"));
-            var ppri_str = toml_get(pp, str_from("priority"));
+            var ptype_str = toml_get(pp, "type");
+            var purl_str = toml_get(pp, "base_url");
+            var ppri_str = toml_get(pp, "priority");
 
             var ptype = PROV_OLLAMA;
             if (ptype_str != 0) { ptype = provider_parse(to_cstr(ptype_str)); }
@@ -51,19 +51,19 @@ fn load_config(path) {
             var route = route_new(ptype, ppri, purl);
 
             # Parse API key
-            var apikey_str = toml_get(pp, str_from("api_key"));
+            var apikey_str = toml_get(pp, "api_key");
             if (apikey_str != 0) {
                 store64(route + ROUTE_API_KEY, to_cstr(apikey_str));
             }
 
             # Parse rate limit (RPM)
-            var rpm_str = toml_get(pp, str_from("rate_limit"));
+            var rpm_str = toml_get(pp, "rate_limit");
             if (rpm_str != 0) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }
 
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
-            var models_str = toml_get(pp, str_from("models"));
+            var models_str = toml_get(pp, "models");
             if (models_str != 0) {
                 var ms = to_cstr(models_str);
                 var ms_len = strlen(ms);
@@ -104,12 +104,12 @@ fn load_config(path) {
     }
 
     # Parse [[budgets]] sections
-    var bud_secs = toml_get_sections(sections, str_from("budgets"));
+    var bud_secs = toml_get_sections(sections, "budgets");
     var bi = 0;
     while (bi < vec_len(bud_secs)) {
         var bp = toml_section_pairs(vec_get(bud_secs, bi));
-        var bname = toml_get(bp, str_from("name"));
-        var bcap_str = toml_get(bp, str_from("capacity"));
+        var bname = toml_get(bp, "name");
+        var bcap_str = toml_get(bp, "capacity");
         if (bname != 0) {
             if (bcap_str != 0) {
                 budget_add_pool(_budget, pool_new(to_cstr(bname), str_to_int(bcap_str)));
@@ -119,12 +119,12 @@ fn load_config(path) {
     }
 
     # Parse [[retry]] section
-    var retry_secs = toml_get_sections(sections, str_from("retry"));
+    var retry_secs = toml_get_sections(sections, "retry");
     if (vec_len(retry_secs) > 0) {
         var rp = toml_section_pairs(vec_get(retry_secs, 0));
-        var mr_str = toml_get(rp, str_from("max_retries"));
-        var bd_str = toml_get(rp, str_from("base_delay_ms"));
-        var md_str = toml_get(rp, str_from("max_delay_ms"));
+        var mr_str = toml_get(rp, "max_retries");
+        var bd_str = toml_get(rp, "base_delay_ms");
+        var md_str = toml_get(rp, "max_delay_ms");
         var mr = 3;
         var bd = 500;
         var md = 30000;
@@ -135,10 +135,10 @@ fn load_config(path) {
     }
 
     # Parse [[auth]] section
-    var auth_secs = toml_get_sections(sections, str_from("auth"));
+    var auth_secs = toml_get_sections(sections, "auth");
     if (vec_len(auth_secs) > 0) {
         var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
-        var tok_str = toml_get(auth_p, str_from("tokens"));
+        var tok_str = toml_get(auth_p, "tokens");
         if (tok_str != 0) {
             vec_push(_auth_tokens, to_cstr(tok_str));
         }
