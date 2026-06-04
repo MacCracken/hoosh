@@ -13,6 +13,12 @@ strategy = "priority"
 [[logging]]
 level = "info"
 
+# Durable persistence (opt-in). When `path` is set, the HMAC audit chain and
+# token-budget usage are stored in an embedded patra DB and restored on
+# startup. Omit this section to run fully in-memory (default).
+# [[storage]]
+# path = "hoosh.patra"
+
 [cache]
 max_entries = 1000
 ttl_secs = 300

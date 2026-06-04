@@ -30,6 +30,9 @@ coverage/
 .env
 .env.*
 
+# Persistence DB (created at runtime when [[storage]] is enabled)
+*.patra
+
 # Model weights (downloaded at runtime, not tracked)
 models/
 *.bin

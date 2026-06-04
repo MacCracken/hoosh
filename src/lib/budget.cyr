@@ -31,6 +31,8 @@ fn pool_commit(p, reserved, actual) {
     if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
     else { store64(p + POOL_RESERVED, 0); }
     store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    # Persist the new used count (no-op when persistence is disabled).
+    storage_budget_set(load64(p + POOL_NAME), load64(p + POOL_CAPACITY), load64(p + POOL_USED));
     return 0;
 }
 

@@ -14,6 +14,14 @@ fn load_config(path) {
         if (port_str != 0) { _http_port = str_to_int(port_str); }
     }
 
+    # Parse [storage] section — opt-in patra persistence (path only)
+    var stor_secs = toml_get_sections(sections, "storage");
+    if (vec_len(stor_secs) > 0) {
+        var sp = toml_section_pairs(vec_get(stor_secs, 0));
+        var path_str = toml_get(sp, "path");
+        if (path_str != 0) { _storage_path = to_cstr(path_str); }
+    }
+
     # Parse [logging] section — sets the sakshi operational log level
     var log_secs = toml_get_sections(sections, "logging");
     if (vec_len(log_secs) > 0) {

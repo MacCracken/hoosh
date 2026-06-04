@@ -33,6 +33,7 @@ include "src/lib/http_client.cyr"
 include "src/lib/provider.cyr"
 include "src/lib/compact.cyr"
 include "src/lib/audit.cyr"
+include "src/lib/storage.cyr"
 include "src/lib/retry.cyr"
 include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
@@ -411,6 +412,28 @@ fn main() {
 
     # Load config
     load_config("hoosh.toml");
+
+    # Open persistence (opt-in via [[storage]] path) and restore prior state.
+    if (_storage_path != 0) {
+        # patra needs the freelist + its own allocator initialized first.
+        fl_init();
+        patra_init();
+        _storage = storage_open(_storage_path);
+        if (_storage != 0) {
+            var na = storage_restore_audit(_audit_chain);
+            var nb = storage_restore_budgets(_budget);
+            var ssb = str_builder_new();
+            str_builder_add_cstr(ssb, "storage: restored ");
+            str_builder_add_int(ssb, na);
+            str_builder_add_cstr(ssb, " audit entries, ");
+            str_builder_add_int(ssb, nb);
+            str_builder_add_cstr(ssb, " budget pools");
+            var smsg = str_builder_build(ssb);
+            sakshi_info(str_data(smsg), str_len(smsg));
+        } else {
+            hlog_error("storage: failed to open db; continuing in-memory");
+        }
+    }
 
     # CLI
     var ac = argc();

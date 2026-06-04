@@ -140,6 +140,9 @@ fn audit_record(chain, event, level, message, provider, model) {
         }
     }
 
+    # Write-through to durable storage (no-op when persistence is disabled).
+    storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev_hash, ehash);
+
     return e;
 }
 

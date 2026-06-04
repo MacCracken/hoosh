@@ -1,0 +1,208 @@
+# storage.cyr — optional durable persistence via patra (embedded SQL DB).
+#
+# Opt-in: enabled only when hoosh.toml has `[[storage]] path = "..."`. When
+# disabled (_storage == 0) every entry point is a no-op and hoosh runs fully
+# in-memory exactly as before.
+#
+# Persists:
+#   audit   (id, ts, event, level, message, provider, model, signature,
+#            prev_hash, entry_hash) — write-through on every audit_record;
+#            restored + chain-linked on startup so the tamper-evident log
+#            survives restarts.
+#   budgets (name, capacity, used) — set-on-commit; used counts restored on
+#            startup so token budgets survive restarts.
+#
+# Requires: patra.cyr (stdlib), string.cyr, alloc, sakshi (logging).
+# NOTE: patra is single-threaded — all access must be serialized once the
+# threaded accept loop lands (see roadmap concurrency item).
+
+var _storage = 0;        # patra db handle, 0 = persistence disabled
+var _storage_path = 0;   # set from [[storage]] path by config.cyr
+
+# Copy a result-set STR cell to a fresh null-terminated buffer (the cell
+# points into the result set, which is freed after the query). patra
+# returns STR cells as null-terminated cstrs, so strlen gives the exact
+# length (get_str_len reports the padded field width).
+fn _rs_dup_str(rs, row, col) {
+    var p = patra_result_get_str(rs, row, col);
+    if (p == 0) {
+        var z = alloc(1);
+        store8(z, 0);
+        return z;
+    }
+    var len = strlen(p);
+    var out = alloc(len + 1);
+    if (len > 0) { memcpy(out, p, len); }
+    store8(out + len, 0);
+    return out;
+}
+
+# Copy a result-set TEXT cell (chain-paged) to a fresh buffer.
+fn _rs_dup_text(db, rs, row, col) {
+    var len = patra_result_get_text_len(rs, row, col);
+    var out = alloc(len + 1);
+    if (len > 0) { patra_result_read_text(db, rs, row, col, out); }
+    store8(out + len, 0);
+    return out;
+}
+
+# The audit column list is long; build SQL from short pieces to stay within
+# the line-length lint and keep CREATE/SELECT column order in lock-step.
+fn _audit_create_sql() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "CREATE TABLE audit (id INT, ts INT, event STR, ");
+    str_builder_add_cstr(sb, "level STR, message TEXT, provider STR, model STR, ");
+    str_builder_add_cstr(sb, "signature STR, prev_hash STR, entry_hash STR)");
+    return to_cstr(str_builder_build(sb));
+}
+
+fn _audit_select_sql() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "SELECT id, ts, event, level, message, provider, ");
+    str_builder_add_cstr(sb, "model, signature, prev_hash, entry_hash ");
+    str_builder_add_cstr(sb, "FROM audit ORDER BY id");
+    return to_cstr(str_builder_build(sb));
+}
+
+# Open (or create) the DB and ensure the schema. CREATE returns
+# PATRA_ERR_EXISTS on reopen — ignored. Returns the db handle or 0.
+fn storage_open(path) {
+    var db = patra_open(path);
+    if (db == 0) { return 0; }
+    patra_exec(db, _audit_create_sql());
+    patra_exec(db, "CREATE TABLE budgets (name STR, capacity INT, used INT)");
+    return db;
+}
+
+# Helper: set a STR column slot in the typed-insert arrays.
+fn _ins_str(types, sptrs, slens, col, s) {
+    var cstr = s;
+    if (cstr == 0) { cstr = ""; }
+    store64(types + col * 8, COL_STR);
+    store64(sptrs + col * 8, cstr);
+    store64(slens + col * 8, strlen(cstr));
+}
+
+# Write-through one audit entry (typed insert — message may contain quotes,
+# so never build SQL from it). No-op when persistence is disabled.
+fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev, ehash) {
+    if (_storage == 0) { return 0; }
+    var types = alloc(80);
+    var ivals = alloc(80);
+    var sptrs = alloc(80);
+    var slens = alloc(80);
+    var bptrs = alloc(80);
+    var blens = alloc(80);
+    memset(types, 0, 80);
+    memset(ivals, 0, 80);
+    memset(sptrs, 0, 80);
+    memset(slens, 0, 80);
+    memset(bptrs, 0, 80);
+    memset(blens, 0, 80);
+    store64(types + 0, COL_INT);
+    store64(ivals + 0, id);
+    store64(types + 8, COL_INT);
+    store64(ivals + 8, ts);
+    _ins_str(types, sptrs, slens, 2, event);
+    _ins_str(types, sptrs, slens, 3, level);
+    # col 4: message TEXT
+    var msg = message;
+    if (msg == 0) { msg = ""; }
+    store64(types + 32, COL_TEXT);
+    store64(bptrs + 32, msg);
+    store64(blens + 32, strlen(msg));
+    _ins_str(types, sptrs, slens, 5, provider);
+    _ins_str(types, sptrs, slens, 6, model);
+    _ins_str(types, sptrs, slens, 7, sig);
+    _ins_str(types, sptrs, slens, 8, prev);
+    _ins_str(types, sptrs, slens, 9, ehash);
+    return patra_insert_row(_storage, "audit", 5, 10, types, ivals, sptrs, slens, bptrs, blens);
+}
+
+# Restore the audit chain from disk: rebuild the in-memory linked list in
+# id order, set last_hash + next_id so new records continue the chain.
+# Returns the number of entries restored.
+fn storage_restore_audit(chain) {
+    if (_storage == 0) { return 0; }
+    var rs = patra_query(_storage, _audit_select_sql());
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    var i = 0;
+    var maxid = 0;
+    while (i < n) {
+        var e = alloc(AUDIT_ENTRY_SIZE);
+        var id = patra_result_get_int(rs, i, 0);
+        store64(e + 0, id);
+        store64(e + 8, patra_result_get_int(rs, i, 1));
+        store64(e + 16, _rs_dup_str(rs, i, 2));
+        store64(e + 24, _rs_dup_str(rs, i, 3));
+        store64(e + 32, _rs_dup_text(_storage, rs, i, 4));
+        store64(e + 40, _rs_dup_str(rs, i, 5));
+        store64(e + 48, _rs_dup_str(rs, i, 6));
+        store64(e + 56, _rs_dup_str(rs, i, 7));
+        store64(e + 64, _rs_dup_str(rs, i, 8));
+        store64(e + 72, _rs_dup_str(rs, i, 9));
+        store64(e + 80, 0);
+        # Append to the chain (mirrors audit_record's link step; hashes are
+        # taken from disk, not recomputed).
+        var tail = load64(chain + 32);
+        if (tail != 0) { store64(tail + 80, e); } else { store64(chain + 24, e); }
+        store64(chain + 32, e);
+        store64(chain + 16, load64(e + 72));
+        store64(chain + 40, load64(chain + 40) + 1);
+        if (id > maxid) { maxid = id; }
+        i = i + 1;
+    }
+    store64(chain + 56, maxid + 1);
+    patra_result_free(rs);
+    return n;
+}
+
+# Set-semantics persist of one pool's row (delete-then-insert keeps exactly
+# one row per pool reflecting current `used`). Pool names come from trusted
+# config. No-op when persistence is disabled.
+fn storage_budget_set(name, capacity, used) {
+    if (_storage == 0) { return 0; }
+    var dsb = str_builder_new();
+    str_builder_add_cstr(dsb, "DELETE FROM budgets WHERE name = '");
+    str_builder_add_cstr(dsb, name);
+    str_builder_add_cstr(dsb, "'");
+    patra_exec(_storage, to_cstr(str_builder_build(dsb)));
+
+    var types = alloc(24);
+    var ivals = alloc(24);
+    var sptrs = alloc(24);
+    var slens = alloc(24);
+    var bptrs = alloc(24);
+    var blens = alloc(24);
+    memset(types, 0, 24);
+    memset(ivals, 0, 24);
+    memset(sptrs, 0, 24);
+    memset(slens, 0, 24);
+    memset(bptrs, 0, 24);
+    memset(blens, 0, 24);
+    _ins_str(types, sptrs, slens, 0, name);
+    store64(types + 8, COL_INT);
+    store64(ivals + 8, capacity);
+    store64(types + 16, COL_INT);
+    store64(ivals + 16, used);
+    return patra_insert_row(_storage, "budgets", 7, 3, types, ivals, sptrs, slens, bptrs, blens);
+}
+
+# Restore each pool's `used` count from disk. Returns rows applied.
+fn storage_restore_budgets(bgt) {
+    if (_storage == 0) { return 0; }
+    var rs = patra_query(_storage, "SELECT name, capacity, used FROM budgets");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    var i = 0;
+    while (i < n) {
+        var nm = _rs_dup_str(rs, i, 0);
+        var used = patra_result_get_int(rs, i, 2);
+        var p = budget_get_pool(bgt, nm);
+        if (p != 0) { store64(p + POOL_USED, used); }
+        i = i + 1;
+    }
+    patra_result_free(rs);
+    return n;
+}

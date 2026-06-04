@@ -81,6 +81,10 @@ The hardening features below continue on the 2.1.x line.
 - [ ] Multi-threaded accept loop (thread pool or epoll)
 - [ ] Connection pooling for backend sockets
 
+### Durability
+- [x] Optional persistence via patra — audit chain + token budgets survive
+      restarts; opt-in `[[storage]] path` (2.1.3)
+
 ### Observability
 - [x] Structured operational logging via sakshi (stderr, leveled; `[[logging]]`
       config) (2.1.2)

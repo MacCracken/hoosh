@@ -5,6 +5,32 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.1.3] — 2026-06-04
+
+Optional durable persistence via the `patra` embedded SQL DB (stdlib). Opt-in and
+fully backward compatible — without `[[storage]]`, hoosh runs in-memory exactly as
+before.
+
+### Added
+- **`src/lib/storage.cyr`** (new) — patra-backed persistence for the HMAC audit
+  chain and token-budget usage. Enabled by `[[storage]] path = "..."` in
+  hoosh.toml; tables `audit` + `budgets` created on open.
+- **Audit chain durability** — `audit_record` writes each entry through to disk
+  (typed `patra_insert_row`, so messages with quotes/commas can't break or
+  inject SQL); on startup the chain is rebuilt in id-order with `last_hash` +
+  `next_id` restored so new entries continue the existing chain.
+- **Token-budget durability** — `pool_commit` persists each pool's `used`;
+  restored on startup. Verified end-to-end (`/v1/tokens/report` → restart →
+  `used` restored).
+- ADR [008-persistence-via-patra](docs/decisions/008-persistence-via-patra.md).
+- `*.patra` added to `.gitignore`; commented `[[storage]]` example in hoosh.toml.
+
+### Notes
+- patra requires `fl_init()` + `patra_init()` before use — called in `main()`
+  before opening storage.
+- patra is single-threaded; storage access will need serialization when the
+  threaded accept loop lands (next milestone).
+
 ## [2.1.2] — 2026-06-04
 
 Structured operational logging via the `sakshi` stdlib module. Internal — no API
