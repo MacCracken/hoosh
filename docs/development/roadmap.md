@@ -50,6 +50,18 @@ Toolchain/scaffolding brought up to current Cyrius (6.0.x) conventions. See
 
 The hardening features below continue on the 2.1.x line.
 
+### Hardware planning (ai-hwaccel 2.3.7 surface)
+- [x] `POST /v1/hardware/cost` — cloud instance cost recommendations (2.1.1)
+- [x] `POST /v1/hardware/training-estimate` — training memory estimate (2.1.1)
+- [x] `GET /v1/hardware/compatible-models` — models that fit detected HW (2.1.1)
+- [ ] `POST /v1/hardware/model-format` — detect SafeTensors/GGUF/ONNX/PyTorch
+      (ai-hwaccel `model_format.cyr`)
+- [ ] `POST /v1/hardware/requirement-match` — scheduler requirement matching
+      (ai-hwaccel `requirement.cyr`)
+- [ ] Threaded detection at startup (`registry_detect_threaded`) — blocked: it
+      segfaults under the single-threaded runtime; revisit with the threaded
+      accept loop.
+
 ### Tool calling & MCP
 - [ ] `/v1/tools/list` — list registered MCP tools
 - [ ] `/v1/tools/call` — invoke MCP tools by name

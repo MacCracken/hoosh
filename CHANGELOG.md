@@ -5,6 +5,36 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] — 2026-06-04
+
+Surfaces ai-hwaccel 2.3.7 planning capabilities that the 2.1.0 dep upgrade pulled
+in but didn't yet expose. Additive — existing endpoints unchanged.
+
+### Added
+- **`POST /v1/hardware/cost`** — cloud instance $/inference recommendations for a
+  model size + quantization (ai-hwaccel `cost.cyr`; AWS/GCP/Azure).
+- **`POST /v1/hardware/training-estimate`** — training-memory breakdown
+  (model/optimizer/activation/total) for a model size + method
+  (full/lora/qlora/dpo/…) + target (gpu/tpu/gaudi) (ai-hwaccel `training.cyr`).
+- **`GET /v1/hardware/compatible-models`** — catalogue models that fit the
+  detected accelerator memory at int8, with headroom % (ai-hwaccel `model.cyr`).
+- **`data/cloud_pricing.json` + `data/models.json`** vendored from ai-hwaccel
+  (read cwd-relative at runtime; cost/compatible-models degrade to empty if
+  absent). `models.json` ships as a **top-level JSON array** — `load_models`
+  scans for bare `{…}` objects, so the `{"models":[…]}` wrapper would yield only
+  the first model. A test (`hardware_data_files`) guards this shape.
+
+### Changed
+- `src/lib/hardware.cyr` header refreshed for the 2.3.7 module set.
+
+### Notes
+- ai-hwaccel's threaded detector (`registry_detect_threaded`) was evaluated for
+  faster startup but segfaults under hoosh's single-threaded runtime — deferred
+  to the concurrency milestone. Startup still uses serial `registry_detect`.
+- Still TODO on the 2.1.x line: `/v1/hardware/model-format` and
+  `/v1/hardware/requirement-match` (ai-hwaccel `model_format.cyr` /
+  `requirement.cyr`).
+
 ## [2.1.0] — 2026-06-04
 
 Toolchain & scaffolding modernization to current Cyrius (6.0.x) conventions. No

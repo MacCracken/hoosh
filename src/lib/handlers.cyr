@@ -376,6 +376,104 @@ fn handle_hw_models(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# POST /v1/hardware/cost — cloud instance $ recommendations for a model
+# size + quantization (ai-hwaccel cost.cyr; reads data/cloud_pricing.json,
+# degrades to empty recommendations if that file is absent).
+fn handle_hw_cost(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var mn = json_get(pairs, str_from("model"));
+    if (mn == 0) { return http_bad_request(cfd, "missing 'model' (e.g. \"70b\")"); }
+    var quant = QUANT_INT8;
+    var q_str = json_get(pairs, str_from("quantization"));
+    if (q_str != 0) {
+        quant = quant_from_str(to_cstr(q_str));
+        if (quant < 0) { return http_bad_request(cfd, "invalid quantization (fp32/fp16/bf16/int8/int4)"); }
+    }
+    return http_json_ok(cfd, cost_to_json(to_cstr(mn), quant));
+}
+
+# POST /v1/hardware/training-estimate — training memory breakdown for a
+# model size + method + target (ai-hwaccel training.cyr; pure compute).
+fn handle_hw_training(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var params_m = 0;
+    var mn = json_get(pairs, str_from("model"));
+    if (mn != 0) { params_m = _hoosh_parse_model_params(to_cstr(mn)) / 1000000; }
+    var mp = json_get(pairs, str_from("model_params_m"));
+    if (mp != 0) { params_m = str_to_int(mp); }
+    if (params_m == 0) { return http_bad_request(cfd, "missing 'model' (e.g. \"7b\") or 'model_params_m'"); }
+    var method = TRAIN_LORA;
+    var meth_s = json_get(pairs, str_from("method"));
+    if (meth_s != 0) {
+        method = training_method_from_str(to_cstr(meth_s));
+        if (method < 0) {
+            var emsg = "invalid 'method' (full/lora/qlora-4bit/qlora-8bit/prefix/dpo/rlhf/distillation)";
+            return http_bad_request(cfd, emsg);
+        }
+    }
+    var target = TARGET_GPU;
+    var tname = "gpu";
+    var tgt_s = json_get(pairs, str_from("target"));
+    if (tgt_s != 0) {
+        var ts = to_cstr(tgt_s);
+        if (streq(ts, "gpu") == 1) { target = TARGET_GPU; tname = "gpu"; }
+        elif (streq(ts, "tpu") == 1) { target = TARGET_TPU; tname = "tpu"; }
+        elif (streq(ts, "gaudi") == 1) { target = TARGET_GAUDI; tname = "gaudi"; }
+        else { return http_bad_request(cfd, "invalid target (gpu/tpu/gaudi)"); }
+    }
+    var e = estimate_training_memory(params_m, method, target);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model_params_millions\":");
+    str_builder_add_int(sb, params_m);
+    str_builder_add_cstr(sb, ",\"method\":\"");
+    str_builder_add_cstr(sb, training_method_name(method));
+    str_builder_add_cstr(sb, "\",\"target\":\"");
+    str_builder_add_cstr(sb, tname);
+    str_builder_add_cstr(sb, "\",\"estimate\":");
+    training_to_json(sb, e);
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/hardware/compatible-models — catalogue models that fit the
+# detected accelerator memory at int8 (ai-hwaccel model.cyr; reads
+# data/models.json, degrades to empty list if that file is absent).
+fn handle_hw_compatible(cfd) {
+    var quant = QUANT_INT8;
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"quantization\":\"int8\",\"models\":[");
+    var models = load_models();
+    if (hw_ready() == 1) {
+        if (vec_len(models) > 0) {
+            var avail = hw_accel_memory();
+            var compat = compatible_with_registry(models, _hw_registry, quant);
+            var first = 1;
+            var i = 0;
+            while (i < vec_len(compat)) {
+                var m = vec_get(compat, i);
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "{\"name\":\"");
+                str_builder_add_cstr(sb, model_name(m));
+                str_builder_add_cstr(sb, "\",\"family\":\"");
+                str_builder_add_cstr(sb, model_family(m));
+                str_builder_add_cstr(sb, "\",\"params_b\":");
+                str_builder_add_int(sb, model_params_b_x1000(m) / 1000);
+                str_builder_add_cstr(sb, ",\"headroom_pct\":");
+                str_builder_add_int(sb, model_headroom_x100(m, quant, avail) / 100);
+                str_builder_add_cstr(sb, "}");
+                first = 0;
+                i = i + 1;
+            }
+        }
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 # GET /metrics
 fn handle_metrics(cfd) {
     var sb = str_builder_new();

@@ -1,0 +1,342 @@
+[
+  {
+    "name": "Llama 3.1 8B",
+    "family": "llama",
+    "params_billions": 8.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      131072
+    ]
+  },
+  {
+    "name": "Llama 3.1 70B",
+    "family": "llama",
+    "params_billions": 70.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      131072
+    ]
+  },
+  {
+    "name": "Llama 3.1 405B",
+    "family": "llama",
+    "params_billions": 405.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      131072
+    ]
+  },
+  {
+    "name": "Llama 3.2 1B",
+    "family": "llama",
+    "params_billions": 1.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      131072
+    ]
+  },
+  {
+    "name": "Llama 3.2 3B",
+    "family": "llama",
+    "params_billions": 3.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      131072
+    ]
+  },
+  {
+    "name": "Mistral 7B",
+    "family": "mistral",
+    "params_billions": 7.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192,
+      32768
+    ]
+  },
+  {
+    "name": "Mixtral 8x7B",
+    "family": "mistral",
+    "params_billions": 46.7,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      32768
+    ]
+  },
+  {
+    "name": "Mixtral 8x22B",
+    "family": "mistral",
+    "params_billions": 141.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      65536
+    ]
+  },
+  {
+    "name": "Mistral Large 2 123B",
+    "family": "mistral",
+    "params_billions": 123.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      131072
+    ]
+  },
+  {
+    "name": "Gemma 2 2B",
+    "family": "gemma",
+    "params_billions": 2.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192
+    ]
+  },
+  {
+    "name": "Gemma 2 9B",
+    "family": "gemma",
+    "params_billions": 9.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192
+    ]
+  },
+  {
+    "name": "Gemma 2 27B",
+    "family": "gemma",
+    "params_billions": 27.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      8192
+    ]
+  },
+  {
+    "name": "Phi-3 Mini 3.8B",
+    "family": "phi",
+    "params_billions": 3.8,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf",
+      "onnx"
+    ],
+    "context_lengths": [
+      4096,
+      131072
+    ]
+  },
+  {
+    "name": "Phi-3 Medium 14B",
+    "family": "phi",
+    "params_billions": 14.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf",
+      "onnx"
+    ],
+    "context_lengths": [
+      4096,
+      131072
+    ]
+  },
+  {
+    "name": "Qwen 2.5 7B",
+    "family": "qwen",
+    "params_billions": 7.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      32768,
+      131072
+    ]
+  },
+  {
+    "name": "Qwen 2.5 14B",
+    "family": "qwen",
+    "params_billions": 14.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      32768,
+      131072
+    ]
+  },
+  {
+    "name": "Qwen 2.5 72B",
+    "family": "qwen",
+    "params_billions": 72.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      32768,
+      131072
+    ]
+  },
+  {
+    "name": "DeepSeek V3 671B",
+    "family": "deepseek",
+    "params_billions": 671.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      131072
+    ]
+  },
+  {
+    "name": "DeepSeek R1 671B",
+    "family": "deepseek",
+    "params_billions": 671.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors",
+      "gguf"
+    ],
+    "context_lengths": [
+      131072
+    ]
+  },
+  {
+    "name": "Falcon 7B",
+    "family": "falcon",
+    "params_billions": 7.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      2048
+    ]
+  },
+  {
+    "name": "Falcon 40B",
+    "family": "falcon",
+    "params_billions": 40.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      2048
+    ]
+  },
+  {
+    "name": "Falcon 180B",
+    "family": "falcon",
+    "params_billions": 180.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      2048
+    ]
+  },
+  {
+    "name": "Command R+ 104B",
+    "family": "cohere",
+    "params_billions": 104.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      131072
+    ]
+  },
+  {
+    "name": "DBRX 132B",
+    "family": "databricks",
+    "params_billions": 132.0,
+    "default_dtype": "bf16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": [
+      32768
+    ]
+  },
+  {
+    "name": "Stable Diffusion XL",
+    "family": "stability",
+    "params_billions": 3.5,
+    "default_dtype": "fp16",
+    "formats": [
+      "safetensors"
+    ],
+    "context_lengths": []
+  },
+  {
+    "name": "Whisper Large V3",
+    "family": "whisper",
+    "params_billions": 1.55,
+    "default_dtype": "fp16",
+    "formats": [
+      "safetensors",
+      "onnx"
+    ],
+    "context_lengths": []
+  }
+]

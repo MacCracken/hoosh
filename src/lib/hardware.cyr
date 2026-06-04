@@ -4,12 +4,17 @@
 #   - Device summary for /v1/hardware endpoint
 #   - Quantization suggestions for model placement
 #   - Sharding plans for multi-GPU inference
-# Requires: ai-hwaccel modules (types, registry, plan, quantization)
+# Requires: ai-hwaccel 2.3.7 bundle (registry, profile, quantization, plan,
+#   cost, training, model, json_out — vendored as lib/ai-hwaccel.cyr)
 
 # Global registry — initialized once at startup
 var _hw_registry = 0;
 
-# Detect hardware and populate the global registry
+# Detect hardware and populate the global registry.
+# NOTE: ai-hwaccel's threaded detector (registry_detect_threaded) was
+# evaluated here but segfaults under hoosh's single-threaded runtime —
+# revisit alongside the threaded accept loop (roadmap concurrency item),
+# where the thread runtime is set up deliberately. Serial for now.
 fn hw_init() {
     _hw_registry = registry_detect();
     return _hw_registry;

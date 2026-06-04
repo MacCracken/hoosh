@@ -1939,6 +1939,25 @@ fn main() {
     var auth_short = "bearer";
     assert(ct_eq_bytes_lens(auth_tok1, strlen(auth_tok1), auth_short, strlen(auth_short)) == 0, "auth: length mismatch rejected");
 
+    # ── Hardware data files (ai-hwaccel cost/model endpoints) ──────
+    # load_models scans for top-level `{...}` objects, so models.json
+    # MUST be a top-level JSON array — the `{"models":[...]}` wrapper
+    # only yields the first model. Guard that shape + presence.
+    test_group("hardware_data_files");
+    var mbuf = alloc(40000);
+    var mn = file_read_all("data/models.json", mbuf, 40000);
+    assert(mn > 0, "data/models.json present and non-empty");
+    var mi = 0;
+    while (mi < mn) {
+        var wc = load8(mbuf + mi);
+        if (wc != 32 && wc != 9 && wc != 10 && wc != 13) { break; }
+        mi = mi + 1;
+    }
+    assert(load8(mbuf + mi) == 91, "models.json is a top-level JSON array");
+    var cbuf = alloc(40000);
+    var cn = file_read_all("data/cloud_pricing.json", cbuf, 40000);
+    assert(cn > 0, "data/cloud_pricing.json present and non-empty");
+
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
     return total_failures;

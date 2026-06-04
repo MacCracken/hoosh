@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.0.57)
-- **Version**: SemVer 2.1.0 stable
+- **Version**: SemVer 2.1.1 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -18,6 +18,12 @@
 All AGNOS apps (LLM inference), daimon (inference routing)
 
 **Note**: 15 LLM providers. Uses murti for local inference. OpenAI-compatible API.
+
+**Data files**: `data/cloud_pricing.json` + `data/models.json` are vendored from
+ai-hwaccel (power `/v1/hardware/cost` + `/compatible-models`). Re-sync them when
+bumping the ai-hwaccel tag. `models.json` MUST be a **top-level JSON array** —
+ai-hwaccel's `load_models` only parses the first object from a `{"models":[…]}`
+wrapper (guarded by the `hardware_data_files` test).
 
 ## Development Process
 
