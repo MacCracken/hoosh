@@ -48,7 +48,9 @@ Toolchain/scaffolding brought up to current Cyrius (6.0.x) conventions. See
 
 ## v2.1.x — Production Hardening (in progress)
 
-The hardening features below continue on the 2.1.x line.
+Released on this line: 2.1.1 (hardware planning endpoints), 2.1.2 (structured
+logging), 2.1.3 (patra persistence). Open items below; `[ ]` = not started,
+`[x]` = shipped (release noted).
 
 ### Hardware planning (ai-hwaccel 2.3.7 surface)
 - [x] `POST /v1/hardware/cost` — cloud instance cost recommendations (2.1.1)
@@ -78,7 +80,14 @@ The hardening features below continue on the 2.1.x line.
 - [ ] mTLS for local provider authentication
 
 ### Concurrency
-- [ ] Multi-threaded accept loop (thread pool or epoll)
+- [ ] Multi-threaded accept loop — **BLOCKED** (race audit 2026-06-04): the
+      cyrius global allocator is not thread-safe — concurrent `alloc` corrupts
+      memory (verified ~5000 corruptions across 4 threads). All stdlib allocation
+      routes through the global allocator (the allocator-as-parameter convention
+      in `alloc.cyr` keeps the global fns racy for back-compat), so per-thread
+      arenas do not help and a global processing mutex would serialize all
+      request handling. Threading primitives themselves (thread_create/join,
+      mutex, channels) work. Revisit when cyrius provides thread-safe allocation.
 - [ ] Connection pooling for backend sockets
 
 ### Durability
