@@ -20,20 +20,34 @@ OpenRouter) work end-to-end.
 - **Provider auth headers** (`_provider_headers`) — `Authorization: Bearer` for
   OpenAI-compat; `x-api-key` + `anthropic-version` for Anthropic — built from the
   route's `api_key` (loaded from `[providers].api_key` in hoosh.toml).
-- **OpenAI `usage` token extraction** (`extract_openai_tokens`) — `prompt_tokens`
-  / `completion_tokens`; Ollama's `*_eval_count` fields fall back.
+- **Anthropic `/v1/messages` shaping** (`_build_anthropic_body`,
+  `anthropic_extract_text`, `extract_anthropic_tokens`) — `max_tokens` body,
+  `content[].text` + `usage.{input,output}_tokens` extraction. **Live-verified
+  against the real Anthropic API** (single request returns correctly).
+- **Token extraction** for OpenAI `usage` (`extract_openai_tokens`) and Anthropic
+  usage; Ollama's `*_eval_count` fields fall back.
+- **`$ENV` key expansion** in config (`_config_expand_env`, `src/lib/config.cyr`)
+  — `api_key = "$ANTHROPIC_API_KEY"` resolves from the environment, so the secret
+  never lives in hoosh.toml. The Anthropic provider block in `hoosh.toml` is
+  enabled (key from env).
 - **Buffered remote streaming** — `stream:true` to a remote provider returns the
   full response as one SSE delta + stop (incremental remote streaming is a
   follow-up; local streaming is unchanged).
 - `tls`, `sandhi`, `mmap`, `dynlib`, `fdlopen` added to `cyrius.cyml` `[deps]`
   (in include order). No `main()` init needed — sandhi/tls self-initialize.
-- Tests: `remote_transport` group (`route_is_remote`, path/URL/bearer building,
-  `extract_openai_tokens`) — 251 tests pass.
+- Tests: `remote_transport` group (scheme dispatch, path/URL/bearer building,
+  OpenAI + Anthropic token/text extraction) — **256 tests pass**.
 
 ### Notes
-- **Not yet:** Anthropic/Gemini request-response shaping (auth headers wired, but
-  `/v1/messages` body + `content[].text` parsing pending), incremental remote
-  streaming, certificate pinning. Tracked in roadmap v2.2.0.
+- 🔴 **BLOCKED for production on a sandhi P1 crash.** Individual remote requests
+  work, but repeated HTTPS calls SIGSEGV the gateway — root-caused to **sandhi
+  1.4.4** crashing on the ~4th sequential `sandhi_http_post` to the same host
+  (consumer-independent 4-line repro; corruption in sandhi's TLS transport, not
+  hoosh). Filed P1 on sandhi:
+  `sandhi/docs/issues/2026-06-09-https-repeated-request-segfault.md`. **Work
+  paused here until sandhi ships a fix.** hoosh's transport code is complete/green.
+- **Not yet (hoosh-side, after unblock):** Anthropic system-message hoist,
+  Gemini shaping, incremental remote streaming, certificate pinning.
 - Binary grows (~sandhi/tls/libssl); local-only deployments are unaffected at
   runtime — the TLS path is reached only for `https://` routes.
 

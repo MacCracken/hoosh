@@ -57,11 +57,11 @@ models = ["llama*", "mistral*", "qwen*", "phi*", "gemma*"]
 # priority = 10
 # models = ["gpt-*", "o1-*", "o3-*"]
 
-# [[providers]]
-# type = "Anthropic"
-# api_key = "$ANTHROPIC_API_KEY"
-# priority = 10
-# models = ["claude-*"]
+[[providers]]
+type = "Anthropic"
+api_key = "$ANTHROPIC_API_KEY"
+priority = 10
+models = ["claude-*"]
 
 # [[providers]]
 # type = "DeepSeek"

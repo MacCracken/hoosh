@@ -211,7 +211,52 @@ fn route_is_remote(route) {
 
 fn _provider_path(route) {
     if (route_provider(route) == PROV_OLLAMA) { return "/api/chat"; }
+    if (route_provider(route) == PROV_ANTHROPIC) { return "/v1/messages"; }
     return "/v1/chat/completions";
+}
+
+fn anthropic_extract_text(resp_body, resp_len) {
+    if (resp_body == 0) { return ""; }
+    if (resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    var needle = "\"text\":\"";
+    var nlen = 8;
+    var i = 0;
+    while (i < resp_len - nlen) {
+        if (memeq(resp_body + i, needle, nlen) == 1) {
+            i = i + nlen;
+            var start = i;
+            while (i < resp_len) {
+                if (load8(resp_body + i) == 34) {
+                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
+                    break;
+                }
+                i = i + 1;
+            }
+            var tlen = i - start;
+            var text = alloc(tlen + 1);
+            memcpy(text, resp_body + start, tlen);
+            store8(text + tlen, 0);
+            return text;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn extract_anthropic_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 20) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 16) {
+        if (memeq(body + i, "\"input_tokens\":", 15) == 1) { prompt = atoi(body + i + 15); }
+        if (memeq(body + i, "\"output_tokens\":", 16) == 1) { comp = atoi(body + i + 16); }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
 }
 
 fn _provider_url(base, path) {
@@ -2048,6 +2093,22 @@ fn main() {
     assert_eq(utok % 0x100000000, 17, "openai completion_tokens extracted");
     var u_empty = extract_openai_tokens(ubuf, 5);
     assert_eq(u_empty, 0, "openai tokens: too-short body returns 0");
+
+    # Anthropic routing + response shaping
+    var rt_anthropic = route_new(PROV_ANTHROPIC, 1, "https://api.anthropic.com");
+    assert_eq(route_is_remote(rt_anthropic), 1, "anthropic is remote");
+    assert_streq(_provider_path(rt_anthropic), "/v1/messages",
+    "anthropic path = /v1/messages");
+
+    var amsg = "{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hi there\"}],\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}";
+    var alen = strlen(amsg);
+    var abuf = alloc(alen + 1);
+    memcpy(abuf, amsg, alen);
+    var atext = anthropic_extract_text(abuf, alen);
+    assert_streq(atext, "Hi there", "anthropic content[].text extracted");
+    var atok = extract_anthropic_tokens(abuf, alen);
+    assert_eq(atok / 0x100000000, 11, "anthropic input_tokens extracted");
+    assert_eq(atok % 0x100000000, 4, "anthropic output_tokens extracted");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

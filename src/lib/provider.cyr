@@ -160,7 +160,91 @@ fn route_is_remote(route) {
 # Chat-completion HTTP path for a provider.
 fn _provider_path(route) {
     if (route_provider(route) == PROV_OLLAMA) { return "/api/chat"; }
+    if (route_provider(route) == PROV_ANTHROPIC) { return "/v1/messages"; }
     return "/v1/chat/completions";
+}
+
+# Build an Anthropic /v1/messages body. Anthropic requires max_tokens and
+# uses the same {role,content} message shape as OpenAI for text turns, so the
+# incoming messages array passes through. (System-message hoisting to the
+# top-level "system" field is a follow-up.)
+fn _build_anthropic_body(model, messages_raw, messages_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"max_tokens\":4096,\"messages\":");
+    var prefix = to_cstr(str_builder_build(sb));
+    var plen = strlen(prefix);
+    var total = plen + messages_len + 1;
+    var buf = alloc(total + 1);
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, messages_raw, messages_len);
+    store8(buf + plen + messages_len, 125);
+    store8(buf + plen + messages_len + 1, 0);
+    return buf;
+}
+
+# Anthropic /v1/messages body from a bare prompt (no messages array).
+fn _build_anthropic_body_prompt(model, prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    return to_cstr(str_builder_build(sb));
+}
+
+# Extract assistant text from an Anthropic response: content[].text.
+# Finds the first "text":"..." and returns the unescaped-boundary slice.
+fn anthropic_extract_text(resp_body, resp_len) {
+    if (resp_body == 0) { return ""; }
+    if (resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    var needle = "\"text\":\"";
+    var nlen = 8;
+    var i = 0;
+    while (i < resp_len - nlen) {
+        if (memeq(resp_body + i, needle, nlen) == 1) {
+            i = i + nlen;
+            var start = i;
+            while (i < resp_len) {
+                if (load8(resp_body + i) == 34) {
+                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
+                    break;
+                }
+                i = i + 1;
+            }
+            var tlen = i - start;
+            var text = alloc(tlen + 1);
+            memcpy(text, resp_body + start, tlen);
+            store8(text + tlen, 0);
+            return text;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+# Extract token counts from an Anthropic response usage object.
+# Returns packed: input_tokens * 0x100000000 + output_tokens.
+fn extract_anthropic_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 20) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 16) {
+        if (memeq(body + i, "\"input_tokens\":", 15) == 1) {
+            prompt = atoi(body + i + 15);
+        }
+        if (memeq(body + i, "\"output_tokens\":", 16) == 1) {
+            comp = atoi(body + i + 16);
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
 }
 
 # base_url + path -> fresh cstr (e.g. "https://api.openai.com/v1/chat/completions")
@@ -200,11 +284,20 @@ fn _provider_headers(route) {
 # Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes, or 0 on failure
 fn provider_forward(route, model, prompt, messages_raw, messages_len) {
     var base = route_base_url(route);
+    var is_anthropic = (route_provider(route) == PROV_ANTHROPIC);
     var body = 0;
-    if (messages_raw != 0) {
-        body = _build_chat_body_raw(model, messages_raw, messages_len);
+    if (is_anthropic == 1) {
+        if (messages_raw != 0) {
+            body = _build_anthropic_body(model, messages_raw, messages_len);
+        } else {
+            body = _build_anthropic_body_prompt(model, prompt);
+        }
     } else {
-        body = _build_chat_body(model, prompt);
+        if (messages_raw != 0) {
+            body = _build_chat_body_raw(model, messages_raw, messages_len);
+        } else {
+            body = _build_chat_body(model, prompt);
+        }
     }
     var blen = strlen(body);
     var path = _provider_path(route);
@@ -221,8 +314,14 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
         var sst = sandhi_http_status(sresp);
         if (sst < 200) { return 0; }
         if (sst >= 300) { return 0; }
-        rb = sandhi_http_body(sresp);
+        # Copy into a buffer with 1 byte of slack: the extractors below
+        # null-terminate in place (store8(buf+len, 0)), and sandhi's body
+        # buffer has no guaranteed trailing slack — writing past it corrupts
+        # the heap (intermittent crashes).
         rbl = sandhi_http_body_len(sresp);
+        rb = alloc(rbl + 1);
+        memcpy(rb, sandhi_http_body(sresp), rbl);
+        store8(rb + rbl, 0);
     } else {
         # Local path: raw socket to 127.0.0.1:<port>, plaintext.
         var port = url_port(base);
@@ -234,11 +333,19 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
         rbl = http_body_len(resp);
     }
 
-    var text = ollama_extract_text(rb, rbl);
-    # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
-    # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
-    var tokens = extract_ollama_tokens(rb, rbl);
-    if (tokens == 0) { tokens = extract_openai_tokens(rb, rbl); }
+    var text = 0;
+    var tokens = 0;
+    if (is_anthropic == 1) {
+        # Anthropic: content[].text + usage.{input,output}_tokens.
+        text = anthropic_extract_text(rb, rbl);
+        tokens = extract_anthropic_tokens(rb, rbl);
+    } else {
+        text = ollama_extract_text(rb, rbl);
+        # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
+        # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
+        tokens = extract_ollama_tokens(rb, rbl);
+        if (tokens == 0) { tokens = extract_openai_tokens(rb, rbl); }
+    }
     var ptok = tokens / 0x100000000;
     var ctok = tokens % 0x100000000;
     metrics_record(ptok, ctok);

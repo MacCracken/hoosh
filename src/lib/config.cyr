@@ -2,6 +2,15 @@
 # Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr
 # Reads: [[server]], [[providers]], [[cache]], [[budgets]], [[auth]]
 
+# Expand a config value: "$NAME" -> getenv("NAME"), so secrets (API keys)
+# live in the environment, not in hoosh.toml. Returns 0 if the env var is
+# unset; passes non-"$" values through unchanged.
+fn _config_expand_env(value) {
+    if (value == 0) { return 0; }
+    if (load8(value) == 36) { return getenv(value + 1); }
+    return value;
+}
+
 fn load_config(path) {
     var sections = toml_parse_file(path);
     if (vec_len(sections) == 0) { return 0; }
@@ -69,10 +78,14 @@ fn load_config(path) {
 
             var route = route_new(ptype, ppri, purl);
 
-            # Parse API key
+            # Parse API key — "$NAME" expands from the environment so the
+            # secret stays out of hoosh.toml.
             var apikey_str = toml_get(pp, "api_key");
             if (apikey_str != 0) {
-                store64(route + ROUTE_API_KEY, to_cstr(apikey_str));
+                var apikey = _config_expand_env(to_cstr(apikey_str));
+                if (apikey != 0) {
+                    store64(route + ROUTE_API_KEY, apikey);
+                }
             }
 
             # Parse rate limit (RPM)

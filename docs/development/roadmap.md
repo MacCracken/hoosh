@@ -97,11 +97,17 @@ OpenRouter) are enum + default-URL entries the transport never reaches.
 `sandhi_http_post`), over `lib/tls.cyr` (TLS) and `lib/net.cyr` (sockets). This
 is hoosh wiring, not a Cyrius gap.
 
-**Status (landed):** OpenAI-compatible cloud providers (OpenAI, DeepSeek,
-Mistral, Groq, Grok, OpenRouter) now work end-to-end — `https://` routes forward
-through sandhi with TLS + `Bearer` auth, in both non-streaming and (buffered)
-streaming modes. Remaining: Anthropic/Gemini request-response shaping, incremental
-remote streaming, cert pinning (checklist below).
+**Status (2026-06-09): implemented + live-verified, but BLOCKED for production on
+a sandhi P1 crash.** The remote path is wired and a real call to Anthropic
+returns correctly (`content[].text` + `usage` tokens extracted; OpenAI-compat +
+Anthropic shaping both landed; `$ENV` key expansion added). **But** repeated
+HTTPS requests crash the gateway — root-caused to a **sandhi 1.4.4 SIGSEGV on the
+~4th sequential `sandhi_http_post`** to the same host (consumer-independent
+4-line repro; corruption in sandhi's TLS transport, not hoosh). Filed P1:
+`/home/macro/Repos/sandhi/docs/issues/2026-06-09-https-repeated-request-segfault.md`.
+**Paused here until sandhi ships a fix**; hoosh's transport code is complete and
+green (256 tests). Remaining hoosh-side work after the unblock: Gemini shaping,
+incremental remote streaming, cert pinning, Anthropic system-message hoist.
 
 - [x] Add `tls`/`sandhi` (+ `mmap`/`dynlib`/`fdlopen`) to `cyrius.cyml` `[deps]`
       in include order (`net`/`http` already present)
@@ -116,10 +122,18 @@ remote streaming, cert pinning (checklist below).
       Ollama fields fall back)
 - [x] Remote streaming: buffered fallback (full response → one SSE delta + stop)
       so `stream:true` clients work against remote providers
-- [ ] **Anthropic request/response shaping** — `/v1/messages` body (`max_tokens`,
-      system hoist) + `content[].text` extraction. Auth headers are wired; full
-      body/response translation is the remaining gap (OpenAI-compat providers —
-      OpenAI, DeepSeek, Mistral, Groq, Grok, OpenRouter — work end-to-end now).
+- [x] **Anthropic request/response shaping** — `/v1/messages` body (`max_tokens`)
+      + `content[].text` / `usage.{input,output}_tokens` extraction. Live-verified
+      against the real API.
+- [x] **`$ENV` key expansion** in config (`_config_expand_env`) — `api_key =
+      "$ANTHROPIC_API_KEY"` resolves from the environment; secret stays out of
+      hoosh.toml.
+- [ ] 🔴 **BLOCKED: sandhi P1 SIGSEGV** on repeated HTTPS requests — gateway
+      crashes after a few remote calls. Not a hoosh bug; filed against sandhi
+      (`docs/issues/2026-06-09-https-repeated-request-segfault.md`). Items below
+      wait on the sandhi fix.
+- [ ] **Anthropic system-message hoist** — lift `role:"system"` turns to the
+      top-level `system` field (Anthropic rejects system role in `messages`)
 - [ ] **Google/Gemini shaping** — `:generateContent` API + key-as-query-param
 - [ ] **Incremental remote streaming** — read TLS via `sandhi_conn_recv` instead
       of `sys_read`, replacing the buffered fallback
