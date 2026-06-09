@@ -10,8 +10,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 Hoosh rewritten from Rust to Cyrius. All core gateway functionality ported.
 
+> **Transport caveat** (audit 2026-06-09): the forward client is loopback-only,
+> so only the **local** backends below work end-to-end today (Ollama, LlamaCPP,
+> Synapse, LMStudio, LocalAI). The remote providers are enum + default-URL
+> entries pending DNS/TLS — see [v2.2.0](#v220--remote-provider-transport-the-criticals).
+
 ### Completed
-- [x] 13 provider backends (Ollama, LlamaCPP, Synapse, LMStudio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter)
+- [x] 13 provider backends defined (Ollama, LlamaCPP, Synapse, LMStudio, LocalAI
+      — wired; OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok,
+      OpenRouter — defined, awaiting remote transport)
 - [x] OpenAI-compatible `/v1/chat/completions` (streaming SSE + non-streaming)
 - [x] Provider routing (priority, round-robin, lowest-latency)
 - [x] Token budget system (check/reserve/report/pools)
@@ -46,39 +53,107 @@ Toolchain/scaffolding brought up to current Cyrius (6.0.x) conventions. See
 
 ---
 
-## v2.1.x — Production Hardening (in progress)
+## v2.1.x — Production Hardening (shipped)
 
 Released on this line: 2.1.1 (hardware planning endpoints), 2.1.2 (structured
 logging), 2.1.3 (patra persistence), 2.1.4 (toolchain refresh — cyrius 6.1.18,
-ai-hwaccel 2.3.9). Open items below; `[ ]` = not started, `[x]` = shipped
-(release noted).
+ai-hwaccel 2.3.9).
 
-### Hardware planning (ai-hwaccel 2.3.9 surface)
-- [x] `POST /v1/hardware/cost` — cloud instance cost recommendations (2.1.1)
-- [x] `POST /v1/hardware/training-estimate` — training memory estimate (2.1.1)
-- [x] `GET /v1/hardware/compatible-models` — models that fit detected HW (2.1.1)
-- [ ] `POST /v1/hardware/model-format` — detect SafeTensors/GGUF/ONNX/PyTorch
-      (ai-hwaccel `model_format.cyr`)
-- [ ] `POST /v1/hardware/requirement-match` — scheduler requirement matching
-      (ai-hwaccel `requirement.cyr`)
-- [ ] Threaded detection at startup (`registry_detect_threaded`) — blocked: it
-      segfaults under the single-threaded runtime; revisit with the threaded
-      accept loop.
+- [x] Hardware planning endpoints — `cost`, `training-estimate`,
+      `compatible-models` (2.1.1)
+- [x] Optional persistence via patra — audit chain + token budgets survive
+      restarts; opt-in `[[storage]] path` (2.1.3)
+- [x] Structured operational logging via sakshi (stderr, leveled; `[[logging]]`
+      config) (2.1.2)
 
-### Tool calling & MCP
-- [ ] `/v1/tools/list` — list registered MCP tools
-- [ ] `/v1/tools/call` — invoke MCP tools by name
-- [ ] Streaming tool call assembly (incremental deltas)
+The line is closed for new scope. The **[v2.2.x parity arc](#v22x--port-parity-arc)**
+is now the focus; everything else that was open on this roadmap is deferred
+behind it to **[v2.3.x](#v23x--post-parity-deferred)**.
 
-### DLP (Data Loss Prevention)
+---
+
+## v2.2.x — Port Parity Arc
+
+The Cyrius port (v2.0.0) shipped the gateway control plane but deferred the
+remote data plane and several Rust-era features. This arc closes the gap between
+the `rust-old` reference and the Cyrius port (audit 2026-06-09). Ordered by
+severity — **2.2.0 ships the criticals**; later point releases work the
+remaining partials and missing features. (Audio STT/TTS is deliberately *not*
+here — it is migrating to **svara**; see Deferred.)
+
+### v2.2.0 — Remote provider transport (the criticals)
+
+Without these, "multi-provider cloud routing" is unbacked. The forward client
+(`src/lib/http_client.cyr`) connects only to `127.0.0.1` (`sockaddr_in(0x0100007F,
+port)`), keeps just the **port** from each route's base URL (host discarded),
+speaks plaintext HTTP/1.0, and injects **no auth**. The 8 cloud providers
+(OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter) are enum +
+default-URL entries the transport cannot reach. **Gating dependency: Cyrius
+stdlib DNS + TLS** (previously deferred — now the blocker to clear first).
+
+- [ ] Connect to arbitrary `host:port` from the route base URL (use the parsed
+      host, not the hardcoded `0x0100007F` loopback)
+- [ ] DNS resolution for remote hostnames
+- [ ] TLS client (HTTPS) for remote endpoints
+- [ ] Auth header injection — `Authorization: Bearer` (OpenAI-compat) and
+      `x-api-key` + `anthropic-version` (Anthropic). The key is already stored on
+      the route (`route.cyr`) but never sent today.
+- [ ] Anthropic request/response shaping — map chat-completions ↔ `/v1/messages`
+- [ ] Certificate pinning + optional mTLS for local providers (hardening)
+
+### v2.2.1 — Provider correctness & completeness
+- [ ] Per-provider token-count ratios — restore `context/tokens.rs` behavior
+      (`compact.cyr` currently hardcodes 4 chars/token for every provider)
+- [ ] Provider lifecycle methods — Ollama `pull_model`/`delete_model`, Synapse
+      `training_status`/`sync_catalog`
+- [ ] Native Ollama `/api/tags` inbound route (list models)
+
+### v2.2.2 — DLP (Data Loss Prevention)
+Today only `ERR_DLP_BLOCKED` + a test-stub `@`-scan exist; the real scanner
+(`dlp/scanner.rs`, 364 L) was not ported.
 - [ ] PII pattern scanner (email, phone, SSN, credit card, API keys)
 - [ ] Classification levels (Public/Internal/Confidential/Restricted)
 - [ ] Privacy-aware routing (Confidential → local-only, Restricted → block)
 
-### TLS & Security
-- [ ] TLS client support for remote providers (requires Cyrius TLS lib)
-- [ ] Certificate pinning for remote endpoints
-- [ ] mTLS for local provider authentication
+### v2.2.3 — Cost & cache intelligence
+- [ ] Cost optimizer — cheapest capable model recommendation (`cost/optimizer.rs`)
+- [ ] Semantic cache — cosine similarity over embeddings (`cache/semantic.rs`);
+      distinct from the exact-key LRU cache already ported
+- [ ] Cache warming — startup pre-population (`cache/warming.rs`)
+- [ ] Context compression — whitespace collapse, stale tool-pair prune, dedup
+      (`context/compression.rs`); distinct from the compaction already ported
+
+### v2.2.4 — Tool calling & MCP
+- [ ] `/v1/tools/list` — list registered MCP tools
+- [ ] `/v1/tools/call` — invoke MCP tools by name
+- [ ] Streaming tool call assembly (incremental deltas)
+
+### v2.2.5 — Throughput
+- [ ] Inference batching manager (`inference/batch.rs`) — gated on the
+      multi-threaded accept loop (BLOCKED; see v2.3.x concurrency)
+- [ ] Connection pooling for backend sockets
+
+### v2.2.6 — Observability
+- [ ] OpenTelemetry trace propagation (`telemetry.rs`)
+- [ ] Event pub/sub bus (`events.rs`) — HealthChanged / InferenceCompleted /
+      InferenceFailed / RateLimited
+- [ ] Per-provider latency histograms in Prometheus
+
+---
+
+## v2.3.x — Post-parity deferred
+
+Everything that was open on the roadmap before the parity arc. Kicked back —
+not started until the 2.2.x arc lands.
+
+### Hardware planning (remaining ai-hwaccel surface)
+- [ ] `POST /v1/hardware/model-format` — detect SafeTensors/GGUF/ONNX/PyTorch
+      (ai-hwaccel `model_format.cyr`)
+- [ ] `POST /v1/hardware/requirement-match` — scheduler requirement matching
+      (ai-hwaccel `requirement.cyr`)
+- [ ] Threaded detection at startup (`registry_detect_threaded`) — blocked:
+      segfaults under the single-threaded runtime; revisit with the threaded
+      accept loop.
 
 ### Concurrency
 - [ ] Multi-threaded accept loop — **BLOCKED** (race audit 2026-06-04): the
@@ -89,21 +164,17 @@ ai-hwaccel 2.3.9). Open items below; `[ ]` = not started, `[x]` = shipped
       arenas do not help and a global processing mutex would serialize all
       request handling. Threading primitives themselves (thread_create/join,
       mutex, channels) work. Revisit when cyrius provides thread-safe allocation.
+      (Unblocks v2.2.5 batching.)
 - [ ] Connection pooling for backend sockets
 
-### Durability
-- [x] Optional persistence via patra — audit chain + token budgets survive
-      restarts; opt-in `[[storage]] path` (2.1.3)
+### New backends
+- [ ] vLLM — high-throughput serving with PagedAttention
+- [ ] TensorRT-LLM — NVIDIA-optimised inference
+- [ ] ONNX Runtime — local ONNX model inference
 
-### Observability
-- [x] Structured operational logging via sakshi (stderr, leveled; `[[logging]]`
-      config) (2.1.2)
-- [ ] OpenTelemetry trace propagation
-- [ ] Per-provider latency histograms in Prometheus
-
-### Scaffolding modernization (backlog — from ai-hwaccel/patra review)
+### Scaffolding modernization (from ai-hwaccel/patra review)
 Conventions the modern sibling repos (ai-hwaccel 2.3.9, patra 1.10.3) follow that
-hoosh has not adopted yet. None block 2.1.0; candidates for the 2.1.x line:
+hoosh has not adopted yet.
 - [ ] `docs/development/state.md` — volatile state (version, test/assertion
       counts, binary size, recent releases), refreshed each release (patra pattern)
 - [ ] `docs/doc-health.md` — doc inventory / freshness tracking (patra pattern)
@@ -116,20 +187,6 @@ hoosh has not adopted yet. None block 2.1.0; candidates for the 2.1.x line:
 
 ---
 
-## v2.2.0 — Extended Backends
-
-### New backends
-- [ ] vLLM — high-throughput serving with PagedAttention
-- [ ] TensorRT-LLM — NVIDIA-optimised inference
-- [ ] ONNX Runtime — local ONNX model inference
-
-### Advanced features
-- [ ] Semantic cache (cosine similarity over embeddings)
-- [ ] Batch inference manager
-- [ ] Cost optimizer (cheapest capable model recommendation)
-
----
-
 ## Deferred (external dependencies)
 
 ### svara — Speech/Audio (migration pending)
@@ -137,9 +194,11 @@ hoosh has not adopted yet. None block 2.1.0; candidates for the 2.1.x line:
 - Hoosh retains provider interface; svara owns audio pipeline
 - Endpoints `/v1/audio/transcriptions` and `/v1/audio/speech` will not be ported
 
-### Remote provider DNS/TLS
+### Cyrius stdlib DNS + TLS — gates v2.2.0
 - Remote providers (OpenAI, Anthropic, etc.) require DNS resolution and TLS
-- Blocked on Cyrius stdlib DNS and TLS support
+- Blocked on Cyrius stdlib DNS and TLS support; clearing this unblocks the
+  **[v2.2.0](#v220--remote-provider-transport-the-criticals)** remote-transport
+  criticals — the highest-priority parity work.
 
 ---
 
