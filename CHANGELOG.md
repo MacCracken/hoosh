@@ -5,6 +5,38 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — toward 2.2.0
+
+Remote provider transport — the **v2.2.0 criticals**. Cloud providers were enum +
+default-URL entries the loopback-only client could never reach; they now forward
+over TLS. OpenAI-compatible providers (OpenAI, DeepSeek, Mistral, Groq, Grok,
+OpenRouter) work end-to-end.
+
+### Added
+- **Remote forward path** (`src/lib/provider.cyr`) — `https://` routes forward
+  through **sandhi**'s high-level client (`sandhi_http_post`: URL parse + DNS +
+  TLS + connect), scheme-dispatched by `route_is_remote`. Local `http://`
+  backends keep the raw-socket fast path unchanged.
+- **Provider auth headers** (`_provider_headers`) — `Authorization: Bearer` for
+  OpenAI-compat; `x-api-key` + `anthropic-version` for Anthropic — built from the
+  route's `api_key` (loaded from `[providers].api_key` in hoosh.toml).
+- **OpenAI `usage` token extraction** (`extract_openai_tokens`) — `prompt_tokens`
+  / `completion_tokens`; Ollama's `*_eval_count` fields fall back.
+- **Buffered remote streaming** — `stream:true` to a remote provider returns the
+  full response as one SSE delta + stop (incremental remote streaming is a
+  follow-up; local streaming is unchanged).
+- `tls`, `sandhi`, `mmap`, `dynlib`, `fdlopen` added to `cyrius.cyml` `[deps]`
+  (in include order). No `main()` init needed — sandhi/tls self-initialize.
+- Tests: `remote_transport` group (`route_is_remote`, path/URL/bearer building,
+  `extract_openai_tokens`) — 251 tests pass.
+
+### Notes
+- **Not yet:** Anthropic/Gemini request-response shaping (auth headers wired, but
+  `/v1/messages` body + `content[].text` parsing pending), incremental remote
+  streaming, certificate pinning. Tracked in roadmap v2.2.0.
+- Binary grows (~sandhi/tls/libssl); local-only deployments are unaffected at
+  runtime — the TLS path is reached only for `https://` routes.
+
 ## [2.1.4] — 2026-06-09
 
 Toolchain and dependency refresh. No API or behavior changes.

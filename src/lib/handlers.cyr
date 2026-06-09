@@ -646,6 +646,29 @@ fn _sse_stop(cfd, model) {
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
 fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
+    # Remote (TLS) providers: no incremental streaming yet — buffer the full
+    # response via the non-streaming path and emit it as one SSE delta + stop.
+    # Local backends stream token-by-token below.
+    if (route_is_remote(route) == 1) {
+        var rresult = retry_forward(
+        _retry_cfg, route, model, "hello", msg_raw, msg_len);
+        http_sse_begin(cfd);
+        if (rresult != 0) {
+            var rtext = load64(rresult);
+            if (strlen(rtext) > 0) {
+                _sse_chunk(cfd, model, rtext, strlen(rtext));
+            }
+            metrics_record(0, load64(rresult + 24));
+            if (_audit_chain != 0) {
+                audit_record(_audit_chain, "inference.stream", "info",
+                "streaming inference (buffered remote)",
+                provider_name(route_provider(route)), model);
+            }
+        }
+        _sse_stop(cfd, model);
+        return 0;
+    }
+
     var bfd = retry_forward_stream(
     _retry_cfg, route, model, msg_raw, msg_len);
     if (bfd < 0) {

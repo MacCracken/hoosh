@@ -10,10 +10,12 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 Hoosh rewritten from Rust to Cyrius. All core gateway functionality ported.
 
-> **Transport caveat** (audit 2026-06-09): the forward client is loopback-only,
-> so only the **local** backends below work end-to-end today (Ollama, LlamaCPP,
-> Synapse, LMStudio, LocalAI). The remote providers are enum + default-URL
-> entries pending DNS/TLS — see [v2.2.0](#v220--remote-provider-transport-the-criticals).
+> **Transport status** (updated 2026-06-09): remote transport is wired (see
+> [v2.2.0](#v220--remote-provider-transport-the-criticals)) — OpenAI-compatible
+> cloud providers (OpenAI, DeepSeek, Mistral, Groq, Grok, OpenRouter) work
+> end-to-end over TLS via sandhi, alongside the local backends (Ollama, LlamaCPP,
+> Synapse, LMStudio, LocalAI). Anthropic/Gemini need request-response shaping
+> still.
 
 ### Completed
 - [x] 13 provider backends defined (Ollama, LlamaCPP, Synapse, LMStudio, LocalAI
@@ -84,21 +86,43 @@ here — it is migrating to **svara**; see Deferred.)
 ### v2.2.0 — Remote provider transport (the criticals)
 
 Without these, "multi-provider cloud routing" is unbacked. The forward client
-(`src/lib/http_client.cyr`) connects only to `127.0.0.1` (`sockaddr_in(0x0100007F,
-port)`), keeps just the **port** from each route's base URL (host discarded),
-speaks plaintext HTTP/1.0, and injects **no auth**. The 8 cloud providers
-(OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter) are enum +
-default-URL entries the transport cannot reach. **Gating dependency: Cyrius
-stdlib DNS + TLS** (previously deferred — now the blocker to clear first).
+(`src/lib/http_client.cyr`) hand-rolls raw sockets to `127.0.0.1`
+(`sockaddr_in(0x0100007F, port)`), keeps just the **port** from each route's base
+URL (host discarded), speaks plaintext HTTP/1.0, and injects **no auth**. The 8
+cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok,
+OpenRouter) are enum + default-URL entries the transport never reaches.
 
-- [ ] Connect to arbitrary `host:port` from the route base URL (use the parsed
-      host, not the hardcoded `0x0100007F` loopback)
-- [ ] DNS resolution for remote hostnames
-- [ ] TLS client (HTTPS) for remote endpoints
-- [ ] Auth header injection — `Authorization: Bearer` (OpenAI-compat) and
-      `x-api-key` + `anthropic-version` (Anthropic). The key is already stored on
-      the route (`route.cyr`) but never sent today.
-- [ ] Anthropic request/response shaping — map chat-completions ↔ `/v1/messages`
+**No external blocker** — the cyrius stdlib already ships everything needed:
+`lib/sandhi.cyr` (high-level HTTPS client: URL parse + DNS + TLS + connect via
+`sandhi_http_post`), over `lib/tls.cyr` (TLS) and `lib/net.cyr` (sockets). This
+is hoosh wiring, not a Cyrius gap.
+
+**Status (landed):** OpenAI-compatible cloud providers (OpenAI, DeepSeek,
+Mistral, Groq, Grok, OpenRouter) now work end-to-end — `https://` routes forward
+through sandhi with TLS + `Bearer` auth, in both non-streaming and (buffered)
+streaming modes. Remaining: Anthropic/Gemini request-response shaping, incremental
+remote streaming, cert pinning (checklist below).
+
+- [x] Add `tls`/`sandhi` (+ `mmap`/`dynlib`/`fdlopen`) to `cyrius.cyml` `[deps]`
+      in include order (`net`/`http` already present)
+- [x] Remote forward via **sandhi**'s high-level client (`sandhi_http_post` —
+      URL parse + DNS + TLS + connect in one call), scheme-dispatched in
+      `provider.cyr`: `https://` → sandhi (`route_is_remote`), local `http://`
+      keeps the raw-socket fast path
+- [x] TLS for `https://` routes (sandhi over `lib/tls.cyr`); plaintext for local
+- [x] Auth header injection — `Authorization: Bearer` (OpenAI-compat) and
+      `x-api-key` + `anthropic-version` (Anthropic), built from `route_api_key`
+- [x] Token extraction for OpenAI `usage` objects (`extract_openai_tokens`,
+      Ollama fields fall back)
+- [x] Remote streaming: buffered fallback (full response → one SSE delta + stop)
+      so `stream:true` clients work against remote providers
+- [ ] **Anthropic request/response shaping** — `/v1/messages` body (`max_tokens`,
+      system hoist) + `content[].text` extraction. Auth headers are wired; full
+      body/response translation is the remaining gap (OpenAI-compat providers —
+      OpenAI, DeepSeek, Mistral, Groq, Grok, OpenRouter — work end-to-end now).
+- [ ] **Google/Gemini shaping** — `:generateContent` API + key-as-query-param
+- [ ] **Incremental remote streaming** — read TLS via `sandhi_conn_recv` instead
+      of `sys_read`, replacing the buffered fallback
 - [ ] Certificate pinning + optional mTLS for local providers (hardening)
 
 ### v2.2.1 — Provider correctness & completeness
@@ -194,11 +218,10 @@ hoosh has not adopted yet.
 - Hoosh retains provider interface; svara owns audio pipeline
 - Endpoints `/v1/audio/transcriptions` and `/v1/audio/speech` will not be ported
 
-### Cyrius stdlib DNS + TLS — gates v2.2.0
-- Remote providers (OpenAI, Anthropic, etc.) require DNS resolution and TLS
-- Blocked on Cyrius stdlib DNS and TLS support; clearing this unblocks the
-  **[v2.2.0](#v220--remote-provider-transport-the-criticals)** remote-transport
-  criticals — the highest-priority parity work.
+(Remote DNS/TLS is **not** deferred — the cyrius stdlib already ships it
+(`lib/tls.cyr`, `lib/net.cyr`, `lib/sandhi.cyr`); the work is hoosh wiring,
+tracked as the [v2.2.0](#v220--remote-provider-transport-the-criticals)
+criticals.)
 
 ---
 

@@ -198,6 +198,56 @@ fn route_matches_model(r, model) {
 }
 
 # ================================================================
+# Remote transport helpers — mirror of src/lib/provider.cyr. Pure
+# string/parse logic for the https:// (sandhi/TLS) forward path.
+# ================================================================
+
+fn route_is_remote(route) {
+    var base = route_base_url(route);
+    if (base == 0) { return 0; }
+    if (memeq(base, "https", 5) == 1) { return 1; }
+    return 0;
+}
+
+fn _provider_path(route) {
+    if (route_provider(route) == PROV_OLLAMA) { return "/api/chat"; }
+    return "/v1/chat/completions";
+}
+
+fn _provider_url(base, path) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, path);
+    return str_cstr(str_builder_build(sb));
+}
+
+fn _bearer_value(key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "Bearer ");
+    str_builder_add_cstr(sb, key);
+    return str_cstr(str_builder_build(sb));
+}
+
+fn extract_openai_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 21) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 20) {
+        if (memeq(body + i, "\"prompt_tokens\":", 16) == 1) {
+            prompt = atoi(body + i + 16);
+        }
+        if (memeq(body + i, "\"completion_tokens\":", 20) == 1) {
+            comp = atoi(body + i + 20);
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+# ================================================================
 # Router — priority-sorted route list + selection
 # Layout: routes_ptr(8) route_count(8) strategy(8) rr_index(8) latencies_ptr(8)
 # Total: 40 bytes
@@ -1972,6 +2022,32 @@ fn main() {
     var cbuf = alloc(40000);
     var cn = file_read_all("data/cloud_pricing.json", cbuf, 40000);
     assert(cn > 0, "data/cloud_pricing.json present and non-empty");
+
+    # ── Remote transport (https:// forward path) ──────────────────
+    test_group("remote_transport");
+    var rt_local = route_new(PROV_OLLAMA, 1, "http://localhost:11434");
+    var rt_remote = route_new(PROV_OPENAI, 1, "https://api.openai.com");
+    assert_eq(route_is_remote(rt_local), 0, "http://localhost is not remote");
+    assert_eq(route_is_remote(rt_remote), 1, "https://api.openai.com is remote");
+    assert_streq(_provider_path(rt_local), "/api/chat",
+    "ollama path = /api/chat");
+    assert_streq(_provider_path(rt_remote), "/v1/chat/completions",
+    "non-ollama path = /v1/chat/completions");
+    assert_streq(_provider_url("https://api.openai.com", "/v1/chat/completions"),
+    "https://api.openai.com/v1/chat/completions", "url join base+path");
+    assert_streq(_bearer_value("sk-test123"), "Bearer sk-test123",
+    "bearer header value");
+
+    # OpenAI usage-object token extraction
+    var usage = "{\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":17,\"total_tokens\":59}}";
+    var ulen = strlen(usage);
+    var ubuf = alloc(ulen + 1);
+    memcpy(ubuf, usage, ulen);
+    var utok = extract_openai_tokens(ubuf, ulen);
+    assert_eq(utok / 0x100000000, 42, "openai prompt_tokens extracted");
+    assert_eq(utok % 0x100000000, 17, "openai completion_tokens extracted");
+    var u_empty = extract_openai_tokens(ubuf, 5);
+    assert_eq(u_empty, 0, "openai tokens: too-short body returns 0");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

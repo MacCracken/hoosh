@@ -126,10 +126,80 @@ fn extract_ollama_tokens(body, blen) {
     return prompt * 0x100000000 + comp;
 }
 
+# Extract token counts from an OpenAI-format response ("usage" object).
+# Returns packed: prompt_tokens * 0x100000000 + completion_tokens.
+fn extract_openai_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 21) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 20) {
+        if (memeq(body + i, "\"prompt_tokens\":", 16) == 1) {
+            prompt = atoi(body + i + 16);
+        }
+        if (memeq(body + i, "\"completion_tokens\":", 20) == 1) {
+            comp = atoi(body + i + 20);
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+# True if the route targets a remote https endpoint (needs DNS + TLS + auth).
+# Local http:// backends keep the raw-socket fast path; https:// routes go
+# through sandhi (DNS resolve + TLS + auth headers).
+fn route_is_remote(route) {
+    var base = route_base_url(route);
+    if (base == 0) { return 0; }
+    if (memeq(base, "https", 5) == 1) { return 1; }
+    return 0;
+}
+
+# Chat-completion HTTP path for a provider.
+fn _provider_path(route) {
+    if (route_provider(route) == PROV_OLLAMA) { return "/api/chat"; }
+    return "/v1/chat/completions";
+}
+
+# base_url + path -> fresh cstr (e.g. "https://api.openai.com/v1/chat/completions")
+fn _provider_url(base, path) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, path);
+    return to_cstr(str_builder_build(sb));
+}
+
+# "Bearer <key>" -> fresh cstr
+fn _bearer_value(key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "Bearer ");
+    str_builder_add_cstr(sb, key);
+    return to_cstr(str_builder_build(sb));
+}
+
+# sandhi header set: Content-Type + per-provider auth. Anthropic uses
+# x-api-key + anthropic-version; everything else uses Authorization: Bearer.
+fn _provider_headers(route) {
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", "application/json");
+    var key = route_api_key(route);
+    if (key != 0) {
+        if (route_provider(route) == PROV_ANTHROPIC) {
+            sandhi_headers_add(h, "x-api-key", key);
+            sandhi_headers_add(h, "anthropic-version", "2023-06-01");
+        } else {
+            sandhi_headers_add(h, "Authorization", _bearer_value(key));
+        }
+    }
+    return h;
+}
+
 # Forward request to provider and extract text + tokens
 # Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes, or 0 on failure
 fn provider_forward(route, model, prompt, messages_raw, messages_len) {
-    var port = url_port(route_base_url(route));
+    var base = route_base_url(route);
     var body = 0;
     if (messages_raw != 0) {
         body = _build_chat_body_raw(model, messages_raw, messages_len);
@@ -137,19 +207,38 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
         body = _build_chat_body(model, prompt);
     }
     var blen = strlen(body);
-    var path = "/api/chat";
-    if (route_provider(route) != PROV_OLLAMA) {
-        path = "/v1/chat/completions";
-    }
-    var resp = http_post_local(port, path, body, blen);
-    if (resp == 0) { return 0; }
-    if (http_status(resp) < 200) { return 0; }
-    if (http_status(resp) >= 300) { return 0; }
+    var path = _provider_path(route);
 
-    var rb = http_body(resp);
-    var rbl = http_body_len(resp);
+    var rb = 0;
+    var rbl = 0;
+    if (route_is_remote(route) == 1) {
+        # Remote (TLS) path via sandhi: full URL + DNS + TLS + auth headers.
+        var url = _provider_url(base, path);
+        var hdrs = _provider_headers(route);
+        var sresp = sandhi_http_post(url, hdrs, body, blen);
+        if (sresp == 0) { return 0; }
+        if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
+        var sst = sandhi_http_status(sresp);
+        if (sst < 200) { return 0; }
+        if (sst >= 300) { return 0; }
+        rb = sandhi_http_body(sresp);
+        rbl = sandhi_http_body_len(sresp);
+    } else {
+        # Local path: raw socket to 127.0.0.1:<port>, plaintext.
+        var port = url_port(base);
+        var resp = http_post_local(port, path, body, blen);
+        if (resp == 0) { return 0; }
+        if (http_status(resp) < 200) { return 0; }
+        if (http_status(resp) >= 300) { return 0; }
+        rb = http_body(resp);
+        rbl = http_body_len(resp);
+    }
+
     var text = ollama_extract_text(rb, rbl);
+    # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
+    # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
     var tokens = extract_ollama_tokens(rb, rbl);
+    if (tokens == 0) { tokens = extract_openai_tokens(rb, rbl); }
     var ptok = tokens / 0x100000000;
     var ctok = tokens % 0x100000000;
     metrics_record(ptok, ctok);
@@ -166,14 +255,15 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
 # Returns backend fd (caller reads chunks + closes).
 # Returns -1 on connection failure.
 fn provider_forward_stream(route, model, messages_raw, messages_len) {
+    # Remote providers have no incremental streaming yet (the local path
+    # sys_read()s a raw fd, which can't decrypt TLS). The handler buffers
+    # remote responses instead — never reach the localhost path for them.
+    if (route_is_remote(route) == 1) { return 0 - 1; }
     var port = url_port(route_base_url(route));
     var body = _build_chat_body_raw_stream(
     model, messages_raw, messages_len);
     var blen = strlen(body);
-    var path = "/api/chat";
-    if (route_provider(route) != PROV_OLLAMA) {
-        path = "/v1/chat/completions";
-    }
+    var path = _provider_path(route);
     var fd = http_post_stream(port, path, body, blen);
     if (fd < 0) { return 0 - 1; }
     # Skip HTTP response headers

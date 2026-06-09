@@ -12,7 +12,7 @@ entry = "src/main.cyr"
 output = "build/hoosh"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "ct", "keccak", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "assert", "bench"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "ct", "keccak", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "tls", "sandhi", "assert", "bench"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
 # bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,
