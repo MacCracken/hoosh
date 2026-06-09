@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.0.57"
+cyrius = "6.1.18"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -20,5 +20,5 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.3.7"
+tag = "2.3.9"
 modules = ["dist/ai-hwaccel.cyr"]

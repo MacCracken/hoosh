@@ -49,10 +49,11 @@ Toolchain/scaffolding brought up to current Cyrius (6.0.x) conventions. See
 ## v2.1.x — Production Hardening (in progress)
 
 Released on this line: 2.1.1 (hardware planning endpoints), 2.1.2 (structured
-logging), 2.1.3 (patra persistence). Open items below; `[ ]` = not started,
-`[x]` = shipped (release noted).
+logging), 2.1.3 (patra persistence), 2.1.4 (toolchain refresh — cyrius 6.1.18,
+ai-hwaccel 2.3.9). Open items below; `[ ]` = not started, `[x]` = shipped
+(release noted).
 
-### Hardware planning (ai-hwaccel 2.3.7 surface)
+### Hardware planning (ai-hwaccel 2.3.9 surface)
 - [x] `POST /v1/hardware/cost` — cloud instance cost recommendations (2.1.1)
 - [x] `POST /v1/hardware/training-estimate` — training memory estimate (2.1.1)
 - [x] `GET /v1/hardware/compatible-models` — models that fit detected HW (2.1.1)
@@ -101,7 +102,7 @@ logging), 2.1.3 (patra persistence). Open items below; `[ ]` = not started,
 - [ ] Per-provider latency histograms in Prometheus
 
 ### Scaffolding modernization (backlog — from ai-hwaccel/patra review)
-Conventions the modern sibling repos (ai-hwaccel 2.3.7, patra 1.10.3) follow that
+Conventions the modern sibling repos (ai-hwaccel 2.3.9, patra 1.10.3) follow that
 hoosh has not adopted yet. None block 2.1.0; candidates for the 2.1.x line:
 - [ ] `docs/development/state.md` — volatile state (version, test/assertion
       counts, binary size, recent releases), refreshed each release (patra pattern)

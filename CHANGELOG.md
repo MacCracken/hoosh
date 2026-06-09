@@ -5,6 +5,19 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.1.4] — 2026-06-09
+
+Toolchain and dependency refresh. No API or behavior changes.
+
+### Changed
+- **Cyrius pin 6.0.57 → 6.1.18** (`cyrius.cyml`). Stdlib re-synced (`cyrius lib
+  sync`); `cyrius.lock` refreshed. `cyrius fmt`/`lint`/`vet`/`deny` clean, 242
+  tests pass, benchmark suite green under 6.1.18.
+- **ai-hwaccel pin 2.3.7 → 2.3.9** — `dist/ai-hwaccel.cyr` bundle re-vendored
+  (`cyrius deps`). The vendored `data/cloud_pricing.json` + `data/models.json`
+  were re-checked against 2.3.9 and are content-unchanged (`models.json` stays a
+  top-level array per the `hardware_data_files` guard).
+
 ## [2.1.3] — 2026-06-04
 
 Optional durable persistence via the `patra` embedded SQL DB (stdlib). Opt-in and
