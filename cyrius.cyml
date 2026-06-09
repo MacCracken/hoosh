@@ -9,7 +9,7 @@ repository = "https://github.com/MacCracken/hoosh"
 
 [build]
 entry = "src/main.cyr"
-output = "hoosh"
+output = "build/hoosh"
 
 [deps]
 stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "ct", "keccak", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "assert", "bench"]

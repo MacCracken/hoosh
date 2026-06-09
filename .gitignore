@@ -1,5 +1,6 @@
 # Build artifacts
 /build/
+/hoosh
 
 # Cyrius vendored stdlib + deps (cyrius lib sync / cyrius deps vendor these)
 /lib/*.cyr
