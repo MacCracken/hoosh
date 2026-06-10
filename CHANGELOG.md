@@ -7,16 +7,31 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.4] — 2026-06-10
+
+**Tool calling** across all three remote families (OpenAI, Anthropic, Gemini) —
+forward `tools`, surface unified OpenAI `tool_calls`, both non-streaming and
+streaming — plus the stale tool-pair prune that completes the compression port.
+(The MCP server endpoints `/v1/tools/list` + `/v1/tools/call` are deferred to
+v2.2.5, pending szál as a Cyrius distlib.)
+
 ### Added
-- **Streaming tool-call assembly (OpenAI-compatible)** — `stream:true` requests
-  now forward `tools` (`_build_chat_body_raw_stream`) and pass the provider's
-  incremental `tool_calls` deltas straight through as OpenAI
-  `chat.completion.chunk` events (`_sse_tool_chunk` in `_remote_stream_cb`), so
-  the client assembles the streamed id/name/arguments fragments. The buffered
-  early-error fallback also emits any tool calls. **Live-verified**: a streamed
-  `get_weather` request to `gpt-4o-mini` produced a `tool_calls` delta with the
-  call id+name followed by incremental `arguments` chunks; plain streaming
-  unchanged. Anthropic/Gemini streaming tool deltas remain a follow-up.
+- **Streaming tool-call assembly — OpenAI, Anthropic, Gemini** — `stream:true`
+  requests forward `tools` on all three families and convert each provider's
+  streaming tool deltas into OpenAI `chat.completion.chunk` `tool_calls` deltas
+  (`_sse_tool_chunk` in `_remote_stream_cb`):
+  - **OpenAI-compat**: deltas pass straight through (client assembles id/name/
+    arguments fragments).
+  - **Anthropic**: `content_block_start` (tool_use) → id+name delta;
+    `input_json_delta.partial_json` → incremental `arguments` deltas
+    (`_emit_anthropic_tool_delta`).
+  - **Gemini**: complete `functionCall` parts re-emitted as one tool_call delta
+    (reusing `_gemini_tool_calls`).
+
+  The buffered early-error fallback also emits any tool calls.
+  **Live-verified** against all three (streamed `get_weather` produced the call
+  id+name then incremental arguments for OpenAI/Anthropic, one complete delta for
+  Gemini); plain streaming unchanged.
 - **Compression: stale tool-pair pruning** (`compression.cyr` `prune_tool_pairs`)
   — completes the `context/compression.rs` port (the half deferred from 2.2.3,
   now that tool-call message structure exists). In a long agentic conversation,
@@ -43,8 +58,6 @@ Versioning: [Semantic Versioning](https://semver.org/).
     (Anthropic), Tokyo (Gemini), London (OpenAI). Plain (no-tools) requests
     unchanged. Unit-tested: `_extract_tools`, OpenAI→Anthropic/Gemini conversion
     (incl. the `"function"`-as-value-vs-key case), Anthropic `tool_use` parsing.
-  - **Follow-ups**: streaming tool-call assembly, and the bote-backed
-    `/v1/tools/list` + `/v1/tools/call` MCP endpoints.
 
 ## [2.2.3] — 2026-06-10
 

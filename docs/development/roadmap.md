@@ -235,7 +235,9 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       (`prune_tool_pairs`, completed in v2.2.4); `[compression]` opt-in, applied
       before compaction.
 
-### v2.2.4 — Tool calling & MCP (in progress)
+### v2.2.4 — Tool calling — ✅ SHIPPED 2026-06-10
+Provider-side tool calling across all three remote families. (The MCP server
+endpoints `/v1/tools/list` + `/v1/tools/call` moved to v2.2.5.)
 - [x] **Provider-side tool calling — OpenAI, Anthropic, Gemini** — `handle_chat`
       forwards the request's `tools` (converting to each native format via
       `_tools_convert`: OpenAI verbatim, Anthropic `input_schema`, Gemini
@@ -243,20 +245,23 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       + `finish_reason:"tool_calls"` (`_extract_openai_tool_calls`,
       `_anthropic_tool_calls`, `_gemini_tool_calls`). Ports `tools/convert.rs`.
       Live-verified against all three providers; unit-tested.
-- [~] Streaming tool call assembly (incremental deltas) — **OpenAI-compatible
-      done**: `stream:true` forwards `tools` and passes provider `tool_calls`
-      deltas through as OpenAI chunks (`_sse_tool_chunk`). Live-verified.
-      **Remaining**: Anthropic/Gemini streaming tool-delta conversion.
-- [ ] `/v1/tools/list` — list registered MCP tools (via **bote** — `bote/dist/
-      bote.cyr` is a Cyrius distlib; JSON-RPC `tools/list` over a `ToolRegistry`)
-- [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; tool
-      implementations come from **szál**, not yet a Cyrius distlib)
+- [x] **Streaming tool call assembly (incremental deltas) — all three families**:
+      `stream:true` forwards `tools` and converts each provider's streaming tool
+      deltas to OpenAI `tool_calls` chunks (`_sse_tool_chunk`; OpenAI pass-through,
+      Anthropic `_emit_anthropic_tool_delta`, Gemini via `_gemini_tool_calls`).
+      Live-verified against all three.
 - [x] **Stale tool-pair prune** in `compression.cyr` (`prune_tool_pairs`,
       deferred from 2.2.3) — drops assistant `tool_calls` turns + their matching
       `role:"tool"` results before the last 3 tool turns. Unit-tested. This
       completes the `context/compression.rs` port.
 
-### v2.2.5 — Throughput
+### v2.2.5 — MCP & Throughput
+MCP tool-server endpoints (moved from 2.2.4). bote (`bote/dist/bote.cyr`) is a
+Cyrius distlib providing the JSON-RPC `ToolRegistry`/`Dispatcher`; the tool
+implementations (**szál**, 58 built-ins) are not yet a Cyrius distlib, so the
+registry starts empty until they ship.
+- [ ] `/v1/tools/list` — list registered MCP tools (bote `ToolRegistry`)
+- [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; needs szál)
 - [ ] Inference batching manager (`inference/batch.rs`) — gated on the
       multi-threaded accept loop (BLOCKED; see v2.3.x concurrency)
 - [ ] Connection pooling for backend sockets
