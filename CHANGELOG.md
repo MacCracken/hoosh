@@ -8,6 +8,17 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Per-token cost estimation + cheapest-model recommendation**
+  (`src/lib/pricing.cyr`, ports `cost/mod.rs`'s pricing table + `lookup_pricing`).
+  16-model built-in price table (input/output $/M, carried ×1000 since no floats)
+  with exact → longest-prefix → provider-fallback lookup; cost computed in
+  micro-USD. Two endpoints: `POST /v1/cost/estimate` `{model,input_tokens,
+  output_tokens}` → estimated cost, and `POST /v1/cost/recommend`
+  `{input_tokens,max_output_tokens}` → cheapest configured exact-model route
+  (wildcard-only routes can't be priced and 404). **Live-verified** (exact,
+  prefix, fallback, local=free, cheapest-wins). The full *capable*-model filter
+  (tier/modality/tool/context — the 934-line `ModelMetadataRegistry`) is a
+  follow-up; this ranks by cost.
 - **Prompt compression** (`src/lib/compression.cyr`, `[compression]` config) —
   opt-in whitespace collapse over JSON `content` *values*: runs of whitespace
   (incl. `\n`/`\t`/`\r` escapes) collapse to a single space with leading/trailing

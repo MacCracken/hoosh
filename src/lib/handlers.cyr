@@ -353,6 +353,100 @@ fn handle_costs(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# POST /v1/cost/estimate {model, input_tokens, output_tokens} — per-token cost.
+fn handle_cost_estimate(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var model = json_get(pairs, str_from("model"));
+    if (model == 0) { return http_bad_request(cfd, "missing model"); }
+    var model_cstr = to_cstr(model);
+    var in_tok = 0;
+    var it = json_get(pairs, str_from("input_tokens"));
+    if (it != 0) { in_tok = str_to_int(it); }
+    var out_tok = 0;
+    var ot = json_get(pairs, str_from("output_tokens"));
+    if (ot != 0) { out_tok = str_to_int(ot); }
+    # Provider of the route that serves this model (drives fallback pricing).
+    var prov = PROV_OPENAI;
+    var route = router_select(_router, model_cstr);
+    if (route != 0) { prov = route_provider(route); }
+    var micro = estimate_cost_micro(model_cstr, prov, in_tok, out_tok);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model_cstr);
+    str_builder_add_cstr(sb, "\",\"input_tokens\":");
+    str_builder_add_int(sb, in_tok);
+    str_builder_add_cstr(sb, ",\"output_tokens\":");
+    str_builder_add_int(sb, out_tok);
+    str_builder_add_cstr(sb, ",\"estimated_cost_micro_usd\":");
+    str_builder_add_int(sb, micro);
+    str_builder_add_cstr(sb, ",\"estimated_cost_usd\":\"");
+    pricing_append_usd(sb, micro);
+    str_builder_add_cstr(sb, "\"}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# POST /v1/cost/recommend {input_tokens, max_output_tokens} — cheapest model.
+# Cost-ranks the configured exact (non-wildcard) model routes and returns the
+# cheapest. Capability/tier/modality filtering (the full ModelMetadataRegistry)
+# is a follow-up; this ranks purely by estimated cost. Routes whose patterns are
+# all wildcards (e.g. "gpt-*") cannot be priced and are skipped.
+fn handle_cost_recommend(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var in_tok = 0;
+    var it = json_get(pairs, str_from("input_tokens"));
+    if (it != 0) { in_tok = str_to_int(it); }
+    var out_tok = 0;
+    var ot = json_get(pairs, str_from("max_output_tokens"));
+    if (ot != 0) { out_tok = str_to_int(ot); }
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var best_model = 0;
+    var best_prov = 0;
+    var best_cost = 0x7FFFFFFFFFFFFFFF;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var pats = load64(r + ROUTE_PATTERNS);
+            var pn = load64(r + ROUTE_PATTERNS_N);
+            var j = 0;
+            while (j < pn) {
+                var pat = load64(pats + j * 8);
+                var pl = strlen(pat);
+                if (pl > 0 && load8(pat + pl - 1) != 42) {
+                    var c = estimate_cost_micro(pat, route_provider(r), in_tok, out_tok);
+                    if (c < best_cost) {
+                        best_cost = c;
+                        best_model = pat;
+                        best_prov = route_provider(r);
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (best_model == 0) {
+        return http_error(cfd, "404", "Not Found",
+        "no exact-model route to recommend (routes use wildcard patterns)");
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, best_model);
+    str_builder_add_cstr(sb, "\",\"provider\":\"");
+    str_builder_add_cstr(sb, provider_name(best_prov));
+    str_builder_add_cstr(sb, "\",\"estimated_cost_micro_usd\":");
+    str_builder_add_int(sb, best_cost);
+    str_builder_add_cstr(sb, ",\"estimated_cost_usd\":\"");
+    pricing_append_usd(sb, best_cost);
+    str_builder_add_cstr(sb, "\"}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 # GET /v1/health/providers
 fn handle_health_providers(cfd) {
     var sb = str_builder_new();

@@ -379,6 +379,106 @@ fn _compress(s) {
     return compress_ws_json(b, n);
 }
 
+# Per-token pricing (mirror of pricing.cyr).
+var _pricing_tbl = 0;
+var _pricing_n = 0;
+
+fn _pricing_add(arr, idx, key, in_s, out_s) {
+    var e = arr + idx * 24;
+    store64(e, key);
+    store64(e + 8, in_s);
+    store64(e + 16, out_s);
+    return 0;
+}
+
+fn _pricing_init() {
+    if (_pricing_tbl != 0) { return 0; }
+    var arr = alloc(16 * 24);
+    _pricing_add(arr, 0, "claude-opus-4", 15000, 75000);
+    _pricing_add(arr, 1, "claude-sonnet-4", 3000, 15000);
+    _pricing_add(arr, 2, "claude-3.5-haiku", 800, 4000);
+    _pricing_add(arr, 3, "claude-3-5-haiku", 800, 4000);
+    _pricing_add(arr, 4, "gpt-4o", 2500, 10000);
+    _pricing_add(arr, 5, "gpt-4o-mini", 150, 600);
+    _pricing_add(arr, 6, "o1", 15000, 60000);
+    _pricing_add(arr, 7, "o3-mini", 1100, 4400);
+    _pricing_add(arr, 8, "deepseek-chat", 270, 1100);
+    _pricing_add(arr, 9, "deepseek-coder", 140, 280);
+    _pricing_add(arr, 10, "deepseek-reasoner", 550, 2190);
+    _pricing_add(arr, 11, "grok-3", 3000, 15000);
+    _pricing_add(arr, 12, "grok-3-mini", 300, 500);
+    _pricing_add(arr, 13, "llama-3.3-70b", 590, 790);
+    _pricing_add(arr, 14, "llama-3.1-8b", 50, 80);
+    _pricing_add(arr, 15, "gemini-2.0-flash", 100, 400);
+    _pricing_tbl = arr;
+    _pricing_n = 16;
+    return 0;
+}
+
+fn _pricing_fallback(prov, out) {
+    var in_s = 0;
+    var out_s = 0;
+    if (provider_is_local(prov) == 0) {
+        if (prov == PROV_ANTHROPIC) { in_s = 3000; out_s = 15000; }
+        if (prov == PROV_OPENAI) { in_s = 2500; out_s = 10000; }
+        if (prov == PROV_DEEPSEEK) { in_s = 270; out_s = 1100; }
+        if (prov == PROV_GROQ) { in_s = 590; out_s = 790; }
+        if (prov == PROV_GROK) { in_s = 3000; out_s = 15000; }
+        if (prov == PROV_GOOGLE) { in_s = 100; out_s = 400; }
+        if (prov == PROV_MISTRAL) { in_s = 2000; out_s = 6000; }
+        if (prov == PROV_OPENROUTER) { in_s = 2500; out_s = 10000; }
+    }
+    store64(out, in_s);
+    store64(out + 8, out_s);
+    return 0;
+}
+
+fn pricing_lookup(model, prov, out) {
+    _pricing_init();
+    var ml = strlen(model);
+    var i = 0;
+    while (i < _pricing_n) {
+        var e = _pricing_tbl + i * 24;
+        if (streq(model, load64(e)) == 1) {
+            store64(out, load64(e + 8));
+            store64(out + 8, load64(e + 16));
+            return 0;
+        }
+        i = i + 1;
+    }
+    var best = 0 - 1;
+    var best_len = 0;
+    i = 0;
+    while (i < _pricing_n) {
+        var e = _pricing_tbl + i * 24;
+        var key = load64(e);
+        var kl = strlen(key);
+        if (kl <= ml) {
+            if (memeq(model, key, kl) == 1) {
+                if (kl > best_len) {
+                    best_len = kl;
+                    best = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (best >= 0) {
+        var be = _pricing_tbl + best * 24;
+        store64(out, load64(be + 8));
+        store64(out + 8, load64(be + 16));
+        return 0;
+    }
+    _pricing_fallback(prov, out);
+    return 0;
+}
+
+fn estimate_cost_micro(model, prov, in_tok, out_tok) {
+    var px = alloc(16);
+    pricing_lookup(model, prov, px);
+    return in_tok * load64(px) / 1000 + out_tok * load64(px + 8) / 1000;
+}
+
 # ================================================================
 # DLP scanner — mirror of src/lib/dlp.cyr (PII/secret byte matchers).
 # Enabled by default here so the matchers are exercised directly.
@@ -3133,6 +3233,28 @@ fn main() {
     # Clean content is unchanged.
     assert_eq(streq(_compress("{\"content\":\"already clean\"}"),
     "{\"content\":\"already clean\"}"), 1, "compress: clean content unchanged");
+
+    # ── Per-token pricing + cost estimation ───────────────────────
+    test_group("pricing");
+    # gpt-4o-mini: 1000 in (0.15) + 500 out (0.6) = 150 + 300 = 450 µ$.
+    assert_eq(estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500), 450,
+    "pricing: gpt-4o-mini exact 1000/500 = 450 µ$");
+    # Prefix match: claude-sonnet-4-20250514 → claude-sonnet-4 (3.0/15.0).
+    assert_eq(estimate_cost_micro("claude-sonnet-4-20250514", PROV_ANTHROPIC, 1000, 1000),
+    18000, "pricing: prefix match claude-sonnet-4 1000/1000 = 18000 µ$");
+    # Unknown model → provider fallback (OpenAI 2.5/10.0).
+    assert_eq(estimate_cost_micro("gpt-9000", PROV_OPENAI, 1000, 0), 2500,
+    "pricing: unknown openai model falls back to 2.5/M");
+    # Local providers are free.
+    assert_eq(estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000), 0,
+    "pricing: local provider is zero-cost");
+    # Exact haiku at 1M input = $0.80 = 800000 µ$.
+    assert_eq(estimate_cost_micro("claude-3.5-haiku", PROV_ANTHROPIC, 1000000, 0),
+    800000, "pricing: 1M tokens claude-3.5-haiku input = 800000 µ$");
+    # Cheaper model ranks below a pricier one (recommend ordering).
+    var c_mini = estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500);
+    var c_4o = estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000, 500);
+    assert_eq(c_mini < c_4o, 1, "pricing: gpt-4o-mini cheaper than gpt-4o");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

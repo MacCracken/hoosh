@@ -22,6 +22,7 @@ include "lib/ai-hwaccel.cyr"
 include "src/lib/types.cyr"
 include "src/lib/dlp.cyr"
 include "src/lib/compression.cyr"
+include "src/lib/pricing.cyr"
 include "src/lib/logging.cyr"
 include "src/lib/ratelimit.cyr"
 include "src/lib/route.cyr"
@@ -193,6 +194,14 @@ fn http_route(cfd, method, path, buf, buf_len) {
     }
     if (streq(path, "/v1/catalog/sync") == 1) {
         return handle_synapse_sync(cfd);
+    }
+    if (streq(path, "/v1/cost/estimate") == 1) {
+        var ceb = req_parse_body(buf, buf_len);
+        return handle_cost_estimate(cfd, ceb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/cost/recommend") == 1) {
+        var crb = req_parse_body(buf, buf_len);
+        return handle_cost_recommend(cfd, crb, req_body_len(buf, buf_len));
     }
 
     # Root
