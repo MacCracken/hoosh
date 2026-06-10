@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.1.21)
-- **Version**: SemVer 2.2.2 stable
+- **Version**: SemVer 2.2.3 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

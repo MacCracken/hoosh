@@ -204,7 +204,7 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       Confidential → local provider only (`router_select_local`, 403 if none);
       Internal/Public pass.
 
-### v2.2.3 — Cost & cache intelligence (in progress)
+### v2.2.3 — Cost & cache intelligence — ✅ SHIPPED 2026-06-10
 - [x] **Response cache wired into `/v1/chat/completions`** — prerequisite found
       during this arc: the exact-key LRU cache was ported but **inert** (never
       read/written by `handle_chat`). Now non-streaming requests key off
@@ -223,12 +223,13 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       Live-verified across tier/vision/tools/context profiles.
       (Note: per-token API pricing is hardcoded, *not* `data/cloud_pricing.json`,
       which is cloud-GPU $/hour for hardware planning.)
-- [~] Semantic cache (`cache/semantic.rs`) — **core done** (`semantic.cyr`):
-      fixed-point cosine (`cosine_x1000`, integer-sqrt magnitudes), embedding
-      store (`semantic_insert`/`semantic_find`, threshold + `max_search`),
-      embeddings float-vector parser, and `[semantic_cache]` config. Unit-tested.
-      **Remaining**: chat-path wiring — on an exact-cache miss, embed the query
-      via the embedding provider (network round-trip) and search/store.
+- [x] **Semantic cache** (`cache/semantic.rs`) — `semantic.cyr`: fixed-point
+      cosine (`cosine_x1000`, integer-sqrt magnitudes), embedding store
+      (`semantic_insert`/`semantic_find`, threshold + `max_search`), embeddings
+      float-vector parser, `[semantic_cache]` config, **and chat-path wiring**
+      (`_embed_query_body` in `handle_chat` — embed the query on a miss, search/
+      store; silent fallthrough on embedding failure). Unit-tested + live-verified
+      (paraphrased queries hit semantically).
 - [~] Context compression (`context/compression.rs`) — **whitespace collapse
       done** (`compression.cyr`, `[compression]` opt-in): JSON-aware collapse of
       `content` values incl. `\n`/`\t`/`\r` escapes, applied before compaction.

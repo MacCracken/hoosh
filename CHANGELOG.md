@@ -7,19 +7,35 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.3] — 2026-06-10
+
+The **Cost & cache intelligence** parity arc — semantic cache, cost optimizer,
+prompt compression, cache warming, and the now-functional response cache — plus
+the native-TLS-by-default toolchain flip (cyrius 6.1.21) and the `hoosh.toml` →
+`hoosh.cyml` config rename.
+
 ### Added
-- **Semantic cache core** (`src/lib/semantic.cyr`, `[semantic_cache]` config) —
-  ports the algorithmic core of `cache/semantic.rs`: fixed-point cosine
-  similarity (`cosine_x1000` over ×10000 integer embedding vectors, magnitudes
-  via integer sqrt to stay within i64), an embedding store
-  (`semantic_insert`/`semantic_find` — nearest neighbour above a configurable
-  threshold, with `max_search` cap), and an embeddings-response float-vector
-  parser (`semantic_parse_embedding`, handling sign/decimal/exponent). Config:
-  `enabled`, `threshold` (0–1, parsed to ×1000), `embedding_model`, `max_search`.
-  Unit-tested (cosine identical/orthogonal/opposite/collinear/zero, integer sqrt,
-  nearest-neighbour + below-threshold + dimension-mismatch, and float parsing
-  incl. scientific notation). The chat-path wiring (computing the query embedding
-  via the embedding provider on a miss) is the remaining follow-up.
+- **Semantic cache** (`src/lib/semantic.cyr`, `[semantic_cache]` config) — ports
+  `cache/semantic.rs`. On an exact-cache miss, the query is embedded via the
+  configured `embedding_model` provider and compared (cosine similarity) to
+  stored query embeddings; a match above `threshold` reuses that entry's cached
+  response — so semantically-similar (differently-worded) requests hit.
+  - **Core**: fixed-point cosine (`cosine_x1000` over ×10000 integer vectors,
+    magnitudes via integer sqrt to stay within i64), embedding store
+    (`semantic_insert`/`semantic_find`, nearest neighbour above threshold with a
+    `max_search` cap), and an embeddings-response float-vector parser
+    (`semantic_parse_embedding`, sign/decimal/exponent).
+  - **Chat-path wiring** (`handle_chat`): on miss, `_embed_query_body` POSTs the
+    (JSON-escaped) request to the embedding provider's `/v1/embeddings`
+    (`/api/embeddings` for Ollama), parses the vector, `semantic_find`s a hit, or
+    stores the embedding under the exact key after forwarding. Any embedding
+    failure degrades silently to a normal forward. Streaming requests are not
+    semantically cached.
+  - Config: `enabled`, `threshold` (0–1 → ×1000), `embedding_model`, `max_search`.
+  - **Unit-tested** (cosine, integer sqrt, store, float parsing incl. scientific
+    notation) **and live-verified**: two paraphrased "capital of France" queries
+    — the second (different exact-key) hit the semantic cache and returned the
+    first's response without re-forwarding.
 - **Cost optimizer — cheapest *capable* model recommendation** (`pricing.cyr` +
   `metadata.cyr`, ports `cost/{mod,optimizer}.rs` + the needed slice of
   `provider/metadata.rs`).

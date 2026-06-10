@@ -52,7 +52,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **Cost tracking** | Per-provider cost accumulation, reset endpoint |
 | **Observability** | Prometheus `/metrics`, HMAC-SHA256 audit chain |
 | **Health checks** | Per-provider TCP probe via `/v1/health/providers` |
-| **Response caching** | Hashmap cache with eviction stats |
+| **Response caching** | Exact-key LRU cache (eviction stats) + opt-in semantic cache (embedding cosine similarity) + startup warming |
 | **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.cyml` |
 | **Local-first** | Prefers on-device inference; remote APIs as fallback |
 

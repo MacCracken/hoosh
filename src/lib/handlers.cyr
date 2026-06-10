@@ -1195,6 +1195,71 @@ fn _cache_key(model, body_ptr, body_len) {
     return sha256_hex(to_cstr(s), str_len(s));
 }
 
+# Append ptr[0..len) into a str_builder, JSON-escaping it for a string value.
+fn _json_escape_into(sb, ptr, len) {
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i);
+        if (c == 34) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 34); }
+        if (c == 92) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 92); }
+        if (c == 10) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 110); }
+        if (c == 13) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 114); }
+        if (c == 9) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 116); }
+        if (c >= 32 && c != 34 && c != 92) { str_builder_add_byte(sb, c); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Embed a query (the request body) via the configured embedding model's provider.
+# Returns a 16-byte (vec_ptr, n) of ×10000 fixed-point components, or 0 on any
+# failure (so the caller degrades gracefully to a normal forward).
+fn _embed_query_body(body_ptr, body_len) {
+    var model = semantic_model();
+    if (model == 0) { return 0; }
+    var route = router_select(_router, model);
+    if (route == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"input\":\"");
+    _json_escape_into(sb, body_ptr, body_len);
+    str_builder_add_cstr(sb, "\"}");
+    var body = to_cstr(str_builder_build(sb));
+    var blen = strlen(body);
+    var rb = 0;
+    var rbl = 0;
+    if (route_is_remote(route) == 1) {
+        var url = _provider_url(route_base_url(route), "/v1/embeddings");
+        var hdrs = _provider_headers(route);
+        var sresp = sandhi_http_post(url, hdrs, body, blen);
+        if (sresp == 0) { return 0; }
+        if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
+        var sst = sandhi_http_status(sresp);
+        if (sst < 200 || sst >= 300) { return 0; }
+        rbl = sandhi_http_body_len(sresp);
+        rb = alloc(rbl + 1);
+        memcpy(rb, sandhi_http_body(sresp), rbl);
+        store8(rb + rbl, 0);
+    } else {
+        var port = url_port(route_base_url(route));
+        var epath = "/v1/embeddings";
+        if (route_provider(route) == PROV_OLLAMA) { epath = "/api/embeddings"; }
+        var resp = http_post_local(port, epath, body, blen);
+        if (resp == 0) { return 0; }
+        if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
+        rb = http_body(resp);
+        rbl = http_body_len(resp);
+    }
+    var nptr = alloc(8);
+    var vec = semantic_parse_embedding(rb, rbl, nptr);
+    if (load64(nptr) == 0) { return 0; }
+    var r = alloc(16);
+    store64(r, vec);
+    store64(r + 8, load64(nptr));
+    return r;
+}
+
 # Build an OpenAI chat.completion response envelope (str). Shared by the live
 # chat path and cache warming so a warmed entry is byte-identical to a fresh one.
 fn _chat_completion_body(model, resp_text, ptok, ctok) {
@@ -1265,12 +1330,31 @@ fn handle_chat(cfd, body_ptr, body_len) {
     # Response cache: exact-key lookup (non-streaming only). A hit short-circuits
     # before rate-limit / budget reservation / provider forward.
     var ckey = 0;
+    var sem_vec = 0;
+    var sem_n = 0;
     if (_req_is_stream(body_ptr, body_len) == 0) {
         ckey = _cache_key(model_cstr, body_ptr, body_len);
         var cached = cache_get(_cache, ckey);
         if (cached != 0) {
             hlog_info("chat: response cache hit");
             return http_ok(cfd, cached, strlen(cached));
+        }
+        # Semantic cache: embed the query and reuse a similar prior response.
+        # Any embedding failure degrades silently to a normal forward.
+        if (semantic_is_enabled() == 1) {
+            var emb = _embed_query_body(body_ptr, body_len);
+            if (emb != 0) {
+                sem_vec = load64(emb);
+                sem_n = load64(emb + 8);
+                var skey = semantic_find(sem_vec, sem_n);
+                if (skey != 0) {
+                    var scached = cache_get(_cache, skey);
+                    if (scached != 0) {
+                        hlog_info("chat: semantic cache hit");
+                        return http_ok(cfd, scached, strlen(scached));
+                    }
+                }
+            }
         }
     }
 
@@ -1369,5 +1453,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
     var body_clen = str_len(body);
     # Populate the response cache for identical future requests.
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
+    # Record the query embedding so semantically-similar future requests hit.
+    if (ckey != 0 && sem_vec != 0) { semantic_insert(ckey, sem_vec, sem_n); }
     return http_ok(cfd, body_cstr, body_clen);
 }
