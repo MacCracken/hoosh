@@ -1,0 +1,233 @@
+# batch.cyr — synchronous batch inference (POST /v1/batch)
+#
+# Accepts {"requests":[ <chat req>, <chat req>, ... ]} and runs the items
+# CONCURRENTLY on worker threads, returning {"results":[ {index,status,body},
+# ... ]} once all complete. Each item is a normal /v1/chat/completions body;
+# items are always treated as non-streaming (a batch returns one aggregate
+# JSON document, so per-item SSE makes no sense).
+#
+# Concurrency model: the handler runs on the single accept-loop thread and
+# JOINS all workers before returning, so the workers are the only concurrent
+# actors. Each worker calls _chat_produce, which holds _chat_lock around the
+# shared-state phases (cache/budget/audit) and releases it for the network
+# forward — so the forwards overlap (the throughput win) while bookkeeping
+# stays serialized. The allocator is thread-safe (cyrius 6.0.64 spinlock);
+# metrics_record is atomic. See ADR-009.
+#
+# Bounds: at most BATCH_MAX_ITEMS items per request; at most BATCH_MAX_PARALLEL
+# workers in flight at once (processed in waves). Ports the concurrency core of
+# rust-old/src/inference/batch.rs; async job-id/progress-poll/cancel are
+# deferred (see roadmap).
+
+# Max items per request, and max workers in flight per wave. The parallel cap
+# is bounded by sigil's crypto scratch banks (SIGIL_CRYPTO_BANKS=8): bank 0 is
+# the main/serial path, so concurrent workers take banks 1..7 — hence ≤7.
+var BATCH_MAX_ITEMS = 64;
+var BATCH_MAX_PARALLEL = 7;
+
+# Atomic completion counter. Workers bump it when they finish; the handler
+# waits on it as a barrier between waves instead of trusting thread_join's
+# timing (empirically thread_join can return before the worker has stored its
+# result, which would let the next wave overlap and — worse — let result
+# assembly read a slot before its worker filled it). One batch runs at a time
+# on the accept thread, so a single global counter is safe.
+var _batch_done = 0;
+
+fn _batch_inc_done() {
+    var old = load64(&_batch_done);
+    while (atomic_cas(&_batch_done, old, old + 1) == 0) { old = load64(&_batch_done); }
+    return 0;
+}
+
+# Worker thread: arg = [req_ptr(0), req_len(8), result_slot(16), crypto_bank(24)].
+# FIRST assigns this thread its sigil crypto scratch bank — every sha256/HMAC/TLS
+# primitive in the chat pipeline (_cache_key, audit chain, remote TLS) reads a
+# thread-local scratch bank, and without a per-worker bank index it dereferences
+# an uninitialized slot and corrupts memory. Then produces a response descriptor,
+# stores it, and signals completion. See ADR-009.
+fn _hoosh_batch_worker(arg) {
+    crypto_bank_set(load64(arg + 24));
+    var req_ptr = load64(arg);
+    var req_len = load64(arg + 8);
+    var slot = load64(arg + 16);
+    store64(slot, _chat_produce(req_ptr, req_len));
+    _batch_inc_done();
+    return 0;
+}
+
+# Locate the raw "requests" array (including its surrounding [ ]) in the body.
+# Returns alloc(16) [ptr, len] or 0 if absent / not an array. Mirrors
+# _extract_messages' depth scan.
+fn _batch_extract_requests(body_ptr, body_len) {
+    var i = 0;
+    while (i < body_len - 11) {
+        if (memeq(body_ptr + i, "\"requests\":", 11) == 1) {
+            i = i + 11;
+            while (i < body_len && load8(body_ptr + i) == 32) { i = i + 1; }
+            if (i < body_len && load8(body_ptr + i) == 91) {
+                var depth = 1;
+                var start = i;
+                i = i + 1;
+                while (i < body_len && depth > 0) {
+                    var ch = load8(body_ptr + i);
+                    if (ch == 34) {
+                        i = i + 1;
+                        while (i < body_len) {
+                            if (load8(body_ptr + i) == 34) { break; }
+                            if (load8(body_ptr + i) == 92) { i = i + 1; }
+                            i = i + 1;
+                        }
+                    } else {
+                        if (ch == 91) { depth = depth + 1; }
+                        if (ch == 93) { depth = depth - 1; }
+                    }
+                    i = i + 1;
+                }
+                var out = alloc(16);
+                store64(out, body_ptr + start);
+                store64(out + 8, i - start);
+                return out;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Split the raw array (incl. surrounding [ ]) into top-level object slices.
+# Returns a vec of alloc(16) [ptr, len]. String-escape and nesting aware.
+fn _batch_split(arr_ptr, arr_len) {
+    var items = vec_new();
+    var i = 0;
+    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
+    if (i >= arr_len) { return items; }
+    i = i + 1;
+    var depth = 0;
+    var start = 0 - 1;
+    while (i < arr_len) {
+        var ch = load8(arr_ptr + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < arr_len) {
+                var c2 = load8(arr_ptr + i);
+                if (c2 == 92) { i = i + 2; } else {
+                    if (c2 == 34) { break; }
+                    i = i + 1;
+                }
+            }
+            i = i + 1;
+        } else {
+            if (ch == 123 || ch == 91) {
+                if (depth == 0 && start < 0) { start = i; }
+                depth = depth + 1;
+                i = i + 1;
+            } else {
+                if (ch == 125 || ch == 93) {
+                    depth = depth - 1;
+                    i = i + 1;
+                    if (depth < 0) { break; }
+                    if (depth == 0 && start >= 0) {
+                        var slc = alloc(16);
+                        store64(slc, arr_ptr + start);
+                        store64(slc + 8, i - start);
+                        vec_push(items, slc);
+                        start = 0 - 1;
+                    }
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return items;
+}
+
+# POST /v1/batch — run a batch of chat requests concurrently.
+fn handle_batch(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var arr = _batch_extract_requests(body_ptr, body_len);
+    if (arr == 0) { return http_bad_request(cfd, "missing 'requests' array"); }
+    var items = _batch_split(load64(arr), load64(arr + 8));
+    var n = vec_len(items);
+    if (n == 0) { return http_bad_request(cfd, "empty batch"); }
+    if (n > BATCH_MAX_ITEMS) { return http_bad_request(cfd, "batch too large (max 64)"); }
+
+    # One result slot per item; worker stores its descriptor there. Arg layout
+    # is [req_ptr, req_len, slot, crypto_bank] (32 bytes); the bank index is
+    # filled in per-wave just before spawn.
+    var slots = alloc(n * 8);
+    var args = alloc(n * 8);
+    var k = 0;
+    while (k < n) {
+        var it = vec_get(items, k);
+        var slot = alloc(8);
+        store64(slot, 0);
+        store64(slots + k * 8, slot);
+        var a = alloc(32);
+        store64(a, load64(it));
+        store64(a + 8, load64(it + 8));
+        store64(a + 16, slot);
+        store64(a + 24, 0);
+        store64(args + k * 8, a);
+        k = k + 1;
+    }
+
+    # Install the main-thread sigil crypto TLS before fan-out so workers can take
+    # their own scratch banks (idempotent).
+    crypto_tls_main_init();
+
+    # Run in waves of BATCH_MAX_PARALLEL concurrent workers. The barrier between
+    # waves is the atomic _batch_done counter (not thread_join's timing, which can
+    # return early): spawn a wave, wait until the counter reaches the wave target,
+    # then join for cleanup and advance. Each worker gets crypto bank 1..w within
+    # its wave (banks are reused across waves — safe, since the barrier fully
+    # drains a wave before the next starts).
+    store64(&_batch_done, 0);
+    var handles = alloc(BATCH_MAX_PARALLEL * 8);
+    var base = 0;
+    while (base < n) {
+        var w = 0;
+        while (w < BATCH_MAX_PARALLEL && base + w < n) {
+            var a = load64(args + (base + w) * 8);
+            store64(a + 24, w + 1);
+            var t = thread_create(&_hoosh_batch_worker, a);
+            store64(handles + w * 8, t);
+            w = w + 1;
+        }
+        var target = base + w;
+        while (load64(&_batch_done) < target) { }
+        # Reap the wave's threads (free their stacks). Safe now — the barrier
+        # has confirmed every worker stored its result.
+        var j = 0;
+        while (j < w) {
+            thread_join(load64(handles + j * 8));
+            j = j + 1;
+        }
+        base = base + w;
+    }
+
+    # Assemble {"results":[{"index":i,"status":<n>,"body":<raw>}, ...]}.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"results\":[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var d = load64(load64(slots + i * 8));
+        str_builder_add_cstr(sb, "{\"index\":");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, ",\"status\":");
+        if (d == 0) {
+            str_builder_add_cstr(sb, "500,\"body\":{\"error\":{\"message\":\"worker produced no result\"}}}");
+        } else {
+            str_builder_add_int(sb, atoi(load64(d)));
+            str_builder_add_cstr(sb, ",\"body\":");
+            str_builder_add_cstr(sb, load64(d + 16));
+            str_builder_add_cstr(sb, "}");
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    var body = str_builder_build(sb);
+    return http_ok(cfd, to_cstr(body), str_len(body));
+}

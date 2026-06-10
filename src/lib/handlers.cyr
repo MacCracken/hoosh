@@ -1415,42 +1415,92 @@ fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls) {
 }
 
 # POST /v1/chat/completions
-fn handle_chat(cfd, body_ptr, body_len) {
-    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+# ── Deferred response descriptor ──────────────
+# A response that _chat_produce *returns* instead of writing to a socket,
+# so a batch worker can collect the body off the accept thread. Layout
+# (32 bytes): status cstr(+0), status_text cstr(+8), body cstr(+16),
+# body_len(+24). _resp_write replays it through http_respond.
+fn _resp_new(status, status_text, body_cstr, body_len) {
+    var r = alloc(32);
+    store64(r, status);
+    store64(r + 8, status_text);
+    store64(r + 16, body_cstr);
+    store64(r + 24, body_len);
+    return r;
+}
+
+# Error-response descriptor mirroring http_error / http_bad_request bodies.
+fn _resp_err(status, status_text, msg, etype) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
+    str_builder_add_cstr(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"");
+    str_builder_add_cstr(sb, etype);
+    str_builder_add_cstr(sb, "\"}}");
+    var b = str_builder_build(sb);
+    return _resp_new(status, status_text, to_cstr(b), str_len(b));
+}
+
+fn _resp_write(cfd, r) {
+    return http_respond(cfd, load64(r), load64(r + 8), load64(r + 16), load64(r + 24));
+}
+
+# ── Chat request preparation (shared by streaming + non-streaming) ─────
+# Runs validation, routing, DLP, response/semantic cache, rate limiting,
+# budget reservation, and message extraction/compression/compaction. Returns
+# a prep record (alloc 104):
+#   +0  kind   0 = terminal (a finished _resp descriptor sits at +8),
+#              1 = ready (the request should be forwarded; fields below)
+#   +8  route / terminal-descriptor   +16 model_cstr   +24 msg_raw
+#   +32 msg_raw_len   +40 tools_raw    +48 tools_len    +56 bpool
+#   +64 est_tokens    +72 prompt_cstr  +80 ckey         +88 sem_vec  +96 sem_n
+# Cache lookups are skipped when is_stream != 0 (matches the prior behavior:
+# streaming responses are never cache-served).
+fn _chat_prep(body_ptr, body_len, is_stream) {
+    var out = alloc(104);
+    store64(out, 0);
+    if (body_len == 0) {
+        store64(out + 8, _resp_err("400", "Bad Request", "empty request body", "invalid_request_error"));
+        return out;
+    }
     var body_str = str_new(body_ptr, body_len);
     var pairs = json_parse(body_str);
-    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-
-    # Input validation
+    if (pairs == 0) {
+        store64(out + 8, _resp_err("400", "Bad Request", "invalid JSON", "invalid_request_error"));
+        return out;
+    }
     var verr = _validate_chat(pairs, body_ptr, body_len);
-    if (verr != 0) { return http_bad_request(cfd, verr); }
-
+    if (verr != 0) {
+        store64(out + 8, _resp_err("400", "Bad Request", verr, "invalid_request_error"));
+        return out;
+    }
     var model = json_get(pairs, str_from("model"));
     var model_cstr = to_cstr(model);
-
     var route = router_select(_router, model_cstr);
     if (route == 0) {
         hlog_warn("chat: no provider for requested model");
-        return http_error(cfd, "404", "Not Found",
-        "no provider for model");
+        store64(out + 8, _resp_err("404", "Not Found", "no provider for model", "server_error"));
+        return out;
     }
 
-    # DLP: classify request content, enforce privacy-aware routing.
-    # Restricted -> block; Confidential -> local provider only (reroute or block).
+    # DLP: Restricted -> block; Confidential -> local provider only.
     if (dlp_is_enabled() == 1) {
         var dlp_level = dlp_scan_level(body_ptr, body_len);
         if (dlp_level == CLASS_RESTRICTED) {
             hlog_warn("dlp: restricted content blocked");
-            return http_error(cfd, "403", "Forbidden",
-            "request blocked: restricted content detected");
+            store64(out + 8, _resp_err("403", "Forbidden",
+            "request blocked: restricted content detected", "server_error"));
+            return out;
         }
         if (dlp_level == CLASS_CONFIDENTIAL) {
             if (provider_is_local(route_provider(route)) == 0) {
                 var lroute = router_select_local(_router, model_cstr);
                 if (lroute == 0) {
                     hlog_warn("dlp: confidential content, no local provider");
-                    return http_error(cfd, "403", "Forbidden",
-                    "request blocked: confidential content requires a local provider");
+                    store64(out + 8, _resp_err("403", "Forbidden",
+                    "request blocked: confidential content requires a local provider",
+                    "server_error"));
+                    return out;
                 }
                 hlog_info("dlp: confidential content routed to a local provider");
                 route = lroute;
@@ -1458,20 +1508,19 @@ fn handle_chat(cfd, body_ptr, body_len) {
         }
     }
 
-    # Response cache: exact-key lookup (non-streaming only). A hit short-circuits
-    # before rate-limit / budget reservation / provider forward.
+    # Response cache: exact-key then semantic (non-streaming only). A hit is a
+    # terminal 200 carrying the cached body verbatim.
     var ckey = 0;
     var sem_vec = 0;
     var sem_n = 0;
-    if (_req_is_stream(body_ptr, body_len) == 0) {
+    if (is_stream == 0) {
         ckey = _cache_key(model_cstr, body_ptr, body_len);
         var cached = cache_get(_cache, ckey);
         if (cached != 0) {
             hlog_info("chat: response cache hit");
-            return http_ok(cfd, cached, strlen(cached));
+            store64(out + 8, _resp_new("200", "OK", cached, strlen(cached)));
+            return out;
         }
-        # Semantic cache: embed the query and reuse a similar prior response.
-        # Any embedding failure degrades silently to a normal forward.
         if (semantic_is_enabled() == 1) {
             var emb = _embed_query_body(body_ptr, body_len);
             if (emb != 0) {
@@ -1482,18 +1531,19 @@ fn handle_chat(cfd, body_ptr, body_len) {
                     var scached = cache_get(_cache, skey);
                     if (scached != 0) {
                         hlog_info("chat: semantic cache hit");
-                        return http_ok(cfd, scached, strlen(scached));
+                        store64(out + 8, _resp_new("200", "OK", scached, strlen(scached)));
+                        return out;
                     }
                 }
             }
         }
     }
 
-    # Rate limit check
+    # Rate limit
     var rl = route_rate_limiter(route);
     if (ratelimit_check(rl) == 0) {
-        return http_error(cfd, "429", "Too Many Requests",
-        "provider rate limit exceeded");
+        store64(out + 8, _resp_err("429", "Too Many Requests", "provider rate limit exceeded", "server_error"));
+        return out;
     }
 
     # Token budget: reserve before inference
@@ -1506,22 +1556,19 @@ fn handle_chat(cfd, body_ptr, body_len) {
     var bpool = budget_get_pool(_budget, pool_name);
     if (bpool != 0) {
         if (pool_available(bpool) < est_tokens) {
-            return http_error(cfd, "429", "Too Many Requests",
-            "token budget exceeded");
+            store64(out + 8, _resp_err("429", "Too Many Requests", "token budget exceeded", "server_error"));
+            return out;
         }
         pool_reserve(bpool, est_tokens);
     }
 
-    # Extract raw messages array
+    # Extract messages + optional compression + compaction
     var msgs = _extract_messages(body_ptr, body_len);
     var msg_raw = 0;
     var msg_raw_len = 0;
     if (msgs != 0) {
         msg_raw = load64(msgs);
         msg_raw_len = load64(msgs + 8);
-        # Prompt compression (opt-in): collapse whitespace in content values and
-        # prune stale tool-call/result pairs before compaction so the token
-        # estimate sees the reduced text.
         if (msg_raw_len > 0 && compression_is_enabled() == 1) {
             var compressed = compress_ws_json(msg_raw, msg_raw_len);
             msg_raw = load64(compressed);
@@ -1530,19 +1577,20 @@ fn handle_chat(cfd, body_ptr, body_len) {
             msg_raw = load64(pruned);
             msg_raw_len = load64(pruned + 8);
         }
-        # Context compaction: limit to est_tokens budget, using the
-        # target provider's chars-per-token ratio.
         if (msg_raw_len > 0) {
             var cpt_x10 = chars_per_token_x10(route_provider(route));
-            var compacted = compact_messages(
-            msg_raw, msg_raw_len, est_tokens * 2, cpt_x10);
+            var compacted = compact_messages(msg_raw, msg_raw_len, est_tokens * 2, cpt_x10);
             msg_raw = load64(compacted);
             msg_raw_len = load64(compacted + 8);
         }
     }
 
-    # Streaming path
-    # Tool calling: forward the request's `tools` to the provider.
+    var prompt_cstr = "hello";
+    if (msg_raw == 0) {
+        var prompt_val = json_get(pairs, str_from("prompt"));
+        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
+    }
+
     var tools = _extract_tools(body_ptr, body_len);
     var tools_raw = 0;
     var tools_len = 0;
@@ -1551,32 +1599,62 @@ fn handle_chat(cfd, body_ptr, body_len) {
         tools_len = load64(tools + 8);
     }
 
-    if (_req_is_stream(body_ptr, body_len) == 1) {
-        if (msg_raw == 0) {
-            return http_bad_request(cfd,
-            "streaming requires messages array");
-        }
-        var sr = handle_chat_stream(
-        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len);
-        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
-        return sr;
-    }
+    store64(out, 1);
+    store64(out + 8, route);
+    store64(out + 16, model_cstr);
+    store64(out + 24, msg_raw);
+    store64(out + 32, msg_raw_len);
+    store64(out + 40, tools_raw);
+    store64(out + 48, tools_len);
+    store64(out + 56, bpool);
+    store64(out + 64, est_tokens);
+    store64(out + 72, prompt_cstr);
+    store64(out + 80, ckey);
+    store64(out + 88, sem_vec);
+    store64(out + 96, sem_n);
+    return out;
+}
 
-    # Non-streaming path
-    var prompt_cstr = "hello";
-    if (msg_raw == 0) {
-        var prompt_val = json_get(pairs, str_from("prompt"));
-        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
-    }
+# Global chat bookkeeping lock. Held by batch workers around the shared-state
+# sections (prep + assemble) so the network forward in between runs concurrently
+# — that overlap is the batching throughput win. Initialized in cmd_serve
+# (mutex_new); the single-threaded accept path never contends it because the
+# batch handler joins all workers before the accept loop resumes, so workers are
+# the only concurrent actors. Uncontended elsewhere.
+var _chat_lock = 0;
 
-    var result = retry_forward(
+# Forward a prepared (ready) request to its provider. Pure network I/O +
+# response parsing — NO shared chat state is mutated here (metrics_record, the
+# one global it touches, is atomic), so this runs unlocked/concurrent.
+fn _chat_forward(prep) {
+    var route = load64(prep + 8);
+    var model_cstr = load64(prep + 16);
+    var msg_raw = load64(prep + 24);
+    var msg_raw_len = load64(prep + 32);
+    var tools_raw = load64(prep + 40);
+    var tools_len = load64(prep + 48);
+    var prompt_cstr = load64(prep + 72);
+    return retry_forward(
     _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len,
     tools_raw, tools_len);
+}
+
+# Build the response descriptor from a forward result. Mutates shared state
+# (budget commit, audit append, response/semantic cache insert), so batch
+# workers must hold _chat_lock around this call.
+fn _chat_assemble(prep, result) {
+    var route = load64(prep + 8);
+    var model_cstr = load64(prep + 16);
+    var bpool = load64(prep + 56);
+    var est_tokens = load64(prep + 64);
+    var ckey = load64(prep + 80);
+    var sem_vec = load64(prep + 88);
+    var sem_n = load64(prep + 96);
+
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         hlog_error("chat: provider backend unreachable after retries");
-        return http_error(cfd, "502", "Bad Gateway",
-        "provider backend unreachable");
+        return _resp_err("502", "Bad Gateway", "provider backend unreachable", "server_error");
     }
 
     var resp_text = load64(result);
@@ -1598,9 +1676,60 @@ fn handle_chat(cfd, body_ptr, body_len) {
     resp_ctok, resp_tool_calls);
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
-    # Populate the response cache for identical future requests.
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
-    # Record the query embedding so semantically-similar future requests hit.
     if (ckey != 0 && sem_vec != 0) { semantic_insert(ckey, sem_vec, sem_n); }
-    return http_ok(cfd, body_cstr, body_clen);
+    return _resp_new("200", "OK", body_cstr, body_clen);
+}
+
+# Forward a prepared request and build its descriptor (single-threaded path).
+fn _chat_finish(prep) {
+    return _chat_assemble(prep, _chat_forward(prep));
+}
+
+# Produce a non-streaming chat response descriptor end-to-end, holding
+# _chat_lock around the shared-state phases (prep, assemble) and releasing it
+# for the network forward. Batch workers call this from their own threads; the
+# concurrency lives entirely in the unlocked forward.
+fn _chat_produce(body_ptr, body_len) {
+    mutex_lock(_chat_lock);
+    var prep = _chat_prep(body_ptr, body_len, 0);
+    var kind = load64(prep);
+    mutex_unlock(_chat_lock);
+    if (kind == 0) { return load64(prep + 8); }
+
+    var result = _chat_forward(prep);
+
+    mutex_lock(_chat_lock);
+    var desc = _chat_assemble(prep, result);
+    mutex_unlock(_chat_lock);
+    return desc;
+}
+
+fn handle_chat(cfd, body_ptr, body_len) {
+    var is_stream = _req_is_stream(body_ptr, body_len);
+    var prep = _chat_prep(body_ptr, body_len, is_stream);
+    if (load64(prep) == 0) {
+        return _resp_write(cfd, load64(prep + 8));
+    }
+
+    if (is_stream == 1) {
+        var route = load64(prep + 8);
+        var model_cstr = load64(prep + 16);
+        var msg_raw = load64(prep + 24);
+        var msg_raw_len = load64(prep + 32);
+        var tools_raw = load64(prep + 40);
+        var tools_len = load64(prep + 48);
+        var bpool = load64(prep + 56);
+        var est_tokens = load64(prep + 64);
+        if (msg_raw == 0) {
+            if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+            return http_bad_request(cfd, "streaming requires messages array");
+        }
+        var sr = handle_chat_stream(
+        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len);
+        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+        return sr;
+    }
+
+    return _resp_write(cfd, _chat_finish(prep));
 }

@@ -115,6 +115,7 @@ Thread-safe DashMap cache with TTL. Keyed on prompt hash. Skips caching for stre
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | Inference (streaming + non-streaming) |
+| `/v1/batch` | POST | Concurrent batch inference (in-process worker pool) |
 | `/v1/models` | GET | List available models |
 | `/api/tags` | GET | List models (native Ollama-compatible shape) |
 | `/v1/models/pull` | POST | Pull a model (Ollama `pull_model`) |

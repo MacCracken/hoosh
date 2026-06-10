@@ -143,6 +143,7 @@ Response:
 | GET | `/v1/models` | List configured providers |
 | GET | `/api/tags` | List models, native Ollama-compatible shape |
 | POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
+| POST | `/v1/batch` | Concurrent batch inference — `{"requests":[…]}` → `{"results":[…]}` |
 | POST | `/v1/embeddings` | Embeddings (forwarded to Ollama) |
 | POST | `/v1/models/pull` | Pull a model (forwarded to Ollama `/api/pull`) |
 | POST | `/v1/models/delete` | Delete a model (forwarded to Ollama `/api/delete`) |

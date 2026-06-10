@@ -5,10 +5,20 @@ var _met_prompt_tokens = 0;
 var _met_comp_tokens = 0;
 var _met_providers = 0;
 
+# Atomic add (CAS loop) — metrics_record runs inside the provider forward,
+# which batch workers execute concurrently (outside the chat bookkeeping
+# lock). Plain `x = x + d` would lose updates across threads; this does not.
+# atomic_cas comes from lib/atomic.cyr (pulled in via lib/alloc.cyr).
+fn _met_atomic_add(ptr, delta) {
+    var old = load64(ptr);
+    while (atomic_cas(ptr, old, old + delta) == 0) { old = load64(ptr); }
+    return 0;
+}
+
 fn metrics_record(prompt_tok, comp_tok) {
-    _met_requests = _met_requests + 1;
-    _met_prompt_tokens = _met_prompt_tokens + prompt_tok;
-    _met_comp_tokens = _met_comp_tokens + comp_tok;
+    _met_atomic_add(&_met_requests, 1);
+    _met_atomic_add(&_met_prompt_tokens, prompt_tok);
+    _met_atomic_add(&_met_comp_tokens, comp_tok);
     return 0;
 }
 

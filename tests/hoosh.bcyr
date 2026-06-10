@@ -22,6 +22,53 @@ include "src/vendor/bote-core.cyr"
 # These will be factored into src/ modules during the actual port
 # ================================================================
 
+# Mirror of src/lib/batch.cyr _batch_split for the batch-parse bench.
+fn _bench_batch_split(arr_ptr, arr_len) {
+    var items = vec_new();
+    var i = 0;
+    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
+    if (i >= arr_len) { return items; }
+    i = i + 1;
+    var depth = 0;
+    var start = 0 - 1;
+    while (i < arr_len) {
+        var ch = load8(arr_ptr + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < arr_len) {
+                var c2 = load8(arr_ptr + i);
+                if (c2 == 92) { i = i + 2; } else {
+                    if (c2 == 34) { break; }
+                    i = i + 1;
+                }
+            }
+            i = i + 1;
+        } else {
+            if (ch == 123 || ch == 91) {
+                if (depth == 0 && start < 0) { start = i; }
+                depth = depth + 1;
+                i = i + 1;
+            } else {
+                if (ch == 125 || ch == 93) {
+                    depth = depth - 1;
+                    i = i + 1;
+                    if (depth < 0) { break; }
+                    if (depth == 0 && start >= 0) {
+                        var slc = alloc(16);
+                        store64(slc, arr_ptr + start);
+                        store64(slc + 8, i - start);
+                        vec_push(items, slc);
+                        start = 0 - 1;
+                    }
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return items;
+}
+
 # Mirror of src/lib/mcp.cyr's bote_echo handler for the MCP benches.
 fn _bench_mcp_echo(args, claims) {
     var sb = str_builder_new();
@@ -818,6 +865,19 @@ fn main() {
     i = 0;
     while (i < 10000) {
         codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}", mcp_disp, 0);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: batch_split_16 (POST /v1/batch request parsing) ─
+    var barr = "[{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"second\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"third\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"fourth\"}]}]";
+    var barr_len = strlen(barr);
+    b = bench_new("batch_split_4");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        _bench_batch_split(barr, barr_len);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);

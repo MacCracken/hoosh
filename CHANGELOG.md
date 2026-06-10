@@ -7,6 +7,61 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-06-10
+
+**Concurrent batch inference** — `POST /v1/batch` runs an array of chat requests
+on worker threads and returns all results in one response. Unblocked by
+re-verifying (not assuming) that the cyrius 6.1.27 allocator is thread-safe: a
+4-thread × 200k-alloc stress showed zero corruption (the v6.0.64 CAS spinlock
+fixed the race the older roadmap audit flagged as a hard blocker). Async
+job-id/progress-poll/cancel and a fully multi-threaded accept loop are deferred
+(see roadmap); this ships the synchronous concurrent executor.
+
+### Added
+- **`POST /v1/batch`** — body `{"requests":[ <chat req>, … ]}`; runs the items
+  concurrently (bounded to `BATCH_MAX_PARALLEL`=7 in flight, processed in waves;
+  `BATCH_MAX_ITEMS`=64 cap) and returns `{"results":[{"index","status","body"},
+  …]}`. Items are treated as non-streaming. Ports the concurrency core of
+  `rust-old/src/inference/batch.rs`. Live-verified against a mock backend: 8
+  forwards per wave overlap (confirmed by per-connection arrival timestamps),
+  waves serialize, results are correct, and metrics stay exact under load.
+- **`src/lib/batch.cyr`** — executor + string/nesting-aware request-array
+  splitter (`_batch_split`, `_batch_extract_requests`). Worker completion is
+  signalled through an **atomic counter barrier** rather than `thread_join`
+  timing (empirically `thread_join` could return before a worker stored its
+  result, which would let the next wave overlap and risk reading an unfilled
+  slot). Unit-tested (split: nested arrays + bracket-bearing strings) + benched
+  (`batch_split_4`).
+
+### Changed
+- **`handle_chat` refactored into a returns-body core** — `_chat_prep`
+  (validation/routing/DLP/cache/rate/budget/messages → terminal descriptor or
+  ready state), `_chat_forward` (the unlocked network call), and `_chat_assemble`
+  (response build + cache/budget/audit writes). `handle_chat` is now a thin
+  writer over these; batch workers call `_chat_produce` (prep + forward +
+  assemble) and collect the body instead of writing a socket. Behavior-preserving
+  (live-diffed byte-for-byte against the prior binary for stream + non-stream).
+- **Coarse-lock for concurrent workers** — `_chat_produce` holds a global
+  `_chat_lock` mutex around the shared-state phases (prep, assemble) and releases
+  it for the network forward, so forwards overlap while cache/budget/audit
+  bookkeeping stays serialized. `metrics_record` is now **atomic** (CAS adds) —
+  it runs inside the unlocked forward. The single-threaded accept path is
+  uncontended (the batch handler joins all workers before the accept loop
+  resumes, so workers are the only concurrent actors).
+
+### Fixed (pre-release, during 2.3.1 bring-up)
+- **Worker-thread crypto crash** — the chat pipeline's sha256/HMAC/TLS (sigil)
+  read a **thread-local crypto scratch bank** that is uninitialized on worker
+  threads; the first threaded build corrupted the heap (batch returned fine, the
+  *next* request segfaulted). Fixed per sigil's intended API: the handler calls
+  `crypto_tls_main_init()` before fan-out and each worker calls
+  `crypto_bank_set(1..7)` at entry (bank 0 = main). Caps `BATCH_MAX_PARALLEL` at
+  7 (sigil's 8 banks − the main lane). See ADR-009 §5.
+
+### Notes
+- See **ADR-009** for the concurrency model, the allocator + sigil thread-safety
+  findings, and why the barrier (not `thread_join`) is the correctness primitive.
+
 ## [2.3.0] — 2026-06-10
 
 **MCP tool-server endpoints** — `GET /v1/tools/list` + `POST /v1/tools/call`,

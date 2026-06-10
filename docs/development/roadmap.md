@@ -281,10 +281,28 @@ changes.
       transitively into a colliding compile set; the self-contained core bundle
       sidesteps it. Re-sync: `./scripts/sync-bote.sh <tag>`.
 
-### v2.3.1 — Throughput (next)
-- [ ] Connection pooling for backend sockets
-- [ ] Inference batching manager (`inference/batch.rs`) — gated on the
-      multi-threaded accept loop (BLOCKED; see v2.3.x concurrency)
+### v2.3.1 — Concurrent batch inference — ✅ SHIPPED 2026-06-10
+- [x] **`POST /v1/batch`** — concurrent batch executor (in-process worker pool,
+      bounded waves, atomic-counter barrier). `handle_chat` refactored into a
+      returns-body core; coarse `_chat_lock` around bookkeeping with the network
+      forward unlocked; atomic `metrics_record`. Ports the concurrency core of
+      `inference/batch.rs`. **No longer blocked** — the cyrius 6.1.27 allocator
+      is thread-safe (v6.0.64 CAS spinlock; re-verified by a 4-thread alloc
+      stress, 0 corruption). See [ADR 009](../decisions/009-concurrent-batch-inference.md).
+- [ ] **Deferred to a later 2.3.x:** async batch — job-id, `GET /v1/batch/{id}`
+      progress polling, cancellation, `DashMap` of batches (the rest of
+      `batch.rs`).
+- [ ] **Deferred — connection pooling for backend sockets.** Low near-term ROI:
+      the local path connects to `127.0.0.1` (loopback connect ≪ inference
+      latency); the high-value case is remote TLS-handshake reuse, which is gated
+      on sandhi keep-alive/pooling support. Revisit when sandhi exposes it.
+
+### v2.4.0 — Multi-threaded accept loop
+Now **unblocked** (allocator thread-safe, verified in 2.3.1). Thread the accept
+loop so *all* traffic runs concurrently — requires a shared-state synchronization
+pass across every handler (cache/budget/audit/rate/cost/metrics), broader than
+2.3.1's batch-only worker pool. Enables loopback-style batching and general
+throughput.
 
 ### v2.3.2 — Observability
 - [ ] OpenTelemetry trace propagation (`telemetry.rs`)
@@ -309,16 +327,17 @@ not started until the 2.2.x arc lands.
       accept loop.
 
 ### Concurrency
-- [ ] Multi-threaded accept loop — **BLOCKED** (race audit 2026-06-04): the
-      cyrius global allocator is not thread-safe — concurrent `alloc` corrupts
-      memory (verified ~5000 corruptions across 4 threads). All stdlib allocation
-      routes through the global allocator (the allocator-as-parameter convention
-      in `alloc.cyr` keeps the global fns racy for back-compat), so per-thread
-      arenas do not help and a global processing mutex would serialize all
-      request handling. Threading primitives themselves (thread_create/join,
-      mutex, channels) work. Revisit when cyrius provides thread-safe allocation.
-      (Unblocks v2.2.5 batching.)
-- [ ] Connection pooling for backend sockets
+- [x] ✅ **UNBLOCKED: cyrius global allocator is now thread-safe.** The
+      2026-06-04 race audit (~5000 corruptions across 4 threads) was fixed
+      upstream by `alloc.cyr`'s **v6.0.64** process-wide CAS spinlock around
+      `alloc()`/`alloc_reset()`. Re-verified under cyrius 6.1.27 with a 4-thread
+      × 200k-alloc stress: **0 corruption**. This unblocked 2.3.1 batch inference
+      and the multi-threaded accept loop (now scheduled as **v2.4.0** above).
+      Note: the global alloc lock serializes `alloc` (uncontended-cheap, but a
+      hot path under heavy threading) — a future per-thread-arena optimization is
+      still possible.
+- [ ] Multi-threaded accept loop — see [v2.4.0](#v240--multi-threaded-accept-loop).
+- [ ] Connection pooling for backend sockets — see v2.3.1 (deferred; sandhi-gated).
 
 ### New backends
 - [ ] vLLM — high-throughput serving with PagedAttention

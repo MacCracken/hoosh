@@ -874,6 +874,93 @@ fn _mcp_echo(args, claims) {
     return str_data(str_builder_build(sb));
 }
 
+# Mirror of src/lib/batch.cyr _batch_extract_requests — locate the raw
+# "requests" array (incl. brackets) in a request body. Returns [ptr,len] or 0.
+fn _t_batch_extract_requests(body_ptr, body_len) {
+    var i = 0;
+    while (i < body_len - 11) {
+        if (memeq(body_ptr + i, "\"requests\":", 11) == 1) {
+            i = i + 11;
+            while (i < body_len && load8(body_ptr + i) == 32) { i = i + 1; }
+            if (i < body_len && load8(body_ptr + i) == 91) {
+                var depth = 1;
+                var start = i;
+                i = i + 1;
+                while (i < body_len && depth > 0) {
+                    var ch = load8(body_ptr + i);
+                    if (ch == 34) {
+                        i = i + 1;
+                        while (i < body_len) {
+                            if (load8(body_ptr + i) == 34) { break; }
+                            if (load8(body_ptr + i) == 92) { i = i + 1; }
+                            i = i + 1;
+                        }
+                    } else {
+                        if (ch == 91) { depth = depth + 1; }
+                        if (ch == 93) { depth = depth - 1; }
+                    }
+                    i = i + 1;
+                }
+                var out = alloc(16);
+                store64(out, body_ptr + start);
+                store64(out + 8, i - start);
+                return out;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mirror of src/lib/batch.cyr _batch_split — split the array (incl. brackets)
+# into top-level object slices. String-escape + nesting aware.
+fn _t_batch_split(arr_ptr, arr_len) {
+    var items = vec_new();
+    var i = 0;
+    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
+    if (i >= arr_len) { return items; }
+    i = i + 1;
+    var depth = 0;
+    var start = 0 - 1;
+    while (i < arr_len) {
+        var ch = load8(arr_ptr + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < arr_len) {
+                var c2 = load8(arr_ptr + i);
+                if (c2 == 92) { i = i + 2; } else {
+                    if (c2 == 34) { break; }
+                    i = i + 1;
+                }
+            }
+            i = i + 1;
+        } else {
+            if (ch == 123 || ch == 91) {
+                if (depth == 0 && start < 0) { start = i; }
+                depth = depth + 1;
+                i = i + 1;
+            } else {
+                if (ch == 125 || ch == 93) {
+                    depth = depth - 1;
+                    i = i + 1;
+                    if (depth < 0) { break; }
+                    if (depth == 0 && start >= 0) {
+                        var slc = alloc(16);
+                        store64(slc, arr_ptr + start);
+                        store64(slc + 8, i - start);
+                        vec_push(items, slc);
+                        start = 0 - 1;
+                    }
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return items;
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4172,6 +4259,32 @@ fn main() {
     # Unknown tool → JSON-RPC error, no crash.
     var mcp_miss = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"nope\",\"arguments\":{}}}", mcp_disp, 0);
     assert_eq(_cmp_substr(mcp_miss, strlen(mcp_miss), "\"error\"", 7) >= 0, 1, "mcp: unknown tool yields error");
+
+    # ── Batch request parsing (POST /v1/batch) ────────────────────
+    test_group("batch");
+    # Body with nested array + a string value containing } and ] — the splitter
+    # must treat those as inside-string, not structural.
+    var bbody = "{\"meta\":1,\"requests\":[{\"a\":1},{\"b\":[2,3]},{\"c\":\"}]x\"}]}";
+    var barr = _t_batch_extract_requests(bbody, strlen(bbody));
+    assert_eq(barr != 0, 1, "batch: requests array located");
+    var bitems = _t_batch_split(load64(barr), load64(barr + 8));
+    assert_eq(vec_len(bitems), 3, "batch: split yields 3 items");
+    # Item 0 = {"a":1}
+    var b0 = vec_get(bitems, 0);
+    assert_eq(load8(load64(b0)), 123, "batch: item0 starts with {");
+    assert_eq(load8(load64(b0) + load64(b0 + 8) - 1), 125, "batch: item0 ends with }");
+    # Item 1 carries the nested array intact.
+    var b1 = vec_get(bitems, 1);
+    assert_eq(_cmp_substr(load64(b1), load64(b1 + 8), "[2,3]", 5) >= 0, 1, "batch: item1 keeps nested array");
+    # Item 2's string value (with } and ]) survives splitting.
+    var b2 = vec_get(bitems, 2);
+    assert_eq(_cmp_substr(load64(b2), load64(b2 + 8), "}]x", 3) >= 0, 1, "batch: item2 string brackets intact");
+    # No "requests" key → 0.
+    var bnone = "{\"model\":\"x\"}";
+    assert_eq(_t_batch_extract_requests(bnone, strlen(bnone)), 0, "batch: missing requests → 0");
+    # Empty array → 0 items.
+    var bempty = _t_batch_split("[]", 2);
+    assert_eq(vec_len(bempty), 0, "batch: empty array → 0 items");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
