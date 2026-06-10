@@ -212,7 +212,7 @@ fn handle_synapse_sync(cfd) {
     return _lifecycle_reply(cfd, resp, "synapse catalog sync failed");
 }
 
-# ── Cache warming ──────────────────────────────────────────────
+# ── Cache warming ──
 # Pre-populate the response cache at startup with operator-configured prompts so
 # common requests are instant before traffic arrives. The single-threaded
 # runtime has no background task, so this runs synchronously at startup. Each
