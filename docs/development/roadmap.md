@@ -210,9 +210,11 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       read/written by `handle_chat`). Now non-streaming requests key off
       sha256(model+body), hit short-circuits before forward, miss stores the
       body. Live-verified (hits/misses in `/v1/cache/stats`).
-- [ ] Cache warming — startup pre-population (`cache/warming.rs`). **Unblocked**
-      by the wiring above; needs `[[warming]]` config + a synchronous startup
-      warm loop (no background task — single-threaded runtime). NEXT.
+- [x] **Cache warming** — startup pre-population (`cache/warming.rs`).
+      `[[warming]]` config (model + prompt) + a synchronous startup warm loop
+      (`warming_run` in `cmd_serve`; no background task — single-threaded
+      runtime). Warms under the exact key a client request hits; live-verified
+      (startup warmed 1/1 → client request cache hit).
 - [ ] Cost optimizer — cheapest capable model recommendation (`cost/optimizer.rs`).
       **Depends on** porting the model-metadata registry (tier/modalities/
       capabilities/context-window) + a pricing lookup over `data/cloud_pricing.json`.

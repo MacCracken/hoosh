@@ -24,6 +24,14 @@ max_entries = 1000
 ttl_secs = 300
 enabled = true
 
+# Cache warming — pre-populate the response cache at startup so common prompts
+# are instant before traffic arrives. Each [[warming]] fires one inference at
+# startup (synchronous; opt-in). A client hits the warmed entry by POSTing the
+# canonical body: {"model":"<model>","messages":[{"role":"user","content":"<prompt>"}]}
+# [[warming]]
+# model = "gpt-4o-mini"
+# prompt = "What is the capital of France?"
+
 # Data Loss Prevention — scans request content for PII/secrets and enforces
 # privacy-aware routing. Off by default. When enabled:
 #   default_level  classification when nothing matches (public|internal|

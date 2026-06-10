@@ -60,6 +60,19 @@ fn load_config(path) {
         dlp_configure(den, dlvl);
     }
 
+    # Parse [[warming]] sections — cache warming prompts (model + prompt).
+    var warm_secs = toml_get_sections(sections, "warming");
+    var wi = 0;
+    while (wi < vec_len(warm_secs)) {
+        var wp = toml_section_pairs(vec_get(warm_secs, wi));
+        var wmodel = toml_get(wp, "model");
+        var wprompt = toml_get(wp, "prompt");
+        if (wmodel != 0 && wprompt != 0) {
+            warming_add(to_cstr(wmodel), to_cstr(wprompt));
+        }
+        wi = wi + 1;
+    }
+
     # Parse [[cache]] section
     var cache_secs = toml_get_sections(sections, "cache");
     if (vec_len(cache_secs) > 0) {

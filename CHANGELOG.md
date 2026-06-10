@@ -7,6 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Cache warming** (`handlers.cyr` `warming_run`/`warming_add`/`_warming_body`,
+  `[[warming]]` config) — pre-populates the response cache at startup with
+  operator-configured `(model, prompt)` prompts so common requests are instant
+  before traffic arrives. Synchronous (the single-threaded runtime has no
+  background task); fires one inference per prompt, skips already-cached keys,
+  logs `cache warming: N/M entries cached`. Each warmed entry is stored under the
+  exact key a client hits by POSTing the canonical body
+  `{"model","messages":[{"role":"user","content"}]}` — unit-tested that the
+  warmed key equals the client-request key. **Live-verified**: startup warmed
+  1/1, client request → cache hit returning the warmed response without
+  forwarding.
+
 ### Fixed
 - **Response cache was inert — now wired into `/v1/chat/completions`.** The
   exact-key LRU cache (`cache.cyr`) was configured and exposed via

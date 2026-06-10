@@ -55,6 +55,7 @@ var _config_path = 0;
 var _http_port = 8088;
 var _retry_cfg = 0;
 var _audit_chain = 0;
+var _warming = 0;
 
 # ================================================================
 # HTTP route dispatch
@@ -253,6 +254,10 @@ fn cmd_serve(port) {
     str_builder_add_cstr(lsb, pbuf);
     var lmsg = str_builder_build(lsb);
     sakshi_info(str_data(lmsg), str_len(lmsg));
+
+    # Cache warming — synchronously pre-populate the cache before accepting
+    # traffic (opt-in via [[warming]] in hoosh.toml).
+    warming_run();
 
     while (1 == 1) {
         var client = sock_accept(sfd);

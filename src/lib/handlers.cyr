@@ -212,6 +212,73 @@ fn handle_synapse_sync(cfd) {
     return _lifecycle_reply(cfd, resp, "synapse catalog sync failed");
 }
 
+# ── Cache warming ──────────────────────────────────────────────
+# Pre-populate the response cache at startup with operator-configured prompts so
+# common requests are instant before traffic arrives. The single-threaded
+# runtime has no background task, so this runs synchronously at startup. Each
+# entry is a 16-byte (model_cstr, prompt_cstr).
+
+fn warming_add(model, prompt) {
+    if (_warming == 0) { _warming = vec_new(); }
+    var e = alloc(16);
+    store64(e, model);
+    store64(e + 8, prompt);
+    vec_push(_warming, e);
+    return 0;
+}
+
+# Canonical compact body a client must POST to hit a warmed entry:
+# {"model":"M","messages":[{"role":"user","content":"P"}]}
+fn _warming_body(model, prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"messages\":[{\"role\":\"user\",\"content\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    return str_builder_build(sb);
+}
+
+# Warm the cache from configured prompts. Returns the count warmed. Skips when
+# the cache is disabled, the model has no route, or the key is already cached.
+fn warming_run() {
+    if (_warming == 0) { return 0; }
+    if (_cache == 0) { return 0; }
+    if (load64(_cache + CACHE_ENABLED) == 0) { return 0; }
+    var n = vec_len(_warming);
+    if (n == 0) { return 0; }
+    var warmed = 0;
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(_warming, i);
+        var model = load64(e);
+        var prompt = load64(e + 8);
+        var route = router_select(_router, model);
+        if (route != 0) {
+            var body = _warming_body(model, prompt);
+            var key = _cache_key(model, to_cstr(body), str_len(body));
+            if (cache_get(_cache, key) == 0) {
+                var result = retry_forward(_retry_cfg, route, model, prompt, 0, 0);
+                if (result != 0) {
+                    var env = _chat_completion_body(model, load64(result),
+                    load64(result + 16), load64(result + 24));
+                    cache_insert(_cache, key, to_cstr(env));
+                    warmed = warmed + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    var lsb = str_builder_new();
+    str_builder_add_cstr(lsb, "cache warming: ");
+    str_builder_add_int(lsb, warmed);
+    str_builder_add_cstr(lsb, "/");
+    str_builder_add_int(lsb, n);
+    str_builder_add_cstr(lsb, " entries cached");
+    hlog_info(to_cstr(str_builder_build(lsb)));
+    return warmed;
+}
+
 # GET /v1/cache/stats
 fn handle_cache_stats(cfd) {
     var sb = str_builder_new();
@@ -1005,6 +1072,29 @@ fn _cache_key(model, body_ptr, body_len) {
     return sha256_hex(to_cstr(s), str_len(s));
 }
 
+# Build an OpenAI chat.completion response envelope (str). Shared by the live
+# chat path and cache warming so a warmed entry is byte-identical to a fresh one.
+fn _chat_completion_body(model, resp_text, ptok, ctok) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+    str_builder_add_cstr(sb, "\"object\":\"chat.completion\",");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+    str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
+    str_builder_add_cstr(sb, "\"content\":\"");
+    str_builder_add_cstr(sb, resp_text);
+    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],");
+    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok + ctok);
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
+
 # POST /v1/chat/completions
 fn handle_chat(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
@@ -1144,24 +1234,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
         provider_name(route_provider(route)), model_cstr);
     }
 
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion\",");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model_cstr);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
-    str_builder_add_cstr(sb, "\"content\":\"");
-    str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],");
-    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, resp_ptok);
-    str_builder_add_cstr(sb, ",\"completion_tokens\":");
-    str_builder_add_int(sb, resp_ctok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, resp_ptok + resp_ctok);
-    str_builder_add_cstr(sb, "}}");
-    var body = str_builder_build(sb);
+    var body = _chat_completion_body(model_cstr, resp_text, resp_ptok, resp_ctok);
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     # Populate the response cache for identical future requests.

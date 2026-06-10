@@ -283,6 +283,17 @@ fn _ckey(model, body) {
     return _cache_key(model, body, strlen(body));
 }
 
+# Canonical warming body (mirror of handlers.cyr _warming_body).
+fn _warming_body(model, prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"messages\":[{\"role\":\"user\",\"content\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    return str_builder_build(sb);
+}
+
 # ================================================================
 # DLP scanner — mirror of src/lib/dlp.cyr (PII/secret byte matchers).
 # Enabled by default here so the matchers are exercised directly.
@@ -3007,6 +3018,17 @@ fn main() {
     assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq2)), 0,
     "cache key: different body differs");
     assert_eq(strlen(_ckey("gpt-4o-mini", rq)), 64, "cache key: sha256 hex is 64 chars");
+
+    # ── Cache warming: canonical body + key match ─────────────────
+    test_group("cache_warming");
+    var wb = _warming_body("gpt-4o-mini", "hi");
+    var wb_expect = "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    assert_eq(streq(str_cstr(wb), wb_expect), 1, "warming: canonical body shape");
+    # The warmed entry's key must equal the key of a client POSTing that body —
+    # otherwise warming populates an entry nothing ever hits.
+    var wkey = _cache_key("gpt-4o-mini", str_cstr(wb), str_len(wb));
+    assert_eq(streq(wkey, _ckey("gpt-4o-mini", wb_expect)), 1,
+    "warming: warmed key matches client request key");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
