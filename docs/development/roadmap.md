@@ -85,7 +85,7 @@ severity — **2.2.0 ships the criticals**; later point releases work the
 remaining partials and missing features. (Audio STT/TTS is deliberately *not*
 here — it is migrating to **svara**; see Deferred.)
 
-### v2.2.0 — Remote provider transport (the criticals)
+### v2.2.0 — Remote provider transport (the criticals) — ✅ SHIPPED 2026-06-09
 
 Without these, "multi-provider cloud routing" is unbacked. The forward client
 (`src/lib/http_client.cyr`) hand-rolls raw sockets to `127.0.0.1`
@@ -99,7 +99,7 @@ OpenRouter) are enum + default-URL entries the transport never reaches.
 `sandhi_http_post`), over `lib/tls.cyr` (TLS) and `lib/net.cyr` (sockets). This
 is hoosh wiring, not a Cyrius gap.
 
-**Status (2026-06-09): UNBLOCKED — sandhi P1 fixed, criticals landed.** The
+**Status (2026-06-09): SHIPPED in 2.2.0 — sandhi P1 fixed, criticals landed.** The
 sandhi repeated-HTTPS SIGSEGV was fixed upstream (cyrius 6.1.20 / sandhi 1.4.5:
 alloc heap moved off `brk` onto mmap, sandhi default-switched to the native TLS
 backend); hoosh bumped its pin 6.1.18 → 6.1.20 and re-verified crash-free (6/6

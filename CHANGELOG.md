@@ -5,7 +5,9 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — toward 2.2.0
+## [Unreleased]
+
+## [2.2.0] — 2026-06-09
 
 Remote provider transport — the **v2.2.0 criticals**. Cloud providers were enum +
 default-URL entries the loopback-only client could never reach; they now forward
