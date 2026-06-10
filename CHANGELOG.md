@@ -8,6 +8,15 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Compression: stale tool-pair pruning** (`compression.cyr` `prune_tool_pairs`)
+  — completes the `context/compression.rs` port (the half deferred from 2.2.3,
+  now that tool-call message structure exists). In a long agentic conversation,
+  assistant messages carrying `tool_calls` (and their matching `role:"tool"`
+  results, paired by id) that fall before the last 3 tool turns are dropped;
+  ordinary turns are untouched. Applied after whitespace collapse when
+  `[compression]` is enabled. Self-contained byte-level helpers (`_cmp_*`).
+  Unit-tested (5-turn conversation → first 2 call+result pairs pruned, recent 3
+  and user turns kept; ≤3 turns unchanged).
 - **Tool calling — OpenAI, Anthropic, and Gemini** — the gateway forwards a
   request's `tools` to the provider (converting to each native format) and
   surfaces the model's tool calls back as OpenAI `tool_calls` +

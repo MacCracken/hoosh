@@ -1436,12 +1436,16 @@ fn handle_chat(cfd, body_ptr, body_len) {
     if (msgs != 0) {
         msg_raw = load64(msgs);
         msg_raw_len = load64(msgs + 8);
-        # Prompt compression (opt-in): collapse whitespace in content values
-        # before compaction so the token estimate sees the reduced text.
+        # Prompt compression (opt-in): collapse whitespace in content values and
+        # prune stale tool-call/result pairs before compaction so the token
+        # estimate sees the reduced text.
         if (msg_raw_len > 0 && compression_is_enabled() == 1) {
             var compressed = compress_ws_json(msg_raw, msg_raw_len);
             msg_raw = load64(compressed);
             msg_raw_len = load64(compressed + 8);
+            var pruned = prune_tool_pairs(msg_raw, msg_raw_len);
+            msg_raw = load64(pruned);
+            msg_raw_len = load64(pruned + 8);
         }
         # Context compaction: limit to est_tokens budget, using the
         # target provider's chars-per-token ratio.

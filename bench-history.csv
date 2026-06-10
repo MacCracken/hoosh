@@ -246,3 +246,15 @@ timestamp,commit,branch,suite,benchmark,avg_ns,min_ns,max_ns,iters
 2026-06-10T08:29:12Z,93ab5b9,main,hoosh,route_matches_model,34,34,34,100000
 2026-06-10T08:29:12Z,93ab5b9,main,hoosh,estimate_tokens_per_provider,8,8,8,100000
 2026-06-10T08:29:12Z,93ab5b9,main,hoosh,dlp_scan_clean_prompt,4000.0000,4000.0000,4000.0000,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,route_select_20_providers,872,872,872,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,route_round_robin_10,177,177,177,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,pool_reserve_commit,83,83,83,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,pool_available,4,4,4,100000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,cache_get_hit,107,107,107,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,cache_get_miss,47,47,47,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,cache_insert,64,64,64,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,queue_enqueue_dequeue,1000.0000,1000.0000,1000.0000,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,queue_5tier_sort,1000.0000,1000.0000,1000.0000,10000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,route_matches_model,32,32,32,100000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,estimate_tokens_per_provider,8,8,8,100000
+2026-06-10T08:46:59Z,da46ec6,main,hoosh,dlp_scan_clean_prompt,4000.0000,4000.0000,4000.0000,10000

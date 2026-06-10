@@ -230,11 +230,10 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       (`_embed_query_body` in `handle_chat` — embed the query on a miss, search/
       store; silent fallthrough on embedding failure). Unit-tested + live-verified
       (paraphrased queries hit semantically).
-- [~] Context compression (`context/compression.rs`) — **whitespace collapse
-      done** (`compression.cyr`, `[compression]` opt-in): JSON-aware collapse of
-      `content` values incl. `\n`/`\t`/`\r` escapes, applied before compaction.
-      The **stale tool-pair prune is deferred to v2.2.4** (needs tool-call
-      message structure).
+- [x] Context compression (`context/compression.rs`) — whitespace collapse
+      (`compress_ws_json`, JSON-aware) **and** stale tool-pair prune
+      (`prune_tool_pairs`, completed in v2.2.4); `[compression]` opt-in, applied
+      before compaction.
 
 ### v2.2.4 — Tool calling & MCP (in progress)
 - [x] **Provider-side tool calling — OpenAI, Anthropic, Gemini** — `handle_chat`
@@ -249,8 +248,10 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       bote.cyr` is a Cyrius distlib; JSON-RPC `tools/list` over a `ToolRegistry`)
 - [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; tool
       implementations come from **szál**, not yet a Cyrius distlib)
-- [ ] Stale tool-pair prune in `compression.cyr` (deferred from 2.2.3 — now has
-      tool-call message structure)
+- [x] **Stale tool-pair prune** in `compression.cyr` (`prune_tool_pairs`,
+      deferred from 2.2.3) — drops assistant `tool_calls` turns + their matching
+      `role:"tool"` results before the last 3 tool turns. Unit-tested. This
+      completes the `context/compression.rs` port.
 
 ### v2.2.5 — Throughput
 - [ ] Inference batching manager (`inference/batch.rs`) — gated on the
