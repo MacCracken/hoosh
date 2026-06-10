@@ -21,6 +21,7 @@ include "lib/ai-hwaccel.cyr"
 
 include "src/lib/types.cyr"
 include "src/lib/dlp.cyr"
+include "src/lib/compression.cyr"
 include "src/lib/logging.cyr"
 include "src/lib/ratelimit.cyr"
 include "src/lib/route.cyr"
@@ -114,8 +115,8 @@ fn http_route(cfd, method, path, buf, buf_len) {
         return http_ok(cfd, body, strlen(body));
     }
     if (streq(path, "/v1/admin/reload") == 1) {
-        load_config("hoosh.toml");
-        hlog_info("config reloaded from hoosh.toml");
+        load_config("hoosh.cyml");
+        hlog_info("config reloaded from hoosh.cyml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
     }
@@ -256,7 +257,7 @@ fn cmd_serve(port) {
     sakshi_info(str_data(lmsg), str_len(lmsg));
 
     # Cache warming — synchronously pre-populate the cache before accepting
-    # traffic (opt-in via [[warming]] in hoosh.toml).
+    # traffic (opt-in via [[warming]] in hoosh.cyml).
     warming_run();
 
     while (1 == 1) {
@@ -453,7 +454,7 @@ fn main() {
     hw_init();
 
     # Load config
-    load_config("hoosh.toml");
+    load_config("hoosh.cyml");
 
     # Open persistence (opt-in via [[storage]] path) and restore prior state.
     if (_storage_path != 0) {

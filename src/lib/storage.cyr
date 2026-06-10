@@ -1,6 +1,6 @@
 # storage.cyr — optional durable persistence via patra (embedded SQL DB).
 #
-# Opt-in: enabled only when hoosh.toml has `[[storage]] path = "..."`. When
+# Opt-in: enabled only when hoosh.cyml has `[[storage]] path = "..."`. When
 # disabled (_storage == 0) every entry point is a no-op and hoosh runs fully
 # in-memory exactly as before.
 #

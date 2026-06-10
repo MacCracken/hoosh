@@ -24,7 +24,7 @@ src/
 ├── hardware.rs          # GPU/TPU/NPU detection (ai-hwaccel)
 ├── middleware/           # Auth (bearer token), rate limiting (sliding window)
 ├── tools/               # MCP bridge, tool definitions, format conversion
-├── config.rs            # hoosh.toml parsing
+├── config.rs            # hoosh.cyml parsing
 ├── error.rs             # HooshError enum
 ├── events.rs            # Provider event bus (majra pubsub)
 ├── metrics.rs           # Prometheus counters

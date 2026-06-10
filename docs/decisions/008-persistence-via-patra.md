@@ -15,7 +15,7 @@ external dependency.
 ## Decision
 
 Add an **opt-in** persistence layer (`src/lib/storage.cyr`) backed by patra,
-enabled only when `hoosh.toml` sets `[[storage]] path = "..."`. When unset,
+enabled only when `hoosh.cyml` sets `[[storage]] path = "..."`. When unset,
 `_storage == 0` and every storage entry point is a no-op — hoosh runs fully
 in-memory, byte-for-byte as before (backward compatible).
 

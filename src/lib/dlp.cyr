@@ -26,7 +26,7 @@ enum DlpClass {
     CLASS_RESTRICTED   = 3;
 }
 
-# Scanner state — configured from [dlp] in hoosh.toml (off by default).
+# Scanner state — configured from [dlp] in hoosh.cyml (off by default).
 var _dlp_enabled = 0;
 var _dlp_default_level = 0;
 

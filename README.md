@@ -53,7 +53,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **Observability** | Prometheus `/metrics`, HMAC-SHA256 audit chain |
 | **Health checks** | Per-provider TCP probe via `/v1/health/providers` |
 | **Response caching** | Hashmap cache with eviction stats |
-| **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.toml` |
+| **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.cyml` |
 | **Local-first** | Prefers on-device inference; remote APIs as fallback |
 
 ---
@@ -153,14 +153,14 @@ Response:
 | GET | `/v1/cache/stats` | Cache hit/miss/eviction stats |
 | GET | `/v1/queue/status` | Request queue status |
 | GET | `/metrics` | Prometheus metrics (text format) |
-| POST | `/v1/admin/reload` | Hot-reload config from `hoosh.toml` |
+| POST | `/v1/admin/reload` | Hot-reload config from `hoosh.cyml` |
 | OPTIONS | `*` | CORS preflight |
 
 ---
 
 ## Configuration
 
-`hoosh.toml`:
+`hoosh.cyml`:
 
 ```toml
 [[server]]

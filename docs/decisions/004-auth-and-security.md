@@ -11,7 +11,7 @@ Hoosh proxies API keys to paid providers and handles user inference data. It nee
 
 ### Bearer Token Authentication
 
-- Static bearer tokens configured in `[auth] tokens` in `hoosh.toml`
+- Static bearer tokens configured in `[auth] tokens` in `hoosh.cyml`
 - Tokens are SHA-256 hashed at startup and stored as digests — raw tokens never kept in memory
 - Per-request comparison: hash provided token once, compare against stored digests with constant-time XOR (no length leak)
 - Empty token list = auth disabled (with startup warning)

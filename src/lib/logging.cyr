@@ -4,7 +4,7 @@
 # stdout as plain presentation. These wrappers carry operational events
 # (request lifecycle, auth/upstream failures, config reloads) to stderr
 # at the configured level, so piping stdout stays clean while operators
-# still get structured logs. Level is set from hoosh.toml `[logging]`
+# still get structured logs. Level is set from hoosh.cyml `[logging]`
 # (see config.cyr); default is SK_INFO.
 #
 # Requires: sakshi.cyr (stdlib), string.cyr (strlen).
@@ -14,7 +14,7 @@ fn hlog_warn(msg) { sakshi_warn(msg, strlen(msg)); return 0; }
 fn hlog_error(msg) { sakshi_error(msg, strlen(msg)); return 0; }
 fn hlog_debug(msg) { sakshi_debug(msg, strlen(msg)); return 0; }
 
-# Map a hoosh.toml log-level string to a sakshi LogLevel, or -1 if unknown.
+# Map a hoosh.cyml log-level string to a sakshi LogLevel, or -1 if unknown.
 fn hlog_level_from_str(s) {
     if (streq(s, "fatal") == 1) { return SK_FATAL; }
     if (streq(s, "error") == 1) { return SK_ERROR; }

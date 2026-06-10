@@ -1,9 +1,9 @@
-# config.cyr — TOML configuration loader for hoosh.toml
+# config.cyr — TOML configuration loader for hoosh.cyml
 # Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr
 # Reads: [[server]], [[providers]], [[cache]], [[budgets]], [[auth]]
 
 # Expand a config value: "$NAME" -> getenv("NAME"), so secrets (API keys)
-# live in the environment, not in hoosh.toml. Returns 0 if the env var is
+# live in the environment, not in hoosh.cyml. Returns 0 if the env var is
 # unset; passes non-"$" values through unchanged.
 fn _config_expand_env(value) {
     if (value == 0) { return 0; }
@@ -60,6 +60,18 @@ fn load_config(path) {
         dlp_configure(den, dlvl);
     }
 
+    # Parse [compression] section — prompt whitespace compression (off by default).
+    var comp_secs = toml_get_sections(sections, "compression");
+    if (vec_len(comp_secs) > 0) {
+        var cmp = toml_section_pairs(vec_get(comp_secs, 0));
+        var cmp_en_str = toml_get(cmp, "enabled");
+        var cmp_en = 0;
+        if (cmp_en_str != 0) {
+            if (str_eq_cstr(cmp_en_str, "true") == 1) { cmp_en = 1; }
+        }
+        compression_configure(cmp_en);
+    }
+
     # Parse [[warming]] sections — cache warming prompts (model + prompt).
     var warm_secs = toml_get_sections(sections, "warming");
     var wi = 0;
@@ -110,7 +122,7 @@ fn load_config(path) {
             var route = route_new(ptype, ppri, purl);
 
             # Parse API key — "$NAME" expands from the environment so the
-            # secret stays out of hoosh.toml.
+            # secret stays out of hoosh.cyml.
             var apikey_str = toml_get(pp, "api_key");
             if (apikey_str != 0) {
                 var apikey = _config_expand_env(to_cstr(apikey_str));

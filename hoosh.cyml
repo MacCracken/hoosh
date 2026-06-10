@@ -24,6 +24,13 @@ max_entries = 1000
 ttl_secs = 300
 enabled = true
 
+# Prompt compression — collapse whitespace in message content before sending,
+# shaving tokens without changing meaning (runs of spaces/tabs/newlines, incl.
+# \n \t \r escapes, become a single space; leading/trailing trimmed). Off by
+# default; applied before context compaction when enabled.
+# [compression]
+# enabled = true
+
 # Cache warming — pre-populate the response cache at startup so common prompts
 # are instant before traffic arrives. Each [[warming]] fires one inference at
 # startup (synchronous; opt-in). A client hits the warmed entry by POSTing the

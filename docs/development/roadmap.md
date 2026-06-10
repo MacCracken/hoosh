@@ -147,7 +147,7 @@ feature (the high-level client can't carry a TLS policy) — see below.
       against the real API.
 - [x] **`$ENV` key expansion** in config (`_config_expand_env`) — `api_key =
       "$ANTHROPIC_API_KEY"` resolves from the environment; secret stays out of
-      hoosh.toml.
+      hoosh.cyml.
 - [x] ✅ **UNBLOCKED: sandhi P1 SIGSEGV fixed** (cyrius 6.1.20 / sandhi 1.4.5;
       alloc heap off `brk`, native TLS default). Pin bumped 6.1.18 → 6.1.20,
       re-verified crash-free (6/6 sequential HTTPS, clean exit).
@@ -221,10 +221,11 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
 - [ ] Semantic cache — cosine similarity over embeddings (`cache/semantic.rs`);
       distinct from the exact-key LRU cache. **Depends on** embedding-vector
       storage + cosine (embeddings are currently pass-through).
-- [ ] Context compression — whitespace collapse + stale tool-pair prune
-      (`context/compression.rs`); distinct from the compaction already ported.
-      The tool-pair prune **depends on** tool-call message structure (v2.2.4);
-      whitespace collapse needs JSON-aware handling over the raw messages buffer.
+- [~] Context compression (`context/compression.rs`) — **whitespace collapse
+      done** (`compression.cyr`, `[compression]` opt-in): JSON-aware collapse of
+      `content` values incl. `\n`/`\t`/`\r` escapes, applied before compaction.
+      The **stale tool-pair prune is deferred to v2.2.4** (needs tool-call
+      message structure).
 
 ### v2.2.4 — Tool calling & MCP
 - [ ] `/v1/tools/list` — list registered MCP tools

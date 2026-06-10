@@ -8,6 +8,14 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Prompt compression** (`src/lib/compression.cyr`, `[compression]` config) —
+  opt-in whitespace collapse over JSON `content` *values*: runs of whitespace
+  (incl. `\n`/`\t`/`\r` escapes) collapse to a single space with leading/trailing
+  trim; keys, structure, and other escapes (`\"`, `\\`, `\uXXXX`) are preserved.
+  Applied in `handle_chat` before compaction when enabled. Ports the
+  whitespace-collapse half of `context/compression.rs`; the stale tool-pair
+  prune is deferred to v2.2.4 (needs tool-call message structure). Distinct from
+  compaction (which drops whole messages). Unit-tested (6 cases) + live-verified.
 - **Cache warming** (`handlers.cyr` `warming_run`/`warming_add`/`_warming_body`,
   `[[warming]]` config) — pre-populates the response cache at startup with
   operator-configured `(model, prompt)` prompts so common requests are instant
@@ -32,6 +40,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
   cached.
 
 ### Changed
+- **Runtime config renamed `hoosh.toml` → `hoosh.cyml`** — matches the project's
+  `cyrius.cyml` manifest convention (TOML syntax in a `.cyml` file; still parsed
+  by `toml_parse_file`). `load_config` + `/v1/admin/reload` + all docs/comments
+  updated. Verified: server loads providers + serves inference from `hoosh.cyml`.
 - **Cyrius pin 6.1.20 → 6.1.21**; stdlib re-synced, `cyrius.lock` refreshed. This
   ships sandhi's **native-TLS-by-default** flip.
 - **Native TLS is now the default — the gateway builds with no TLS flag**
