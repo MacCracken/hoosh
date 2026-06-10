@@ -644,26 +644,111 @@ fn _sse_stop(cfd, model) {
     return 0;
 }
 
+# SSE event callback for incremental remote streaming (sandhi_http_stream
+# contract: return nonzero to continue, 0 to stop). ctx layout:
+#   cfd(8) model(8) provider(8) emitted(8).
+# Each event's data is the provider's SSE payload; the per-provider extractor
+# (already used on the non-streaming path) pulls the delta text out of it.
+fn _remote_stream_cb(ctx, ev) {
+    var data = sandhi_sse_event_data(ev);
+    if (data == 0) { return 1; }
+    var dlen = strlen(data);
+    if (dlen == 0) { return 1; }
+    var prov = load64(ctx + 16);
+    # OpenAI-compat terminates the stream with a literal `[DONE]` sentinel.
+    if (dlen == 6) {
+        if (memeq(data, "[DONE]", 6) == 1) { return 0; }
+    }
+    var txt = 0;
+    if (prov == PROV_ANTHROPIC) {
+        # content_block_delta carries delta.text; other event types have no
+        # "text":"..." and extract to empty (skipped below).
+        txt = anthropic_extract_text(data, dlen);
+    } else {
+        if (prov == PROV_GOOGLE) {
+            # candidates[].content.parts[].text
+            txt = anthropic_extract_text(data, dlen);
+        } else {
+            # OpenAI-compat delta: choices[].delta.content
+            txt = ollama_extract_text(data, dlen);
+        }
+    }
+    if (strlen(txt) > 0) {
+        _sse_chunk(load64(ctx), load64(ctx + 8), txt, strlen(txt));
+        store64(ctx + 24, load64(ctx + 24) + 1);
+    }
+    return 1;
+}
+
+# Build the streaming request body for a remote provider.
+fn _remote_stream_body(route, model, msg_raw, msg_len) {
+    var prov = route_provider(route);
+    if (prov == PROV_ANTHROPIC) {
+        return _build_anthropic_body_x(model, msg_raw, msg_len, 1);
+    }
+    if (prov == PROV_GOOGLE) {
+        return _build_gemini_body(msg_raw, msg_len);
+    }
+    return _build_chat_body_raw_stream(model, msg_raw, msg_len);
+}
+
+# Build the streaming request URL for a remote provider.
+fn _remote_stream_url(route, model) {
+    if (route_provider(route) == PROV_GOOGLE) {
+        return _gemini_url_stream(route_base_url(route), model, route_api_key(route));
+    }
+    return _provider_url(route_base_url(route), _provider_path(route));
+}
+
 # Streaming handler: proxy NDJSON/SSE from backend to client
 fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
-    # Remote (TLS) providers: no incremental streaming yet — buffer the full
-    # response via the non-streaming path and emit it as one SSE delta + stop.
-    # Local backends stream token-by-token below.
+    # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
+    # each provider's delta events and re-emitting them as OpenAI SSE chunks.
+    # If the stream errors before emitting anything, fall back to the buffered
+    # non-streaming path (no second http_sse_begin). Local backends stream
+    # token-by-token below.
     if (route_is_remote(route) == 1) {
-        var rresult = retry_forward(
-        _retry_cfg, route, model, "hello", msg_raw, msg_len);
         http_sse_begin(cfd);
-        if (rresult != 0) {
-            var rtext = load64(rresult);
-            if (strlen(rtext) > 0) {
-                _sse_chunk(cfd, model, rtext, strlen(rtext));
+        var sbody = _remote_stream_body(route, model, msg_raw, msg_len);
+        var surl = _remote_stream_url(route, model);
+        var hdrs = _provider_headers(route);
+        var ctx = alloc(32);
+        store64(ctx, cfd);
+        store64(ctx + 8, model);
+        store64(ctx + 16, route_provider(route));
+        store64(ctx + 24, 0);
+        var sres = sandhi_http_stream(
+        surl, "POST", hdrs, sbody, strlen(sbody),
+        &_remote_stream_cb, ctx);
+        var emitted = load64(ctx + 24);
+        var ok = 0;
+        if (sres != 0) {
+            if (sandhi_stream_err(sres) == SANDHI_OK) {
+                var st = sandhi_stream_status(sres);
+                if (st >= 200) { if (st < 300) { ok = 1; } }
             }
-            metrics_record(0, load64(rresult + 24));
-            if (_audit_chain != 0) {
-                audit_record(_audit_chain, "inference.stream", "info",
-                "streaming inference (buffered remote)",
-                provider_name(route_provider(route)), model);
+        }
+        if (ok == 0) {
+            # Only safe to fall back when nothing was streamed yet, otherwise
+            # the buffered emit would duplicate the partial output.
+            if (emitted == 0) {
+                var rresult = retry_forward(
+                _retry_cfg, route, model, "hello", msg_raw, msg_len);
+                if (rresult != 0) {
+                    var rtext = load64(rresult);
+                    if (strlen(rtext) > 0) {
+                        _sse_chunk(cfd, model, rtext, strlen(rtext));
+                    }
+                    metrics_record(0, load64(rresult + 24));
+                }
             }
+        } else {
+            metrics_record(0, emitted);
+        }
+        if (_audit_chain != 0) {
+            audit_record(_audit_chain, "inference.stream", "info",
+            "streaming inference (remote)",
+            provider_name(route_provider(route)), model);
         }
         _sse_stop(cfd, model);
         return 0;

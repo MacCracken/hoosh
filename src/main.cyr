@@ -390,6 +390,26 @@ fn main() {
     args_init();
     sha256_global_init();
 
+    # Force sandhi's native TLS backend so the gateway never fdlopen-loads
+    # libssl/libcrypto/glibc, whose brk-malloc arena + TLS machinery is the
+    # source of the repeated-request SIGSEGV on the remote path. This REQUIRES
+    # the native stack to be compiled in via `-D CYRIUS_TLS_NATIVE` (see the
+    # [build] flags in cyrius.cyml and the CI/release workflows). If that flag
+    # is ever dropped, use_native returns -1 and the gateway would silently fall
+    # back to the crash-prone libssl bridge — so warn loudly instead of failing
+    # quietly. See sandhi docs/architecture/004-native-tls-default.md.
+    if (sandhi_tls_use_native() != 0) {
+        var _w = "WARNING: native TLS backend unavailable — built without "
+        ;
+        sys_write(2, _w, strlen(_w));
+        var _w2 = "-D CYRIUS_TLS_NATIVE. Remote HTTPS runs on the libssl bridge, "
+        ;
+        sys_write(2, _w2, strlen(_w2));
+        var _w3 = "which SIGSEGVs on repeated requests. Rebuild with the flag.\n"
+        ;
+        sys_write(2, _w3, strlen(_w3));
+    }
+
     # Initialize state
     _budget = budget_new();
     budget_add_pool(_budget, pool_new("default", 10000000));

@@ -215,6 +215,35 @@ fn _provider_path(route) {
     return "/v1/chat/completions";
 }
 
+fn ollama_extract_text(resp_body, resp_len) {
+    if (resp_body == 0) { return ""; }
+    if (resp_len == 0) { return ""; }
+    store8(resp_body + resp_len, 0);
+    var needle = "\"content\":\"";
+    var nlen = 11;
+    var i = 0;
+    while (i < resp_len - nlen) {
+        if (memeq(resp_body + i, needle, nlen) == 1) {
+            i = i + nlen;
+            var start = i;
+            while (i < resp_len) {
+                if (load8(resp_body + i) == 34) {
+                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
+                    break;
+                }
+                i = i + 1;
+            }
+            var tlen = i - start;
+            var text = alloc(tlen + 1);
+            memcpy(text, resp_body + start, tlen);
+            store8(text + tlen, 0);
+            return text;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
 fn anthropic_extract_text(resp_body, resp_len) {
     if (resp_body == 0) { return ""; }
     if (resp_len == 0) { return ""; }
@@ -290,6 +319,263 @@ fn extract_openai_tokens(body, blen) {
         i = i + 1;
     }
     return prompt * 0x100000000 + comp;
+}
+
+# Anthropic system-message hoist helpers — mirror of src/lib/provider.cyr.
+fn _json_obj_str_field(p, len, key, keylen) {
+    var i = 0;
+    while (i < len - keylen - 1) {
+        if (load8(p + i) == 34) {
+            if (memeq(p + i + 1, key, keylen) == 1) {
+                if (load8(p + i + 1 + keylen) == 34) {
+                    var j = i + 2 + keylen;
+                    while (j < len) {
+                        var c = load8(p + j);
+                        if (c == 32) { j = j + 1; continue; }
+                        if (c == 58) { j = j + 1; continue; }
+                        break;
+                    }
+                    if (j >= len) { return 0; }
+                    if (load8(p + j) != 34) { return 0; }
+                    j = j + 1;
+                    var vs = j;
+                    while (j < len) {
+                        if (load8(p + j) == 34) {
+                            if (load8(p + j - 1) == 92) { j = j + 1; continue; }
+                            break;
+                        }
+                        j = j + 1;
+                    }
+                    var r = alloc(16);
+                    store64(r, p + vs);
+                    store64(r + 8, j - vs);
+                    return r;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _obj_is_system(p, len) {
+    var rf = _json_obj_str_field(p, len, "role", 4);
+    if (rf == 0) { return 0; }
+    if (load64(rf + 8) != 6) { return 0; }
+    if (memeq(load64(rf), "system", 6) == 1) { return 1; }
+    return 0;
+}
+
+fn _json_obj_end(p, len, start) {
+    var depth = 0;
+    var i = start;
+    while (i < len) {
+        var ch = load8(p + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(p + i) == 34) {
+                    if (load8(p + i - 1) != 92) { break; }
+                }
+                i = i + 1;
+            }
+        } else {
+            if (ch == 123) { depth = depth + 1; }
+            if (ch == 91) { depth = depth + 1; }
+            if (ch == 93) { depth = depth - 1; }
+            if (ch == 125) {
+                depth = depth - 1;
+                if (depth == 0) { return i + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn _build_anthropic_body_x(model, messages_raw, messages_len, stream) {
+    var sys_sb = str_builder_new();
+    var msgs_sb = str_builder_new();
+    str_builder_putc(msgs_sb, '[');
+    var has_sys = 0;
+    var first = 1;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32) { i = i + 1; continue; }
+        if (ch == 44) { i = i + 1; continue; }
+        if (ch == 10) { i = i + 1; continue; }
+        if (ch == 13) { i = i + 1; continue; }
+        if (ch == 9) { i = i + 1; continue; }
+        if (ch != 123) { break; }
+        var obj_start = i;
+        var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
+        var obj_len = obj_end - obj_start;
+        var keep = 1;
+        if (_obj_is_system(messages_raw + obj_start, obj_len) == 1) {
+            var cf = _json_obj_str_field(messages_raw + obj_start, obj_len, "content", 7);
+            if (cf != 0) {
+                if (has_sys == 1) {
+                    str_builder_putc(sys_sb, 92);
+                    str_builder_putc(sys_sb, 110);
+                }
+                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                has_sys = 1;
+                keep = 0;
+            }
+        }
+        if (keep == 1) {
+            if (first == 0) { str_builder_putc(msgs_sb, ','); }
+            str_builder_add(msgs_sb, str_new(messages_raw + obj_start, obj_len));
+            first = 0;
+        }
+        i = obj_end;
+    }
+    str_builder_putc(msgs_sb, ']');
+
+    var body = str_builder_new();
+    str_builder_add_cstr(body, "{\"model\":\"");
+    str_builder_add_cstr(body, model);
+    str_builder_add_cstr(body, "\",\"max_tokens\":4096,");
+    if (stream == 1) {
+        str_builder_add_cstr(body, "\"stream\":true,");
+    }
+    if (has_sys == 1) {
+        str_builder_add_cstr(body, "\"system\":\"");
+        str_builder_add(body, str_builder_build(sys_sb));
+        str_builder_add_cstr(body, "\",");
+    }
+    str_builder_add_cstr(body, "\"messages\":");
+    str_builder_add(body, str_builder_build(msgs_sb));
+    str_builder_putc(body, '}');
+    return str_cstr(str_builder_build(body));
+}
+
+fn _build_anthropic_body(model, messages_raw, messages_len) {
+    return _build_anthropic_body_x(model, messages_raw, messages_len, 0);
+}
+
+# Gemini shaping helpers — mirror of src/lib/provider.cyr.
+fn _build_gemini_body(messages_raw, messages_len) {
+    var sys_sb = str_builder_new();
+    var contents_sb = str_builder_new();
+    str_builder_putc(contents_sb, '[');
+    var has_sys = 0;
+    var first = 1;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32) { i = i + 1; continue; }
+        if (ch == 44) { i = i + 1; continue; }
+        if (ch == 10) { i = i + 1; continue; }
+        if (ch == 13) { i = i + 1; continue; }
+        if (ch == 9) { i = i + 1; continue; }
+        if (ch != 123) { break; }
+        var obj_start = i;
+        var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
+        var obj_len = obj_end - obj_start;
+        var cf = _json_obj_str_field(messages_raw + obj_start, obj_len, "content", 7);
+        if (_obj_is_system(messages_raw + obj_start, obj_len) == 1) {
+            if (cf != 0) {
+                if (has_sys == 1) {
+                    str_builder_putc(sys_sb, 92);
+                    str_builder_putc(sys_sb, 110);
+                }
+                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                has_sys = 1;
+            }
+        } else {
+            if (cf != 0) {
+                var role = "user";
+                var rf = _json_obj_str_field(messages_raw + obj_start, obj_len, "role", 4);
+                if (rf != 0) {
+                    if (load64(rf + 8) == 9) {
+                        if (memeq(load64(rf), "assistant", 9) == 1) { role = "model"; }
+                    }
+                }
+                if (first == 0) { str_builder_putc(contents_sb, ','); }
+                str_builder_add_cstr(contents_sb, "{\"role\":\"");
+                str_builder_add_cstr(contents_sb, role);
+                str_builder_add_cstr(contents_sb, "\",\"parts\":[{\"text\":\"");
+                str_builder_add(contents_sb, str_new(load64(cf), load64(cf + 8)));
+                str_builder_add_cstr(contents_sb, "\"}]}");
+                first = 0;
+            }
+        }
+        i = obj_end;
+    }
+    str_builder_putc(contents_sb, ']');
+
+    var body = str_builder_new();
+    str_builder_putc(body, '{');
+    if (has_sys == 1) {
+        str_builder_add_cstr(body, "\"systemInstruction\":{\"parts\":[{\"text\":\"");
+        str_builder_add(body, str_builder_build(sys_sb));
+        str_builder_add_cstr(body, "\"}]},");
+    }
+    str_builder_add_cstr(body, "\"contents\":");
+    str_builder_add(body, str_builder_build(contents_sb));
+    str_builder_putc(body, '}');
+    return str_cstr(str_builder_build(body));
+}
+
+fn gemini_extract_text(resp_body, resp_len) {
+    return anthropic_extract_text(resp_body, resp_len);
+}
+
+fn extract_gemini_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 22) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 23) {
+        if (memeq(body + i, "\"promptTokenCount\":", 19) == 1) {
+            prompt = atoi(body + i + 19);
+        }
+        if (memeq(body + i, "\"candidatesTokenCount\":", 23) == 1) {
+            comp = atoi(body + i + 23);
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+fn _gemini_url(base, model, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "/v1beta/models/");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, ":generateContent");
+    if (key != 0) {
+        str_builder_add_cstr(sb, "?key=");
+        str_builder_add_cstr(sb, key);
+    }
+    return str_cstr(str_builder_build(sb));
+}
+
+fn _gemini_url_stream(base, model, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "/v1beta/models/");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, ":streamGenerateContent?alt=sse");
+    if (key != 0) {
+        str_builder_add_cstr(sb, "&key=");
+        str_builder_add_cstr(sb, key);
+    }
+    return str_cstr(str_builder_build(sb));
 }
 
 # ================================================================
@@ -2109,6 +2395,83 @@ fn main() {
     var atok = extract_anthropic_tokens(abuf, alen);
     assert_eq(atok / 0x100000000, 11, "anthropic input_tokens extracted");
     assert_eq(atok % 0x100000000, 4, "anthropic output_tokens extracted");
+
+    # Anthropic system-message hoist: role:"system" turns lift to top-level
+    # "system"; the rest pass through unchanged.
+    var hm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"}]";
+    var hb1 = _build_anthropic_body("claude", hm1, strlen(hm1));
+    assert_streq(hb1,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "anthropic hoist: system lifted, user kept");
+
+    # No system turn → no "system" field, messages pass straight through.
+    var hm2 = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    var hb2 = _build_anthropic_body("claude", hm2, strlen(hm2));
+    assert_streq(hb2,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "anthropic hoist: no system, passthrough");
+
+    # Multiple system turns join with \n in declaration order.
+    var hm3 = "[{\"role\":\"system\",\"content\":\"A\"},{\"role\":\"system\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"hi\"}]";
+    var hb3 = _build_anthropic_body("claude", hm3, strlen(hm3));
+    assert_streq(hb3,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"A\\nB\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "anthropic hoist: two system turns joined with newline");
+
+    # Gemini shaping: OpenAI messages -> contents (assistant->model), system ->
+    # systemInstruction; URL carries model + key query param.
+    var gm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]";
+    var gb1 = _build_gemini_body(gm1, strlen(gm1));
+    assert_streq(gb1,
+    "{\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief\"}]},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]},{\"role\":\"model\",\"parts\":[{\"text\":\"yo\"}]}]}",
+    "gemini shaping: system->systemInstruction, assistant->model");
+
+    var gm2 = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    var gb2 = _build_gemini_body(gm2, strlen(gm2));
+    assert_streq(gb2,
+    "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}]}",
+    "gemini shaping: no system, single user turn");
+
+    assert_streq(
+    _gemini_url("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=k123",
+    "gemini url: model-scoped generateContent + key query param");
+
+    var gresp = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}],\"role\":\"model\"}}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3,\"totalTokenCount\":10}}";
+    var glen = strlen(gresp);
+    var gbuf = alloc(glen + 1);
+    memcpy(gbuf, gresp, glen);
+    assert_streq(gemini_extract_text(gbuf, glen), "Hello", "gemini text extracted");
+    var gtok = extract_gemini_tokens(gbuf, glen);
+    assert_eq(gtok / 0x100000000, 7, "gemini promptTokenCount extracted");
+    assert_eq(gtok % 0x100000000, 3, "gemini candidatesTokenCount extracted");
+
+    # Incremental streaming: request shaping for the SSE path.
+    var sm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"}]";
+    var sb1 = _build_anthropic_body_x("claude", sm1, strlen(sm1), 1);
+    assert_streq(sb1,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"stream\":true,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "anthropic stream body: stream:true flag set");
+
+    assert_streq(
+    _gemini_url_stream("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=k123",
+    "gemini stream url: streamGenerateContent + alt=sse + key");
+
+    # SSE delta extraction reuses the per-provider extractors on event data.
+    var oai_delta = "{\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}";
+    var od_len = strlen(oai_delta);
+    var od_buf = alloc(od_len + 1);
+    memcpy(od_buf, oai_delta, od_len);
+    assert_streq(ollama_extract_text(od_buf, od_len), "Hi",
+    "openai SSE delta: content extracted");
+
+    var ant_delta = "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}";
+    var ad_len = strlen(ant_delta);
+    var ad_buf = alloc(ad_len + 1);
+    memcpy(ad_buf, ant_delta, ad_len);
+    assert_streq(anthropic_extract_text(ad_buf, ad_len), "Hi",
+    "anthropic SSE delta: text_delta extracted (type:text_delta not matched)");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

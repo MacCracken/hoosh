@@ -63,6 +63,7 @@ wrapper (guarded by the `hardware_data_files` test).
 - **Own the stack.** If an AGNOS project wraps an external capability, depend on the AGNOS project (e.g. hardware detection via `ai-hwaccel`, consumed as its `dist/` bundle).
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **Pin the toolchain in `cyrius.cyml`.** Build/CI use the pinned `cyrius` (`~/.cyrius/versions/<pin>/bin/cyrius`); `cyrius lib sync` + `cyrius deps` vendor stdlib + deps into gitignored `lib/`.
+- **Build the binary with `-D CYRIUS_TLS_NATIVE`** (flag MUST come before the source: `cyrius build -D CYRIUS_TLS_NATIVE src/main.cyr build/hoosh`). This compiles in sandhi's native TLS stack so the gateway never fdlopen-loads libssl/glibc — whose brk-malloc arena + TLS machinery **SIGSEGVs on repeated remote HTTPS requests**. Without it, hoosh silently falls back to the crash-prone libssl bridge; `main()` calls `sandhi_tls_use_native()` and prints a startup WARNING if native is not active. CI + release pass the flag; local builds must too. (Tests/benches don't need it — no real TLS.)
 - **Syscalls via `sys_*` wrappers** (`sys_write`/`sys_read`/`sys_close`/`sys_socket`/`sys_connect`/`sys_exit`) — never raw `syscall(N, …)` numbers or bare `SYS_*` enum members.
 - **Single-pass include order** — modules must be `include`d before first use (`include "lib/ai-hwaccel.cyr"` before any module that calls into it).
 - **Build strings with `str_builder`**, allocate with `alloc` only when you must — avoid temporary allocations.

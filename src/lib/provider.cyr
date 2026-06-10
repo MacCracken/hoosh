@@ -164,24 +164,156 @@ fn _provider_path(route) {
     return "/v1/chat/completions";
 }
 
+# Scan a JSON object's bytes for a string field `"<key>":"<value>"`. Returns
+# an alloc(16) {value_ptr(8), value_len(8)} for the value slice (escaped `\"`
+# preserved, quote-skipping mirrors the extractors above), or 0 when the key
+# is absent or its value is not a JSON string.
+fn _json_obj_str_field(p, len, key, keylen) {
+    var i = 0;
+    while (i < len - keylen - 1) {
+        if (load8(p + i) == 34) {
+            if (memeq(p + i + 1, key, keylen) == 1) {
+                if (load8(p + i + 1 + keylen) == 34) {
+                    var j = i + 2 + keylen;
+                    while (j < len) {
+                        var c = load8(p + j);
+                        if (c == 32) { j = j + 1; continue; }
+                        if (c == 58) { j = j + 1; continue; }
+                        break;
+                    }
+                    if (j >= len) { return 0; }
+                    if (load8(p + j) != 34) { return 0; }
+                    j = j + 1;
+                    var vs = j;
+                    while (j < len) {
+                        if (load8(p + j) == 34) {
+                            if (load8(p + j - 1) == 92) { j = j + 1; continue; }
+                            break;
+                        }
+                        j = j + 1;
+                    }
+                    var r = alloc(16);
+                    store64(r, p + vs);
+                    store64(r + 8, j - vs);
+                    return r;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# True if a JSON object's bytes carry `"role":"system"`.
+fn _obj_is_system(p, len) {
+    var rf = _json_obj_str_field(p, len, "role", 4);
+    if (rf == 0) { return 0; }
+    if (load64(rf + 8) != 6) { return 0; }
+    if (memeq(load64(rf), "system", 6) == 1) { return 1; }
+    return 0;
+}
+
+# Index just past the `}` matching the `{` at `start`. String-aware (braces
+# and brackets inside JSON strings don't count), escaped `\"` skipped.
+fn _json_obj_end(p, len, start) {
+    var depth = 0;
+    var i = start;
+    while (i < len) {
+        var ch = load8(p + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(p + i) == 34) {
+                    if (load8(p + i - 1) != 92) { break; }
+                }
+                i = i + 1;
+            }
+        } else {
+            if (ch == 123) { depth = depth + 1; }
+            if (ch == 91) { depth = depth + 1; }
+            if (ch == 93) { depth = depth - 1; }
+            if (ch == 125) {
+                depth = depth - 1;
+                if (depth == 0) { return i + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
 # Build an Anthropic /v1/messages body. Anthropic requires max_tokens and
-# uses the same {role,content} message shape as OpenAI for text turns, so the
-# incoming messages array passes through. (System-message hoisting to the
-# top-level "system" field is a follow-up.)
+# rejects `role:"system"` turns inside `messages`, so system turns are hoisted
+# to the top-level `system` field (multiple joined with `\n`); the remaining
+# {role,content} turns pass through unchanged. Objects whose content is not a
+# plain string are left in `messages` rather than dropped. `stream` adds the
+# top-level `"stream":true` flag for the incremental SSE path.
+fn _build_anthropic_body_x(model, messages_raw, messages_len, stream) {
+    var sys_sb = str_builder_new();
+    var msgs_sb = str_builder_new();
+    str_builder_putc(msgs_sb, '[');
+    var has_sys = 0;
+    var first = 1;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32) { i = i + 1; continue; }
+        if (ch == 44) { i = i + 1; continue; }
+        if (ch == 10) { i = i + 1; continue; }
+        if (ch == 13) { i = i + 1; continue; }
+        if (ch == 9) { i = i + 1; continue; }
+        if (ch != 123) { break; }
+        var obj_start = i;
+        var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
+        var obj_len = obj_end - obj_start;
+        var keep = 1;
+        if (_obj_is_system(messages_raw + obj_start, obj_len) == 1) {
+            var cf = _json_obj_str_field(messages_raw + obj_start, obj_len, "content", 7);
+            if (cf != 0) {
+                if (has_sys == 1) {
+                    str_builder_putc(sys_sb, 92);
+                    str_builder_putc(sys_sb, 110);
+                }
+                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                has_sys = 1;
+                keep = 0;
+            }
+        }
+        if (keep == 1) {
+            if (first == 0) { str_builder_putc(msgs_sb, ','); }
+            str_builder_add(msgs_sb, str_new(messages_raw + obj_start, obj_len));
+            first = 0;
+        }
+        i = obj_end;
+    }
+    str_builder_putc(msgs_sb, ']');
+
+    var body = str_builder_new();
+    str_builder_add_cstr(body, "{\"model\":\"");
+    str_builder_add_cstr(body, model);
+    str_builder_add_cstr(body, "\",\"max_tokens\":4096,");
+    if (stream == 1) {
+        str_builder_add_cstr(body, "\"stream\":true,");
+    }
+    if (has_sys == 1) {
+        str_builder_add_cstr(body, "\"system\":\"");
+        str_builder_add(body, str_builder_build(sys_sb));
+        str_builder_add_cstr(body, "\",");
+    }
+    str_builder_add_cstr(body, "\"messages\":");
+    str_builder_add(body, str_builder_build(msgs_sb));
+    str_builder_putc(body, '}');
+    return to_cstr(str_builder_build(body));
+}
+
+# Non-streaming Anthropic body (the common case).
 fn _build_anthropic_body(model, messages_raw, messages_len) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"max_tokens\":4096,\"messages\":");
-    var prefix = to_cstr(str_builder_build(sb));
-    var plen = strlen(prefix);
-    var total = plen + messages_len + 1;
-    var buf = alloc(total + 1);
-    memcpy(buf, prefix, plen);
-    memcpy(buf + plen, messages_raw, messages_len);
-    store8(buf + plen + messages_len, 125);
-    store8(buf + plen + messages_len + 1, 0);
-    return buf;
+    return _build_anthropic_body_x(model, messages_raw, messages_len, 0);
 }
 
 # Anthropic /v1/messages body from a bare prompt (no messages array).
@@ -247,6 +379,145 @@ fn extract_anthropic_tokens(body, blen) {
     return prompt * 0x100000000 + comp;
 }
 
+# Build a Google Gemini :generateContent body from an OpenAI-style messages
+# array. role:"system" turns hoist to `systemInstruction` (joined with `\n`);
+# the rest become `contents` entries with role mapped (assistant -> "model",
+# everything else -> "user") and content wrapped as a single text part. Content
+# bytes are already JSON-escaped, so they embed verbatim.
+fn _build_gemini_body(messages_raw, messages_len) {
+    var sys_sb = str_builder_new();
+    var contents_sb = str_builder_new();
+    str_builder_putc(contents_sb, '[');
+    var has_sys = 0;
+    var first = 1;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32) { i = i + 1; continue; }
+        if (ch == 44) { i = i + 1; continue; }
+        if (ch == 10) { i = i + 1; continue; }
+        if (ch == 13) { i = i + 1; continue; }
+        if (ch == 9) { i = i + 1; continue; }
+        if (ch != 123) { break; }
+        var obj_start = i;
+        var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
+        var obj_len = obj_end - obj_start;
+        var cf = _json_obj_str_field(messages_raw + obj_start, obj_len, "content", 7);
+        if (_obj_is_system(messages_raw + obj_start, obj_len) == 1) {
+            if (cf != 0) {
+                if (has_sys == 1) {
+                    str_builder_putc(sys_sb, 92);
+                    str_builder_putc(sys_sb, 110);
+                }
+                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                has_sys = 1;
+            }
+        } else {
+            if (cf != 0) {
+                var role = "user";
+                var rf = _json_obj_str_field(messages_raw + obj_start, obj_len, "role", 4);
+                if (rf != 0) {
+                    if (load64(rf + 8) == 9) {
+                        if (memeq(load64(rf), "assistant", 9) == 1) { role = "model"; }
+                    }
+                }
+                if (first == 0) { str_builder_putc(contents_sb, ','); }
+                str_builder_add_cstr(contents_sb, "{\"role\":\"");
+                str_builder_add_cstr(contents_sb, role);
+                str_builder_add_cstr(contents_sb, "\",\"parts\":[{\"text\":\"");
+                str_builder_add(contents_sb, str_new(load64(cf), load64(cf + 8)));
+                str_builder_add_cstr(contents_sb, "\"}]}");
+                first = 0;
+            }
+        }
+        i = obj_end;
+    }
+    str_builder_putc(contents_sb, ']');
+
+    var body = str_builder_new();
+    str_builder_putc(body, '{');
+    if (has_sys == 1) {
+        str_builder_add_cstr(body, "\"systemInstruction\":{\"parts\":[{\"text\":\"");
+        str_builder_add(body, str_builder_build(sys_sb));
+        str_builder_add_cstr(body, "\"}]},");
+    }
+    str_builder_add_cstr(body, "\"contents\":");
+    str_builder_add(body, str_builder_build(contents_sb));
+    str_builder_putc(body, '}');
+    return to_cstr(str_builder_build(body));
+}
+
+# Gemini :generateContent body from a bare prompt (single user turn).
+fn _build_gemini_body_prompt(prompt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"");
+    str_builder_add_cstr(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}]}");
+    return to_cstr(str_builder_build(sb));
+}
+
+# Extract assistant text from a Gemini response: candidates[].content.parts[].text.
+# The first "text":"..." is the model output (same shape as Anthropic content).
+fn gemini_extract_text(resp_body, resp_len) {
+    return anthropic_extract_text(resp_body, resp_len);
+}
+
+# Extract token counts from a Gemini response usageMetadata object.
+# Returns packed: promptTokenCount * 0x100000000 + candidatesTokenCount.
+fn extract_gemini_tokens(body, blen) {
+    if (body == 0) { return 0; }
+    if (blen < 22) { return 0; }
+    store8(body + blen, 0);
+    var prompt = 0;
+    var comp = 0;
+    var i = 0;
+    while (i < blen - 23) {
+        if (memeq(body + i, "\"promptTokenCount\":", 19) == 1) {
+            prompt = atoi(body + i + 19);
+        }
+        if (memeq(body + i, "\"candidatesTokenCount\":", 23) == 1) {
+            comp = atoi(body + i + 23);
+        }
+        i = i + 1;
+    }
+    return prompt * 0x100000000 + comp;
+}
+
+# base + "/v1beta/models/<model>:generateContent?key=<key>" -> fresh cstr.
+# Gemini authenticates via the key query param (no Authorization header).
+fn _gemini_url(base, model, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "/v1beta/models/");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, ":generateContent");
+    if (key != 0) {
+        str_builder_add_cstr(sb, "?key=");
+        str_builder_add_cstr(sb, key);
+    }
+    return to_cstr(str_builder_build(sb));
+}
+
+# Streaming variant: :streamGenerateContent with `alt=sse` so the response is
+# an SSE stream of candidate deltas (key stays in the query string).
+fn _gemini_url_stream(base, model, key) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, "/v1beta/models/");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, ":streamGenerateContent?alt=sse");
+    if (key != 0) {
+        str_builder_add_cstr(sb, "&key=");
+        str_builder_add_cstr(sb, key);
+    }
+    return to_cstr(str_builder_build(sb));
+}
+
 # base_url + path -> fresh cstr (e.g. "https://api.openai.com/v1/chat/completions")
 fn _provider_url(base, path) {
     var sb = str_builder_new();
@@ -264,7 +535,8 @@ fn _bearer_value(key) {
 }
 
 # sandhi header set: Content-Type + per-provider auth. Anthropic uses
-# x-api-key + anthropic-version; everything else uses Authorization: Bearer.
+# x-api-key + anthropic-version; Google authenticates via the URL key query
+# param (no auth header); everything else uses Authorization: Bearer.
 fn _provider_headers(route) {
     var h = sandhi_headers_new();
     sandhi_headers_add(h, "Content-Type", "application/json");
@@ -274,7 +546,9 @@ fn _provider_headers(route) {
             sandhi_headers_add(h, "x-api-key", key);
             sandhi_headers_add(h, "anthropic-version", "2023-06-01");
         } else {
-            sandhi_headers_add(h, "Authorization", _bearer_value(key));
+            if (route_provider(route) != PROV_GOOGLE) {
+                sandhi_headers_add(h, "Authorization", _bearer_value(key));
+            }
         }
     }
     return h;
@@ -285,6 +559,7 @@ fn _provider_headers(route) {
 fn provider_forward(route, model, prompt, messages_raw, messages_len) {
     var base = route_base_url(route);
     var is_anthropic = (route_provider(route) == PROV_ANTHROPIC);
+    var is_google = (route_provider(route) == PROV_GOOGLE);
     var body = 0;
     if (is_anthropic == 1) {
         if (messages_raw != 0) {
@@ -293,10 +568,18 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
             body = _build_anthropic_body_prompt(model, prompt);
         }
     } else {
-        if (messages_raw != 0) {
-            body = _build_chat_body_raw(model, messages_raw, messages_len);
+        if (is_google == 1) {
+            if (messages_raw != 0) {
+                body = _build_gemini_body(messages_raw, messages_len);
+            } else {
+                body = _build_gemini_body_prompt(prompt);
+            }
         } else {
-            body = _build_chat_body(model, prompt);
+            if (messages_raw != 0) {
+                body = _build_chat_body_raw(model, messages_raw, messages_len);
+            } else {
+                body = _build_chat_body(model, prompt);
+            }
         }
     }
     var blen = strlen(body);
@@ -306,7 +589,14 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
     var rbl = 0;
     if (route_is_remote(route) == 1) {
         # Remote (TLS) path via sandhi: full URL + DNS + TLS + auth headers.
-        var url = _provider_url(base, path);
+        # Google builds a model-scoped :generateContent URL with the key as a
+        # query param; everyone else joins base + path.
+        var url = 0;
+        if (is_google == 1) {
+            url = _gemini_url(base, model, route_api_key(route));
+        } else {
+            url = _provider_url(base, path);
+        }
         var hdrs = _provider_headers(route);
         var sresp = sandhi_http_post(url, hdrs, body, blen);
         if (sresp == 0) { return 0; }
@@ -339,13 +629,17 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
         # Anthropic: content[].text + usage.{input,output}_tokens.
         text = anthropic_extract_text(rb, rbl);
         tokens = extract_anthropic_tokens(rb, rbl);
-    } else {
-        text = ollama_extract_text(rb, rbl);
-        # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
-        # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
-        tokens = extract_ollama_tokens(rb, rbl);
-        if (tokens == 0) { tokens = extract_openai_tokens(rb, rbl); }
-    }
+    } else { if (is_google == 1) {
+            # Gemini: candidates[].content.parts[].text + usageMetadata counts.
+            text = gemini_extract_text(rb, rbl);
+            tokens = extract_gemini_tokens(rb, rbl);
+        } else {
+            text = ollama_extract_text(rb, rbl);
+            # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
+            # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
+            tokens = extract_ollama_tokens(rb, rbl);
+            if (tokens == 0) { tokens = extract_openai_tokens(rb, rbl); }
+        } }
     var ptok = tokens / 0x100000000;
     var ctok = tokens % 0x100000000;
     metrics_record(ptok, ctok);
@@ -362,9 +656,9 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len) {
 # Returns backend fd (caller reads chunks + closes).
 # Returns -1 on connection failure.
 fn provider_forward_stream(route, model, messages_raw, messages_len) {
-    # Remote providers have no incremental streaming yet (the local path
-    # sys_read()s a raw fd, which can't decrypt TLS). The handler buffers
-    # remote responses instead — never reach the localhost path for them.
+    # Local-only fast path: raw fd + sys_read can't decrypt TLS. Remote
+    # providers stream incrementally via sandhi_http_stream in the handler
+    # (handle_chat_stream's remote branch) and never reach here.
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var port = url_port(route_base_url(route));
     var body = _build_chat_body_raw_stream(

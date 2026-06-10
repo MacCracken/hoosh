@@ -9,8 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 Remote provider transport — the **v2.2.0 criticals**. Cloud providers were enum +
 default-URL entries the loopback-only client could never reach; they now forward
-over TLS. OpenAI-compatible providers (OpenAI, DeepSeek, Mistral, Groq, Grok,
-OpenRouter) work end-to-end.
+over TLS. All families work end-to-end: OpenAI-compatible (OpenAI, DeepSeek,
+Mistral, Groq, Grok, OpenRouter), Anthropic, and Google/Gemini. The sandhi P1
+that blocked production is fixed upstream; streaming is now incremental.
 
 ### Added
 - **Remote forward path** (`src/lib/provider.cyr`) — `https://` routes forward
@@ -30,24 +31,76 @@ OpenRouter) work end-to-end.
   — `api_key = "$ANTHROPIC_API_KEY"` resolves from the environment, so the secret
   never lives in hoosh.toml. The Anthropic provider block in `hoosh.toml` is
   enabled (key from env).
-- **Buffered remote streaming** — `stream:true` to a remote provider returns the
-  full response as one SSE delta + stop (incremental remote streaming is a
-  follow-up; local streaming is unchanged).
+- **Anthropic system-message hoist** (`_build_anthropic_body`, with byte-level
+  JSON helpers `_json_obj_str_field` / `_obj_is_system` / `_json_obj_end`) —
+  `role:"system"` turns lift to the top-level `system` field (multiple joined
+  with `\n`); remaining `{role,content}` turns pass through unchanged. Anthropic
+  rejects a system role inside `messages`, so this is required for system prompts.
+- **Google/Gemini shaping** (`_build_gemini_body`, `_gemini_url`,
+  `gemini_extract_text`, `extract_gemini_tokens`) — maps OpenAI-style messages to
+  Gemini `contents` (assistant→`model`, system→`systemInstruction`), builds the
+  model-scoped `:generateContent?key=` URL (key as a **query param**, no auth
+  header — `_provider_headers` skips `Authorization` for Google), and extracts
+  `candidates[].content.parts[].text` + `usageMetadata.{prompt,candidates}TokenCount`.
+- **Incremental remote streaming** — `handle_chat_stream`'s remote branch drives
+  `sandhi_http_stream` with a per-event SSE callback (`_remote_stream_cb`),
+  decoding each provider's delta (OpenAI `choices[].delta.content`, Anthropic
+  `content_block_delta.delta.text`, Gemini `:streamGenerateContent?alt=sse`) and
+  re-emitting them as OpenAI SSE chunks. Replaces the buffered one-shot fallback,
+  which is retained only for the error-before-first-byte case (so a stream that
+  fails early degrades to buffered without duplicating output).
 - `tls`, `sandhi`, `mmap`, `dynlib`, `fdlopen` added to `cyrius.cyml` `[deps]`
   (in include order). No `main()` init needed — sandhi/tls self-initialize.
 - Tests: `remote_transport` group (scheme dispatch, path/URL/bearer building,
-  OpenAI + Anthropic token/text extraction) — **256 tests pass**.
+  OpenAI + Anthropic + Gemini token/text extraction, system-message hoist, stream
+  request shaping, SSE delta extraction) — **269 tests pass**.
+
+### Changed
+- **Cyrius pin 6.1.18 → 6.1.20** (`cyrius.cyml`); stdlib re-synced, `cyrius.lock`
+  refreshed (sandhi 1.4.4 → **1.4.5**). This ships the fix for the P1 below.
+- **Build the gateway with `-D CYRIUS_TLS_NATIVE`** (CI + release workflows;
+  flag precedes the source). Compiles in sandhi's native TLS stack so the binary
+  never fdlopen-loads libssl/libcrypto/glibc. `main()` now calls
+  `sandhi_tls_use_native()` at startup and prints a loud stderr WARNING if the
+  native backend is not active (so a dropped flag can't silently regress to the
+  crash-prone libssl path). See CLAUDE.md Key Principles + sandhi architecture/004.
+
+### Fixed
+- ✅ **Remote-transport repeated-request SIGSEGV — fixed by switching hoosh to the
+  native TLS backend.** Live smoke testing revealed the gateway crashed (SIGSEGV)
+  on the *2nd–4th* remote request (stream *and* non-stream, intermittent). Root
+  cause: hoosh was building **without** `-D CYRIUS_TLS_NATIVE`, so it ran on the
+  deprecated libssl fdlopen bridge; the fault was inside the loaded libssl/glibc
+  TLS layer (`cmp …,%fs:…` — the brk-malloc/TLS-arena family of the upstream P1).
+  Building native (flag + `sandhi_tls_use_native()`) means **no libssl is ever
+  loaded** (verified: 0 libssl maps), and the crash is gone — 10/10 non-stream and
+  8/8 streaming requests to Anthropic succeed with the server staying up.
+- ✅ **sandhi P1 repeated-HTTPS SIGSEGV resolved upstream** (cyrius 6.1.20 /
+  sandhi 1.4.5). cyrius `alloc.cyr`'s `brk` bump heap collided with glibc malloc's
+  `brk` arena (pulled in by `fdlopen` loading libssl); fixed by moving the alloc
+  heap onto an anonymous-`mmap` chunk-bump allocator and default-switching sandhi
+  to the native TLS backend. (hoosh additionally had to *opt into* native — see
+  above — to stop loading libssl at all.)
+
+### Verified (live)
+- **Anthropic** end-to-end against the real API: non-stream (system-message hoist
+  confirmed — a 3-word system instruction is obeyed, which only works if the
+  system turn is hoisted out of `messages`), incremental streaming, and repeated
+  requests — all on the native backend, no crash.
+- **Google/Gemini** request/response shaping verified via direct probe (URL,
+  `contents`/`systemInstruction` body, `candidates`/`usageMetadata` extraction);
+  full gateway path returns clean results and degrades gracefully on auth errors
+  without crashing. A live 200 is pending a valid `GEMINI_API_KEY`.
 
 ### Notes
-- 🔴 **BLOCKED for production on a sandhi P1 crash.** Individual remote requests
-  work, but repeated HTTPS calls SIGSEGV the gateway — root-caused to **sandhi
-  1.4.4** crashing on the ~4th sequential `sandhi_http_post` to the same host
-  (consumer-independent 4-line repro; corruption in sandhi's TLS transport, not
-  hoosh). Filed P1 on sandhi:
-  `sandhi/docs/issues/2026-06-09-https-repeated-request-segfault.md`. **Work
-  paused here until sandhi ships a fix.** hoosh's transport code is complete/green.
-- **Not yet (hoosh-side, after unblock):** Anthropic system-message hoist,
-  Gemini shaping, incremental remote streaming, certificate pinning.
+- **Deferred — blocked on a sandhi P1:** certificate pinning + optional mTLS for
+  local providers. sandhi already has live pinning/mTLS
+  (`sandhi_tls_policy_new_pinned` → `sandhi_conn_open_with_policy`), but the
+  high-level `sandhi_http_post`/`_stream` client never threads a policy
+  (`sandhi_http_options` has no policy field), so it's unreachable without
+  hand-rolling HTTP+chunked+SSE over `sandhi_conn`. Filed P1 on sandhi to thread a
+  policy through `sandhi_http_options`
+  (`sandhi/docs/issues/2026-06-09-https-client-tls-policy-threading.md`).
 - Binary grows (~sandhi/tls/libssl); local-only deployments are unaffected at
   runtime — the TLS path is reached only for `https://` routes.
 
