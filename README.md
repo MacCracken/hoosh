@@ -139,8 +139,13 @@ Response:
 | GET | `/v1/health` | Health check (probes first provider) |
 | GET | `/v1/health/providers` | Per-provider health status |
 | GET | `/v1/models` | List configured providers |
+| GET | `/api/tags` | List models, native Ollama-compatible shape |
 | POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
 | POST | `/v1/embeddings` | Embeddings (forwarded to Ollama) |
+| POST | `/v1/models/pull` | Pull a model (forwarded to Ollama `/api/pull`) |
+| POST | `/v1/models/delete` | Delete a model (forwarded to Ollama `/api/delete`) |
+| POST | `/v1/training/status` | Synapse training job status |
+| POST | `/v1/catalog/sync` | Synapse model-catalog sync |
 | GET | `/v1/tokens/pools` | Token budget pools |
 | GET | `/v1/costs` | Cost tracking summary |
 | POST | `/v1/costs/reset` | Reset cost counters |

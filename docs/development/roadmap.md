@@ -173,12 +173,20 @@ feature (the high-level client can't carry a TLS policy) — see below.
       `sandhi/docs/issues/2026-06-09-https-client-tls-policy-threading.md`. Pick up
       hoosh-side once that lands.
 
-### v2.2.1 — Provider correctness & completeness
-- [ ] Per-provider token-count ratios — restore `context/tokens.rs` behavior
-      (`compact.cyr` currently hardcodes 4 chars/token for every provider)
-- [ ] Provider lifecycle methods — Ollama `pull_model`/`delete_model`, Synapse
-      `training_status`/`sync_catalog`
-- [ ] Native Ollama `/api/tags` inbound route (list models)
+### v2.2.1 — Provider correctness & completeness — ✅ SHIPPED 2026-06-09
+- [x] Per-provider token-count ratios — restored `context/tokens.rs` behavior in
+      `compact.cyr`: `chars_per_token_x10` (OpenAI-family 3.8, Anthropic 3.5,
+      local 3.7, default 4.0, scaled ×10 for float-free integer math);
+      `compact_messages` now takes the target provider's ratio via
+      `route_provider(route)`. Unknown providers keep the prior 4.0 default.
+- [x] Provider lifecycle methods — Ollama `pull_model`/`delete_model`, Synapse
+      `training_status`/`sync_catalog`, exposed as `POST /v1/models/pull`,
+      `POST /v1/models/delete`, `POST /v1/training/status`, `POST /v1/catalog/sync`.
+      Each forwards to the configured backend (via `http_req_local`, generalized
+      to GET/POST/DELETE) and 404s when the provider isn't configured.
+      Live-verified against a mock backend (method/path/body correct).
+- [x] Native Ollama `/api/tags` inbound route (`handle_ollama_tags`) — lists
+      enabled routes' model patterns in Ollama's tags shape.
 
 ### v2.2.2 — DLP (Data Loss Prevention)
 Today only `ERR_DLP_BLOCKED` + a test-stub `@`-scan exist; the real scanner

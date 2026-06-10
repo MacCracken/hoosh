@@ -119,6 +119,61 @@ fn provider_name(prov) {
     return "unknown";
 }
 
+# ----------------------------------------------------------------
+# Per-provider token estimation (mirrors src/lib/compact.cyr).
+# Chars-per-token ratio scaled by 10 (3.8 -> 38) since there are no floats.
+# ----------------------------------------------------------------
+
+var CHARS_PER_TOKEN_X10 = 40;
+
+fn chars_per_token_x10(prov) {
+    if (prov == PROV_OPENAI) { return 38; }
+    if (prov == PROV_DEEPSEEK) { return 38; }
+    if (prov == PROV_MISTRAL) { return 38; }
+    if (prov == PROV_GROQ) { return 38; }
+    if (prov == PROV_GROK) { return 38; }
+    if (prov == PROV_OPENROUTER) { return 38; }
+    if (prov == PROV_ANTHROPIC) { return 35; }
+    if (prov == PROV_OLLAMA) { return 37; }
+    if (prov == PROV_LLAMACPP) { return 37; }
+    if (prov == PROV_LMSTUDIO) { return 37; }
+    if (prov == PROV_LOCALAI) { return 37; }
+    return 40;
+}
+
+fn estimate_tokens(messages, msg_len, cpt_x10) {
+    var ratio = cpt_x10;
+    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
+    return msg_len * 10 / ratio;
+}
+
+# ----------------------------------------------------------------
+# Generic request header (mirrors src/lib/http_client.cyr).
+# Used by the provider-lifecycle forwarders (GET/POST/DELETE).
+# ----------------------------------------------------------------
+fn _build_req_header(buf, method, path, host, body_len) {
+    var pos = 0;
+    memcpy(buf + pos, method, strlen(method)); pos = pos + strlen(method);
+    store8(buf + pos, 32); pos = pos + 1;
+    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
+    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
+    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
+    var cl_buf = alloc(32);
+    var cl_len = fmt_int_buf(body_len, cl_buf);
+    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    return pos;
+}
+
 # ================================================================
 # Routing strategy
 # ================================================================
@@ -191,6 +246,20 @@ fn route_matches_model(r, model) {
             if (memeq(model, pattern, plen - 1) == 1) { return 1; }
         } else {
             if (streq(model, pattern) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Find the first enabled route for a provider type (mirrors
+# handlers.cyr _router_find_provider, parameterized by routes array).
+fn _find_provider_route(routes, count, prov) {
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (route_provider(r) == prov) { return r; }
         }
         i = i + 1;
     }
@@ -2498,6 +2567,65 @@ fn main() {
     var ppg_tok = extract_gemini_tokens(ppg_buf, ppg_len);
     assert_eq(ppg_tok / 0x100000000, 2, "gemini pretty-printed: promptTokenCount");
     assert_eq(ppg_tok % 0x100000000, 9, "gemini pretty-printed: candidatesTokenCount");
+
+    # ── Per-provider token estimation (compact.cyr) ───────────────
+    # Ratio table (x10) mirrors ProviderTokenCounter::for_provider.
+    assert_eq(chars_per_token_x10(PROV_OPENAI), 38, "openai ratio 3.8");
+    assert_eq(chars_per_token_x10(PROV_ANTHROPIC), 35, "anthropic ratio 3.5");
+    assert_eq(chars_per_token_x10(PROV_OLLAMA), 37, "ollama ratio 3.7");
+    assert_eq(chars_per_token_x10(PROV_DEEPSEEK), 38, "deepseek tracks openai");
+    assert_eq(chars_per_token_x10(PROV_SYNAPSE), 40, "synapse conservative 4.0");
+    assert_eq(chars_per_token_x10(PROV_GOOGLE), 40, "google default 4.0");
+    # estimate_tokens: 100 chars at each ratio (floor division).
+    assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_OPENAI)), 26,
+    "100 chars / 3.8 = 26 tokens (openai)");
+    assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_ANTHROPIC)), 28,
+    "100 chars / 3.5 = 28 tokens (anthropic, denser)");
+    assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_OLLAMA)), 27,
+    "100 chars / 3.7 = 27 tokens (local)");
+    assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_SYNAPSE)), 25,
+    "100 chars / 4.0 = 25 tokens (default)");
+    # Provider-aware estimate: denser tokenizer yields a higher count for the
+    # same text, so anthropic > openai > default for equal input.
+    var ant_est = estimate_tokens(0, 1000, chars_per_token_x10(PROV_ANTHROPIC));
+    var oai_est = estimate_tokens(0, 1000, chars_per_token_x10(PROV_OPENAI));
+    var def_est = estimate_tokens(0, 1000, chars_per_token_x10(PROV_SYNAPSE));
+    assert_eq(ant_est > oai_est, 1, "anthropic estimates higher than openai");
+    assert_eq(oai_est > def_est, 1, "openai estimates higher than default");
+    # Zero/invalid ratio falls back to the 4.0 default.
+    assert_eq(estimate_tokens(0, 100, 0), 25, "zero ratio falls back to 4.0");
+
+    # ── Provider lifecycle: route lookup by provider ──────────────
+    var lc_r1 = route_new(PROV_OPENAI, 1, "https://api.openai.com");
+    var lc_r2 = route_new(PROV_OLLAMA, 2, "http://localhost:11434");
+    var lc_r3 = route_new(PROV_SYNAPSE, 3, "http://localhost:5000");
+    var lc_routes = alloc(24);
+    store64(lc_routes, lc_r1);
+    store64(lc_routes + 8, lc_r2);
+    store64(lc_routes + 16, lc_r3);
+    assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), lc_r2,
+    "lifecycle: finds ollama route for pull/delete");
+    assert_eq(_find_provider_route(lc_routes, 3, PROV_SYNAPSE), lc_r3,
+    "lifecycle: finds synapse route for training/sync");
+    assert_eq(_find_provider_route(lc_routes, 3, PROV_ANTHROPIC), 0,
+    "lifecycle: missing provider returns 0 (404)");
+    # Disabled routes are skipped.
+    route_set_enabled(lc_r2, 0);
+    assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), 0,
+    "lifecycle: disabled ollama route skipped");
+
+    # ── http_client: generic method header (GET/POST/DELETE) ──────
+    var hdr_buf = alloc(2048);
+    var hdr_len = _build_req_header(hdr_buf, "DELETE", "/api/delete",
+    "localhost", 19);
+    assert_eq(memeq(hdr_buf, "DELETE /api/delete HTTP/1.0", 27), 1,
+    "req header: DELETE method + path line");
+    assert_eq(memeq(hdr_buf + hdr_len - 4, "\r\n\r\n", 4), 1,
+    "req header: terminates with blank line");
+    var ghdr = alloc(2048);
+    _build_req_header(ghdr, "GET", "/v1/training/job-1", "localhost", 0);
+    assert_eq(memeq(ghdr, "GET /v1/training/job-1 HTTP/1.0", 31), 1,
+    "req header: GET method + path line");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

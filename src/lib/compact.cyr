@@ -2,13 +2,43 @@
 # Truncates messages array to fit within a token budget.
 # Strategy: keep system message + last N messages that fit.
 #
-# Token estimation: ~4 chars per token (rough approximation)
+# Token estimation: per-provider chars-per-token ratios, restored from the
+# Rust-era context/tokens.rs ProviderTokenCounter. Different tokenizers produce
+# different token counts for the same text, so the bytes/token ratio is tuned
+# per provider family. Cyrius has no floats here, so ratios are carried scaled
+# by 10 (e.g. 3.8 chars/token -> 38); the default of 40 (== 4 chars/token)
+# preserves the old behaviour for unknown providers.
 
-var CHARS_PER_TOKEN = 4;
+var CHARS_PER_TOKEN_X10 = 40;
 
-# Estimate token count from a messages JSON array
-fn estimate_tokens(messages, msg_len) {
-    return msg_len / CHARS_PER_TOKEN;
+# Chars-per-token ratio (x10) for a provider type (PROV_* in types.cyr).
+# Mirrors ProviderTokenCounter::for_provider in rust-old/src/context/tokens.rs.
+fn chars_per_token_x10(prov) {
+    # OpenAI cl100k/o200k: ~3.8 chars/token. DeepSeek/Mistral/Groq/Grok/
+    # OpenRouter track OpenAI-family tokenizers.
+    if (prov == PROV_OPENAI) { return 38; }
+    if (prov == PROV_DEEPSEEK) { return 38; }
+    if (prov == PROV_MISTRAL) { return 38; }
+    if (prov == PROV_GROQ) { return 38; }
+    if (prov == PROV_GROK) { return 38; }
+    if (prov == PROV_OPENROUTER) { return 38; }
+    # Anthropic: slightly denser tokenizer, ~3.5 chars/token.
+    if (prov == PROV_ANTHROPIC) { return 35; }
+    # Local LLaMA-family tokenizers: ~3.7 chars/token.
+    if (prov == PROV_OLLAMA) { return 37; }
+    if (prov == PROV_LLAMACPP) { return 37; }
+    if (prov == PROV_LMSTUDIO) { return 37; }
+    if (prov == PROV_LOCALAI) { return 37; }
+    # Synapse, Whisper, and anything else: conservative 4.0 chars/token.
+    return 40;
+}
+
+# Estimate token count from a messages JSON array given a chars/token (x10) ratio.
+# tokens = chars * 10 / cpt_x10  (inverse of chars = tokens * cpt_x10 / 10).
+fn estimate_tokens(messages, msg_len, cpt_x10) {
+    var ratio = cpt_x10;
+    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
+    return msg_len * 10 / ratio;
 }
 
 # Compact a messages array to fit within max_tokens.
@@ -16,8 +46,10 @@ fn estimate_tokens(messages, msg_len) {
 # or the original if already fits.
 # Strategy: find system message (keep it), then keep
 # as many recent messages as fit in the budget.
-fn compact_messages(msg_ptr, msg_len, max_tokens) {
-    var est = estimate_tokens(msg_ptr, msg_len);
+fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
+    var ratio = cpt_x10;
+    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
+    var est = estimate_tokens(msg_ptr, msg_len, ratio);
     if (est <= max_tokens) {
         # Already fits
         var r = alloc(16);
@@ -64,8 +96,8 @@ fn compact_messages(msg_ptr, msg_len, max_tokens) {
         i = i + 1;
     }
 
-    # Budget: max chars = max_tokens * CHARS_PER_TOKEN
-    var budget = max_tokens * CHARS_PER_TOKEN;
+    # Budget: max chars = max_tokens * chars/token (ratio is scaled by 10)
+    var budget = max_tokens * ratio / 10;
     var sys_chars = 0;
     if (has_system == 1) { sys_chars = sys_end - sys_start; }
     var remaining = budget - sys_chars - 10;

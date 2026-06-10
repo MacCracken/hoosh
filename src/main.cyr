@@ -94,6 +94,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
     if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
+    if (streq(path, "/api/tags") == 1) { return handle_ollama_tags(cfd); }
     if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
@@ -174,6 +175,21 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/chat/completions") == 1) {
         var body = req_parse_body(buf, buf_len);
         return handle_chat(cfd, body, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/models/pull") == 1) {
+        var mpb = req_parse_body(buf, buf_len);
+        return handle_model_pull(cfd, mpb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/models/delete") == 1) {
+        var mdb = req_parse_body(buf, buf_len);
+        return handle_model_delete(cfd, mdb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/training/status") == 1) {
+        var tsb = req_parse_body(buf, buf_len);
+        return handle_synapse_training(cfd, tsb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/catalog/sync") == 1) {
+        return handle_synapse_sync(cfd);
     }
 
     # Root

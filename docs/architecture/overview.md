@@ -116,6 +116,11 @@ Thread-safe DashMap cache with TTL. Keyed on prompt hash. Skips caching for stre
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | Inference (streaming + non-streaming) |
 | `/v1/models` | GET | List available models |
+| `/api/tags` | GET | List models (native Ollama-compatible shape) |
+| `/v1/models/pull` | POST | Pull a model (Ollama `pull_model`) |
+| `/v1/models/delete` | POST | Delete a model (Ollama `delete_model`) |
+| `/v1/training/status` | POST | Synapse training job status |
+| `/v1/catalog/sync` | POST | Synapse model-catalog sync |
 | `/v1/health` | GET | Gateway health |
 | `/v1/health/providers` | GET | Per-provider health |
 | `/v1/tokens/check` | POST | Check token budget |

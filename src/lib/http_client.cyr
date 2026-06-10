@@ -1,6 +1,31 @@
 # http_client.cyr — HTTP POST client for forwarding to provider backends
 # Uses raw TCP sockets with proper CRLF byte construction
 
+# Generic request header for an arbitrary method (GET/POST/DELETE/...).
+# method must be a cstr like "POST" or "DELETE"; a single space follows it.
+fn _build_req_header(buf, method, path, host, body_len) {
+    var pos = 0;
+    memcpy(buf + pos, method, strlen(method)); pos = pos + strlen(method);
+    store8(buf + pos, 32); pos = pos + 1;
+    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
+    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
+    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
+    var cl_buf = alloc(32);
+    var cl_len = fmt_int_buf(body_len, cl_buf);
+    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    return pos;
+}
+
 fn _build_post_header(buf, path, host, body_len) {
     var pos = 0;
     memcpy(buf + pos, "POST ", 5); pos = pos + 5;
@@ -23,17 +48,19 @@ fn _build_post_header(buf, path, host, body_len) {
     return pos;
 }
 
-# HTTP POST to localhost:port. Returns _http_parse_response result or 0.
-fn http_post_local(port, path, body, body_len) {
+# HTTP request to localhost:port with an arbitrary method (GET/POST/DELETE).
+# body may be 0 with body_len 0 for bodyless methods. Returns
+# _http_parse_response result or 0.
+fn http_req_local(method, port, path, body, body_len) {
     var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0; }
     var sa = sockaddr_in(0x0100007F, port);
     var cr = sys_connect(fd, sa, 16);
     if (cr < 0) { sys_close(fd); return 0; }
     var hdr = alloc(2048);
-    var hlen = _build_post_header(hdr, path, "localhost", body_len);
+    var hlen = _build_req_header(hdr, method, path, "localhost", body_len);
     sys_write(fd, hdr, hlen);
-    sys_write(fd, body, body_len);
+    if (body_len > 0) { sys_write(fd, body, body_len); }
     var rbuf = alloc(131072);
     var total = 0;
     var n = 1;
@@ -44,6 +71,11 @@ fn http_post_local(port, path, body, body_len) {
     sys_close(fd);
     if (total == 0) { return 0; }
     return _http_parse_response(rbuf, total);
+}
+
+# HTTP POST to localhost:port. Returns _http_parse_response result or 0.
+fn http_post_local(port, path, body, body_len) {
+    return http_req_local("POST", port, path, body, body_len);
 }
 
 # HTTP POST that returns the open fd for streaming reads.

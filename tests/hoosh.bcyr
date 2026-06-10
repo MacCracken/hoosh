@@ -106,6 +106,30 @@ fn route_matches_model(r, model) {
     return 0;
 }
 
+# Per-provider token estimation (mirrors src/lib/compact.cyr).
+var CHARS_PER_TOKEN_X10 = 40;
+
+fn chars_per_token_x10(prov) {
+    if (prov == PROV_OPENAI) { return 38; }
+    if (prov == PROV_DEEPSEEK) { return 38; }
+    if (prov == PROV_MISTRAL) { return 38; }
+    if (prov == PROV_GROQ) { return 38; }
+    if (prov == PROV_GROK) { return 38; }
+    if (prov == PROV_OPENROUTER) { return 38; }
+    if (prov == PROV_ANTHROPIC) { return 35; }
+    if (prov == PROV_OLLAMA) { return 37; }
+    if (prov == PROV_LLAMACPP) { return 37; }
+    if (prov == PROV_LMSTUDIO) { return 37; }
+    if (prov == PROV_LOCALAI) { return 37; }
+    return 40;
+}
+
+fn estimate_tokens(messages, msg_len, cpt_x10) {
+    var ratio = cpt_x10;
+    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
+    return msg_len * 10 / ratio;
+}
+
 # Router
 enum RouterField {
     ROUTER_SIZE      = 40;
@@ -435,6 +459,17 @@ fn main() {
     i = 0;
     while (i < 100000) {
         route_matches_model(mr, "llama3.2:latest");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # ── Benchmark: estimate_tokens (per-provider, per chat request) ─
+    b = bench_new("estimate_tokens_per_provider");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        estimate_tokens(0, 4096, chars_per_token_x10(PROV_ANTHROPIC));
         i = i + 1;
     }
     bench_batch_stop(b, 100000);

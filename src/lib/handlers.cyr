@@ -55,6 +55,163 @@ fn handle_models(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# Find the first enabled route for a provider type, or 0 if none.
+fn _router_find_provider(prov) {
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (route_provider(r) == prov) { return r; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# GET /api/tags — native Ollama-compatible model listing.
+# Emits each enabled route's model patterns in Ollama's tags shape so Ollama
+# clients pointed at the gateway can enumerate available models.
+fn handle_ollama_tags(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"models\":[");
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var first = 1;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var pats = load64(r + ROUTE_PATTERNS);
+            var pn = load64(r + ROUTE_PATTERNS_N);
+            var j = 0;
+            while (j < pn) {
+                var pat = load64(pats + j * 8);
+                if (strlen(pat) > 0) {
+                    if (first == 0) { str_builder_add_cstr(sb, ","); }
+                    str_builder_add_cstr(sb, "{\"name\":\"");
+                    str_builder_add_cstr(sb, pat);
+                    str_builder_add_cstr(sb, "\",\"model\":\"");
+                    str_builder_add_cstr(sb, pat);
+                    str_builder_add_cstr(sb,
+                    "\",\"modified_at\":\"\",\"size\":0,\"digest\":\"\",");
+                    str_builder_add_cstr(sb, "\"details\":{\"family\":\"");
+                    str_builder_add_cstr(sb, provider_name(route_provider(r)));
+                    str_builder_add_cstr(sb, "\"}}");
+                    first = 0;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# Build a {"name":"<model>"} body cstr for Ollama pull/delete. Returns a
+# 16-byte (ptr,len) struct.
+fn _build_name_body(model_cstr) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"name\":\"");
+    str_builder_add_cstr(sb, model_cstr);
+    str_builder_add_cstr(sb, "\"}");
+    var s = str_builder_build(sb);
+    var r = alloc(16);
+    store64(r, to_cstr(s));
+    store64(r + 8, str_len(s));
+    return r;
+}
+
+# Forward a provider lifecycle response (or a gateway error) to the client.
+fn _lifecycle_reply(cfd, resp, what) {
+    if (resp == 0) {
+        hlog_error("lifecycle: backend unreachable");
+        return http_error(cfd, "502", "Bad Gateway", what);
+    }
+    if (http_status(resp) >= 200) {
+        if (http_status(resp) < 300) {
+            return http_ok(cfd, http_body(resp), http_body_len(resp));
+        }
+    }
+    hlog_warn("lifecycle: backend returned error status");
+    return http_error(cfd, "502", "Bad Gateway", what);
+}
+
+# POST /v1/models/pull {"model":"..."} — Ollama pull_model.
+fn handle_model_pull(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var model = json_get(pairs, str_from("model"));
+    if (model == 0) { return http_bad_request(cfd, "missing model"); }
+    var model_cstr = to_cstr(model);
+    if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
+    var route = _router_find_provider(PROV_OLLAMA);
+    if (route == 0) {
+        return http_error(cfd, "404", "Not Found", "no ollama provider configured");
+    }
+    var fb = _build_name_body(model_cstr);
+    var port = url_port(route_base_url(route));
+    var resp = http_req_local("POST", port, "/api/pull",
+    load64(fb), load64(fb + 8));
+    return _lifecycle_reply(cfd, resp, "ollama pull failed");
+}
+
+# POST /v1/models/delete {"model":"..."} — Ollama delete_model.
+fn handle_model_delete(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var model = json_get(pairs, str_from("model"));
+    if (model == 0) { return http_bad_request(cfd, "missing model"); }
+    var model_cstr = to_cstr(model);
+    if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
+    var route = _router_find_provider(PROV_OLLAMA);
+    if (route == 0) {
+        return http_error(cfd, "404", "Not Found", "no ollama provider configured");
+    }
+    var fb = _build_name_body(model_cstr);
+    var port = url_port(route_base_url(route));
+    var resp = http_req_local("DELETE", port, "/api/delete",
+    load64(fb), load64(fb + 8));
+    return _lifecycle_reply(cfd, resp, "ollama delete failed");
+}
+
+# POST /v1/training/status {"job_id":"..."} — Synapse training_status.
+fn handle_synapse_training(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var job = json_get(pairs, str_from("job_id"));
+    if (job == 0) { return http_bad_request(cfd, "missing job_id"); }
+    var job_cstr = to_cstr(job);
+    if (strlen(job_cstr) == 0) { return http_bad_request(cfd, "empty job_id"); }
+    var route = _router_find_provider(PROV_SYNAPSE);
+    if (route == 0) {
+        return http_error(cfd, "404", "Not Found", "no synapse provider configured");
+    }
+    var psb = str_builder_new();
+    str_builder_add_cstr(psb, "/v1/training/");
+    str_builder_add_cstr(psb, job_cstr);
+    var path = to_cstr(str_builder_build(psb));
+    var port = url_port(route_base_url(route));
+    var resp = http_req_local("GET", port, path, 0, 0);
+    return _lifecycle_reply(cfd, resp, "synapse training status failed");
+}
+
+# POST /v1/catalog/sync — Synapse sync_catalog.
+fn handle_synapse_sync(cfd) {
+    var route = _router_find_provider(PROV_SYNAPSE);
+    if (route == 0) {
+        return http_error(cfd, "404", "Not Found", "no synapse provider configured");
+    }
+    var port = url_port(route_base_url(route));
+    var resp = http_req_local("POST", port, "/v1/catalog/sync", 0, 0);
+    return _lifecycle_reply(cfd, resp, "synapse catalog sync failed");
+}
+
 # GET /v1/cache/stats
 fn handle_cache_stats(cfd) {
     var sb = str_builder_new();
@@ -884,10 +1041,12 @@ fn handle_chat(cfd, body_ptr, body_len) {
     if (msgs != 0) {
         msg_raw = load64(msgs);
         msg_raw_len = load64(msgs + 8);
-        # Context compaction: limit to est_tokens budget
+        # Context compaction: limit to est_tokens budget, using the
+        # target provider's chars-per-token ratio.
         if (msg_raw_len > 0) {
+            var cpt_x10 = chars_per_token_x10(route_provider(route));
             var compacted = compact_messages(
-            msg_raw, msg_raw_len, est_tokens * 2);
+            msg_raw, msg_raw_len, est_tokens * 2, cpt_x10);
             msg_raw = load64(compacted);
             msg_raw_len = load64(compacted + 8);
         }

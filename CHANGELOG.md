@@ -7,6 +7,51 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-06-09
+
+Provider correctness & completeness — the **v2.2.1 parity items**. Restores the
+per-provider token estimation lost in the port, and adds the provider lifecycle
+and native-Ollama surface the Rust gateway exposed.
+
+### Added
+- **Provider lifecycle endpoints** (`src/lib/handlers.cyr`) — restore the Rust-era
+  `ollama.pull_model`/`delete_model` and `synapse.training_status`/`sync_catalog`:
+  - `POST /v1/models/pull` `{"model":"..."}` → forwards `POST /api/pull`
+    `{"name":"..."}` to the configured Ollama backend.
+  - `POST /v1/models/delete` `{"model":"..."}` → forwards `DELETE /api/delete`
+    `{"name":"..."}` to Ollama.
+  - `POST /v1/training/status` `{"job_id":"..."}` → forwards `GET
+    /v1/training/<job>` to the Synapse backend.
+  - `POST /v1/catalog/sync` → forwards `POST /v1/catalog/sync` to Synapse.
+
+  Each resolves the target via `_router_find_provider` (first enabled route of
+  the provider type), returns `404` when that provider is not configured, and
+  `502` when the backend is unreachable or errors. **Live-verified** against a
+  mock backend: pull/delete forward the correct method, path, and body.
+- **Native Ollama `/api/tags` inbound route** (`handle_ollama_tags`) — lists each
+  enabled route's model patterns in Ollama's tags shape
+  (`{"models":[{"name","model","modified_at","size","digest","details"}]}`), so
+  Ollama clients pointed at the gateway can enumerate available models.
+- **Generic local HTTP client** (`http_req_local`, `_build_req_header` in
+  `src/lib/http_client.cyr`) — arbitrary method (GET/POST/DELETE) over the
+  loopback fast path, with bodyless requests supported. `http_post_local` is now
+  a thin `POST` wrapper (no behaviour change for existing callers).
+
+### Changed
+- **Per-provider token estimation** (`src/lib/compact.cyr`) — context compaction
+  no longer hardcodes 4 chars/token for every provider. Restores
+  `ProviderTokenCounter::for_provider` from the Rust `context/tokens.rs`: ratios
+  are carried scaled by 10 (no floats) — OpenAI-family 3.8, Anthropic 3.5 (denser
+  tokenizer), local LLaMA-family 3.7, others a conservative 4.0. `compact_messages`
+  takes the target provider's ratio (via `chars_per_token_x10(route_provider)`),
+  so the budget math matches how the destination actually tokenizes. Unknown
+  providers keep the prior 4.0 default.
+
+### Tests
+- `+20` assertions (**298 pass**): per-provider ratio table + `estimate_tokens`
+  (incl. denser-provider-estimates-higher and zero-ratio fallback), lifecycle
+  route lookup (found/missing/disabled), and generic GET/DELETE request headers.
+
 ## [2.2.0] — 2026-06-09
 
 Remote provider transport — the **v2.2.0 criticals**. Cloud providers were enum +
