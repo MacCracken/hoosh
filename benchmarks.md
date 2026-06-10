@@ -1,22 +1,23 @@
 # Benchmarks
 
-Latest: **2026-06-10T04:26:02Z** — commit `cd7f3c0`
+Latest: **2026-06-10T05:00:15Z** — commit `273398f`
 
 ## hoosh
 
-| Benchmark | Baseline (`909bbc4`) | Previous (`cd7f3c0`) | Current (`cd7f3c0`) |
+| Benchmark | Baseline (`cd7f3c0`) | Previous (`273398f`) | Current (`273398f`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 941 ns | 977 ns +4% | 968 ns |
-| `route_round_robin_10` | 182 ns | 183 ns | 184 ns |
-| `pool_reserve_commit` | 84 ns | 85 ns | 86 ns |
+| `route_select_20_providers` | 968 ns | 984 ns | 982 ns |
+| `route_round_robin_10` | 184 ns | 184 ns | 186 ns |
+| `pool_reserve_commit` | 86 ns | 86 ns | 86 ns |
 | `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 114 ns | 115 ns | 119 ns +4% |
-| `cache_get_miss` | 50 ns | 51 ns | 51 ns |
-| `cache_insert` | 67 ns | 67 ns | 74 ns +10% |
+| `cache_get_hit` | 119 ns | 114 ns **-4%** | 114 ns **-4%** |
+| `cache_get_miss` | 51 ns | 51 ns | 50 ns |
+| `cache_insert` | 74 ns | 84 ns +14% | 67 ns **-9%** |
 | `queue_enqueue_dequeue` | 1.00 us | 1.00 us | 1.00 us |
 | `queue_5tier_sort` | 1.00 us | 1.00 us | 1.00 us |
-| `route_matches_model` | 37 ns | 36 ns | 35 ns **-5%** |
-| `estimate_tokens_per_provider` | — | — | 8 ns |
+| `route_matches_model` | 35 ns | 37 ns +6% | 38 ns +9% |
+| `estimate_tokens_per_provider` | 8 ns | 8 ns | 8 ns |
+| `dlp_scan_clean_prompt` | — | 4.00 us | 4.00 us |
 
 ---
 

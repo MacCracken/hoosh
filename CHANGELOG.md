@@ -7,6 +7,37 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-06-10
+
+Data Loss Prevention — the **v2.2.2 parity item**. Ports `dlp/scanner.rs`: the
+Cyrius gateway previously had only `ERR_DLP_BLOCKED` + a test stub. Now requests
+are scanned for PII/secrets, classified, and routed by privacy policy.
+
+### Added
+- **DLP scanner** (`src/lib/dlp.cyr`) — eight built-in PII/secret matchers,
+  hand-rolled as byte-level scanners (the Cyrius port carries no regex engine,
+  and adding one would be an unnecessary dependency). Patterns and levels mirror
+  `BuiltinPatterns::all`: `email`/`ipv4` → Internal, `phone_us` → Confidential,
+  `ssn`/`credit_card`/`api_key`/`aws_key`/`github_token` → Restricted. Each
+  honours `\b` word boundaries; `dlp_scan_level` returns the highest level found
+  and short-circuits on the first Restricted match.
+- **Classification levels** (`DlpClass`: Public/Internal/Confidential/Restricted,
+  ordered) + `dlp_class_name`/`dlp_class_from_str`.
+- **Privacy-aware routing** (`handle_chat`) — when DLP is enabled: Restricted
+  content is **blocked** (`403`); Confidential content is forced to a **local
+  provider** via the new `router_select_local` (blocked `403` if no local route
+  serves the model); Internal and Public pass through. **Live-verified
+  end-to-end**: SSN → blocked, US phone on a remote-only model → local-required
+  block, clean prompt → normal inference.
+- **`[dlp]` config section** (`src/lib/config.cyr`) — `enabled` (default false)
+  and `default_level`; documented (disabled) in `hoosh.toml`.
+
+### Tests & benchmarks
+- `+19` assertions (**317 pass**): every pattern at its level, highest-level-wins,
+  clean/empty → default, disabled → default, and two false-positive guards
+  (20-digit run is not a card; leading-dot domain is not an email).
+- New bench `dlp_scan_clean_prompt` (~4µs for a typical prompt) — 12 benches total.
+
 ## [2.2.1] — 2026-06-09
 
 Provider correctness & completeness — the **v2.2.1 parity items**. Restores the

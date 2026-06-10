@@ -1011,6 +1011,29 @@ fn handle_chat(cfd, body_ptr, body_len) {
         "no provider for model");
     }
 
+    # DLP: classify request content, enforce privacy-aware routing.
+    # Restricted -> block; Confidential -> local provider only (reroute or block).
+    if (dlp_is_enabled() == 1) {
+        var dlp_level = dlp_scan_level(body_ptr, body_len);
+        if (dlp_level == CLASS_RESTRICTED) {
+            hlog_warn("dlp: restricted content blocked");
+            return http_error(cfd, "403", "Forbidden",
+            "request blocked: restricted content detected");
+        }
+        if (dlp_level == CLASS_CONFIDENTIAL) {
+            if (provider_is_local(route_provider(route)) == 0) {
+                var lroute = router_select_local(_router, model_cstr);
+                if (lroute == 0) {
+                    hlog_warn("dlp: confidential content, no local provider");
+                    return http_error(cfd, "403", "Forbidden",
+                    "request blocked: confidential content requires a local provider");
+                }
+                hlog_info("dlp: confidential content routed to a local provider");
+                route = lroute;
+            }
+        }
+    }
+
     # Rate limit check
     var rl = route_rate_limiter(route);
     if (ratelimit_check(rl) == 0) {

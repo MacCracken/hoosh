@@ -20,6 +20,7 @@ include "lib/ai-hwaccel.cyr"
 # ================================================================
 
 include "src/lib/types.cyr"
+include "src/lib/dlp.cyr"
 include "src/lib/logging.cyr"
 include "src/lib/ratelimit.cyr"
 include "src/lib/route.cyr"

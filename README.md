@@ -48,6 +48,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **Authentication** | Bearer token auth with constant-time comparison (HMAC-SHA256 via sigil) |
 | **Rate limiting** | Per-provider RPM limits |
 | **Token budgets** | Per-agent named pools with reserve/commit lifecycle |
+| **Data Loss Prevention** | PII/secret scanning (8 built-ins) with privacy-aware routing — Restricted blocked, Confidential forced local (opt-in `[dlp]`) |
 | **Cost tracking** | Per-provider cost accumulation, reset endpoint |
 | **Observability** | Prometheus `/metrics`, HMAC-SHA256 audit chain |
 | **Health checks** | Per-provider TCP probe via `/v1/health/providers` |

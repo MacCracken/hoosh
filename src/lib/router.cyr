@@ -76,6 +76,36 @@ fn router_select(rt, model) {
     return load64(cand);
 }
 
+# Select among local providers only — used for DLP-confidential content that
+# must not leave the machine. Same strategy/priority order as router_select,
+# but candidates are filtered to local backends. Returns 0 if none serve model.
+fn router_select_local(rt, model) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var strategy = load64(rt + ROUTER_STRATEGY);
+    var cand = alloc(count * 8);
+    var cn = 0;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && provider_is_local(route_provider(r)) == 1) {
+            if (route_matches_model(r, model) == 1) {
+                store64(cand + cn * 8, r);
+                cn = cn + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (cn == 0) { return 0; }
+    if (strategy == STRAT_ROUND_ROBIN) {
+        var idx = load64(rt + ROUTER_RR_IDX);
+        store64(rt + ROUTER_RR_IDX, idx + 1);
+        return load64(cand + (idx % cn) * 8);
+    }
+    # Priority/direct/lowest-latency all fall back to the top priority local.
+    return load64(cand);
+}
+
 fn router_report_latency(rt, base_url, latency_ms) {
     var lat_map = load64(rt + ROUTER_LATENCIES);
     var old = map_get(lat_map, base_url);

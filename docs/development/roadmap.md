@@ -188,12 +188,17 @@ feature (the high-level client can't carry a TLS policy) — see below.
 - [x] Native Ollama `/api/tags` inbound route (`handle_ollama_tags`) — lists
       enabled routes' model patterns in Ollama's tags shape.
 
-### v2.2.2 — DLP (Data Loss Prevention)
-Today only `ERR_DLP_BLOCKED` + a test-stub `@`-scan exist; the real scanner
-(`dlp/scanner.rs`, 364 L) was not ported.
-- [ ] PII pattern scanner (email, phone, SSN, credit card, API keys)
-- [ ] Classification levels (Public/Internal/Confidential/Restricted)
-- [ ] Privacy-aware routing (Confidential → local-only, Restricted → block)
+### v2.2.2 — DLP (Data Loss Prevention) — ✅ SHIPPED 2026-06-10
+Ported `dlp/scanner.rs` (364 L) — previously only `ERR_DLP_BLOCKED` + a test
+stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matchers
+(no regex engine in the Cyrius port, no new dependency).
+- [x] PII pattern scanner — email, phone_us, ssn, credit_card, ipv4, api_key,
+      aws_key, github_token (8 built-ins, `\b`-aware), live-verified end-to-end.
+- [x] Classification levels (`DlpClass`: Public/Internal/Confidential/Restricted,
+      ordered) + `[dlp]` config (`enabled`, `default_level`).
+- [x] Privacy-aware routing in `handle_chat` — Restricted → block (403);
+      Confidential → local provider only (`router_select_local`, 403 if none);
+      Internal/Public pass.
 
 ### v2.2.3 — Cost & cache intelligence
 - [ ] Cost optimizer — cheapest capable model recommendation (`cost/optimizer.rs`)

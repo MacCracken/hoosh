@@ -1,0 +1,365 @@
+# dlp.cyr — Data Loss Prevention: PII/secret pattern scanner + classification.
+#
+# Port of rust-old/src/dlp/{patterns,scanner}.rs. The Cyrius gateway carries no
+# regex engine (and adding one would be an unnecessary dependency), so each
+# built-in pattern is a hand-rolled byte-level matcher. Detection is presence-
+# based: dlp_scan_level returns the highest classification level found, which is
+# what privacy-aware routing keys off.
+#
+# Classification (higher = more restricted), mirroring ClassificationLevel:
+#   PUBLIC(0) INTERNAL(1) CONFIDENTIAL(2) RESTRICTED(3)
+#
+# Built-in patterns and their levels (from BuiltinPatterns::all):
+#   email      INTERNAL      [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+#   ipv4       INTERNAL      \b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b
+#   phone_us   CONFIDENTIAL  \b\d{3}[-. ]\d{3}[-. ]\d{4}\b
+#   ssn        RESTRICTED    \b\d{3}-\d{2}-\d{4}\b
+#   credit_card RESTRICTED   \b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b
+#   api_key    RESTRICTED    \b(?:sk-|pk-|api[_-]?key[=: ]{1,5})[a-zA-Z0-9]{20,}\b
+#   aws_key    RESTRICTED    \bAKIA[0-9A-Z]{16}\b
+#   github_token RESTRICTED  \b(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}\b
+
+enum DlpClass {
+    CLASS_PUBLIC       = 0;
+    CLASS_INTERNAL     = 1;
+    CLASS_CONFIDENTIAL = 2;
+    CLASS_RESTRICTED   = 3;
+}
+
+# Scanner state — configured from [dlp] in hoosh.toml (off by default).
+var _dlp_enabled = 0;
+var _dlp_default_level = 0;
+
+fn dlp_configure(enabled, default_level) {
+    _dlp_enabled = enabled;
+    _dlp_default_level = default_level;
+    return 0;
+}
+
+fn dlp_is_enabled() { return _dlp_enabled; }
+
+fn dlp_class_name(level) {
+    if (level == CLASS_RESTRICTED) { return "restricted"; }
+    if (level == CLASS_CONFIDENTIAL) { return "confidential"; }
+    if (level == CLASS_INTERNAL) { return "internal"; }
+    return "public";
+}
+
+# Map a classification name (config value) to a level, or -1 if unknown.
+fn dlp_class_from_str(name) {
+    if (streq(name, "public") == 1) { return CLASS_PUBLIC; }
+    if (streq(name, "internal") == 1) { return CLASS_INTERNAL; }
+    if (streq(name, "confidential") == 1) { return CLASS_CONFIDENTIAL; }
+    if (streq(name, "restricted") == 1) { return CLASS_RESTRICTED; }
+    return 0 - 1;
+}
+
+# ---- Character classes ----
+
+fn _dlp_is_digit(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+fn _dlp_is_upper(c) {
+    if (c >= 65 && c <= 90) { return 1; }
+    return 0;
+}
+
+fn _dlp_is_lower(c) {
+    if (c >= 97 && c <= 122) { return 1; }
+    return 0;
+}
+
+fn _dlp_is_alpha(c) {
+    if (_dlp_is_upper(c) == 1 || _dlp_is_lower(c) == 1) { return 1; }
+    return 0;
+}
+
+fn _dlp_is_alnum(c) {
+    if (_dlp_is_alpha(c) == 1 || _dlp_is_digit(c) == 1) { return 1; }
+    return 0;
+}
+
+# [0-9A-Z] — uppercase alnum (aws_key body).
+fn _dlp_is_upper_alnum(c) {
+    if (_dlp_is_upper(c) == 1 || _dlp_is_digit(c) == 1) { return 1; }
+    return 0;
+}
+
+# Word char [a-zA-Z0-9_] — for \b boundary checks.
+fn _dlp_is_word(c) {
+    if (_dlp_is_alnum(c) == 1 || c == 95) { return 1; }
+    return 0;
+}
+
+# \b before position i: start-of-text or a non-word char precedes it.
+fn _dlp_bound_before(t, i) {
+    if (i == 0) { return 1; }
+    if (_dlp_is_word(load8(t + i - 1)) == 0) { return 1; }
+    return 0;
+}
+
+# \b after end-exclusive position e: end-of-text or a non-word char follows.
+fn _dlp_bound_after(t, e, len) {
+    if (e >= len) { return 1; }
+    if (_dlp_is_word(load8(t + e)) == 0) { return 1; }
+    return 0;
+}
+
+# t[i..i+n) all digits, in bounds.
+fn _dlp_digits_n(t, i, len, n) {
+    if (i + n > len) { return 0; }
+    var k = 0;
+    while (k < n) {
+        if (_dlp_is_digit(load8(t + i + k)) == 0) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# ---- Per-pattern matchers (match at offset i, boundary-before assumed) ----
+
+# ssn: \b\d{3}-\d{2}-\d{4}\b
+fn _dlp_match_ssn_at(t, i, len) {
+    if (i + 11 > len) { return 0; }
+    if (_dlp_digits_n(t, i, len, 3) == 0) { return 0; }
+    if (load8(t + i + 3) != 45) { return 0; }
+    if (_dlp_digits_n(t, i + 4, len, 2) == 0) { return 0; }
+    if (load8(t + i + 6) != 45) { return 0; }
+    if (_dlp_digits_n(t, i + 7, len, 4) == 0) { return 0; }
+    if (_dlp_bound_after(t, i + 11, len) == 0) { return 0; }
+    return 1;
+}
+
+# phone_us separator [-. ]
+fn _dlp_is_phone_sep(c) {
+    if (c == 45 || c == 46 || c == 32) { return 1; }
+    return 0;
+}
+
+# phone_us: \b\d{3}[-. ]\d{3}[-. ]\d{4}\b
+fn _dlp_match_phone_at(t, i, len) {
+    if (i + 12 > len) { return 0; }
+    if (_dlp_digits_n(t, i, len, 3) == 0) { return 0; }
+    if (_dlp_is_phone_sep(load8(t + i + 3)) == 0) { return 0; }
+    if (_dlp_digits_n(t, i + 4, len, 3) == 0) { return 0; }
+    if (_dlp_is_phone_sep(load8(t + i + 7)) == 0) { return 0; }
+    if (_dlp_digits_n(t, i + 8, len, 4) == 0) { return 0; }
+    if (_dlp_bound_after(t, i + 12, len) == 0) { return 0; }
+    return 1;
+}
+
+# credit_card separator [- ] (optional between groups)
+fn _dlp_is_cc_sep(c) {
+    if (c == 45 || c == 32) { return 1; }
+    return 0;
+}
+
+# credit_card: \b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b
+fn _dlp_match_cc_at(t, i, len) {
+    if (_dlp_digits_n(t, i, len, 4) == 0) { return 0; }
+    var p = i + 4;
+    var g = 1;
+    while (g < 4) {
+        if (p < len && _dlp_is_cc_sep(load8(t + p)) == 1) { p = p + 1; }
+        if (_dlp_digits_n(t, p, len, 4) == 0) { return 0; }
+        p = p + 4;
+        g = g + 1;
+    }
+    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
+    return 1;
+}
+
+# ipv4 group: consume 1-3 digits from p, return new pos or -1.
+fn _dlp_ipv4_group(t, p, len) {
+    if (p >= len) { return 0 - 1; }
+    if (_dlp_is_digit(load8(t + p)) == 0) { return 0 - 1; }
+    var n = 1;
+    p = p + 1;
+    while (n < 3 && p < len && _dlp_is_digit(load8(t + p)) == 1) {
+        p = p + 1;
+        n = n + 1;
+    }
+    return p;
+}
+
+# ipv4: \b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b
+fn _dlp_match_ipv4_at(t, i, len) {
+    var p = _dlp_ipv4_group(t, i, len);
+    if (p < 0) { return 0; }
+    var g = 1;
+    while (g < 4) {
+        if (p >= len) { return 0; }
+        if (load8(t + p) != 46) { return 0; }
+        p = p + 1;
+        p = _dlp_ipv4_group(t, p, len);
+        if (p < 0) { return 0; }
+        g = g + 1;
+    }
+    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
+    return 1;
+}
+
+# api_key prefix: sk- | pk- | api[_-]?key[=: ]{1,5}. Returns pos after prefix or -1.
+fn _dlp_apikey_prefix(t, i, len) {
+    if (i + 3 <= len) {
+        var c0 = load8(t + i);
+        if (c0 == 115 || c0 == 112) {
+            if (load8(t + i + 1) == 107 && load8(t + i + 2) == 45) {
+                return i + 3;
+            }
+        }
+    }
+    if (i + 6 <= len) {
+        if (load8(t + i) == 97 && load8(t + i + 1) == 112 && load8(t + i + 2) == 105) {
+            var p = i + 3;
+            if (p < len && (load8(t + p) == 95 || load8(t + p) == 45)) { p = p + 1; }
+            if (p + 3 <= len) {
+                if (load8(t + p) == 107 && load8(t + p + 1) == 101 && load8(t + p + 2) == 121) {
+                    p = p + 3;
+                    # [=: ]{1,5} — at least one, at most five.
+                    var sc = 0;
+                    var more = 1;
+                    while (more == 1 && sc < 5 && p < len) {
+                        var sep = load8(t + p);
+                        if (sep == 61 || sep == 58 || sep == 32) {
+                            p = p + 1;
+                            sc = sc + 1;
+                        } else {
+                            more = 0;
+                        }
+                    }
+                    if (sc >= 1) { return p; }
+                }
+            }
+        }
+    }
+    return 0 - 1;
+}
+
+# api_key: prefix + [a-zA-Z0-9]{20,} + \b
+fn _dlp_match_apikey_at(t, i, len) {
+    var p = _dlp_apikey_prefix(t, i, len);
+    if (p < 0) { return 0; }
+    var n = 0;
+    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
+        p = p + 1;
+        n = n + 1;
+    }
+    if (n < 20) { return 0; }
+    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
+    return 1;
+}
+
+# aws_key: \bAKIA[0-9A-Z]{16}\b
+fn _dlp_match_aws_at(t, i, len) {
+    if (i + 20 > len) { return 0; }
+    if (load8(t + i) != 65 || load8(t + i + 1) != 75) { return 0; }
+    if (load8(t + i + 2) != 73 || load8(t + i + 3) != 65) { return 0; }
+    var k = 0;
+    while (k < 16) {
+        if (_dlp_is_upper_alnum(load8(t + i + 4 + k)) == 0) { return 0; }
+        k = k + 1;
+    }
+    if (_dlp_bound_after(t, i + 20, len) == 0) { return 0; }
+    return 1;
+}
+
+# github_token third char [pours]
+fn _dlp_is_gh_third(c) {
+    if (c == 112 || c == 111 || c == 117 || c == 115 || c == 114) { return 1; }
+    return 0;
+}
+
+# github_token: \b(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}\b
+fn _dlp_match_github_at(t, i, len) {
+    if (i + 4 > len) { return 0; }
+    if (load8(t + i) != 103 || load8(t + i + 1) != 104) { return 0; }
+    if (_dlp_is_gh_third(load8(t + i + 2)) == 0) { return 0; }
+    if (load8(t + i + 3) != 95) { return 0; }
+    var p = i + 4;
+    var n = 0;
+    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
+        p = p + 1;
+        n = n + 1;
+    }
+    if (n < 36) { return 0; }
+    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
+    return 1;
+}
+
+# email local char [a-zA-Z0-9._%+-]
+fn _dlp_is_email_local(c) {
+    if (_dlp_is_alnum(c) == 1) { return 1; }
+    if (c == 46 || c == 95 || c == 37 || c == 43 || c == 45) { return 1; }
+    return 0;
+}
+
+# email domain char [a-zA-Z0-9.-]
+fn _dlp_is_email_domain(c) {
+    if (_dlp_is_alnum(c) == 1) { return 1; }
+    if (c == 46 || c == 45) { return 1; }
+    return 0;
+}
+
+# email: [local]+@[domain]+\.[alpha]{2,} — keyed on '@', no \b boundary.
+fn _dlp_has_email(t, len) {
+    var i = 0;
+    while (i < len) {
+        if (load8(t + i) == 64) {
+            if (i >= 1 && _dlp_is_email_local(load8(t + i - 1)) == 1) {
+                var p = i + 1;
+                var seen = 0;
+                while (p < len && _dlp_is_email_domain(load8(t + p)) == 1) {
+                    if (load8(t + p) == 46) {
+                        if (seen == 1) {
+                            var q = p + 1;
+                            var ac = 0;
+                            while (q < len && _dlp_is_alpha(load8(t + q)) == 1) {
+                                ac = ac + 1;
+                                q = q + 1;
+                            }
+                            if (ac >= 2) { return 1; }
+                        }
+                    } else {
+                        seen = 1;
+                    }
+                    p = p + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Scan a byte buffer, returning the highest classification level found.
+# Returns _dlp_default_level when scanning is disabled, the text is empty, or
+# nothing matches. Restricted matches short-circuit (nothing outranks them).
+fn dlp_scan_level(t, len) {
+    if (_dlp_enabled == 0) { return _dlp_default_level; }
+    if (len == 0) { return _dlp_default_level; }
+    var level = _dlp_default_level;
+    var i = 0;
+    while (i < len) {
+        if (_dlp_bound_before(t, i) == 1) {
+            if (_dlp_match_ssn_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
+            if (_dlp_match_cc_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
+            if (_dlp_match_apikey_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
+            if (_dlp_match_aws_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
+            if (_dlp_match_github_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
+            if (_dlp_match_phone_at(t, i, len) == 1) {
+                if (level < CLASS_CONFIDENTIAL) { level = CLASS_CONFIDENTIAL; }
+            }
+            if (_dlp_match_ipv4_at(t, i, len) == 1) {
+                if (level < CLASS_INTERNAL) { level = CLASS_INTERNAL; }
+            }
+        }
+        i = i + 1;
+    }
+    if (level < CLASS_INTERNAL) {
+        if (_dlp_has_email(t, len) == 1) { level = CLASS_INTERNAL; }
+    }
+    return level;
+}

@@ -24,6 +24,17 @@ max_entries = 1000
 ttl_secs = 300
 enabled = true
 
+# Data Loss Prevention — scans request content for PII/secrets and enforces
+# privacy-aware routing. Off by default. When enabled:
+#   default_level  classification when nothing matches (public|internal|
+#                  confidential|restricted)
+# Policy: restricted content (SSN, credit card, API key, AWS/GitHub token) is
+# blocked (403); confidential content (US phone) is forced to a local provider
+# (blocked if none serves the model); internal (email, IPv4) and public pass.
+# [dlp]
+# enabled = true
+# default_level = "public"
+
 # --- Token budget pools ---
 
 [[budgets]]
