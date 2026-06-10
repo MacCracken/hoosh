@@ -223,9 +223,12 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       Live-verified across tier/vision/tools/context profiles.
       (Note: per-token API pricing is hardcoded, *not* `data/cloud_pricing.json`,
       which is cloud-GPU $/hour for hardware planning.)
-- [ ] Semantic cache — cosine similarity over embeddings (`cache/semantic.rs`);
-      distinct from the exact-key LRU cache. **Depends on** embedding-vector
-      storage + cosine (embeddings are currently pass-through).
+- [~] Semantic cache (`cache/semantic.rs`) — **core done** (`semantic.cyr`):
+      fixed-point cosine (`cosine_x1000`, integer-sqrt magnitudes), embedding
+      store (`semantic_insert`/`semantic_find`, threshold + `max_search`),
+      embeddings float-vector parser, and `[semantic_cache]` config. Unit-tested.
+      **Remaining**: chat-path wiring — on an exact-cache miss, embed the query
+      via the embedding provider (network round-trip) and search/store.
 - [~] Context compression (`context/compression.rs`) — **whitespace collapse
       done** (`compression.cyr`, `[compression]` opt-in): JSON-aware collapse of
       `content` values incl. `\n`/`\t`/`\r` escapes, applied before compaction.

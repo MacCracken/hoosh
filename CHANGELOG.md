@@ -8,6 +8,18 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Semantic cache core** (`src/lib/semantic.cyr`, `[semantic_cache]` config) —
+  ports the algorithmic core of `cache/semantic.rs`: fixed-point cosine
+  similarity (`cosine_x1000` over ×10000 integer embedding vectors, magnitudes
+  via integer sqrt to stay within i64), an embedding store
+  (`semantic_insert`/`semantic_find` — nearest neighbour above a configurable
+  threshold, with `max_search` cap), and an embeddings-response float-vector
+  parser (`semantic_parse_embedding`, handling sign/decimal/exponent). Config:
+  `enabled`, `threshold` (0–1, parsed to ×1000), `embedding_model`, `max_search`.
+  Unit-tested (cosine identical/orthogonal/opposite/collinear/zero, integer sqrt,
+  nearest-neighbour + below-threshold + dimension-mismatch, and float parsing
+  incl. scientific notation). The chat-path wiring (computing the query embedding
+  via the embedding provider on a miss) is the remaining follow-up.
 - **Cost optimizer — cheapest *capable* model recommendation** (`pricing.cyr` +
   `metadata.cyr`, ports `cost/{mod,optimizer}.rs` + the needed slice of
   `provider/metadata.rs`).

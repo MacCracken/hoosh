@@ -39,6 +39,17 @@ enabled = true
 # model = "gpt-4o-mini"
 # prompt = "What is the capital of France?"
 
+# Semantic cache — on an exact-cache miss, compare the query's embedding to
+# stored ones (cosine similarity); a match above `threshold` reuses that
+# response. Off by default. `embedding_model` names the model used to embed
+# queries; `max_search` caps the scan (0 = unlimited). The chat-path embedding
+# round-trip is wired separately; the core (cosine + store + parsing) ships now.
+# [semantic_cache]
+# enabled = true
+# threshold = 0.85
+# embedding_model = "text-embedding-3-small"
+# max_search = 0
+
 # Data Loss Prevention — scans request content for PII/secrets and enforces
 # privacy-aware routing. Off by default. When enabled:
 #   default_level  classification when nothing matches (public|internal|

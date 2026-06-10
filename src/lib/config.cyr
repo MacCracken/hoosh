@@ -60,6 +60,31 @@ fn load_config(path) {
         dlp_configure(den, dlvl);
     }
 
+    # Parse [semantic_cache] section — embedding-similarity cache (off by default).
+    var sem_secs = toml_get_sections(sections, "semantic_cache");
+    if (vec_len(sem_secs) > 0) {
+        var sp = toml_section_pairs(vec_get(sem_secs, 0));
+        var sen_str = toml_get(sp, "enabled");
+        var sen = 0;
+        if (sen_str != 0) {
+            if (str_eq_cstr(sen_str, "true") == 1) { sen = 1; }
+        }
+        var sthr = 850;
+        var sthr_str = toml_get(sp, "threshold");
+        if (sthr_str != 0) {
+            var ts = to_cstr(sthr_str);
+            var fr = _sem_parse_num(ts, 0, strlen(ts));
+            sthr = load64(fr) / 10;
+        }
+        var smodel = 0;
+        var smodel_str = toml_get(sp, "embedding_model");
+        if (smodel_str != 0) { smodel = to_cstr(smodel_str); }
+        var smax = 0;
+        var smax_str = toml_get(sp, "max_search");
+        if (smax_str != 0) { smax = str_to_int(smax_str); }
+        semantic_configure(sen, sthr, smodel, smax);
+    }
+
     # Parse [compression] section — prompt whitespace compression (off by default).
     var comp_secs = toml_get_sections(sections, "compression");
     if (vec_len(comp_secs) > 0) {
