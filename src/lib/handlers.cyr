@@ -258,10 +258,10 @@ fn warming_run() {
             var body = _warming_body(model, prompt);
             var key = _cache_key(model, to_cstr(body), str_len(body));
             if (cache_get(_cache, key) == 0) {
-                var result = retry_forward(_retry_cfg, route, model, prompt, 0, 0);
+                var result = retry_forward(_retry_cfg, route, model, prompt, 0, 0, 0, 0);
                 if (result != 0) {
                     var env = _chat_completion_body(model, load64(result),
-                    load64(result + 16), load64(result + 24));
+                    load64(result + 16), load64(result + 24), 0);
                     cache_insert(_cache, key, to_cstr(env));
                     warmed = warmed + 1;
                 }
@@ -904,6 +904,47 @@ fn _req_is_stream(body_ptr, body_len) {
 }
 
 # Extract raw "messages" array from request body
+# Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0.
+# Balanced-bracket scan with JSON string handling (mirrors _extract_messages).
+fn _extract_tools(body_ptr, body_len) {
+    var i = 0;
+    while (i + 9 < body_len) {
+        if (memeq(body_ptr + i, "\"tools\":", 8) == 1) {
+            var j = i + 8;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            if (j < body_len && load8(body_ptr + j) == 91) {
+                var depth = 1;
+                var start = j;
+                j = j + 1;
+                while (j < body_len && depth > 0) {
+                    var ch = load8(body_ptr + j);
+                    if (ch == 91) { depth = depth + 1; }
+                    if (ch == 93) { depth = depth - 1; }
+                    if (ch == 34) {
+                        j = j + 1;
+                        while (j < body_len) {
+                            if (load8(body_ptr + j) == 34) { break; }
+                            if (load8(body_ptr + j) == 92) { j = j + 1; }
+                            j = j + 1;
+                        }
+                    }
+                    j = j + 1;
+                }
+                var len = j - start;
+                # An empty "[]" is no tools.
+                if (len <= 2) { return 0; }
+                var result = alloc(16);
+                store64(result, body_ptr + start);
+                store64(result + 8, len);
+                return result;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _extract_messages(body_ptr, body_len) {
     var mi = 0;
     while (mi < body_len - 12) {
@@ -1080,7 +1121,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
             # the buffered emit would duplicate the partial output.
             if (emitted == 0) {
                 var rresult = retry_forward(
-                _retry_cfg, route, model, "hello", msg_raw, msg_len);
+                _retry_cfg, route, model, "hello", msg_raw, msg_len, 0, 0);
                 if (rresult != 0) {
                     var rtext = load64(rresult);
                     if (strlen(rtext) > 0) {
@@ -1262,7 +1303,7 @@ fn _embed_query_body(body_ptr, body_len) {
 
 # Build an OpenAI chat.completion response envelope (str). Shared by the live
 # chat path and cache warming so a warmed entry is byte-identical to a fresh one.
-fn _chat_completion_body(model, resp_text, ptok, ctok) {
+fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
     str_builder_add_cstr(sb, "\"object\":\"chat.completion\",");
@@ -1272,7 +1313,14 @@ fn _chat_completion_body(model, resp_text, ptok, ctok) {
     str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
     str_builder_add_cstr(sb, "\"content\":\"");
     str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"},\"finish_reason\":\"stop\"}],");
+    str_builder_add_cstr(sb, "\"");
+    if (tool_calls != 0) {
+        str_builder_add_cstr(sb, ",\"tool_calls\":");
+        str_builder_add_cstr(sb, tool_calls);
+        str_builder_add_cstr(sb, "},\"finish_reason\":\"tool_calls\"}],");
+    } else {
+        str_builder_add_cstr(sb, "},\"finish_reason\":\"stop\"}],");
+    }
     str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
     str_builder_add_int(sb, ptok);
     str_builder_add_cstr(sb, ",\"completion_tokens\":");
@@ -1425,8 +1473,18 @@ fn handle_chat(cfd, body_ptr, body_len) {
         if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
     }
 
+    # Tool calling: forward the request's `tools` to the provider (OpenAI-compat).
+    var tools = _extract_tools(body_ptr, body_len);
+    var tools_raw = 0;
+    var tools_len = 0;
+    if (tools != 0) {
+        tools_raw = load64(tools);
+        tools_len = load64(tools + 8);
+    }
+
     var result = retry_forward(
-    _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len);
+    _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len,
+    tools_raw, tools_len);
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         hlog_error("chat: provider backend unreachable after retries");
@@ -1437,6 +1495,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
     var resp_text = load64(result);
     var resp_ptok = load64(result + 16);
     var resp_ctok = load64(result + 24);
+    var resp_tool_calls = load64(result + 32);
 
     if (bpool != 0) {
         pool_commit(bpool, est_tokens, resp_ptok + resp_ctok);
@@ -1448,7 +1507,8 @@ fn handle_chat(cfd, body_ptr, body_len) {
         provider_name(route_provider(route)), model_cstr);
     }
 
-    var body = _chat_completion_body(model_cstr, resp_text, resp_ptok, resp_ctok);
+    var body = _chat_completion_body(model_cstr, resp_text, resp_ptok,
+    resp_ctok, resp_tool_calls);
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     # Populate the response cache for identical future requests.

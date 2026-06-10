@@ -7,6 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Tool calling (OpenAI-compatible)** — the gateway now forwards a request's
+  `tools` to the provider and surfaces the model's `tool_calls` back. `handle_chat`
+  extracts the `tools` array (`_extract_tools`, balanced-bracket scan), threads it
+  through `retry_forward`/`provider_forward` into the OpenAI-compatible body
+  (`_build_chat_body_raw`), and `_extract_openai_tool_calls` lifts
+  `choices[0].message.tool_calls` from the response into hoosh's envelope with
+  `finish_reason:"tool_calls"`. Plain (no-tools) requests are unchanged.
+  **Live-verified**: a `get_weather` tool request to `gpt-4o-mini` returned a
+  `tool_calls` entry calling `get_weather(city="London")`. Unit-tested
+  (`_extract_tools`: span, nested arrays, bracket-in-string, absent/empty).
+  Ports the OpenAI half of `tools/convert.rs`. **Follow-ups**: Anthropic/Gemini
+  tool-format conversion, streaming tool-call assembly, and the bote-backed
+  `/v1/tools/list` + `/v1/tools/call` MCP endpoints.
+
 ## [2.2.3] — 2026-06-10
 
 The **Cost & cache intelligence** parity arc — semantic cache, cost optimizer,

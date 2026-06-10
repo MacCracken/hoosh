@@ -236,10 +236,21 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       The **stale tool-pair prune is deferred to v2.2.4** (needs tool-call
       message structure).
 
-### v2.2.4 — Tool calling & MCP
-- [ ] `/v1/tools/list` — list registered MCP tools
-- [ ] `/v1/tools/call` — invoke MCP tools by name
+### v2.2.4 — Tool calling & MCP (in progress)
+- [~] **Provider-side tool calling (OpenAI-compatible)** — `handle_chat` forwards
+      the request's `tools` to the provider and surfaces `tool_calls` +
+      `finish_reason:"tool_calls"` (`_extract_tools`, `_build_chat_body_raw` tools
+      injection, `_extract_openai_tool_calls`). Ports the OpenAI half of
+      `tools/convert.rs`. Live-verified against `gpt-4o-mini`. **Remaining**:
+      Anthropic (`input_schema` + `tool_use` blocks) and Gemini
+      (`functionDeclarations`) tool-format conversion.
 - [ ] Streaming tool call assembly (incremental deltas)
+- [ ] `/v1/tools/list` — list registered MCP tools (via **bote** — `bote/dist/
+      bote.cyr` is a Cyrius distlib; JSON-RPC `tools/list` over a `ToolRegistry`)
+- [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; tool
+      implementations come from **szál**, not yet a Cyrius distlib)
+- [ ] Stale tool-pair prune in `compression.cyr` (deferred from 2.2.3 — now has
+      tool-call message structure)
 
 ### v2.2.5 — Throughput
 - [ ] Inference batching manager (`inference/batch.rs`) — gated on the

@@ -772,6 +772,60 @@ fn _vec2(x, y) {
     return v;
 }
 
+# Extract the raw tools array span (mirror of handlers.cyr _extract_tools).
+fn _extract_tools(body_ptr, body_len) {
+    var i = 0;
+    while (i + 9 < body_len) {
+        if (memeq(body_ptr + i, "\"tools\":", 8) == 1) {
+            var j = i + 8;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            if (j < body_len && load8(body_ptr + j) == 91) {
+                var depth = 1;
+                var start = j;
+                j = j + 1;
+                while (j < body_len && depth > 0) {
+                    var ch = load8(body_ptr + j);
+                    if (ch == 91) { depth = depth + 1; }
+                    if (ch == 93) { depth = depth - 1; }
+                    if (ch == 34) {
+                        j = j + 1;
+                        while (j < body_len) {
+                            if (load8(body_ptr + j) == 34) { break; }
+                            if (load8(body_ptr + j) == 92) { j = j + 1; }
+                            j = j + 1;
+                        }
+                    }
+                    j = j + 1;
+                }
+                var len = j - start;
+                if (len <= 2) { return 0; }
+                var result = alloc(16);
+                store64(result, body_ptr + start);
+                store64(result + 8, len);
+                return result;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Extract tools from a cstr body literal, return the span as a cstr (or 0).
+fn _etools(s) {
+    var n = strlen(s);
+    var b = alloc(n + 1);
+    memcpy(b, s, n);
+    var r = _extract_tools(b, n);
+    if (r == 0) { return 0; }
+    var p = load64(r);
+    var l = load64(r + 8);
+    var o = alloc(l + 1);
+    memcpy(o, p, l);
+    store8(o + l, 0);
+    return o;
+}
+
 # ================================================================
 # DLP scanner — mirror of src/lib/dlp.cyr (PII/secret byte matchers).
 # Enabled by default here so the matchers are exercised directly.
@@ -3612,6 +3666,20 @@ fn main() {
     metadata_lookup("gpt-4o-mini", md);  # economy, vision, tools
     assert_eq(meets_requirements(md, TIER_STANDARD, 0, 0, 0, 1000), 0,
     "meets: economy model fails standard-tier requirement");
+
+    # ── Tool calling: extract the request's tools array ───────────
+    test_group("tool_calling");
+    assert_eq(streq(_etools("{\"model\":\"m\",\"tools\":[{\"type\":\"function\"}]}"),
+    "[{\"type\":\"function\"}]"), 1, "tools: extracted span");
+    # Nested arrays inside a tool (e.g. an enum) are balanced correctly.
+    assert_eq(streq(_etools("{\"tools\":[{\"enum\":[1,2,3]}],\"x\":1}"),
+    "[{\"enum\":[1,2,3]}]"), 1, "tools: nested arrays balanced");
+    # A `]` inside a string value doesn't end the array early.
+    assert_eq(streq(_etools("{\"tools\":[{\"d\":\"a]b\"}]}"),
+    "[{\"d\":\"a]b\"}]"), 1, "tools: bracket in string ignored");
+    # Absent / empty tools → 0.
+    assert_eq(_etools("{\"model\":\"m\",\"messages\":[]}"), 0, "tools: absent → 0");
+    assert_eq(_etools("{\"tools\":[]}"), 0, "tools: empty array → 0");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
