@@ -41,9 +41,15 @@ move to v2.3.1 and v2.3.2 respectively.
 
 ### Changed
 - **Toolchain: Cyrius 6.1.21 → 6.1.27** (pin in `cyrius.cyml`). 384 → 392 tests
-  green; stdlib snapshot now ships `bayan`/`ganita` (unused by hoosh; the
-  whole-program compile emits benign `last-definition-wins` notes for their
-  `json`/`toml` overlaps, none in hoosh's gated files).
+  green.
+- **Stdlib migration: `bigint` + `toml` + `json` → `bayan`.** 6.1.27 consolidated
+  the standalone `bigint`/`toml`/`json` snapshot modules into a single `bayan`
+  module (it provides `json_parse`/`json_get`, `toml_parse`, and the bigint/u256
+  surface). `[deps].stdlib` now lists `bayan` (placed before `sigil`, which
+  references its u256 surface) in place of the three; `tests/hoosh.tcyr`'s
+  explicit `lib/toml.cyr` + `lib/json.cyr` includes collapse to `lib/bayan.cyr`.
+  Without this, a clean checkout's `cyrius deps` fails — `cannot read
+  ./lib/{bigint,toml,json}.cyr` — since those files no longer ship.
 
 ### Notes
 - **bote is vendored, not a `[deps.bote]` block.** Unlike ai-hwaccel (no git

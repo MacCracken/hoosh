@@ -12,7 +12,10 @@ entry = "src/main.cyr"
 output = "build/hoosh"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bigint", "ct", "keccak", "sigil", "toml", "json", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "tls", "sandhi", "assert", "bench"]
+# bayan (6.1.27) is the consolidated bigint + toml + json module — the
+# standalone bigint/toml/json snapshot files were merged into it. It must
+# precede sigil (sigil references bayan's u256 surface).
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "tls", "sandhi", "assert", "bench"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
 # bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,
