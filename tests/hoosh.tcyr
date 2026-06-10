@@ -215,76 +215,88 @@ fn _provider_path(route) {
     return "/v1/chat/completions";
 }
 
-fn ollama_extract_text(resp_body, resp_len) {
-    if (resp_body == 0) { return ""; }
-    if (resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    var needle = "\"content\":\"";
-    var nlen = 11;
+# Whitespace-tolerant JSON field scanners — mirror of src/lib/provider.cyr.
+fn _json_value_pos(body, len, key, keylen) {
     var i = 0;
-    while (i < resp_len - nlen) {
-        if (memeq(resp_body + i, needle, nlen) == 1) {
-            i = i + nlen;
-            var start = i;
-            while (i < resp_len) {
-                if (load8(resp_body + i) == 34) {
-                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
-                    break;
+    while (i < len - keylen - 1) {
+        if (load8(body + i) == 34) {
+            if (memeq(body + i + 1, key, keylen) == 1) {
+                if (load8(body + i + 1 + keylen) == 34) {
+                    var j = i + 2 + keylen;
+                    while (j < len) {
+                        var c = load8(body + j);
+                        if (c == 32) { j = j + 1; continue; }
+                        if (c == 9) { j = j + 1; continue; }
+                        if (c == 10) { j = j + 1; continue; }
+                        if (c == 13) { j = j + 1; continue; }
+                        break;
+                    }
+                    if (j < len) {
+                        if (load8(body + j) == 58) {
+                            j = j + 1;
+                            while (j < len) {
+                                var d = load8(body + j);
+                                if (d == 32) { j = j + 1; continue; }
+                                if (d == 9) { j = j + 1; continue; }
+                                if (d == 10) { j = j + 1; continue; }
+                                if (d == 13) { j = j + 1; continue; }
+                                break;
+                            }
+                            return j;
+                        }
+                    }
                 }
-                i = i + 1;
             }
-            var tlen = i - start;
-            var text = alloc(tlen + 1);
-            memcpy(text, resp_body + start, tlen);
-            store8(text + tlen, 0);
-            return text;
         }
         i = i + 1;
     }
-    return "";
+    return 0 - 1;
+}
+
+fn _json_extract_str(body, len, key, keylen) {
+    if (body == 0) { return ""; }
+    if (len == 0) { return ""; }
+    store8(body + len, 0);
+    var p = _json_value_pos(body, len, key, keylen);
+    if (p < 0) { return ""; }
+    if (p >= len) { return ""; }
+    if (load8(body + p) != 34) { return ""; }
+    var start = p + 1;
+    var j = start;
+    while (j < len) {
+        if (load8(body + j) == 34) {
+            if (load8(body + j - 1) == 92) { j = j + 1; continue; }
+            break;
+        }
+        j = j + 1;
+    }
+    var tlen = j - start;
+    var text = alloc(tlen + 1);
+    memcpy(text, body + start, tlen);
+    store8(text + tlen, 0);
+    return text;
+}
+
+fn _json_extract_int(body, len, key, keylen) {
+    if (body == 0) { return 0; }
+    if (len == 0) { return 0; }
+    store8(body + len, 0);
+    var p = _json_value_pos(body, len, key, keylen);
+    if (p < 0) { return 0; }
+    return atoi(body + p);
+}
+
+fn ollama_extract_text(resp_body, resp_len) {
+    return _json_extract_str(resp_body, resp_len, "content", 7);
 }
 
 fn anthropic_extract_text(resp_body, resp_len) {
-    if (resp_body == 0) { return ""; }
-    if (resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    var needle = "\"text\":\"";
-    var nlen = 8;
-    var i = 0;
-    while (i < resp_len - nlen) {
-        if (memeq(resp_body + i, needle, nlen) == 1) {
-            i = i + nlen;
-            var start = i;
-            while (i < resp_len) {
-                if (load8(resp_body + i) == 34) {
-                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
-                    break;
-                }
-                i = i + 1;
-            }
-            var tlen = i - start;
-            var text = alloc(tlen + 1);
-            memcpy(text, resp_body + start, tlen);
-            store8(text + tlen, 0);
-            return text;
-        }
-        i = i + 1;
-    }
-    return "";
+    return _json_extract_str(resp_body, resp_len, "text", 4);
 }
 
 fn extract_anthropic_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 20) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 16) {
-        if (memeq(body + i, "\"input_tokens\":", 15) == 1) { prompt = atoi(body + i + 15); }
-        if (memeq(body + i, "\"output_tokens\":", 16) == 1) { comp = atoi(body + i + 16); }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "input_tokens", 12);
+    var comp = _json_extract_int(body, blen, "output_tokens", 13);
     return prompt * 0x100000000 + comp;
 }
 
@@ -303,21 +315,8 @@ fn _bearer_value(key) {
 }
 
 fn extract_openai_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 21) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 20) {
-        if (memeq(body + i, "\"prompt_tokens\":", 16) == 1) {
-            prompt = atoi(body + i + 16);
-        }
-        if (memeq(body + i, "\"completion_tokens\":", 20) == 1) {
-            comp = atoi(body + i + 20);
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "prompt_tokens", 13);
+    var comp = _json_extract_int(body, blen, "completion_tokens", 17);
     return prompt * 0x100000000 + comp;
 }
 
@@ -534,21 +533,8 @@ fn gemini_extract_text(resp_body, resp_len) {
 }
 
 fn extract_gemini_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 22) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 23) {
-        if (memeq(body + i, "\"promptTokenCount\":", 19) == 1) {
-            prompt = atoi(body + i + 19);
-        }
-        if (memeq(body + i, "\"candidatesTokenCount\":", 23) == 1) {
-            comp = atoi(body + i + 23);
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "promptTokenCount", 16);
+    var comp = _json_extract_int(body, blen, "candidatesTokenCount", 20);
     return prompt * 0x100000000 + comp;
 }
 
@@ -2472,6 +2458,46 @@ fn main() {
     memcpy(ad_buf, ant_delta, ad_len);
     assert_streq(anthropic_extract_text(ad_buf, ad_len), "Hi",
     "anthropic SSE delta: text_delta extracted (type:text_delta not matched)");
+
+    # Pretty-printed JSON (OpenAI + Gemini REST responses indent and put a
+    # space after the colon: `"content": "ok"`). The old compact-only needles
+    # (`"content":"`) missed these, so non-streaming OpenAI/Gemini silently
+    # returned empty text + 0 tokens. Extractors must tolerate whitespace
+    # around the colon. Regression guard for the 2.2.0 live-verification bug.
+    var pp_oai = "{\n  \"choices\": [\n    {\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"ok\"\n      }\n    }\n  ],\n  \"usage\": {\n    \"prompt_tokens\": 14,\n    \"completion_tokens\": 1\n  }\n}";
+    var ppo_len = strlen(pp_oai);
+    var ppo_buf = alloc(ppo_len + 1);
+    memcpy(ppo_buf, pp_oai, ppo_len);
+    assert_streq(ollama_extract_text(ppo_buf, ppo_len), "ok",
+    "openai pretty-printed: content extracted past whitespace");
+    var ppo_tok = extract_openai_tokens(ppo_buf, ppo_len);
+    assert_eq(ppo_tok / 0x100000000, 14, "openai pretty-printed: prompt_tokens");
+    assert_eq(ppo_tok % 0x100000000, 1, "openai pretty-printed: completion_tokens");
+
+    # Anthropic content[].text where "text" also appears as a *value*
+    # ("type":"text") before the real key — the key-vs-value check must skip
+    # the value occurrence and extract from the real "text": field.
+    var pp_ant = "{\n  \"content\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"hi\"\n    }\n  ],\n  \"usage\": { \"input_tokens\": 5, \"output_tokens\": 2 }\n}";
+    var ppa_len = strlen(pp_ant);
+    var ppa_buf = alloc(ppa_len + 1);
+    memcpy(ppa_buf, pp_ant, ppa_len);
+    assert_streq(anthropic_extract_text(ppa_buf, ppa_len), "hi",
+    "anthropic pretty-printed: text key extracted, type:text value skipped");
+    var ppa_tok = extract_anthropic_tokens(ppa_buf, ppa_len);
+    assert_eq(ppa_tok / 0x100000000, 5, "anthropic pretty-printed: input_tokens");
+    assert_eq(ppa_tok % 0x100000000, 2, "anthropic pretty-printed: output_tokens");
+
+    # Gemini pretty-printed candidates/usageMetadata (real shape from the live
+    # gemini-2.5-flash response that exposed the bug).
+    var pp_gem = "{\n  \"candidates\": [\n    {\n      \"content\": {\n        \"parts\": [ { \"text\": \"yo\" } ],\n        \"role\": \"model\"\n      }\n    }\n  ],\n  \"usageMetadata\": {\n    \"promptTokenCount\": 2,\n    \"candidatesTokenCount\": 9\n  }\n}";
+    var ppg_len = strlen(pp_gem);
+    var ppg_buf = alloc(ppg_len + 1);
+    memcpy(ppg_buf, pp_gem, ppg_len);
+    assert_streq(gemini_extract_text(ppg_buf, ppg_len), "yo",
+    "gemini pretty-printed: parts[].text extracted");
+    var ppg_tok = extract_gemini_tokens(ppg_buf, ppg_len);
+    assert_eq(ppg_tok / 0x100000000, 2, "gemini pretty-printed: promptTokenCount");
+    assert_eq(ppg_tok % 0x100000000, 9, "gemini pretty-printed: candidatesTokenCount");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

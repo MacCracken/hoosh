@@ -68,6 +68,23 @@ that blocked production is fixed upstream; streaming is now incremental.
   crash-prone libssl path). See CLAUDE.md Key Principles + sandhi architecture/004.
 
 ### Fixed
+- ✅ **Whitespace-tolerant response extraction — OpenAI & Gemini non-streaming
+  responses were silently dropped.** Live verification revealed the text/token
+  extractors (`ollama_extract_text`, `anthropic_extract_text`, and the
+  `extract_*_tokens` scanners) matched compact-only needles (`"content":"`,
+  `"prompt_tokens":`). OpenAI and Gemini **pretty-print** their REST responses
+  (`"content": "ok"`, `"prompt_tokens": 14`), and `atoi` doesn't skip leading
+  spaces — so both **text and token extraction returned empty/0** for those
+  providers (Anthropic returns compact JSON, which is why it passed earlier).
+  Replaced all six extractors with three shared, whitespace-tolerant,
+  quote-anchored scanners (`_json_value_pos` / `_json_extract_str` /
+  `_json_extract_int`) that skip whitespace around the `:` and require a colon to
+  confirm a key — the latter also cleanly skips a string *value* equal to a key
+  name (Anthropic's `"type":"text"` vs the real `"text":` field) and subsumes the
+  hand-rolled `prompt_eval_count`/`eval_count` disambiguation. Added a
+  pretty-printed-JSON regression group (OpenAI/Anthropic/Gemini text + tokens).
+  **Live-verified**: `gpt-4o-mini`, `claude-haiku-4-5`, and `gemini-2.5-flash`
+  all return through the gateway.
 - ✅ **Remote-transport repeated-request SIGSEGV — fixed by switching hoosh to the
   native TLS backend.** Live smoke testing revealed the gateway crashed (SIGSEGV)
   on the *2nd–4th* remote request (stream *and* non-stream, intermittent). Root
@@ -85,14 +102,20 @@ that blocked production is fixed upstream; streaming is now incremental.
   above — to stop loading libssl at all.)
 
 ### Verified (live)
-- **Anthropic** end-to-end against the real API: non-stream (system-message hoist
-  confirmed — a 3-word system instruction is obeyed, which only works if the
-  system turn is hoisted out of `messages`), incremental streaming, and repeated
-  requests — all on the native backend, no crash.
-- **Google/Gemini** request/response shaping verified via direct probe (URL,
-  `contents`/`systemInstruction` body, `candidates`/`usageMetadata` extraction);
-  full gateway path returns clean results and degrades gracefully on auth errors
-  without crashing. A live 200 is pending a valid `GEMINI_API_KEY`.
+- **All three cloud families live end-to-end through the gateway** (`hoosh infer`,
+  native TLS backend): **OpenAI** (`gpt-4o-mini`), **Anthropic**
+  (`claude-haiku-4-5`), and **Google/Gemini** (`gemini-2.5-flash`,
+  `gemini-flash-latest`) each return correct text. OpenAI and Gemini surfaced the
+  pretty-printed-JSON extraction bug above; verified fixed.
+- **Anthropic** also verified for the system-message hoist (a 3-word system
+  instruction is obeyed, which only works if the system turn is hoisted out of
+  `messages`), incremental streaming, and repeated requests — no crash.
+- **Config**: `$ENV` key expansion verified live — provider blocks resolve
+  `api_key = "$GEMINI_KEY"` / `"$ANTHROPIC_AGNOS_KEY"` / `"$OPENAI_KEY"` from the
+  environment; secrets stay out of `hoosh.toml`.
+- Gemini auth confirmed as the `?key=` query param (Bearer returns 401); the
+  gateway degrades gracefully on a `404`/`429` upstream (unknown model / quota)
+  without crashing.
 
 ### Notes
 - **Deferred — blocked on a sandhi P1:** certificate pinning + optional mTLS for

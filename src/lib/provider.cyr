@@ -64,34 +64,94 @@ fn openai_compat_infer(port, model, prompt) {
     return http_post_local(port, "/v1/chat/completions", body, strlen(body));
 }
 
-# Extract "content":"..." from JSON response body (handles nested objects)
-fn ollama_extract_text(resp_body, resp_len) {
-    if (resp_body == 0) { return ""; }
-    if (resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    var needle = "\"content\":\"";
-    var nlen = 11;
+# First byte index of the value for the first object key exactly matching
+# `"<key>"`, skipping whitespace around the `:`. REST APIs (OpenAI, Gemini)
+# pretty-print responses (`"content": "ok"`, `"prompt_tokens": 14`), so the
+# colon-and-value can be separated from the key by spaces/newlines; the older
+# compact-only needles (`"content":"`) silently missed them. The key is
+# quote-anchored on both sides, so `"eval_count"` will not match inside
+# `"prompt_eval_count"` (the disambiguation the token scanners did by hand).
+# Returns -1 when the key is absent.
+fn _json_value_pos(body, len, key, keylen) {
     var i = 0;
-    while (i < resp_len - nlen) {
-        if (memeq(resp_body + i, needle, nlen) == 1) {
-            i = i + nlen;
-            var start = i;
-            while (i < resp_len) {
-                if (load8(resp_body + i) == 34) {
-                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
-                    break;
+    while (i < len - keylen - 1) {
+        if (load8(body + i) == 34) {
+            if (memeq(body + i + 1, key, keylen) == 1) {
+                if (load8(body + i + 1 + keylen) == 34) {
+                    var j = i + 2 + keylen;
+                    while (j < len) {
+                        var c = load8(body + j);
+                        if (c == 32) { j = j + 1; continue; }
+                        if (c == 9) { j = j + 1; continue; }
+                        if (c == 10) { j = j + 1; continue; }
+                        if (c == 13) { j = j + 1; continue; }
+                        break;
+                    }
+                    # Genuine key iff a colon follows. Otherwise this `"<key>"`
+                    # was a string *value* equal to the key name (e.g. Anthropic's
+                    # `"type":"text"` vs the real `"text":` key) — keep scanning.
+                    if (j < len) {
+                        if (load8(body + j) == 58) {
+                            j = j + 1;
+                            while (j < len) {
+                                var d = load8(body + j);
+                                if (d == 32) { j = j + 1; continue; }
+                                if (d == 9) { j = j + 1; continue; }
+                                if (d == 10) { j = j + 1; continue; }
+                                if (d == 13) { j = j + 1; continue; }
+                                break;
+                            }
+                            return j;
+                        }
+                    }
                 }
-                i = i + 1;
             }
-            var tlen = i - start;
-            var text = alloc(tlen + 1);
-            memcpy(text, resp_body + start, tlen);
-            store8(text + tlen, 0);
-            return text;
         }
         i = i + 1;
     }
-    return "";
+    return 0 - 1;
+}
+
+# Extract the string value of the first `"<key>"` field (escaped `\"`
+# preserved), whitespace-tolerant via _json_value_pos. "" if absent or the
+# value is not a JSON string.
+fn _json_extract_str(body, len, key, keylen) {
+    if (body == 0) { return ""; }
+    if (len == 0) { return ""; }
+    store8(body + len, 0);
+    var p = _json_value_pos(body, len, key, keylen);
+    if (p < 0) { return ""; }
+    if (p >= len) { return ""; }
+    if (load8(body + p) != 34) { return ""; }
+    var start = p + 1;
+    var j = start;
+    while (j < len) {
+        if (load8(body + j) == 34) {
+            if (load8(body + j - 1) == 92) { j = j + 1; continue; }
+            break;
+        }
+        j = j + 1;
+    }
+    var tlen = j - start;
+    var text = alloc(tlen + 1);
+    memcpy(text, body + start, tlen);
+    store8(text + tlen, 0);
+    return text;
+}
+
+# Integer value of the first `"<key>"` field, whitespace-tolerant. 0 if absent.
+fn _json_extract_int(body, len, key, keylen) {
+    if (body == 0) { return 0; }
+    if (len == 0) { return 0; }
+    store8(body + len, 0);
+    var p = _json_value_pos(body, len, key, keylen);
+    if (p < 0) { return 0; }
+    return atoi(body + p);
+}
+
+# Extract "content":"..." from JSON response body (handles nested objects)
+fn ollama_extract_text(resp_body, resp_len) {
+    return _json_extract_str(resp_body, resp_len, "content", 7);
 }
 
 # Also works for OpenAI-format responses (same "content" field structure)
@@ -102,48 +162,16 @@ fn openai_extract_text(resp_body, resp_len) {
 # Extract token counts from Ollama response
 # Returns packed: prompt_tokens * 0x100000000 + completion_tokens
 fn extract_ollama_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen == 0) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 13) {
-        if (memeq(body + i, "\"prompt_eval_count\":", 19) == 1) {
-            prompt = atoi(body + i + 19);
-        }
-        if (memeq(body + i, "\"eval_count\":", 13) == 1) {
-            if (i < 8) {
-                comp = atoi(body + i + 13);
-            } else {
-                if (memeq(body + i - 8, "\"prompt_", 8) != 1) {
-                    comp = atoi(body + i + 13);
-                }
-            }
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "prompt_eval_count", 17);
+    var comp = _json_extract_int(body, blen, "eval_count", 10);
     return prompt * 0x100000000 + comp;
 }
 
 # Extract token counts from an OpenAI-format response ("usage" object).
 # Returns packed: prompt_tokens * 0x100000000 + completion_tokens.
 fn extract_openai_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 21) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 20) {
-        if (memeq(body + i, "\"prompt_tokens\":", 16) == 1) {
-            prompt = atoi(body + i + 16);
-        }
-        if (memeq(body + i, "\"completion_tokens\":", 20) == 1) {
-            comp = atoi(body + i + 20);
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "prompt_tokens", 13);
+    var comp = _json_extract_int(body, blen, "completion_tokens", 17);
     return prompt * 0x100000000 + comp;
 }
 
@@ -330,52 +358,14 @@ fn _build_anthropic_body_prompt(model, prompt) {
 # Extract assistant text from an Anthropic response: content[].text.
 # Finds the first "text":"..." and returns the unescaped-boundary slice.
 fn anthropic_extract_text(resp_body, resp_len) {
-    if (resp_body == 0) { return ""; }
-    if (resp_len == 0) { return ""; }
-    store8(resp_body + resp_len, 0);
-    var needle = "\"text\":\"";
-    var nlen = 8;
-    var i = 0;
-    while (i < resp_len - nlen) {
-        if (memeq(resp_body + i, needle, nlen) == 1) {
-            i = i + nlen;
-            var start = i;
-            while (i < resp_len) {
-                if (load8(resp_body + i) == 34) {
-                    if (i > 0) { if (load8(resp_body + i - 1) == 92) { i = i + 1; continue; } }
-                    break;
-                }
-                i = i + 1;
-            }
-            var tlen = i - start;
-            var text = alloc(tlen + 1);
-            memcpy(text, resp_body + start, tlen);
-            store8(text + tlen, 0);
-            return text;
-        }
-        i = i + 1;
-    }
-    return "";
+    return _json_extract_str(resp_body, resp_len, "text", 4);
 }
 
 # Extract token counts from an Anthropic response usage object.
 # Returns packed: input_tokens * 0x100000000 + output_tokens.
 fn extract_anthropic_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 20) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 16) {
-        if (memeq(body + i, "\"input_tokens\":", 15) == 1) {
-            prompt = atoi(body + i + 15);
-        }
-        if (memeq(body + i, "\"output_tokens\":", 16) == 1) {
-            comp = atoi(body + i + 16);
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "input_tokens", 12);
+    var comp = _json_extract_int(body, blen, "output_tokens", 13);
     return prompt * 0x100000000 + comp;
 }
 
@@ -470,21 +460,8 @@ fn gemini_extract_text(resp_body, resp_len) {
 # Extract token counts from a Gemini response usageMetadata object.
 # Returns packed: promptTokenCount * 0x100000000 + candidatesTokenCount.
 fn extract_gemini_tokens(body, blen) {
-    if (body == 0) { return 0; }
-    if (blen < 22) { return 0; }
-    store8(body + blen, 0);
-    var prompt = 0;
-    var comp = 0;
-    var i = 0;
-    while (i < blen - 23) {
-        if (memeq(body + i, "\"promptTokenCount\":", 19) == 1) {
-            prompt = atoi(body + i + 19);
-        }
-        if (memeq(body + i, "\"candidatesTokenCount\":", 23) == 1) {
-            comp = atoi(body + i + 23);
-        }
-        i = i + 1;
-    }
+    var prompt = _json_extract_int(body, blen, "promptTokenCount", 16);
+    var comp = _json_extract_int(body, blen, "candidatesTokenCount", 20);
     return prompt * 0x100000000 + comp;
 }
 

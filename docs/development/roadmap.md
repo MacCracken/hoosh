@@ -106,9 +106,13 @@ backend); hoosh bumped its pin 6.1.18 → 6.1.20 and re-verified crash-free (6/6
 sequential HTTPS, clean exit). With the unblock, the remaining shaping/streaming
 criticals all landed: **Anthropic system-message hoist**, **Google/Gemini
 shaping**, and **incremental remote streaming** (via `sandhi_http_stream`'s SSE
-callback, with a buffered fallback when nothing streams). 269 tests green, and
-Anthropic is **live-verified** end-to-end (non-stream + streaming + repeated
-requests, no crash).
+callback, with a buffered fallback when nothing streams). 278 tests green. **All
+three cloud families are live-verified end-to-end** through the gateway —
+OpenAI (`gpt-4o-mini`), Anthropic (`claude-haiku-4-5`, plus system-message hoist
++ streaming + repeated requests, no crash), and Google/Gemini
+(`gemini-2.5-flash`). Live verification also caught and fixed a
+whitespace-tolerance bug: OpenAI and Gemini pretty-print their REST responses, so
+the compact-only extractors silently dropped their text/tokens (see CHANGELOG).
 
 **Critical build requirement (found during live smoke testing):** the gateway
 **must** be built with `-D CYRIUS_TLS_NATIVE` (flag before the source). Without

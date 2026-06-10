@@ -59,3 +59,13 @@ timestamp,commit,branch,suite,benchmark,avg_ns,min_ns,max_ns,iters
 2026-06-10T03:55:36Z,3d4bfaf,main,hoosh,queue_enqueue_dequeue,1000.0000,1000.0000,1000.0000,10000
 2026-06-10T03:55:36Z,3d4bfaf,main,hoosh,queue_5tier_sort,1000.0000,1000.0000,1000.0000,10000
 2026-06-10T03:55:36Z,3d4bfaf,main,hoosh,route_matches_model,34,34,34,100000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,route_select_20_providers,941,941,941,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,route_round_robin_10,182,182,182,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,pool_reserve_commit,84,84,84,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,pool_available,4,4,4,100000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,cache_get_hit,114,114,114,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,cache_get_miss,50,50,50,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,cache_insert,67,67,67,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,queue_enqueue_dequeue,1000.0000,1000.0000,1000.0000,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,queue_5tier_sort,1000.0000,1000.0000,1000.0000,10000
+2026-06-10T04:08:09Z,909bbc4,main,hoosh,route_matches_model,37,37,37,100000

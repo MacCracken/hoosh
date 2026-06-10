@@ -51,17 +51,23 @@ models = ["llama*", "mistral*", "qwen*", "phi*", "gemma*"]
 # --- Remote providers ---
 # Set API keys via environment variables for security.
 
-# [[providers]]
-# type = "OpenAi"
-# api_key = "$OPENAI_API_KEY"
-# priority = 10
-# models = ["gpt-*", "o1-*", "o3-*"]
+[[providers]]
+type = "OpenAi"
+api_key = "$OPENAI_API_KEY"
+priority = 10
+models = ["gpt-*", "o1-*", "o3-*"]
 
 [[providers]]
 type = "Anthropic"
 api_key = "$ANTHROPIC_API_KEY"
 priority = 10
 models = ["claude-*"]
+
+[[providers]]
+type = "Google"
+api_key = "$GEMINI_API_KEY"
+priority = 10
+models = ["gemini-*"]
 
 # [[providers]]
 # type = "DeepSeek"
