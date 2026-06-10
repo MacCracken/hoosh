@@ -237,13 +237,13 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       message structure).
 
 ### v2.2.4 — Tool calling & MCP (in progress)
-- [~] **Provider-side tool calling (OpenAI-compatible)** — `handle_chat` forwards
-      the request's `tools` to the provider and surfaces `tool_calls` +
-      `finish_reason:"tool_calls"` (`_extract_tools`, `_build_chat_body_raw` tools
-      injection, `_extract_openai_tool_calls`). Ports the OpenAI half of
-      `tools/convert.rs`. Live-verified against `gpt-4o-mini`. **Remaining**:
-      Anthropic (`input_schema` + `tool_use` blocks) and Gemini
-      (`functionDeclarations`) tool-format conversion.
+- [x] **Provider-side tool calling — OpenAI, Anthropic, Gemini** — `handle_chat`
+      forwards the request's `tools` (converting to each native format via
+      `_tools_convert`: OpenAI verbatim, Anthropic `input_schema`, Gemini
+      `functionDeclarations`) and surfaces tool calls back as OpenAI `tool_calls`
+      + `finish_reason:"tool_calls"` (`_extract_openai_tool_calls`,
+      `_anthropic_tool_calls`, `_gemini_tool_calls`). Ports `tools/convert.rs`.
+      Live-verified against all three providers; unit-tested.
 - [ ] Streaming tool call assembly (incremental deltas)
 - [ ] `/v1/tools/list` — list registered MCP tools (via **bote** — `bote/dist/
       bote.cyr` is a Cyrius distlib; JSON-RPC `tools/list` over a `ToolRegistry`)

@@ -45,7 +45,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
 | **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
 | **Provider routing** | Priority, round-robin, lowest-latency (EMA), direct — with model pattern matching |
-| **Tool calling** | OpenAI-compatible — forwards `tools`, surfaces `tool_calls` from the model |
+| **Tool calling** | Forwards `tools` (OpenAI/Anthropic/Gemini native formats), surfaces unified OpenAI `tool_calls` |
 | **Authentication** | Bearer token auth with constant-time comparison (HMAC-SHA256 via sigil) |
 | **Rate limiting** | Per-provider RPM limits |
 | **Token budgets** | Per-agent named pools with reserve/commit lifecycle |

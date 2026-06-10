@@ -1072,10 +1072,10 @@ fn _remote_stream_cb(ctx, ev) {
 fn _remote_stream_body(route, model, msg_raw, msg_len) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
-        return _build_anthropic_body_x(model, msg_raw, msg_len, 1);
+        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, 0, 0);
     }
     if (prov == PROV_GOOGLE) {
-        return _build_gemini_body(msg_raw, msg_len);
+        return _build_gemini_body(msg_raw, msg_len, 0, 0);
     }
     return _build_chat_body_raw_stream(model, msg_raw, msg_len);
 }

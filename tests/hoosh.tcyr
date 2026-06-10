@@ -1326,6 +1326,210 @@ fn _json_obj_end(p, len, start) {
     return i;
 }
 
+# Tool conversion helpers (mirror of provider.cyr).
+fn _json_span_end(p, len, start) {
+    var depth = 0;
+    var i = start;
+    while (i < len) {
+        var ch = load8(p + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(p + i) == 34) {
+                    if (load8(p + i - 1) != 92) { break; }
+                }
+                i = i + 1;
+            }
+        } else {
+            if (ch == 123 || ch == 91) { depth = depth + 1; }
+            if (ch == 125 || ch == 93) {
+                depth = depth - 1;
+                if (depth == 0) { return i + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn _json_obj_obj_span(p, len, key, keylen) {
+    var i = 0;
+    while (i + keylen + 2 < len) {
+        if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
+        && load8(p + i + 1 + keylen) == 34) {
+            var j = i + 2 + keylen;
+            while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
+                j = j + 1;
+            }
+            if (j < len && load8(p + j) == 123) {
+                var end = _json_obj_end(p, len, j);
+                var r = alloc(16);
+                store64(r, p + j);
+                store64(r + 8, end - j);
+                return r;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _json_arr_span(p, len, key, keylen) {
+    var i = 0;
+    while (i + keylen + 2 < len) {
+        if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
+        && load8(p + i + 1 + keylen) == 34) {
+            var j = i + 2 + keylen;
+            while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
+                j = j + 1;
+            }
+            if (j < len && load8(p + j) == 91) {
+                var end = _json_span_end(p, len, j);
+                var r = alloc(16);
+                store64(r, p + j);
+                store64(r + 8, end - j);
+                return r;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _json_esc_span(sb, ptr, len) {
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i);
+        if (c == 34) { str_builder_putc(sb, 92); str_builder_putc(sb, 34); }
+        if (c == 92) { str_builder_putc(sb, 92); str_builder_putc(sb, 92); }
+        if (c == 10) { str_builder_putc(sb, 92); str_builder_putc(sb, 110); }
+        if (c == 13) { str_builder_putc(sb, 92); str_builder_putc(sb, 114); }
+        if (c == 9) { str_builder_putc(sb, 92); str_builder_putc(sb, 116); }
+        if (c >= 32 && c != 34 && c != 92) { str_builder_putc(sb, c); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _emit_tool_call(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add(sb, str_new(id_p, id_l));
+    str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
+    str_builder_add(sb, str_new(nm_p, nm_l));
+    str_builder_add_cstr(sb, "\",\"arguments\":\"");
+    if (args_l > 0) { _json_esc_span(sb, args_p, args_l); } else { str_builder_add_cstr(sb, "{}"); }
+    str_builder_add_cstr(sb, "\"}}");
+    return 0;
+}
+
+fn _tools_convert(tools_raw, tools_len, schema_key) {
+    var sb = str_builder_new();
+    str_builder_putc(sb, '[');
+    var first = 1;
+    var i = 0;
+    while (i < tools_len && load8(tools_raw + i) != 91) { i = i + 1; }
+    i = i + 1;
+    while (i < tools_len) {
+        var ch = load8(tools_raw + i);
+        if (ch == 32 || ch == 44 || ch == 10 || ch == 13 || ch == 9) {
+            i = i + 1;
+        } else {
+            if (ch != 123) {
+                i = tools_len;
+            } else {
+                var obj_end = _json_obj_end(tools_raw, tools_len, i);
+                var func = _json_obj_obj_span(tools_raw + i, obj_end - i, "function", 8);
+                if (func != 0) {
+                    var fptr = load64(func);
+                    var flen = load64(func + 8);
+                    var nm = _json_obj_str_field(fptr, flen, "name", 4);
+                    var ds = _json_obj_str_field(fptr, flen, "description", 11);
+                    var pm = _json_obj_obj_span(fptr, flen, "parameters", 10);
+                    if (nm != 0) {
+                        if (first == 0) { str_builder_putc(sb, ','); }
+                        str_builder_add_cstr(sb, "{\"name\":\"");
+                        str_builder_add(sb, str_new(load64(nm), load64(nm + 8)));
+                        str_builder_add_cstr(sb, "\",\"description\":\"");
+                        if (ds != 0) {
+                            str_builder_add(sb, str_new(load64(ds), load64(ds + 8)));
+                        }
+                        str_builder_add_cstr(sb, "\",\"");
+                        str_builder_add_cstr(sb, schema_key);
+                        str_builder_add_cstr(sb, "\":");
+                        if (pm != 0) {
+                            str_builder_add(sb, str_new(load64(pm), load64(pm + 8)));
+                        } else {
+                            str_builder_add_cstr(sb, "{}");
+                        }
+                        str_builder_putc(sb, '}');
+                        first = 0;
+                    }
+                }
+                i = obj_end;
+            }
+        }
+    }
+    str_builder_putc(sb, ']');
+    return str_cstr(str_builder_build(sb));
+}
+
+fn _anthropic_tool_calls(rb, rbl) {
+    var cspan = _json_arr_span(rb, rbl, "content", 7);
+    if (cspan == 0) { return 0; }
+    var cp = load64(cspan);
+    var cl = load64(cspan + 8);
+    var sb = str_builder_new();
+    str_builder_putc(sb, '[');
+    var first = 1;
+    var i = 1;
+    while (i < cl) {
+        var ch = load8(cp + i);
+        if (ch == 123) {
+            var oe = _json_span_end(cp, cl, i);
+            var ol = oe - i;
+            var tf = _json_obj_str_field(cp + i, ol, "type", 4);
+            if (tf != 0) {
+                if (load64(tf + 8) == 8 && memeq(load64(tf), "tool_use", 8) == 1) {
+                    var idf = _json_obj_str_field(cp + i, ol, "id", 2);
+                    var nmf = _json_obj_str_field(cp + i, ol, "name", 4);
+                    var inf = _json_obj_obj_span(cp + i, ol, "input", 5);
+                    if (idf != 0 && nmf != 0) {
+                        if (first == 0) { str_builder_putc(sb, ','); }
+                        var ap = 0;
+                        var al = 0;
+                        if (inf != 0) { ap = load64(inf); al = load64(inf + 8); }
+                        _emit_tool_call(sb, load64(idf), load64(idf + 8),
+                        load64(nmf), load64(nmf + 8), ap, al);
+                        first = 0;
+                    }
+                }
+            }
+            i = oe;
+        } else {
+            i = i + 1;
+        }
+    }
+    str_builder_putc(sb, ']');
+    if (first == 1) { return 0; }
+    return str_cstr(str_builder_build(sb));
+}
+
+# Convert a cstr OpenAI-tools literal; return the converted cstr.
+fn _conv(s, key) {
+    var n = strlen(s);
+    var b = alloc(n + 1);
+    memcpy(b, s, n);
+    return _tools_convert(b, n, key);
+}
+
+# Parse Anthropic tool_use from a cstr response literal; return tool_calls cstr.
+fn _antc(s) {
+    var n = strlen(s);
+    var b = alloc(n + 1);
+    memcpy(b, s, n);
+    return _anthropic_tool_calls(b, n);
+}
+
 fn _build_anthropic_body_x(model, messages_raw, messages_len, stream) {
     var sys_sb = str_builder_new();
     var msgs_sb = str_builder_new();
@@ -3680,6 +3884,24 @@ fn main() {
     # Absent / empty tools → 0.
     assert_eq(_etools("{\"model\":\"m\",\"messages\":[]}"), 0, "tools: absent → 0");
     assert_eq(_etools("{\"tools\":[]}"), 0, "tools: empty array → 0");
+
+    # Outbound conversion: OpenAI tools → Anthropic (input_schema) / Gemini.
+    # NB: "function" appears as both the "type" value and the real object key.
+    var oai_tools = "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}]";
+    assert_eq(streq(_conv(oai_tools, "input_schema"),
+    "[{\"name\":\"get_weather\",\"description\":\"d\",\"input_schema\":{\"type\":\"object\"}}]"),
+    1, "tools: OpenAI → Anthropic input_schema");
+    assert_eq(streq(_conv(oai_tools, "parameters"),
+    "[{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}]"),
+    1, "tools: OpenAI → Gemini parameters");
+    # Inbound: Anthropic tool_use blocks → OpenAI tool_calls (input stringified).
+    var ant_resp = "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{\"city\":\"Paris\"}}]}";
+    assert_eq(streq(_antc(ant_resp),
+    "[{\"id\":\"toolu_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]"),
+    1, "tools: Anthropic tool_use → OpenAI tool_calls");
+    # No tool_use blocks → 0.
+    assert_eq(_antc("{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}"), 0,
+    "tools: Anthropic no tool_use → 0");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

@@ -8,19 +8,25 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Tool calling (OpenAI-compatible)** — the gateway now forwards a request's
-  `tools` to the provider and surfaces the model's `tool_calls` back. `handle_chat`
-  extracts the `tools` array (`_extract_tools`, balanced-bracket scan), threads it
-  through `retry_forward`/`provider_forward` into the OpenAI-compatible body
-  (`_build_chat_body_raw`), and `_extract_openai_tool_calls` lifts
-  `choices[0].message.tool_calls` from the response into hoosh's envelope with
-  `finish_reason:"tool_calls"`. Plain (no-tools) requests are unchanged.
-  **Live-verified**: a `get_weather` tool request to `gpt-4o-mini` returned a
-  `tool_calls` entry calling `get_weather(city="London")`. Unit-tested
-  (`_extract_tools`: span, nested arrays, bracket-in-string, absent/empty).
-  Ports the OpenAI half of `tools/convert.rs`. **Follow-ups**: Anthropic/Gemini
-  tool-format conversion, streaming tool-call assembly, and the bote-backed
-  `/v1/tools/list` + `/v1/tools/call` MCP endpoints.
+- **Tool calling — OpenAI, Anthropic, and Gemini** — the gateway forwards a
+  request's `tools` to the provider (converting to each native format) and
+  surfaces the model's tool calls back as OpenAI `tool_calls` +
+  `finish_reason:"tool_calls"`. Ports `tools/convert.rs`.
+  - **Request**: `_extract_tools` lifts the `tools` array (balanced-bracket scan);
+    threaded through `retry_forward`/`provider_forward` into the body. OpenAI-compat
+    passes them verbatim (`_build_chat_body_raw`); `_tools_convert` maps them to
+    Anthropic `input_schema` and Gemini `functionDeclarations`.
+  - **Response**: `_extract_openai_tool_calls` (OpenAI), `_anthropic_tool_calls`
+    (`content[].tool_use` → `tool_calls`, `input` stringified), and
+    `_gemini_tool_calls` (`functionCall` parts → `tool_calls`, synthesised ids).
+    Tool-call argument objects are JSON-string-escaped (incl. control chars, so
+    Gemini's pretty-printed `args` stay valid).
+  - **Live-verified** against all three: `get_weather` called for Paris
+    (Anthropic), Tokyo (Gemini), London (OpenAI). Plain (no-tools) requests
+    unchanged. Unit-tested: `_extract_tools`, OpenAI→Anthropic/Gemini conversion
+    (incl. the `"function"`-as-value-vs-key case), Anthropic `tool_use` parsing.
+  - **Follow-ups**: streaming tool-call assembly, and the bote-backed
+    `/v1/tools/list` + `/v1/tools/call` MCP endpoints.
 
 ## [2.2.3] — 2026-06-10
 
