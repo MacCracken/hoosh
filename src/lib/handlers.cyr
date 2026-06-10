@@ -387,11 +387,21 @@ fn handle_cost_estimate(cfd, body_ptr, body_len) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
-# POST /v1/cost/recommend {input_tokens, max_output_tokens} — cheapest model.
-# Cost-ranks the configured exact (non-wildcard) model routes and returns the
-# cheapest. Capability/tier/modality filtering (the full ModelMetadataRegistry)
-# is a follow-up; this ranks purely by estimated cost. Routes whose patterns are
-# all wildcards (e.g. "gpt-*") cannot be priced and are skipped.
+# Parse a JSON boolean field (true → 1, absent/false → 0).
+fn _req_bool(pairs, key) {
+    var v = json_get(pairs, str_from(key));
+    if (v == 0) { return 0; }
+    if (str_eq_cstr(v, "true") == 1) { return 1; }
+    return 0;
+}
+
+# POST /v1/cost/recommend — cheapest *capable* model for a request profile.
+# Body: {input_tokens, max_output_tokens, uses_tools, has_vision,
+# has_system_prompt}. Classifies the request's minimum tier, then among the
+# configured exact (non-wildcard) model routes keeps only those whose metadata
+# satisfies tier/modality/tool/system/context requirements, and returns the
+# cheapest by estimated cost. Models without metadata (or wildcard-only routes)
+# are skipped. Mirrors CostOptimizer::recommend.
 fn handle_cost_recommend(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
@@ -402,11 +412,19 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
     var out_tok = 0;
     var ot = json_get(pairs, str_from("max_output_tokens"));
     if (ot != 0) { out_tok = str_to_int(ot); }
+    var uses_tools = _req_bool(pairs, "uses_tools");
+    var has_vision = _req_bool(pairs, "has_vision");
+    var has_system = _req_bool(pairs, "has_system_prompt");
+    var min_tier = classify_complexity(in_tok, uses_tools, has_vision);
+    var total_tokens = in_tok + out_tok;
+
     var routes = load64(_router + ROUTER_ROUTES);
     var count = load64(_router + ROUTER_COUNT);
     var best_model = 0;
     var best_prov = 0;
+    var best_tier = 0;
     var best_cost = 0x7FFFFFFFFFFFFFFF;
+    var meta = alloc(40);
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
@@ -418,11 +436,18 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
                 var pat = load64(pats + j * 8);
                 var pl = strlen(pat);
                 if (pl > 0 && load8(pat + pl - 1) != 42) {
-                    var c = estimate_cost_micro(pat, route_provider(r), in_tok, out_tok);
-                    if (c < best_cost) {
-                        best_cost = c;
-                        best_model = pat;
-                        best_prov = route_provider(r);
+                    if (metadata_lookup(pat, meta) == 1) {
+                        if (meets_requirements(meta, min_tier, has_vision,
+                        uses_tools, has_system, total_tokens) == 1) {
+                            var c = estimate_cost_micro(pat, route_provider(r),
+                            in_tok, out_tok);
+                            if (c < best_cost) {
+                                best_cost = c;
+                                best_model = pat;
+                                best_prov = route_provider(r);
+                                best_tier = load64(meta + 8);
+                            }
+                        }
                     }
                 }
                 j = j + 1;
@@ -432,13 +457,17 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
     }
     if (best_model == 0) {
         return http_error(cfd, "404", "Not Found",
-        "no exact-model route to recommend (routes use wildcard patterns)");
+        "no capable exact-model route for this request profile");
     }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, best_model);
     str_builder_add_cstr(sb, "\",\"provider\":\"");
     str_builder_add_cstr(sb, provider_name(best_prov));
+    str_builder_add_cstr(sb, "\",\"tier\":\"");
+    str_builder_add_cstr(sb, tier_name(best_tier));
+    str_builder_add_cstr(sb, "\",\"required_tier\":\"");
+    str_builder_add_cstr(sb, tier_name(min_tier));
     str_builder_add_cstr(sb, "\",\"estimated_cost_micro_usd\":");
     str_builder_add_int(sb, best_cost);
     str_builder_add_cstr(sb, ",\"estimated_cost_usd\":\"");

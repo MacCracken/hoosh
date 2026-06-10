@@ -215,11 +215,12 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       (`warming_run` in `cmd_serve`; no background task — single-threaded
       runtime). Warms under the exact key a client request hits; live-verified
       (startup warmed 1/1 → client request cache hit).
-- [~] Cost optimizer (`cost/optimizer.rs`) — **pricing + cost-based recommend
-      done** (`pricing.cyr`: 16-model per-token table ported from `cost/mod.rs`,
-      exact/prefix/fallback lookup; `POST /v1/cost/estimate` + `/v1/cost/recommend`
-      rank by estimated cost). The **capable-model filter** (tier/modality/tool/
-      context — the 934-line `ModelMetadataRegistry`) is the remaining follow-up.
+- [x] **Cost optimizer** (`cost/optimizer.rs`) — cheapest *capable* model.
+      `pricing.cyr` (16-model per-token table from `cost/mod.rs`, exact/prefix/
+      fallback) + `metadata.cyr` (per-model tier/context/vision/tools/system +
+      `classify_complexity`/`meets_requirements` from the registry slice).
+      `POST /v1/cost/estimate` and `POST /v1/cost/recommend` (capability-filtered).
+      Live-verified across tier/vision/tools/context profiles.
       (Note: per-token API pricing is hardcoded, *not* `data/cloud_pricing.json`,
       which is cloud-GPU $/hour for hardware planning.)
 - [ ] Semantic cache — cosine similarity over embeddings (`cache/semantic.rs`);

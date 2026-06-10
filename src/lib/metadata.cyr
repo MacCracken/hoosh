@@ -1,0 +1,132 @@
+# metadata.cyr — model capability metadata + complexity classification.
+#
+# Port of the parts of rust-old/src/provider/metadata.rs + cost/optimizer.rs the
+# cost optimizer needs to pick the cheapest *capable* model: per-model tier,
+# context window, and vision/tools/system-prompt support, plus
+# classify_complexity / meets_requirements. Covers the priced models (the ones
+# /v1/cost/recommend can rank); unknown models have no metadata and are skipped.
+
+# Tier ordering doubles as tier_rank (Economy < Standard < Premium < Reasoning).
+enum ModelTier {
+    TIER_ECONOMY   = 0;
+    TIER_STANDARD  = 1;
+    TIER_PREMIUM   = 2;
+    TIER_REASONING = 3;
+}
+
+var _meta_tbl = 0;
+var _meta_n = 0;
+
+# Entry: key(0) ctx(8) tier(16) vision(24) tools(32) sys(40) — 48 bytes.
+fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys) {
+    var e = arr + idx * 48;
+    store64(e, key);
+    store64(e + 8, ctx);
+    store64(e + 16, tier);
+    store64(e + 24, vision);
+    store64(e + 32, tools);
+    store64(e + 40, sys);
+    return 0;
+}
+
+fn _meta_init() {
+    if (_meta_tbl != 0) { return 0; }
+    var arr = alloc(16 * 48);
+    _meta_add(arr, 0, "claude-opus-4", 200000, TIER_PREMIUM, 1, 1, 1);
+    _meta_add(arr, 1, "claude-sonnet-4", 200000, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 2, "claude-3.5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 3, "claude-3-5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 4, "gpt-4o", 128000, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 5, "gpt-4o-mini", 128000, TIER_ECONOMY, 1, 1, 1);
+    _meta_add(arr, 6, "o1", 200000, TIER_REASONING, 1, 1, 1);
+    _meta_add(arr, 7, "o3-mini", 200000, TIER_REASONING, 0, 1, 1);
+    _meta_add(arr, 8, "deepseek-chat", 64000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 9, "deepseek-coder", 64000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 10, "deepseek-reasoner", 64000, TIER_REASONING, 0, 1, 1);
+    _meta_add(arr, 11, "grok-3", 131072, TIER_PREMIUM, 0, 1, 1);
+    _meta_add(arr, 12, "grok-3-mini", 131072, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 13, "llama-3.3-70b", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 14, "llama-3.1-8b", 128000, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 15, "gemini-2.0-flash", 1048576, TIER_ECONOMY, 1, 1, 1);
+    _meta_tbl = arr;
+    _meta_n = 16;
+    return 0;
+}
+
+# Copy entry e's fields into out: ctx(0) tier(8) vision(16) tools(24) sys(32).
+fn _meta_copy(e, out) {
+    store64(out, load64(e + 8));
+    store64(out + 8, load64(e + 16));
+    store64(out + 16, load64(e + 24));
+    store64(out + 24, load64(e + 32));
+    store64(out + 32, load64(e + 40));
+    return 0;
+}
+
+# Look up model metadata into out (ctx,tier,vision,tools,sys). Exact → longest
+# prefix. Returns 1 if found, 0 if unknown.
+fn metadata_lookup(model, out) {
+    _meta_init();
+    var ml = strlen(model);
+    var i = 0;
+    while (i < _meta_n) {
+        var e = _meta_tbl + i * 48;
+        if (streq(model, load64(e)) == 1) {
+            _meta_copy(e, out);
+            return 1;
+        }
+        i = i + 1;
+    }
+    var best = 0 - 1;
+    var best_len = 0;
+    i = 0;
+    while (i < _meta_n) {
+        var e = _meta_tbl + i * 48;
+        var key = load64(e);
+        var kl = strlen(key);
+        if (kl <= ml) {
+            if (memeq(model, key, kl) == 1) {
+                if (kl > best_len) {
+                    best_len = kl;
+                    best = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (best >= 0) {
+        _meta_copy(_meta_tbl + best * 48, out);
+        return 1;
+    }
+    return 0;
+}
+
+# Minimum tier a request needs (mirrors CostOptimizer::classify_complexity).
+fn classify_complexity(in_tok, uses_tools, has_vision) {
+    if (has_vision == 1) { return TIER_STANDARD; }
+    if (uses_tools == 1 && in_tok > 2000) { return TIER_STANDARD; }
+    if (in_tok > 10000) { return TIER_STANDARD; }
+    return TIER_ECONOMY;
+}
+
+# Does a model's metadata (out from metadata_lookup) satisfy the request?
+fn meets_requirements(meta, min_tier, has_vision, uses_tools, has_system, total_tokens) {
+    var ctx = load64(meta);
+    var tier = load64(meta + 8);
+    var vision = load64(meta + 16);
+    var tools = load64(meta + 24);
+    var sys = load64(meta + 32);
+    if (tier < min_tier) { return 0; }
+    if (has_vision == 1 && vision == 0) { return 0; }
+    if (uses_tools == 1 && tools == 0) { return 0; }
+    if (has_system == 1 && sys == 0) { return 0; }
+    if (total_tokens > ctx) { return 0; }
+    return 1;
+}
+
+fn tier_name(tier) {
+    if (tier == TIER_REASONING) { return "reasoning"; }
+    if (tier == TIER_PREMIUM) { return "premium"; }
+    if (tier == TIER_STANDARD) { return "standard"; }
+    return "economy";
+}

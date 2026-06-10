@@ -151,7 +151,7 @@ Response:
 | GET | `/v1/costs` | Cost tracking summary |
 | POST | `/v1/costs/reset` | Reset cost counters |
 | POST | `/v1/cost/estimate` | Estimate per-token cost for a model + token profile |
-| POST | `/v1/cost/recommend` | Cheapest configured exact-model for a token profile |
+| POST | `/v1/cost/recommend` | Cheapest *capable* model for a request profile (tier/vision/tools/context-aware) |
 | GET | `/v1/cache/stats` | Cache hit/miss/eviction stats |
 | GET | `/v1/queue/status` | Request queue status |
 | GET | `/metrics` | Prometheus metrics (text format) |
