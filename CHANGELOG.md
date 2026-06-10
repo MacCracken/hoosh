@@ -7,6 +7,30 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Response cache was inert — now wired into `/v1/chat/completions`.** The
+  exact-key LRU cache (`cache.cyr`) was configured and exposed via
+  `/v1/cache/stats`, but `handle_chat` never read or wrote it, so every request
+  hit the provider. Non-streaming requests now compute an exact key
+  (`_cache_key` = sha256-hex over model + raw body), short-circuit on a hit
+  before rate-limit/budget/forward, and store the response body on a miss.
+  **Live-verified**: identical request twice → 1 miss + 1 hit (`/v1/cache/stats`
+  `hits:1`). Foundation for cache warming (v2.2.3). Streaming responses are not
+  cached.
+
+### Changed
+- **Cyrius pin 6.1.20 → 6.1.21**; stdlib re-synced, `cyrius.lock` refreshed. This
+  ships sandhi's **native-TLS-by-default** flip.
+- **Native TLS is now the default — the gateway builds with no TLS flag**
+  (`cyrius build src/main.cyr build/hoosh`). The old opt-in `-D CYRIUS_TLS_NATIVE`
+  is gone from CI/release/CLAUDE.md (kept as a deprecated, harmless no-op
+  upstream). The crash-prone libssl fdlopen bridge is now the explicit **opt-out**
+  via `-D CYRIUS_TLS_LIBSSL`, which hoosh never passes. `main()` still asserts
+  native via `sandhi_tls_use_native()` and warns only if a libssl-only build
+  disabled it. **Verified**: default build → native active (5 sequential remote
+  HTTPS, clean exit, no warning); `-D CYRIUS_TLS_LIBSSL` build → startup warning
+  as expected.
+
 ## [2.2.2] — 2026-06-10
 
 Data Loss Prevention — the **v2.2.2 parity item**. Ports `dlp/scanner.rs`: the

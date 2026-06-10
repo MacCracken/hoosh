@@ -115,12 +115,16 @@ whitespace-tolerance bug: OpenAI and Gemini pretty-print their REST responses, s
 the compact-only extractors silently dropped their text/tokens (see CHANGELOG).
 
 **Critical build requirement (found during live smoke testing):** the gateway
-**must** be built with `-D CYRIUS_TLS_NATIVE` (flag before the source). Without
-it, hoosh runs on the deprecated libssl fdlopen bridge, which **SIGSEGVs on the
-2nd–4th remote request** (the brk-malloc/TLS-arena family of the upstream P1) —
-this affected stream *and* non-stream. Native loads no libssl at all and is
-crash-free. CI/release now pass the flag; `main()` forces native via
-`sandhi_tls_use_native()` and warns if it's not active. See CLAUDE.md.
+must run on sandhi's **native** TLS backend. Without it, hoosh runs on the
+deprecated libssl fdlopen bridge, which **SIGSEGVs on the 2nd–4th remote
+request** (the brk-malloc/TLS-arena family of the upstream P1) — this affected
+stream *and* non-stream. Native loads no libssl at all and is crash-free.
+Originally this required `-D CYRIUS_TLS_NATIVE` at build time; **as of cyrius
+6.1.21 / sandhi native-default (hoosh 2.2.2), native is the default and no flag
+is needed** — the libssl bridge is now the explicit opt-out (`-D
+CYRIUS_TLS_LIBSSL`, which hoosh never passes). `main()` still asserts native via
+`sandhi_tls_use_native()` and warns if a libssl-only build disabled it. See
+CLAUDE.md.
 
 The only deferred item is **cert pinning**, which needs an upstream sandhi
 feature (the high-level client can't carry a TLS policy) — see below.
@@ -200,13 +204,25 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       Confidential → local provider only (`router_select_local`, 403 if none);
       Internal/Public pass.
 
-### v2.2.3 — Cost & cache intelligence
-- [ ] Cost optimizer — cheapest capable model recommendation (`cost/optimizer.rs`)
+### v2.2.3 — Cost & cache intelligence (in progress)
+- [x] **Response cache wired into `/v1/chat/completions`** — prerequisite found
+      during this arc: the exact-key LRU cache was ported but **inert** (never
+      read/written by `handle_chat`). Now non-streaming requests key off
+      sha256(model+body), hit short-circuits before forward, miss stores the
+      body. Live-verified (hits/misses in `/v1/cache/stats`).
+- [ ] Cache warming — startup pre-population (`cache/warming.rs`). **Unblocked**
+      by the wiring above; needs `[[warming]]` config + a synchronous startup
+      warm loop (no background task — single-threaded runtime). NEXT.
+- [ ] Cost optimizer — cheapest capable model recommendation (`cost/optimizer.rs`).
+      **Depends on** porting the model-metadata registry (tier/modalities/
+      capabilities/context-window) + a pricing lookup over `data/cloud_pricing.json`.
 - [ ] Semantic cache — cosine similarity over embeddings (`cache/semantic.rs`);
-      distinct from the exact-key LRU cache already ported
-- [ ] Cache warming — startup pre-population (`cache/warming.rs`)
-- [ ] Context compression — whitespace collapse, stale tool-pair prune, dedup
-      (`context/compression.rs`); distinct from the compaction already ported
+      distinct from the exact-key LRU cache. **Depends on** embedding-vector
+      storage + cosine (embeddings are currently pass-through).
+- [ ] Context compression — whitespace collapse + stale tool-pair prune
+      (`context/compression.rs`); distinct from the compaction already ported.
+      The tool-pair prune **depends on** tool-call message structure (v2.2.4);
+      whitespace collapse needs JSON-aware handling over the raw messages buffer.
 
 ### v2.2.4 — Tool calling & MCP
 - [ ] `/v1/tools/list` — list registered MCP tools

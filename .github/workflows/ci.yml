@@ -84,11 +84,12 @@ jobs:
       - name: Build (DCE)
         run: |
           mkdir -p build
-          # -D CYRIUS_TLS_NATIVE: compile sandhi's native TLS stack so the
-          # gateway never fdlopen-loads libssl/glibc (whose brk-malloc/TLS
-          # machinery SIGSEGVs on repeated remote requests). Flag MUST precede
-          # the source; main.cyr warns at startup if native is not active.
-          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE src/main.cyr build/hoosh
+          # Native TLS is sandhi's default backend (cyrius 6.1.21+) — no flag
+          # needed. The gateway never fdlopen-loads libssl/glibc (whose
+          # brk-malloc/TLS machinery SIGSEGVs on repeated remote requests).
+          # main.cyr warns at startup if a libssl-only build (-D CYRIUS_TLS_LIBSSL)
+          # ever disables it. Do NOT pass -D CYRIUS_TLS_LIBSSL.
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/hoosh
           echo "hoosh: $(wc -c < build/hoosh) bytes"
 
       - name: Verify ELF

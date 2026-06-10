@@ -266,6 +266,23 @@ fn _find_provider_route(routes, count, prov) {
     return 0;
 }
 
+# Exact-key response-cache key (mirror of handlers.cyr _cache_key).
+fn _cache_key(model, body_ptr, body_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\n");
+    var bb = alloc(body_len + 1);
+    memcpy(bb, body_ptr, body_len);
+    store8(bb + body_len, 0);
+    str_builder_add_cstr(sb, bb);
+    var s = str_builder_build(sb);
+    return sha256_hex(str_cstr(s), str_len(s));
+}
+
+fn _ckey(model, body) {
+    return _cache_key(model, body, strlen(body));
+}
+
 # ================================================================
 # DLP scanner — mirror of src/lib/dlp.cyr (PII/secret byte matchers).
 # Enabled by default here so the matchers are exercised directly.
@@ -2978,6 +2995,18 @@ fn main() {
     assert_eq(_dlp_test("SSN: 123-45-6789"), CLASS_PUBLIC,
     "dlp: disabled returns default");
     _dlp_enabled = 1;
+
+    # ── Response cache key (exact-key) ────────────────────────────
+    test_group("cache_key");
+    var rq = "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq)), 1,
+    "cache key: identical (model,body) is deterministic");
+    assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o", rq)), 0,
+    "cache key: different model differs");
+    var rq2 = "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"bye\"}]}";
+    assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq2)), 0,
+    "cache key: different body differs");
+    assert_eq(strlen(_ckey("gpt-4o-mini", rq)), 64, "cache key: sha256 hex is 64 chars");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

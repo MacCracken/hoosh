@@ -42,10 +42,11 @@ jobs:
           cyrius lib sync
           cyrius deps
           mkdir -p build
-          # -D CYRIUS_TLS_NATIVE: native TLS stack — no fdlopen libssl/glibc,
-          # which SIGSEGVs on repeated remote requests. Flag MUST precede the
-          # source; main.cyr warns at startup if native is not active.
-          CYRIUS_DCE=1 cyrius build -D CYRIUS_TLS_NATIVE src/main.cyr build/hoosh
+          # Native TLS is sandhi's default backend (cyrius 6.1.21+) — no flag.
+          # No fdlopen libssl/glibc (which SIGSEGVs on repeated remote requests).
+          # main.cyr warns at startup if a libssl-only build (-D CYRIUS_TLS_LIBSSL)
+          # ever disables it. Do NOT pass -D CYRIUS_TLS_LIBSSL.
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/hoosh
           xxd -l 4 build/hoosh | grep -q "7f45 4c46"
           echo "hoosh: $(wc -c < build/hoosh) bytes"
 

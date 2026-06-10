@@ -990,6 +990,21 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
     return 0;
 }
 
+# Exact-key response-cache key: sha256-hex over model + the raw request body.
+# Identical requests (same model + byte-identical body) collide to one entry;
+# this is the exact-key LRU cache (the semantic cache handles similarity).
+fn _cache_key(model, body_ptr, body_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\n");
+    var bb = alloc(body_len + 1);
+    memcpy(bb, body_ptr, body_len);
+    store8(bb + body_len, 0);
+    str_builder_add_cstr(sb, bb);
+    var s = str_builder_build(sb);
+    return sha256_hex(to_cstr(s), str_len(s));
+}
+
 # POST /v1/chat/completions
 fn handle_chat(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
@@ -1031,6 +1046,18 @@ fn handle_chat(cfd, body_ptr, body_len) {
                 hlog_info("dlp: confidential content routed to a local provider");
                 route = lroute;
             }
+        }
+    }
+
+    # Response cache: exact-key lookup (non-streaming only). A hit short-circuits
+    # before rate-limit / budget reservation / provider forward.
+    var ckey = 0;
+    if (_req_is_stream(body_ptr, body_len) == 0) {
+        ckey = _cache_key(model_cstr, body_ptr, body_len);
+        var cached = cache_get(_cache, ckey);
+        if (cached != 0) {
+            hlog_info("chat: response cache hit");
+            return http_ok(cfd, cached, strlen(cached));
         }
     }
 
@@ -1134,5 +1161,10 @@ fn handle_chat(cfd, body_ptr, body_len) {
     str_builder_add_cstr(sb, ",\"total_tokens\":");
     str_builder_add_int(sb, resp_ptok + resp_ctok);
     str_builder_add_cstr(sb, "}}");
-    return http_json_ok(cfd, str_builder_build(sb));
+    var body = str_builder_build(sb);
+    var body_cstr = to_cstr(body);
+    var body_clen = str_len(body);
+    # Populate the response cache for identical future requests.
+    if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
+    return http_ok(cfd, body_cstr, body_clen);
 }
