@@ -243,7 +243,10 @@ stub existed. Implemented in `src/lib/dlp.cyr` as hand-rolled byte-level matcher
       + `finish_reason:"tool_calls"` (`_extract_openai_tool_calls`,
       `_anthropic_tool_calls`, `_gemini_tool_calls`). Ports `tools/convert.rs`.
       Live-verified against all three providers; unit-tested.
-- [ ] Streaming tool call assembly (incremental deltas)
+- [~] Streaming tool call assembly (incremental deltas) — **OpenAI-compatible
+      done**: `stream:true` forwards `tools` and passes provider `tool_calls`
+      deltas through as OpenAI chunks (`_sse_tool_chunk`). Live-verified.
+      **Remaining**: Anthropic/Gemini streaming tool-delta conversion.
 - [ ] `/v1/tools/list` — list registered MCP tools (via **bote** — `bote/dist/
       bote.cyr` is a Cyrius distlib; JSON-RPC `tools/list` over a `ToolRegistry`)
 - [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; tool

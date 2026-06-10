@@ -1015,6 +1015,23 @@ fn _sse_chunk(cfd, model, content, content_len) {
     return 0;
 }
 
+# Stream one SSE chunk wrapping a tool_calls delta (passed through verbatim).
+fn _sse_tool_chunk(cfd, model, tool_calls) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+    str_builder_add_cstr(sb, "\"delta\":{\"tool_calls\":");
+    str_builder_add_cstr(sb, tool_calls);
+    str_builder_add_cstr(sb, "},\"finish_reason\":null}]}");
+    var s = str_builder_build(sb);
+    var d = to_cstr(s);
+    http_sse_event(cfd, d, str_len(s));
+    return 0;
+}
+
 # Send the final SSE stop chunk
 fn _sse_stop(cfd, model) {
     var sb = str_builder_new();
@@ -1065,11 +1082,25 @@ fn _remote_stream_cb(ctx, ev) {
         _sse_chunk(load64(ctx), load64(ctx + 8), txt, strlen(txt));
         store64(ctx + 24, load64(ctx + 24) + 1);
     }
+    # OpenAI-compatible tool_call deltas pass straight through (the client
+    # assembles the partial id/name/arguments fragments). Anthropic/Gemini
+    # streaming tool deltas are a follow-up.
+    if (prov != PROV_ANTHROPIC) {
+        if (prov != PROV_GOOGLE) {
+            var tc = _extract_openai_tool_calls(data, dlen);
+            if (tc != 0) {
+                _sse_tool_chunk(load64(ctx), load64(ctx + 8), tc);
+                store64(ctx + 24, load64(ctx + 24) + 1);
+            }
+        }
+    }
     return 1;
 }
 
-# Build the streaming request body for a remote provider.
-fn _remote_stream_body(route, model, msg_raw, msg_len) {
+# Build the streaming request body for a remote provider. Tools are forwarded on
+# the OpenAI-compatible streaming path (its tool_call deltas pass through);
+# Anthropic/Gemini streaming tool conversion is a follow-up, so they omit tools.
+fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
         return _build_anthropic_body_x(model, msg_raw, msg_len, 1, 0, 0);
@@ -1077,7 +1108,7 @@ fn _remote_stream_body(route, model, msg_raw, msg_len) {
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, 0, 0);
     }
-    return _build_chat_body_raw_stream(model, msg_raw, msg_len);
+    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len);
 }
 
 # Build the streaming request URL for a remote provider.
@@ -1089,7 +1120,7 @@ fn _remote_stream_url(route, model) {
 }
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
-fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
+fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len) {
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -1097,7 +1128,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
     # token-by-token below.
     if (route_is_remote(route) == 1) {
         http_sse_begin(cfd);
-        var sbody = _remote_stream_body(route, model, msg_raw, msg_len);
+        var sbody = _remote_stream_body(route, model, msg_raw, msg_len,
+        tools_raw, tools_len);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
         var ctx = alloc(32);
@@ -1121,12 +1153,15 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len) {
             # the buffered emit would duplicate the partial output.
             if (emitted == 0) {
                 var rresult = retry_forward(
-                _retry_cfg, route, model, "hello", msg_raw, msg_len, 0, 0);
+                _retry_cfg, route, model, "hello", msg_raw, msg_len,
+                tools_raw, tools_len);
                 if (rresult != 0) {
                     var rtext = load64(rresult);
                     if (strlen(rtext) > 0) {
                         _sse_chunk(cfd, model, rtext, strlen(rtext));
                     }
+                    var rtc = load64(rresult + 32);
+                    if (rtc != 0) { _sse_tool_chunk(cfd, model, rtc); }
                     metrics_record(0, load64(rresult + 24));
                 }
             }
@@ -1459,13 +1494,22 @@ fn handle_chat(cfd, body_ptr, body_len) {
     }
 
     # Streaming path
+    # Tool calling: forward the request's `tools` to the provider.
+    var tools = _extract_tools(body_ptr, body_len);
+    var tools_raw = 0;
+    var tools_len = 0;
+    if (tools != 0) {
+        tools_raw = load64(tools);
+        tools_len = load64(tools + 8);
+    }
+
     if (_req_is_stream(body_ptr, body_len) == 1) {
         if (msg_raw == 0) {
             return http_bad_request(cfd,
             "streaming requires messages array");
         }
         var sr = handle_chat_stream(
-        cfd, route, model_cstr, msg_raw, msg_raw_len);
+        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len);
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         return sr;
     }
@@ -1475,15 +1519,6 @@ fn handle_chat(cfd, body_ptr, body_len) {
     if (msg_raw == 0) {
         var prompt_val = json_get(pairs, str_from("prompt"));
         if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
-    }
-
-    # Tool calling: forward the request's `tools` to the provider (OpenAI-compat).
-    var tools = _extract_tools(body_ptr, body_len);
-    var tools_raw = 0;
-    var tools_len = 0;
-    if (tools != 0) {
-        tools_raw = load64(tools);
-        tools_len = load64(tools + 8);
     }
 
     var result = retry_forward(

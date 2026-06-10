@@ -40,22 +40,19 @@ fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len)
     return to_cstr(str_builder_build(sb));
 }
 
-# Build streaming chat body from model + raw messages
-fn _build_chat_body_raw_stream(model, messages_raw, messages_len) {
+# Build streaming chat body from model + raw messages (+ optional tools).
+fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"stream\":true,\"messages\":");
-    var s = str_builder_build(sb);
-    var prefix = to_cstr(s);
-    var plen = strlen(prefix);
-    var total = plen + messages_len + 1;
-    var buf = alloc(total + 1);
-    memcpy(buf, prefix, plen);
-    memcpy(buf + plen, messages_raw, messages_len);
-    store8(buf + plen + messages_len, 125);
-    store8(buf + plen + messages_len + 1, 0);
-    return buf;
+    _sb_add_span(sb, messages_raw, messages_len);
+    if (tools_raw != 0 && tools_len > 0) {
+        str_builder_add_cstr(sb, ",\"tools\":");
+        _sb_add_span(sb, tools_raw, tools_len);
+    }
+    str_builder_add_cstr(sb, "}");
+    return to_cstr(str_builder_build(sb));
 }
 
 # Forward to Ollama native API
@@ -958,7 +955,7 @@ fn provider_forward_stream(route, model, messages_raw, messages_len) {
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var port = url_port(route_base_url(route));
     var body = _build_chat_body_raw_stream(
-    model, messages_raw, messages_len);
+    model, messages_raw, messages_len, 0, 0);
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(port, path, body, blen);

@@ -8,6 +8,15 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Streaming tool-call assembly (OpenAI-compatible)** — `stream:true` requests
+  now forward `tools` (`_build_chat_body_raw_stream`) and pass the provider's
+  incremental `tool_calls` deltas straight through as OpenAI
+  `chat.completion.chunk` events (`_sse_tool_chunk` in `_remote_stream_cb`), so
+  the client assembles the streamed id/name/arguments fragments. The buffered
+  early-error fallback also emits any tool calls. **Live-verified**: a streamed
+  `get_weather` request to `gpt-4o-mini` produced a `tool_calls` delta with the
+  call id+name followed by incremental `arguments` chunks; plain streaming
+  unchanged. Anthropic/Gemini streaming tool deltas remain a follow-up.
 - **Compression: stale tool-pair pruning** (`compression.cyr` `prune_tool_pairs`)
   — completes the `context/compression.rs` port (the half deferred from 2.2.3,
   now that tool-call message structure exists). In a long agentic conversation,
