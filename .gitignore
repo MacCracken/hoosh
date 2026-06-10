@@ -1,5 +1,9 @@
-# Build artifacts
-/build/
+# Build artifacts — keep the build/ dir tracked (via .gitkeep) so it always
+# exists and the compiler drops the binary there, never falling back to the
+# repo root. Ignore everything else inside it.
+/build/*
+!/build/.gitkeep
+# Belt-and-suspenders: ignore a stray top-level binary if one is ever produced.
 /hoosh
 
 # Cyrius vendored stdlib + deps (cyrius lib sync / cyrius deps vendor these)

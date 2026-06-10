@@ -29,6 +29,9 @@ Versioning: [Semantic Versioning](https://semver.org/).
   forwarding.
 
 ### Fixed
+- **Build output always lands in `build/`** — the `build/` directory is now
+  tracked via `build/.gitkeep` so it always exists; the compiler no longer falls
+  back to dropping the binary at the repo root when `build/` is absent.
 - **Response cache was inert — now wired into `/v1/chat/completions`.** The
   exact-key LRU cache (`cache.cyr`) was configured and exposed via
   `/v1/cache/stats`, but `handle_chat` never read or wrote it, so every request
