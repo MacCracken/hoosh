@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.1.21"
+cyrius = "6.1.27"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -22,3 +22,22 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 git = "https://github.com/MacCracken/ai-hwaccel"
 tag = "2.3.9"
 modules = ["dist/ai-hwaccel.cyr"]
+
+# MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
+# /v1/tools/list + /v1/tools/call. We consume bote's **core** bundle
+# (`[lib.core]`, 9 transport-free modules: error/protocol/jsonx/registry/
+# events/audit/dispatch/codec/schema) — the surface for consumers that
+# wrap bote's Dispatcher/Registry but supply their own transport, exactly
+# hoosh's HTTP server.
+#
+# NOT consumed via `[deps.bote]`: unlike ai-hwaccel (whose manifest has no
+# git sub-deps), bote's manifest declares `[deps.libro]` + `[deps.majra]`
+# for its full bundle's `events_majra`/`audit_libro` modules. `cyrius deps`
+# recurses into those git sub-deps, vendoring libro/majra → bayan/ganita/
+# agnosys and adding them all to the compile set — where the agnos superset
+# (agnosys) collides with bote-core's `registry_new` ("last definition
+# wins", a correctness hazard) and trips an agnosys slice-include error.
+# The core bundle itself is fully self-contained (no includes, no libro/
+# majra symbols), so we vendor it directly as `src/vendor/bote-core.cyr`
+# (committed; see that file's header for the pinned bote tag) and include
+# it from src/main.cyr. Re-sync with `./scripts/sync-bote.sh <tag>`.

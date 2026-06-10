@@ -7,6 +7,56 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-06-10
+
+**MCP tool-server endpoints** — `GET /v1/tools/list` + `POST /v1/tools/call`,
+backed by **bote 2.7.3**'s JSON-RPC 2.0 registry/dispatcher/codec. Closes the
+last open item of the v2.2.x parity arc (was tracked as v2.2.5); the parity arc
+is complete, so this ships as **2.3.0**. Also bumps the toolchain to the latest
+Cyrius (**6.1.27**). Connection pooling and OpenTelemetry/event-bus observability
+move to v2.3.1 and v2.3.2 respectively.
+
+### Added
+- **`GET /v1/tools/list`** — lists registered MCP tools in JSON-RPC form
+  (`{"jsonrpc":"2.0","id":1,"result":{"tools":[…]}}`). hoosh synthesizes the
+  `tools/list` request and returns bote's `ToolRegistry` listing verbatim.
+- **`POST /v1/tools/call`** — invokes a tool by name. The request body is an MCP
+  JSON-RPC request (`method:"tools/call"`, `params:{name,arguments}`); it is run
+  through bote's codec + `Dispatcher`, so `initialize` and `tools/list` are also
+  accepted here for full MCP-client compatibility. Unknown tools return a
+  JSON-RPC error; an empty body returns 400.
+- **`src/lib/mcp.cyr`** — the wiring module. `mcp_init` (called from
+  `cmd_serve`) builds the registry + dispatcher and registers a built-in
+  `bote_echo` smoke tool so both endpoints are live-verifiable end-to-end.
+  szál's 58 tool implementations plug in here once they ship as a Cyrius
+  distlib — register them alongside `bote_echo` in `mcp_init` and they appear in
+  `tools/list` and dispatch through `tools/call` with no transport changes (the
+  registry currently holds echo only).
+  **Live-verified**: `tools/list` lists `bote_echo`; `tools/call` round-trips
+  arguments as MCP text content; `initialize` negotiates the protocol version;
+  unknown tool → JSON-RPC error.
+- **Tests + benches** — `mcp_tools` test group (registry/dispatch/codec via the
+  real bote-core: list/call/unknown-tool) and `mcp_tools_list` / `mcp_tools_call`
+  benches (full JSON-RPC parse → dispatch → serialize: ~4 µs / ~9 µs).
+
+### Changed
+- **Toolchain: Cyrius 6.1.21 → 6.1.27** (pin in `cyrius.cyml`). 384 → 392 tests
+  green; stdlib snapshot now ships `bayan`/`ganita` (unused by hoosh; the
+  whole-program compile emits benign `last-definition-wins` notes for their
+  `json`/`toml` overlaps, none in hoosh's gated files).
+
+### Notes
+- **bote is vendored, not a `[deps.bote]` block.** Unlike ai-hwaccel (no git
+  sub-deps), bote's manifest declares `[deps.libro]` + `[deps.majra]`; `cyrius
+  deps` resolves those transitively, pulling libro/majra → bayan/ganita/agnosys
+  into the compile set, where the agnos superset collides with bote-core's
+  `registry_new` and trips an agnosys slice-include error. bote's `[lib.core]`
+  bundle (`dist/bote-core.cyr`) is fully self-contained (9 transport-free
+  modules, no includes), so it is committed at `src/vendor/bote-core.cyr` and
+  included directly. Living under `src/` keeps `cyrius vet` trust intact and the
+  generated file out of the fmt/lint globs. Re-sync with
+  `./scripts/sync-bote.sh <tag>`.
+
 ## [2.2.4] — 2026-06-10
 
 **Tool calling** across all three remote families (OpenAI, Anthropic, Gemini) —

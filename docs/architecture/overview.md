@@ -129,6 +129,8 @@ Thread-safe DashMap cache with TTL. Keyed on prompt hash. Skips caching for stre
 | `/v1/tokens/pools` | GET | List token pools |
 | `/v1/cost/estimate` | POST | Per-token cost estimate for a model |
 | `/v1/cost/recommend` | POST | Cheapest configured exact-model |
+| `/v1/tools/list` | GET | List registered MCP tools (JSON-RPC 2.0, via bote) |
+| `/v1/tools/call` | POST | Invoke an MCP tool by name (MCP JSON-RPC, via bote) |
 | `/v1/transcribe` | POST | Speech-to-text (whisper) |
 
 ---

@@ -1,7 +1,12 @@
 # ADR-005: MCP Integration via Bote + Szál
 
-**Status:** Proposed
-**Date:** 2026-03-21
+**Status:** Accepted (protocol layer shipped in 2.3.0; szál + kavach pending)
+**Date:** 2026-03-21 (proposed) · 2026-06-10 (protocol layer accepted/shipped)
+
+> **Update 2026-06-10 (2.3.0):** the bote protocol layer shipped. See
+> [Implementation (2.3.0)](#implementation-230) below. The Rust-era framing in
+> the original proposal (crates.io links, `v0.23.4`) is superseded by the Cyrius
+> port — bote and szál are Cyrius distlibs, not crates.
 
 ## Context
 
@@ -63,3 +68,53 @@ Client → hoosh (inference + tool routing)
 - **Reimplement tools in hoosh**: Duplicates szál's 58 tools and workflow engine
 - **No MCP support**: Limits tool use to OpenAI-compatible function calling only
 - **Only bote, no szál**: Requires writing all tool implementations from scratch
+
+## Implementation (2.3.0)
+
+The **protocol layer** (bote) shipped in 2.3.0 — the first concrete step of
+"Integration layer 1" above. szál (tool implementations) and kavach (sandbox)
+remain pending.
+
+**Endpoints** (`src/lib/mcp.cyr`, wired in `src/main.cyr`):
+
+- `GET /v1/tools/list` — synthesizes a JSON-RPC `tools/list` request and returns
+  bote's `ToolRegistry` listing verbatim.
+- `POST /v1/tools/call` — the request body is an MCP JSON-RPC request, run through
+  bote's codec + `Dispatcher`; `initialize` and `tools/list` are also accepted.
+
+`mcp_init` (called from `cmd_serve`) builds the registry + dispatcher and
+registers a single built-in `bote_echo` smoke tool so the endpoints are
+live-verifiable end-to-end. **szál plugs in here**: when its 58 tools ship as a
+Cyrius distlib, register them alongside `bote_echo` in `mcp_init` and they appear
+in `tools/list` and dispatch through `tools/call` with no transport changes.
+
+### bote is vendored, not a `[deps.bote]` block
+
+bote is consumed as a single committed file, `src/vendor/bote-core.cyr`
+(bote 2.7.3's `[lib.core]` profile — 9 transport-free modules: error, protocol,
+jsonx, registry, events, audit, dispatch, codec, schema), **not** via a
+`[deps.bote]` entry in `cyrius.cyml`.
+
+**Why.** Unlike ai-hwaccel (whose manifest declares no git sub-deps), bote's
+manifest declares `[deps.libro]` + `[deps.majra]` for its *full* bundle's
+`events_majra` / `audit_libro` modules. `cyrius deps` resolves those
+transitively — vendoring libro/majra → bayan/ganita/agnosys into the compile set,
+where the agnos superset collides with bote-core's `registry_new`
+("last-definition-wins", a correctness hazard) and trips an `agnosys.cyr`
+slice-include compile error. The `bote-core` bundle is fully self-contained (no
+includes, no libro/majra symbols), so vendoring just that file sidesteps the
+transitive tree entirely.
+
+**Why under `src/`.** `cyrius vet` (cyaudit) trusts the authored `src/` tree and
+hash-locked `cyrius.lock` deps; a top-level `vendor/` file reads as *untrusted*
+and fails the vet gate. Placing the bundle at `src/vendor/bote-core.cyr` keeps
+vet green, and because the fmt/lint CI globs are `src/main.cyr` + `src/lib/*.cyr`,
+the generated bundle is excluded from those gates. Re-sync with
+`./scripts/sync-bote.sh <tag>`.
+
+### Tested
+
+`mcp_tools` unit group (registry/dispatch/codec via the real bote-core:
+list / call / unknown-tool) and `mcp_tools_list` / `mcp_tools_call` benches
+(full JSON-RPC parse → dispatch → serialize, ~4 µs / ~9 µs). Live-verified
+end-to-end against the running gateway.

@@ -15,11 +15,21 @@ include "lib/fnptr.cyr"
 include "lib/bench.cyr"
 include "lib/chrono.cyr"
 include "lib/syscalls.cyr"
+include "src/vendor/bote-core.cyr"
 
 # ================================================================
 # Inline all types from the test file (same definitions)
 # These will be factored into src/ modules during the actual port
 # ================================================================
+
+# Mirror of src/lib/mcp.cyr's bote_echo handler for the MCP benches.
+fn _bench_mcp_echo(args, claims) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    if (args != 0) { _json_emit_escaped(sb, args); }
+    str_builder_add_cstr(sb, "\"}],\"isError\":false}");
+    return str_data(str_builder_build(sb));
+}
 
 # Provider types
 enum Provider {
@@ -778,6 +788,36 @@ fn main() {
     i = 0;
     while (i < 10000) {
         dlp_scan_level(dlp_buf, dlp_len);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: mcp_tools_list (bote dispatch) ─────────────────
+    # Full JSON-RPC parse → dispatch → tools/list result serialize, the
+    # per-request cost behind GET /v1/tools/list.
+    var mcp_reg = registry_new();
+    var mcp_disp = dispatcher_new(mcp_reg);
+    var mcp_sch = schema_new("object", vec_new(), vec_new());
+    var mcp_td = tool_def_new("bote_echo", "Echo", mcp_sch);
+    dispatcher_register_tool(mcp_disp, mcp_td, &_bench_mcp_echo);
+
+    b = bench_new("mcp_tools_list");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", mcp_disp, 0);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: mcp_tools_call (bote dispatch + echo) ──────────
+    b = bench_new("mcp_tools_call");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}", mcp_disp, 0);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);

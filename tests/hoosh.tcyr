@@ -20,6 +20,7 @@ include "lib/json.cyr"
 include "lib/syscalls.cyr"
 include "lib/assert.cyr"
 include "lib/sakshi.cyr"
+include "src/vendor/bote-core.cyr"
 include "src/lib/logging.cyr"
 
 # ================================================================
@@ -862,6 +863,16 @@ fn _cmp_substr(p, plen, needle, nlen) {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# Mirror of src/lib/mcp.cyr's _hoosh_tool_echo — bote tool handler ABI
+# fn(args_cstr, claims) -> result_cstr. Echoes args as MCP text content.
+fn _mcp_echo(args, claims) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    if (args != 0) { _json_emit_escaped(sb, args); }
+    str_builder_add_cstr(sb, "\"}],\"isError\":false}");
+    return str_data(str_builder_build(sb));
 }
 
 fn _cmp_str_field(p, len, key, keylen) {
@@ -4133,6 +4144,35 @@ fn main() {
     var conv2 = "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"r\"}]";
     var pr2 = _prune(conv2);
     assert_eq(_cmp_substr(pr2, strlen(pr2), "\"c1\"", 4) >= 0, 1, "prune: <=3 turns unchanged");
+
+    # ── MCP tool server (bote) ────────────────────────────────────
+    # Exercises the real bote-core registry/dispatcher/codec that
+    # src/lib/mcp.cyr drives behind /v1/tools/list + /v1/tools/call.
+    test_group("mcp_tools");
+    var mcp_reg = registry_new();
+    var mcp_disp = dispatcher_new(mcp_reg);
+    var mcp_sch = schema_new("object", vec_new(), vec_new());
+    var mcp_td = tool_def_new("bote_echo", "Echo the provided arguments", mcp_sch);
+    dispatcher_register_tool(mcp_disp, mcp_td, &_mcp_echo);
+    assert_eq(registry_len(mcp_reg), 1, "mcp: registry holds one tool");
+    assert_eq(registry_contains(mcp_reg, "bote_echo"), 1, "mcp: registry contains bote_echo");
+
+    # tools/list — the request src/lib/mcp.cyr synthesizes for GET.
+    var mcp_lst = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", mcp_disp, 0);
+    var mcp_ll = strlen(mcp_lst);
+    assert_eq(_cmp_substr(mcp_lst, mcp_ll, "bote_echo", 9) >= 0, 1, "mcp: tools/list lists bote_echo");
+    assert_eq(_cmp_substr(mcp_lst, mcp_ll, "\"result\"", 8) >= 0, 1, "mcp: tools/list is a JSON-RPC result");
+
+    # tools/call — echo round-trips the arguments as text content.
+    var mcp_call = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}", mcp_disp, 0);
+    var mcp_cl = strlen(mcp_call);
+    assert_eq(_cmp_substr(mcp_call, mcp_cl, "\"content\"", 9) >= 0, 1, "mcp: tools/call returns content");
+    assert_eq(_cmp_substr(mcp_call, mcp_cl, "isError", 7) >= 0, 1, "mcp: tools/call result has isError");
+    assert_eq(_cmp_substr(mcp_call, mcp_cl, "\"id\":2", 6) >= 0, 1, "mcp: tools/call echoes request id");
+
+    # Unknown tool → JSON-RPC error, no crash.
+    var mcp_miss = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"nope\",\"arguments\":{}}}", mcp_disp, 0);
+    assert_eq(_cmp_substr(mcp_miss, strlen(mcp_miss), "\"error\"", 7) >= 0, 1, "mcp: unknown tool yields error");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

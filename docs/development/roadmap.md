@@ -255,18 +255,38 @@ endpoints `/v1/tools/list` + `/v1/tools/call` moved to v2.2.5.)
       `role:"tool"` results before the last 3 tool turns. Unit-tested. This
       completes the `context/compression.rs` port.
 
-### v2.2.5 — MCP & Throughput
-MCP tool-server endpoints (moved from 2.2.4). bote (`bote/dist/bote.cyr`) is a
-Cyrius distlib providing the JSON-RPC `ToolRegistry`/`Dispatcher`; the tool
-implementations (**szál**, 58 built-ins) are not yet a Cyrius distlib, so the
-registry starts empty until they ship.
-- [ ] `/v1/tools/list` — list registered MCP tools (bote `ToolRegistry`)
-- [ ] `/v1/tools/call` — invoke MCP tools by name (bote `Dispatcher`; needs szál)
+---
+
+## v2.3.0 — MCP tool server — ✅ SHIPPED 2026-06-10
+
+The last open item of the parity arc (was tracked as v2.2.5). With it landed,
+the v2.2.x parity arc is complete, so MCP ships as **2.3.0**. Toolchain also
+bumped to the latest Cyrius (**6.1.27**).
+
+bote (`dist/bote-core.cyr`, the `[lib.core]` profile) is the JSON-RPC 2.0
+`ToolRegistry`/`Dispatcher`/codec. The tool implementations (**szál**, 58
+built-ins) are not yet a Cyrius distlib, so the registry holds a single built-in
+`bote_echo` smoke tool until they ship — register them in `mcp_init`
+(`src/lib/mcp.cyr`) alongside `bote_echo` and they appear with no transport
+changes.
+- [x] `GET /v1/tools/list` — list registered MCP tools (bote `ToolRegistry`),
+      JSON-RPC result shape. Live-verified.
+- [x] `POST /v1/tools/call` — invoke a tool by name (bote codec + `Dispatcher`);
+      MCP JSON-RPC body, `initialize`/`tools/list` also accepted. Live-verified
+      (echo round-trip, initialize handshake, unknown-tool error, empty-body 400).
+- [x] `src/lib/mcp.cyr` wiring + `bote_echo` built-in; `mcp_init` from
+      `cmd_serve`. Unit-tested (`mcp_tools`) + benched (`mcp_tools_list`/`_call`).
+- [x] **bote vendored at `src/vendor/bote-core.cyr`** (not `[deps.bote]`) — bote's
+      manifest declares libro/majra git sub-deps that `cyrius deps` resolves
+      transitively into a colliding compile set; the self-contained core bundle
+      sidesteps it. Re-sync: `./scripts/sync-bote.sh <tag>`.
+
+### v2.3.1 — Throughput (next)
+- [ ] Connection pooling for backend sockets
 - [ ] Inference batching manager (`inference/batch.rs`) — gated on the
       multi-threaded accept loop (BLOCKED; see v2.3.x concurrency)
-- [ ] Connection pooling for backend sockets
 
-### v2.2.6 — Observability
+### v2.3.2 — Observability
 - [ ] OpenTelemetry trace propagation (`telemetry.rs`)
 - [ ] Event pub/sub bus (`events.rs`) — HealthChanged / InferenceCompleted /
       InferenceFailed / RateLimited

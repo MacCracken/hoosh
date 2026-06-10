@@ -154,6 +154,8 @@ Response:
 | POST | `/v1/cost/estimate` | Estimate per-token cost for a model + token profile |
 | POST | `/v1/cost/recommend` | Cheapest *capable* model for a request profile (tier/vision/tools/context-aware) |
 | GET | `/v1/cache/stats` | Cache hit/miss/eviction stats |
+| GET | `/v1/tools/list` | List registered MCP tools (JSON-RPC 2.0, via bote) |
+| POST | `/v1/tools/call` | Invoke an MCP tool by name (MCP JSON-RPC body, via bote) |
 | GET | `/v1/queue/status` | Request queue status |
 | GET | `/metrics` | Prometheus metrics (text format) |
 | POST | `/v1/admin/reload` | Hot-reload config from `hoosh.cyml` |

@@ -15,6 +15,13 @@
 
 include "lib/ai-hwaccel.cyr"
 
+# MCP protocol core (bote 2.7.3) — self-contained JSON-RPC 2.0 registry/
+# dispatcher/codec bundle, committed under src/vendor/ rather than pulled
+# via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
+# cyrius resolves transitively and that collide with the agnos stdlib —
+# see cyrius.cyml). Powers /v1/tools/list + /v1/tools/call via src/lib/mcp.cyr.
+include "src/vendor/bote-core.cyr"
+
 # ================================================================
 # Hoosh modules
 # ================================================================
@@ -42,6 +49,7 @@ include "src/lib/storage.cyr"
 include "src/lib/retry.cyr"
 include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
+include "src/lib/mcp.cyr"
 include "src/lib/config.cyr"
 
 # ================================================================
@@ -104,6 +112,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
+    if (streq(path, "/v1/tools/list") == 1) { return handle_tools_list(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
     if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
@@ -205,6 +214,10 @@ fn http_route(cfd, method, path, buf, buf_len) {
         var crb = req_parse_body(buf, buf_len);
         return handle_cost_recommend(cfd, crb, req_body_len(buf, buf_len));
     }
+    if (streq(path, "/v1/tools/call") == 1) {
+        var tcb = req_parse_body(buf, buf_len);
+        return handle_tools_call(cfd, tcb, req_body_len(buf, buf_len));
+    }
 
     # Root
     if (streq(path, "/") == 1) {
@@ -270,6 +283,10 @@ fn cmd_serve(port) {
     # Cache warming — synchronously pre-populate the cache before accepting
     # traffic (opt-in via [[warming]] in hoosh.cyml).
     warming_run();
+
+    # MCP tool server — build bote's registry + dispatcher (bote_echo
+    # registered) so /v1/tools/list + /v1/tools/call are live on start.
+    mcp_init();
 
     while (1 == 1) {
         var client = sock_accept(sfd);

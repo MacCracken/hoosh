@@ -1,0 +1,76 @@
+# src/lib/mcp.cyr — MCP tool-server endpoints (bote)
+#
+# Wires bote's JSON-RPC 2.0 registry + dispatcher (vendor/bote-core.cyr)
+# to two gateway entry points:
+#   GET  /v1/tools/list  — list registered MCP tools (bote ToolRegistry)
+#   POST /v1/tools/call  — invoke a tool by name   (bote Dispatcher)
+#
+# The dispatcher is built once at startup (mcp_init, called from cmd_serve)
+# with a single bote_echo smoke tool registered so the endpoints are
+# live-verifiable end-to-end. szál's tool implementations (58 built-ins)
+# plug in here once they ship as a Cyrius distlib — register them in
+# mcp_init alongside bote_echo and they appear in tools/list + dispatch
+# through tools/call with no transport changes (the registry currently
+# holds echo only).
+#
+# Requires: vendor/bote-core.cyr (registry/dispatcher/codec) and
+# src/lib/http_server.cyr (http_ok/http_bad_request) — both included
+# before this module in src/main.cyr.
+
+var _mcp_dispatcher = 0;
+
+# bote_echo — smoke tool. Echoes its JSON arguments back as MCP text
+# content. Handler ABI (bote 2.0): fn(args_cstr, claims) -> result_cstr,
+# where the returned cstr becomes the JSON-RPC `result` body. claims is
+# always 0 today (populated in a future bote 2.x auth pass).
+fn _hoosh_tool_echo(args, claims) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+    if (args != 0) { _json_emit_escaped(sb, args); }
+    str_builder_add_cstr(sb, "\"}],\"isError\":false}");
+    return str_data(str_builder_build(sb));
+}
+
+# Build the registry + dispatcher and register the built-in tools.
+# Idempotent: a second call rebuilds (only invoked once from cmd_serve).
+fn mcp_init() {
+    var reg = registry_new();
+    var disp = dispatcher_new(reg);
+    # Empty object schema — bote_echo accepts any arguments.
+    var schema = schema_new("object", vec_new(), vec_new());
+    var td = tool_def_new("bote_echo",
+    "Echo the provided arguments back as text content",
+    schema);
+    dispatcher_register_tool(disp, td, &_hoosh_tool_echo);
+    _mcp_dispatcher = disp;
+    return disp;
+}
+
+# Run a JSON-RPC message through the dispatcher and write the response.
+# codec_process_message returns a serialized JSON-RPC response cstr, or 0
+# for a notification (no id) — which carries no response body.
+fn _mcp_respond(cfd, input) {
+    if (_mcp_dispatcher == 0) { mcp_init(); }
+    var out = codec_process_message(input, _mcp_dispatcher, 0);
+    if (out == 0) { return http_respond(cfd, "204", "No Content", "", 0); }
+    return http_ok(cfd, out, strlen(out));
+}
+
+# GET /v1/tools/list — list registered MCP tools. Synthesizes the
+# JSON-RPC `tools/list` request and returns bote's response verbatim:
+# {"jsonrpc":"2.0","id":1,"result":{"tools":[...]}}.
+fn handle_tools_list(cfd) {
+    return _mcp_respond(cfd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+}
+
+# POST /v1/tools/call — invoke a tool by name. The request body is an MCP
+# JSON-RPC request:
+#   {"jsonrpc":"2.0","id":N,"method":"tools/call",
+#    "params":{"name":"<tool>","arguments":{...}}}
+# The body is passed through bote's codec, so `initialize` and
+# `tools/list` are also accepted here for full MCP-client compatibility.
+fn handle_tools_call(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
+    var input = to_cstr(str_new(body_ptr, body_len));
+    return _mcp_respond(cfd, input);
+}
