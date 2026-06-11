@@ -701,6 +701,69 @@ fn handle_hw_placement(cfd, body_ptr, body_len) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# POST /v1/hardware/model-format — detect a model's container format from the
+# RAW model bytes in the request body (send the file or at least its header; the
+# detector reads magic/metadata). No filesystem access (safer than a path arg).
+# Returns ai-hwaccel's ModelMetadata JSON {format, param_count, dtype, ...}.
+fn handle_hw_model_format(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body (send raw model bytes)"); }
+    var m = detect_format_from_bytes(body_ptr, body_len);
+    if (m == 0) { return http_bad_request(cfd, "unrecognized model format"); }
+    return http_json_ok(cfd, model_meta_to_json(m));
+}
+
+# Map a requirement string to the ai-hwaccel REQ_* enum, or -1 if unknown.
+fn _hoosh_req_from_str(s) {
+    if (streq(s, "none") == 1) { return REQ_NONE; }
+    if (streq(s, "gpu") == 1) { return REQ_GPU; }
+    if (streq(s, "tpu") == 1) { return REQ_TPU; }
+    if (streq(s, "gaudi") == 1) { return REQ_GAUDI; }
+    if (streq(s, "aws-neuron") == 1) { return REQ_AWS_NEURON; }
+    if (streq(s, "gpu-or-tpu") == 1) { return REQ_GPU_OR_TPU; }
+    if (streq(s, "any-accelerator") == 1) { return REQ_ANY_ACCELERATOR; }
+    return 0 - 1;
+}
+
+# POST /v1/hardware/requirement-match — does the detected hardware satisfy a
+# scheduler requirement? Body {requirement: "gpu"|"tpu"|..., min_chips?: N}.
+# Reads the immutable hw registry (detected once at startup) — no lock needed.
+fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+    var req_str = json_get(pairs, str_from("requirement"));
+    if (req_str == 0) { return http_bad_request(cfd, "missing 'requirement'"); }
+    var req = _hoosh_req_from_str(to_cstr(req_str));
+    if (req < 0) { return http_bad_request(cfd, "unknown requirement"); }
+    var min_chips = 1;
+    var mc_str = json_get(pairs, str_from("min_chips"));
+    if (mc_str != 0) { min_chips = str_to_int(mc_str); }
+    var hit = 0;
+    if (hw_ready() == 1) {
+        var np = reg_num_profiles(_hw_registry);
+        var i = 0;
+        while (i < np && hit == 0) {
+            var p = reg_get_profile(_hw_registry, i);
+            if (requirement_satisfied(req, min_chips, p) == 1) { hit = p; }
+            i = i + 1;
+        }
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"requirement\":\"");
+    str_builder_add_cstr(sb, requirement_name(req));
+    str_builder_add_cstr(sb, "\",\"min_chips\":");
+    str_builder_add_int(sb, min_chips);
+    str_builder_add_cstr(sb, ",\"satisfied\":");
+    if (hit != 0) { str_builder_add_cstr(sb, "true"); } else { str_builder_add_cstr(sb, "false"); }
+    if (hit != 0) {
+        str_builder_add_cstr(sb, ",\"device\":\"");
+        str_builder_add_cstr(sb, accel_name(profile_accel_type(hit)));
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 # GET /v1/hardware/models
 fn handle_hw_models(cfd) {
     var sb = str_builder_new();

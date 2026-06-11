@@ -1062,6 +1062,19 @@ fn _t_otlp_path(url) {
     return "/v1/traces";
 }
 
+# Mirror of src/lib/handlers.cyr _hoosh_req_from_str (REQ_* values inlined:
+# none=0 gpu=1 tpu=2 gaudi=3 aws-neuron=4 gpu-or-tpu=5 any-accelerator=6, -1=bad).
+fn _t_req_from_str(s) {
+    if (streq(s, "none") == 1) { return 0; }
+    if (streq(s, "gpu") == 1) { return 1; }
+    if (streq(s, "tpu") == 1) { return 2; }
+    if (streq(s, "gaudi") == 1) { return 3; }
+    if (streq(s, "aws-neuron") == 1) { return 4; }
+    if (streq(s, "gpu-or-tpu") == 1) { return 5; }
+    if (streq(s, "any-accelerator") == 1) { return 6; }
+    return 0 - 1;
+}
+
 # Mirror of src/lib/otlp.cyr _otlp_attr_int — OTLP/JSON int attribute (string val).
 fn _t_otlp_attr_int(sb, k, v) {
     str_builder_add_cstr(sb, "{\"key\":\"");
@@ -4504,6 +4517,15 @@ fn main() {
     # Full ring rejects the overflow push.
     _t_wq_push(1); _t_wq_push(2); _t_wq_push(3); _t_wq_push(4);
     assert_eq(_t_wq_push(5), 0, "wq: full ring rejects push");
+
+    # ── Hardware: requirement-string → REQ_* enum ────────────────
+    test_group("hardware");
+    assert_eq(_t_req_from_str("none"), 0, "req: none → REQ_NONE");
+    assert_eq(_t_req_from_str("gpu"), 1, "req: gpu → REQ_GPU");
+    assert_eq(_t_req_from_str("tpu"), 2, "req: tpu → REQ_TPU");
+    assert_eq(_t_req_from_str("gpu-or-tpu"), 5, "req: gpu-or-tpu → REQ_GPU_OR_TPU");
+    assert_eq(_t_req_from_str("any-accelerator"), 6, "req: any-accelerator → REQ_ANY_ACCELERATOR");
+    assert_eq(_t_req_from_str("quantum"), 0 - 1, "req: unknown → -1");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

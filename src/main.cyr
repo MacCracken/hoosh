@@ -177,6 +177,14 @@ fn http_route(cfd, method, path, buf, buf_len) {
         var trb = req_parse_body(buf, buf_len);
         return handle_hw_training(cfd, trb, req_body_len(buf, buf_len));
     }
+    if (streq(path, "/v1/hardware/model-format") == 1) {
+        var mfb = req_parse_body(buf, buf_len);
+        return handle_hw_model_format(cfd, mfb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/hardware/requirement-match") == 1) {
+        var rmb = req_parse_body(buf, buf_len);
+        return handle_hw_requirement_match(cfd, rmb, req_body_len(buf, buf_len));
+    }
     if (streq(path, "/v1/embeddings") == 1) {
         var eb = req_parse_body(buf, buf_len);
         var ebl = req_body_len(buf, buf_len);

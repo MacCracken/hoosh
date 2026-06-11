@@ -7,6 +7,29 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.1] — 2026-06-10
+
+**Hardware planning endpoints** — the remaining ai-hwaccel surface from the
+v2.4.x arc. Also bumps the toolchain to Cyrius **6.1.30**.
+
+### Added
+- **`POST /v1/hardware/model-format`** — detect a model's container format from
+  the **raw model bytes** in the request body (send the file or its header; no
+  filesystem path, so no arbitrary-read surface). Returns ai-hwaccel's
+  `ModelMetadata` JSON (`format` + `param_count`/`dtype`/`tensor_count`/
+  `format_version` when present). Detects SafeTensors / GGUF / ONNX / PyTorch;
+  unrecognized → 400. Live-verified against crafted GGUF + SafeTensors headers.
+- **`POST /v1/hardware/requirement-match`** — does the detected hardware satisfy a
+  scheduler requirement? Body `{requirement: "gpu"|"tpu"|"gaudi"|"aws-neuron"|
+  "gpu-or-tpu"|"any-accelerator"|"none", min_chips?: N}` → `{requirement,
+  min_chips, satisfied, device?}`. Reads the immutable hw registry (detected at
+  startup) — lock-free under the v2.4.0 worker pool. Live-verified (ROCm GPU
+  detected on the dev machine; TPU/min_chips → false; unknown req → 400).
+
+### Changed
+- **Toolchain: Cyrius 6.1.30** (pin). Clean `lib/` re-sync; no stdlib migration;
+  442 tests green.
+
 ## [2.4.0] — 2026-06-10
 
 **Multi-threaded accept loop** — interactive traffic now runs concurrently, not

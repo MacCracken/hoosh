@@ -6,7 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-10 (**v2.4.0** — multi-threaded accept loop). Doc
+> **Last refresh**: 2026-06-10 (**v2.4.1** — hardware planning endpoints +
+> Cyrius 6.1.30). Doc touch: CHANGELOG [2.4.1], roadmap (hw bullets checked +
+> shipped row), overview.md (`hardware.cyr` desc), CLAUDE.md pin. Gates: 442
+> tests, 17 benches, clean. **Prior**: 2026-06-10 (**v2.4.0** — multi-threaded
+> accept loop). Doc
 > touch: +**ADR-011** (unified worker pool), CHANGELOG [2.4.0], roadmap (2.4.0 →
 > shipped row + arc anchor marked done), overview.md (+`pool.cyr`, accept-loop
 > line), index.md (+ADR-011). Gates: 436 tests, 17 benches, clean. **Prior**:
