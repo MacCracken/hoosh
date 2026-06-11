@@ -7,6 +7,45 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-06-10
+
+**Async batch inference** — `POST /v1/batch` with `{"async":true}` returns a
+batch id immediately and runs the batch on a background thread; clients poll
+`GET /v1/batch/{id}` for progress and `POST /v1/batch/{id}/cancel` to cancel.
+Completes the `inference/batch.rs` port (submit → progress → cancel → registry).
+The synchronous `POST /v1/batch` (2.3.1) is unchanged and remains the default.
+
+### Added
+- **`POST /v1/batch` async mode** (`{"async":true}`) → `{"id","status","total"}`.
+  A background runner thread executes the items (waves of 7 crypto-bank workers,
+  same engine as the sync path), updating a `BatchState`.
+- **`GET /v1/batch/{id}`** → progress snapshot: `{id,status,total,completed,
+  failed,results[]}`. `status` ∈ queued/running/completed/cancelled; a still-
+  pending item shows `status:null,body:null`. Reads are lock-free (atomics +
+  write-once result slots).
+- **`POST /v1/batch/{id}/cancel`** → sets the cancel flag; in-flight items finish
+  but no further waves launch (the runner checks the flag before each wave).
+- **Batch registry** (`src/lib/batch.cyr`): `id → BatchState` map + atomic id
+  counter, touched only by the single-threaded accept loop (no lock needed).
+  Live-verified end-to-end: submit→poll→complete (6/6), cancel mid-flight (28-item
+  batch → cancelled at 14/28), and **20/20 concurrent `/v1/chat/completions`
+  served while a 28-item batch ran in the background** (the sync-pass guarantee).
+
+### Changed
+- **Sync pass: the accept-thread chat path now holds `_chat_lock`** around its
+  shared-state phases (prep, assemble/commit; streaming audit appends too). An
+  async batch runs workers concurrently with the accept loop, so a
+  `/v1/chat/completions` served mid-batch would otherwise race batch workers on
+  `_cache`/`_budget`/`_audit`. Uncontended (cheap) when no batch is in flight.
+- **One batch executes at a time** via `_batch_exec_lock` (sync and async share
+  it), so crypto-bank workers (lanes 1..7) never overlap across batches;
+  additional submitted batches queue (`status:"queued"`).
+
+### Notes
+- Async batches run sequentially (one executes at a time); concurrent execution
+  of multiple async batches, and completed-batch eviction from the registry, are
+  future work. See ADR-009.
+
 ## [2.3.1] — 2026-06-10
 
 **Concurrent batch inference** — `POST /v1/batch` runs an array of chat requests

@@ -109,3 +109,42 @@ init, not just a thread-safe allocator.
 - **Rely on `thread_join` for the barrier** — unsafe here (returns early); see §4.
 - **Multi-threaded accept loop now** — bigger blast radius (every handler +
   all shared state must be thread-safe); deferred to 2.4.0.
+
+## Update (2.3.2): async batch
+
+2.3.1 shipped the *synchronous* executor (the handler blocks until all items
+finish). 2.3.2 adds the **async** surface: `POST /v1/batch {"async":true}`
+returns a batch id immediately, a background runner thread executes the batch,
+and clients poll `GET /v1/batch/{id}` / `POST /v1/batch/{id}/cancel`.
+
+**What changed and why:**
+
+1. **The accept loop now runs concurrently with batch workers.** In 2.3.1 the
+   accept thread was *parked* (joining) during a sync batch, so workers were the
+   only concurrent actors and only they needed `_chat_lock`. With a background
+   runner, the accept loop keeps serving requests — so a `/v1/chat/completions`
+   served mid-batch races workers on `_cache`/`_budget`/`_audit`. The fix is the
+   **sync pass**: `handle_chat` (and the streaming audit append) now take
+   `_chat_lock` around their shared-state phases, exactly like a worker. This is
+   a focused slice of the broader sync work scoped for 2.4.0.
+
+2. **`BatchState` + registry, lock-free reads.** Per-batch state (total,
+   completed, failed, status, cancel flag, per-item result slots) lives in a
+   `BatchState`; `completed`/`failed`/`status`/`cancel` are accessed atomically
+   and result slots are write-once, so `GET` needs no lock. The `id → BatchState`
+   registry is touched only by the single-threaded accept loop, so it needs no
+   lock either; the runner holds its `BatchState` pointer directly.
+
+3. **Request bodies are copied at submit.** The runner outlives the POST handler,
+   but the accept loop reuses its receive buffer for the next request — so
+   `batch_submit` copies each item's body into heap-owned memory.
+
+4. **One batch executes at a time** (`_batch_exec_lock`, shared by sync + async).
+   This keeps the crypto-bank lanes (1..7) exclusive to the running batch — bank
+   0 is the accept thread — avoiding the cross-batch lane collision that 8 banks
+   can't otherwise cover. Extra submitted batches queue (`status:"queued"`).
+   Cancellation is checked before each wave (in-flight items finish).
+
+**Deferred:** concurrent execution of multiple async batches (needs a global lane
+pool / semaphore across batches), and eviction of completed batches from the
+registry (currently retained for the process lifetime).

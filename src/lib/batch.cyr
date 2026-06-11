@@ -39,6 +39,251 @@ fn _batch_inc_done() {
     return 0;
 }
 
+fn _batch_atomic_add(ptr, delta) {
+    var old = load64(ptr);
+    while (atomic_cas(ptr, old, old + delta) == 0) { old = load64(ptr); }
+    return 0;
+}
+
+# ── Async batch state (POST /v1/batch async + GET /v1/batch/{id}) ──────
+#
+# Status values (stored atomically at BS_STATUS).
+var BATCH_QUEUED    = 0;
+var BATCH_RUNNING   = 1;
+var BATCH_COMPLETED = 2;
+var BATCH_CANCELLED = 3;
+
+# BatchState layout (64 bytes). completed/failed/status/cancel are written by
+# the background runner + read by the accept thread serving GET — accessed
+# atomically. results slots are write-once per item (runner writes, GET reads).
+var BS_ID        = 0;    # cstr — batch id
+var BS_TOTAL     = 8;    # i64  — item count
+var BS_COMPLETED = 16;   # atomic i64
+var BS_FAILED    = 24;   # atomic i64
+var BS_STATUS    = 32;   # atomic i64 (BATCH_*)
+var BS_CANCEL    = 40;   # atomic i64 (0/1)
+var BS_RESULTS   = 48;   # alloc(total*8) — per-item response descriptor or 0
+var BS_REQS      = 56;   # alloc(total*16) — per-item [owned_body_ptr, len]
+
+# id → BatchState. Touched ONLY by the accept thread (POST insert, GET/cancel
+# lookup), which is single-threaded, so the map needs no lock. The runner holds
+# its BatchState pointer directly and never touches the registry.
+var _batch_registry = 0;
+var _batch_id_counter = 0;
+# Held by a runner for the duration of its execution so only one batch runs its
+# crypto-bank workers (banks 1..7) at a time; other submitted batches queue.
+var _batch_exec_lock = 0;
+
+fn batch_registry_init() {
+    if (_batch_registry == 0) { _batch_registry = map_new(); }
+    if (_batch_exec_lock == 0) { _batch_exec_lock = mutex_new(); }
+    return 0;
+}
+
+# Generate a unique batch id ("batch-<n>"). Accept-thread only.
+fn _batch_next_id() {
+    _batch_id_counter = _batch_id_counter + 1;
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "batch-");
+    str_builder_add_int(sb, _batch_id_counter);
+    return str_data(str_builder_build(sb));
+}
+
+# Build a BatchState for `total` items (results/reqs arrays zeroed).
+fn batch_state_new(id, total) {
+    var bs = alloc(64);
+    store64(bs + BS_ID, id);
+    store64(bs + BS_TOTAL, total);
+    store64(bs + BS_COMPLETED, 0);
+    store64(bs + BS_FAILED, 0);
+    store64(bs + BS_STATUS, BATCH_QUEUED);
+    store64(bs + BS_CANCEL, 0);
+    var results = alloc(total * 8);
+    var reqs = alloc(total * 16);
+    var i = 0;
+    while (i < total) {
+        store64(results + i * 8, 0);
+        store64(reqs + i * 16, 0);
+        store64(reqs + i * 16 + 8, 0);
+        i = i + 1;
+    }
+    store64(bs + BS_RESULTS, results);
+    store64(bs + BS_REQS, reqs);
+    return bs;
+}
+
+# Status name for JSON output.
+fn _batch_status_name(s) {
+    if (s == BATCH_QUEUED) { return "queued"; }
+    if (s == BATCH_RUNNING) { return "running"; }
+    if (s == BATCH_COMPLETED) { return "completed"; }
+    return "cancelled";
+}
+
+# Async worker: arg = [req_ptr(0), req_len(8), result_slot(16), bank(24), bs(32)].
+fn _async_batch_worker(arg) {
+    crypto_bank_set(load64(arg + 24));
+    var d = _chat_produce(load64(arg), load64(arg + 8));
+    store64(load64(arg + 16), d);
+    var bs = load64(arg + 32);
+    if (d == 0) {
+        _batch_atomic_add(bs + BS_FAILED, 1);
+    } else {
+        if (atoi(load64(d)) != 200) { _batch_atomic_add(bs + BS_FAILED, 1); }
+    }
+    # Completion counter is also the wave barrier — bump it LAST, after the slot
+    # and failure count are visible.
+    _batch_atomic_add(bs + BS_COMPLETED, 1);
+    return 0;
+}
+
+# Background runner thread (arg = BatchState). Holds _batch_exec_lock for the
+# whole run so its crypto-bank workers (1..7) are exclusive; other submitted
+# batches queue. Runs items in waves, checking the cancel flag before each wave.
+fn _async_batch_run(bs) {
+    mutex_lock(_batch_exec_lock);
+    store64(bs + BS_STATUS, BATCH_RUNNING);
+    var total = load64(bs + BS_TOTAL);
+    var reqs = load64(bs + BS_REQS);
+    var results = load64(bs + BS_RESULTS);
+    var handles = alloc(BATCH_MAX_PARALLEL * 8);
+    var wargs = alloc(BATCH_MAX_PARALLEL * 8);
+    var launched = 0;
+    var base = 0;
+    while (base < total) {
+        if (load64(bs + BS_CANCEL) == 1) { base = total; } else {
+            var w = 0;
+            while (w < BATCH_MAX_PARALLEL && base + w < total) {
+                var idx = base + w;
+                var a = alloc(40);
+                store64(a, load64(reqs + idx * 16));
+                store64(a + 8, load64(reqs + idx * 16 + 8));
+                store64(a + 16, results + idx * 8);
+                store64(a + 24, w + 1);
+                store64(a + 32, bs);
+                store64(wargs + w * 8, a);
+                store64(handles + w * 8, thread_create(&_async_batch_worker, a));
+                w = w + 1;
+            }
+            launched = launched + w;
+            while (load64(bs + BS_COMPLETED) < launched) { }
+            var j = 0;
+            while (j < w) {
+                thread_join(load64(handles + j * 8));
+                j = j + 1;
+            }
+            base = base + w;
+        }
+    }
+    if (load64(bs + BS_CANCEL) == 1) {
+        store64(bs + BS_STATUS, BATCH_CANCELLED);
+    } else {
+        store64(bs + BS_STATUS, BATCH_COMPLETED);
+    }
+    mutex_unlock(_batch_exec_lock);
+    return 0;
+}
+
+# Submit an async batch: copy request bodies (the accept buffer is reused once
+# the POST returns), register a BatchState, and spawn the runner. Returns the
+# BatchState (accept thread reads its id for the response), or 0 on bad input.
+fn batch_submit(items) {
+    var total = vec_len(items);
+    if (total == 0) { return 0; }
+    batch_registry_init();
+    crypto_tls_main_init();
+    var id = _batch_next_id();
+    var bs = batch_state_new(id, total);
+    var reqs = load64(bs + BS_REQS);
+    var i = 0;
+    while (i < total) {
+        var it = vec_get(items, i);
+        var src = load64(it);
+        var len = load64(it + 8);
+        var copy = alloc(len + 1);
+        memcpy(copy, src, len);
+        store8(copy + len, 0);
+        store64(reqs + i * 16, copy);
+        store64(reqs + i * 16 + 8, len);
+        i = i + 1;
+    }
+    map_set(_batch_registry, id, bs);
+    thread_create(&_async_batch_run, bs);
+    return bs;
+}
+
+# True if the request opts into async mode via a top-level "async": true.
+fn _batch_is_async(body, len) {
+    var i = 0;
+    while (i < len - 7) {
+        if (memeq(body + i, "\"async\"", 7) == 1) {
+            var j = i + 7;
+            while (j < len && (load8(body + j) == 32 || load8(body + j) == 58)) { j = j + 1; }
+            if (j + 4 <= len && memeq(body + j, "true", 4) == 1) { return 1; }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# GET /v1/batch/{id} — progress snapshot. Reads BatchState atomics + write-once
+# result slots (a pending item shows status:null,body:null).
+fn handle_batch_get(cfd, id) {
+    if (_batch_registry == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    var bs = map_get(_batch_registry, id);
+    if (bs == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    var total = load64(bs + BS_TOTAL);
+    var results = load64(bs + BS_RESULTS);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add_cstr(sb, load64(bs + BS_ID));
+    str_builder_add_cstr(sb, "\",\"status\":\"");
+    str_builder_add_cstr(sb, _batch_status_name(load64(bs + BS_STATUS)));
+    str_builder_add_cstr(sb, "\",\"total\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"completed\":");
+    str_builder_add_int(sb, load64(bs + BS_COMPLETED));
+    str_builder_add_cstr(sb, ",\"failed\":");
+    str_builder_add_int(sb, load64(bs + BS_FAILED));
+    str_builder_add_cstr(sb, ",\"results\":[");
+    var i = 0;
+    while (i < total) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        var d = load64(results + i * 8);
+        str_builder_add_cstr(sb, "{\"index\":");
+        str_builder_add_int(sb, i);
+        if (d == 0) {
+            str_builder_add_cstr(sb, ",\"status\":null,\"body\":null}");
+        } else {
+            str_builder_add_cstr(sb, ",\"status\":");
+            str_builder_add_int(sb, atoi(load64(d)));
+            str_builder_add_cstr(sb, ",\"body\":");
+            str_builder_add_cstr(sb, load64(d + 16));
+            str_builder_add_cstr(sb, "}");
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    var body = str_builder_build(sb);
+    return http_ok(cfd, to_cstr(body), str_len(body));
+}
+
+# POST /v1/batch/{id}/cancel — request cancellation (in-flight items finish; no
+# further waves launch).
+fn handle_batch_cancel(cfd, id) {
+    if (_batch_registry == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    var bs = map_get(_batch_registry, id);
+    if (bs == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    store64(bs + BS_CANCEL, 1);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add_cstr(sb, load64(bs + BS_ID));
+    str_builder_add_cstr(sb, "\",\"status\":\"cancelling\"}");
+    var body = str_builder_build(sb);
+    return http_ok(cfd, to_cstr(body), str_len(body));
+}
+
 # Worker thread: arg = [req_ptr(0), req_len(8), result_slot(16), crypto_bank(24)].
 # FIRST assigns this thread its sigil crypto scratch bank — every sha256/HMAC/TLS
 # primitive in the chat pipeline (_cache_key, audit chain, remote TLS) reads a
@@ -153,6 +398,29 @@ fn handle_batch(cfd, body_ptr, body_len) {
     if (n == 0) { return http_bad_request(cfd, "empty batch"); }
     if (n > BATCH_MAX_ITEMS) { return http_bad_request(cfd, "batch too large (max 64)"); }
 
+    # Async mode: register a BatchState, kick off a background runner, and return
+    # the id immediately. The client polls GET /v1/batch/{id}.
+    if (_batch_is_async(body_ptr, body_len) == 1) {
+        var bs = batch_submit(items);
+        var asb = str_builder_new();
+        str_builder_add_cstr(asb, "{\"id\":\"");
+        str_builder_add_cstr(asb, load64(bs + BS_ID));
+        str_builder_add_cstr(asb, "\",\"status\":\"");
+        str_builder_add_cstr(asb, _batch_status_name(load64(bs + BS_STATUS)));
+        str_builder_add_cstr(asb, "\",\"total\":");
+        str_builder_add_int(asb, load64(bs + BS_TOTAL));
+        str_builder_add_cstr(asb, "}");
+        var asbody = str_builder_build(asb);
+        return http_ok(cfd, to_cstr(asbody), str_len(asbody));
+    }
+
+    # Synchronous mode (default): run the batch inline and return all results.
+    # Hold _batch_exec_lock so a sync batch and a background async batch never run
+    # their crypto-bank workers (1..7) concurrently.
+    batch_registry_init();
+    mutex_lock(_batch_exec_lock);
+    crypto_tls_main_init();
+
     # One result slot per item; worker stores its descriptor there. Arg layout
     # is [req_ptr, req_len, slot, crypto_bank] (32 bytes); the bank index is
     # filled in per-wave just before spawn.
@@ -172,10 +440,6 @@ fn handle_batch(cfd, body_ptr, body_len) {
         store64(args + k * 8, a);
         k = k + 1;
     }
-
-    # Install the main-thread sigil crypto TLS before fan-out so workers can take
-    # their own scratch banks (idempotent).
-    crypto_tls_main_init();
 
     # Run in waves of BATCH_MAX_PARALLEL concurrent workers. The barrier between
     # waves is the atomic _batch_done counter (not thread_join's timing, which can
@@ -229,5 +493,6 @@ fn handle_batch(cfd, body_ptr, body_len) {
     }
     str_builder_add_cstr(sb, "]}");
     var body = str_builder_build(sb);
+    mutex_unlock(_batch_exec_lock);
     return http_ok(cfd, to_cstr(body), str_len(body));
 }

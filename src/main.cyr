@@ -223,6 +223,20 @@ fn http_route(cfd, method, path, buf, buf_len) {
         var bbb = req_parse_body(buf, buf_len);
         return handle_batch(cfd, bbb, req_body_len(buf, buf_len));
     }
+    # /v1/batch/{id}  (GET progress)  and  /v1/batch/{id}/cancel  (POST)
+    var plen = strlen(path);
+    if (plen > 10) {
+        if (memeq(path, "/v1/batch/", 10) == 1) {
+            if (plen > 17 && memeq(path + plen - 7, "/cancel", 7) == 1) {
+                var idlen = plen - 17;
+                var bid = alloc(idlen + 1);
+                memcpy(bid, path + 10, idlen);
+                store8(bid + idlen, 0);
+                return handle_batch_cancel(cfd, bid);
+            }
+            return handle_batch_get(cfd, path + 10);
+        }
+    }
 
     # Root
     if (streq(path, "/") == 1) {
@@ -296,6 +310,9 @@ fn cmd_serve(port) {
     # Chat bookkeeping lock — guards shared state when batch workers run
     # concurrently (POST /v1/batch). Created before the accept loop.
     _chat_lock = mutex_new();
+
+    # Async batch registry + exec lock (POST /v1/batch async, GET /v1/batch/{id}).
+    batch_registry_init();
 
     while (1 == 1) {
         var client = sock_accept(sfd);

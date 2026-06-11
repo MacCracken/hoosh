@@ -1217,9 +1217,12 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len)
             metrics_record(0, emitted);
         }
         if (_audit_chain != 0) {
+            # _chat_lock: audit-chain append may race a background batch worker.
+            mutex_lock(_chat_lock);
             audit_record(_audit_chain, "inference.stream", "info",
             "streaming inference (remote)",
             provider_name(route_provider(route)), model);
+            mutex_unlock(_chat_lock);
         }
         _sse_stop(cfd, model);
         return 0;
@@ -1298,8 +1301,11 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len)
     sys_close(bfd);
     metrics_record(0, token_count);
     if (_audit_chain != 0) {
+        # _chat_lock: audit-chain append may race a background batch worker.
+        mutex_lock(_chat_lock);
         audit_record(_audit_chain, "inference.stream",
         "info", "streaming inference", provider_name(route_provider(route)), model);
+        mutex_unlock(_chat_lock);
     }
     return 0;
 }
@@ -1705,10 +1711,18 @@ fn _chat_produce(body_ptr, body_len) {
     return desc;
 }
 
+# Accept-thread chat handler. Holds _chat_lock around the shared-state phases
+# (prep, assemble/commit) exactly like a batch worker, so a /v1/chat/completions
+# served on the accept loop is safe while a background async batch's workers run
+# concurrently. The network forward / SSE stream runs unlocked. Uncontended when
+# no batch is in flight.
 fn handle_chat(cfd, body_ptr, body_len) {
     var is_stream = _req_is_stream(body_ptr, body_len);
+    mutex_lock(_chat_lock);
     var prep = _chat_prep(body_ptr, body_len, is_stream);
-    if (load64(prep) == 0) {
+    var kind = load64(prep);
+    mutex_unlock(_chat_lock);
+    if (kind == 0) {
         return _resp_write(cfd, load64(prep + 8));
     }
 
@@ -1722,14 +1736,26 @@ fn handle_chat(cfd, body_ptr, body_len) {
         var bpool = load64(prep + 56);
         var est_tokens = load64(prep + 64);
         if (msg_raw == 0) {
-            if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+            if (bpool != 0) {
+                mutex_lock(_chat_lock);
+                pool_commit(bpool, est_tokens, 0);
+                mutex_unlock(_chat_lock);
+            }
             return http_bad_request(cfd, "streaming requires messages array");
         }
         var sr = handle_chat_stream(
         cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len);
-        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+        if (bpool != 0) {
+            mutex_lock(_chat_lock);
+            pool_commit(bpool, est_tokens, 0);
+            mutex_unlock(_chat_lock);
+        }
         return sr;
     }
 
-    return _resp_write(cfd, _chat_finish(prep));
+    var result = _chat_forward(prep);
+    mutex_lock(_chat_lock);
+    var desc = _chat_assemble(prep, result);
+    mutex_unlock(_chat_lock);
+    return _resp_write(cfd, desc);
 }

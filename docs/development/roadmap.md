@@ -289,22 +289,32 @@ changes.
       `inference/batch.rs`. **No longer blocked** — the cyrius 6.1.27 allocator
       is thread-safe (v6.0.64 CAS spinlock; re-verified by a 4-thread alloc
       stress, 0 corruption). See [ADR 009](../decisions/009-concurrent-batch-inference.md).
-- [ ] **Deferred to a later 2.3.x:** async batch — job-id, `GET /v1/batch/{id}`
-      progress polling, cancellation, `DashMap` of batches (the rest of
-      `batch.rs`).
 - [ ] **Deferred — connection pooling for backend sockets.** Low near-term ROI:
       the local path connects to `127.0.0.1` (loopback connect ≪ inference
       latency); the high-value case is remote TLS-handshake reuse, which is gated
       on sandhi keep-alive/pooling support. Revisit when sandhi exposes it.
 
+### v2.3.2 — Async batch inference — ✅ SHIPPED 2026-06-10
+- [x] **`POST /v1/batch {"async":true}`** → returns a batch id; a background
+      runner executes the batch (waves of 7 crypto-bank workers).
+- [x] **`GET /v1/batch/{id}`** progress (queued/running/completed/cancelled,
+      completed/failed counts, per-item results), **`POST /v1/batch/{id}/cancel`**.
+- [x] **Sync pass** — `handle_chat` now takes `_chat_lock` so a chat served on
+      the accept loop is safe concurrent with background batch workers
+      (live-verified: 20/20 concurrent chats during a 28-item batch). One batch
+      executes at a time (`_batch_exec_lock`) to keep crypto lanes exclusive.
+      See [ADR 009](../decisions/009-concurrent-batch-inference.md) §"Update (2.3.2)".
+- [ ] **Deferred:** concurrent execution of multiple async batches (global lane
+      pool/semaphore); completed-batch eviction from the registry.
+
 ### v2.4.0 — Multi-threaded accept loop
 Now **unblocked** (allocator thread-safe, verified in 2.3.1). Thread the accept
 loop so *all* traffic runs concurrently — requires a shared-state synchronization
-pass across every handler (cache/budget/audit/rate/cost/metrics), broader than
-2.3.1's batch-only worker pool. Enables loopback-style batching and general
-throughput.
+pass across every handler (cache/budget/audit/rate/cost/metrics). 2.3.2's sync
+pass already locked the chat path; this extends it to the remaining mutating
+handlers. Enables loopback-style batching and general throughput.
 
-### v2.3.2 — Observability
+### v2.3.3 — Observability
 - [ ] OpenTelemetry trace propagation (`telemetry.rs`)
 - [ ] Event pub/sub bus (`events.rs`) — HealthChanged / InferenceCompleted /
       InferenceFailed / RateLimited

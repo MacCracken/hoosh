@@ -961,6 +961,29 @@ fn _t_batch_split(arr_ptr, arr_len) {
     return items;
 }
 
+# Mirror of src/lib/batch.cyr _batch_is_async — detects top-level "async":true.
+fn _t_batch_is_async(body, len) {
+    var i = 0;
+    while (i < len - 7) {
+        if (memeq(body + i, "\"async\"", 7) == 1) {
+            var j = i + 7;
+            while (j < len && (load8(body + j) == 32 || load8(body + j) == 58)) { j = j + 1; }
+            if (j + 4 <= len && memeq(body + j, "true", 4) == 1) { return 1; }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mirror of src/lib/batch.cyr _batch_status_name.
+fn _t_batch_status_name(s) {
+    if (s == 0) { return "queued"; }
+    if (s == 1) { return "running"; }
+    if (s == 2) { return "completed"; }
+    return "cancelled";
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4285,6 +4308,21 @@ fn main() {
     # Empty array → 0 items.
     var bempty = _t_batch_split("[]", 2);
     assert_eq(vec_len(bempty), 0, "batch: empty array → 0 items");
+
+    # ── Async batch (mode detection + status names) ───────────────
+    test_group("batch_async");
+    var ba1 = "{\"async\":true,\"requests\":[]}";
+    assert_eq(_t_batch_is_async(ba1, strlen(ba1)), 1, "async: compact true detected");
+    var ba2 = "{\"async\": true, \"requests\":[]}";
+    assert_eq(_t_batch_is_async(ba2, strlen(ba2)), 1, "async: spaced true detected");
+    var ba3 = "{\"async\":false,\"requests\":[]}";
+    assert_eq(_t_batch_is_async(ba3, strlen(ba3)), 0, "async: false → sync");
+    var ba4 = "{\"requests\":[]}";
+    assert_eq(_t_batch_is_async(ba4, strlen(ba4)), 0, "async: absent → sync");
+    assert_streq(_t_batch_status_name(0), "queued", "async: status 0=queued");
+    assert_streq(_t_batch_status_name(1), "running", "async: status 1=running");
+    assert_streq(_t_batch_status_name(2), "completed", "async: status 2=completed");
+    assert_streq(_t_batch_status_name(3), "cancelled", "async: status 3=cancelled");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
