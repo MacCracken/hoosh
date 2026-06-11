@@ -70,13 +70,51 @@ var BS_REQS      = 56;   # alloc(total*16) — per-item [owned_body_ptr, len]
 # its BatchState pointer directly and never touches the registry.
 var _batch_registry = 0;
 var _batch_id_counter = 0;
-# Held by a runner for the duration of its execution so only one batch runs its
-# crypto-bank workers (banks 1..7) at a time; other submitted batches queue.
-var _batch_exec_lock = 0;
+# Insertion-ordered ids, for evicting the oldest TERMINAL batch when the tracked
+# count exceeds the cap. Bounds the registry map (not heap — hoosh's bump
+# allocator never frees; an evicted batch's memory is not reclaimed, same as
+# every other allocation). Evicted ids 404 on subsequent polls.
+var _batch_ids = 0;
+var BATCH_MAX_TRACKED = 64;
+
+# ── Global crypto-lane pool ──────────────
+# sigil has SIGIL_CRYPTO_BANKS (8) crypto scratch lanes; lane 0 is the accept
+# thread, lanes 1..7 are for batch workers. This pool hands those 7 lanes out
+# ACROSS ALL batches (sync + async), so multiple async batches can run their
+# workers concurrently without ever colliding on a lane — total live workers are
+# capped at 7 globally. Each lane slot is 0=free / 1=taken; a worker holds its
+# lane index from acquire to release and uses it as its crypto_bank_set arg.
+var BATCH_LANES = 7;       # SIGIL_CRYPTO_BANKS - 1
+var _batch_lanes = 0;      # alloc(BATCH_LANES * 8), index 0 → lane 1, …
+
+# Acquire a free lane (spins until one frees). Returns lane index 1..7.
+fn _batch_lane_acquire() {
+    while (1 == 1) {
+        var i = 0;
+        while (i < BATCH_LANES) {
+            if (atomic_cas(_batch_lanes + i * 8, 0, 1) == 1) { return i + 1; }
+            i = i + 1;
+        }
+        # No free lane — sleep (not busy-spin) so concurrent runners don't starve
+        # the accept loop serving GET /v1/batch/{id} polls.
+        sleep_ms(1);
+    }
+    return 0;
+}
+
+fn _batch_lane_release(lane) {
+    atomic_store(_batch_lanes + (lane - 1) * 8, 0);
+    return 0;
+}
 
 fn batch_registry_init() {
     if (_batch_registry == 0) { _batch_registry = map_new(); }
-    if (_batch_exec_lock == 0) { _batch_exec_lock = mutex_new(); }
+    if (_batch_ids == 0) { _batch_ids = vec_new(); }
+    if (_batch_lanes == 0) {
+        _batch_lanes = alloc(BATCH_LANES * 8);
+        var i = 0;
+        while (i < BATCH_LANES) { store64(_batch_lanes + i * 8, 0); i = i + 1; }
+    }
     return 0;
 }
 
@@ -121,8 +159,10 @@ fn _batch_status_name(s) {
 }
 
 # Async worker: arg = [req_ptr(0), req_len(8), result_slot(16), bank(24), bs(32)].
+# Async worker: arg = [req_ptr(0), req_len(8), result_slot(16), lane(24), bs(32)].
 fn _async_batch_worker(arg) {
-    crypto_bank_set(load64(arg + 24));
+    var lane = load64(arg + 24);
+    crypto_bank_set(lane);
     var d = _chat_produce(load64(arg), load64(arg + 8));
     store64(load64(arg + 16), d);
     var bs = load64(arg + 32);
@@ -131,56 +171,53 @@ fn _async_batch_worker(arg) {
     } else {
         if (atoi(load64(d)) != 200) { _batch_atomic_add(bs + BS_FAILED, 1); }
     }
-    # Completion counter is also the wave barrier — bump it LAST, after the slot
-    # and failure count are visible.
+    # Free the lane (crypto is done), then bump the completion counter LAST so the
+    # slot + failure count are visible before the runner's barrier observes it.
+    _batch_lane_release(lane);
     _batch_atomic_add(bs + BS_COMPLETED, 1);
     return 0;
 }
 
-# Background runner thread (arg = BatchState). Holds _batch_exec_lock for the
-# whole run so its crypto-bank workers (1..7) are exclusive; other submitted
-# batches queue. Runs items in waves, checking the cancel flag before each wave.
+# Background runner thread (arg = BatchState). Spawns one worker per item, pacing
+# spawns by GLOBAL lane availability (_batch_lane_acquire blocks until a lane
+# frees), so live workers across ALL concurrent batches stay ≤ BATCH_LANES. No
+# exec lock — multiple async batches run concurrently, sharing the lane pool.
+# Checks the cancel flag before each spawn (in-flight items finish).
 fn _async_batch_run(bs) {
-    mutex_lock(_batch_exec_lock);
     store64(bs + BS_STATUS, BATCH_RUNNING);
     var total = load64(bs + BS_TOTAL);
     var reqs = load64(bs + BS_REQS);
     var results = load64(bs + BS_RESULTS);
-    var handles = alloc(BATCH_MAX_PARALLEL * 8);
-    var wargs = alloc(BATCH_MAX_PARALLEL * 8);
+    var handles = alloc(total * 8);
     var launched = 0;
-    var base = 0;
-    while (base < total) {
-        if (load64(bs + BS_CANCEL) == 1) { base = total; } else {
-            var w = 0;
-            while (w < BATCH_MAX_PARALLEL && base + w < total) {
-                var idx = base + w;
-                var a = alloc(40);
-                store64(a, load64(reqs + idx * 16));
-                store64(a + 8, load64(reqs + idx * 16 + 8));
-                store64(a + 16, results + idx * 8);
-                store64(a + 24, w + 1);
-                store64(a + 32, bs);
-                store64(wargs + w * 8, a);
-                store64(handles + w * 8, thread_create(&_async_batch_worker, a));
-                w = w + 1;
-            }
-            launched = launched + w;
-            while (load64(bs + BS_COMPLETED) < launched) { }
-            var j = 0;
-            while (j < w) {
-                thread_join(load64(handles + j * 8));
-                j = j + 1;
-            }
-            base = base + w;
+    var idx = 0;
+    while (idx < total) {
+        if (load64(bs + BS_CANCEL) == 1) { idx = total; } else {
+            var lane = _batch_lane_acquire();
+            var a = alloc(40);
+            store64(a, load64(reqs + idx * 16));
+            store64(a + 8, load64(reqs + idx * 16 + 8));
+            store64(a + 16, results + idx * 8);
+            store64(a + 24, lane);
+            store64(a + 32, bs);
+            store64(handles + launched * 8, thread_create(&_async_batch_worker, a));
+            launched = launched + 1;
+            idx = idx + 1;
         }
+    }
+    # Wait for every launched worker, then reap stacks. Sleep, don't busy-spin —
+    # the accept loop must stay responsive to polls while this runs.
+    while (load64(bs + BS_COMPLETED) < launched) { sleep_ms(1); }
+    var j = 0;
+    while (j < launched) {
+        thread_join(load64(handles + j * 8));
+        j = j + 1;
     }
     if (load64(bs + BS_CANCEL) == 1) {
         store64(bs + BS_STATUS, BATCH_CANCELLED);
     } else {
         store64(bs + BS_STATUS, BATCH_COMPLETED);
     }
-    mutex_unlock(_batch_exec_lock);
     return 0;
 }
 
@@ -208,8 +245,33 @@ fn batch_submit(items) {
         i = i + 1;
     }
     map_set(_batch_registry, id, bs);
+    vec_push(_batch_ids, id);
+    _batch_evict_terminal();
     thread_create(&_async_batch_run, bs);
     return bs;
+}
+
+# When tracked batches exceed the cap, drop the oldest TERMINAL (completed or
+# cancelled) batch from the registry + id list. Running/queued batches are kept.
+# Accept-thread-only (called from batch_submit), so no lock. Note: the bump
+# allocator never reclaims the evicted batch's memory — this only bounds the map.
+fn _batch_evict_terminal() {
+    if (vec_len(_batch_ids) <= BATCH_MAX_TRACKED) { return 0; }
+    var i = 0;
+    while (i < vec_len(_batch_ids)) {
+        var oid = vec_get(_batch_ids, i);
+        var obs = map_get(_batch_registry, oid);
+        if (obs != 0) {
+            var st = load64(obs + BS_STATUS);
+            if (st == BATCH_COMPLETED || st == BATCH_CANCELLED) {
+                map_delete(_batch_registry, oid);
+                vec_remove(_batch_ids, i);
+                return 0;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # True if the request opts into async mode via a top-level "async": true.
@@ -291,11 +353,13 @@ fn handle_batch_cancel(cfd, id) {
 # an uninitialized slot and corrupts memory. Then produces a response descriptor,
 # stores it, and signals completion. See ADR-009.
 fn _hoosh_batch_worker(arg) {
-    crypto_bank_set(load64(arg + 24));
+    var lane = load64(arg + 24);
+    crypto_bank_set(lane);
     var req_ptr = load64(arg);
     var req_len = load64(arg + 8);
     var slot = load64(arg + 16);
     store64(slot, _chat_produce(req_ptr, req_len));
+    _batch_lane_release(lane);
     _batch_inc_done();
     return 0;
 }
@@ -415,60 +479,37 @@ fn handle_batch(cfd, body_ptr, body_len) {
     }
 
     # Synchronous mode (default): run the batch inline and return all results.
-    # Hold _batch_exec_lock so a sync batch and a background async batch never run
-    # their crypto-bank workers (1..7) concurrently.
+    # Workers draw crypto lanes from the shared global pool (same as async
+    # batches), so a sync batch and concurrent background async batches never
+    # collide on a lane. One sync batch runs at a time (accept thread), so the
+    # _batch_done barrier counter is safe to reset + reuse here.
     batch_registry_init();
-    mutex_lock(_batch_exec_lock);
     crypto_tls_main_init();
 
-    # One result slot per item; worker stores its descriptor there. Arg layout
-    # is [req_ptr, req_len, slot, crypto_bank] (32 bytes); the bank index is
-    # filled in per-wave just before spawn.
     var slots = alloc(n * 8);
-    var args = alloc(n * 8);
+    var handles = alloc(n * 8);
+    store64(&_batch_done, 0);
     var k = 0;
     while (k < n) {
         var it = vec_get(items, k);
         var slot = alloc(8);
         store64(slot, 0);
         store64(slots + k * 8, slot);
+        var lane = _batch_lane_acquire();
         var a = alloc(32);
         store64(a, load64(it));
         store64(a + 8, load64(it + 8));
         store64(a + 16, slot);
-        store64(a + 24, 0);
-        store64(args + k * 8, a);
+        store64(a + 24, lane);
+        store64(handles + k * 8, thread_create(&_hoosh_batch_worker, a));
         k = k + 1;
     }
-
-    # Run in waves of BATCH_MAX_PARALLEL concurrent workers. The barrier between
-    # waves is the atomic _batch_done counter (not thread_join's timing, which can
-    # return early): spawn a wave, wait until the counter reaches the wave target,
-    # then join for cleanup and advance. Each worker gets crypto bank 1..w within
-    # its wave (banks are reused across waves — safe, since the barrier fully
-    # drains a wave before the next starts).
-    store64(&_batch_done, 0);
-    var handles = alloc(BATCH_MAX_PARALLEL * 8);
-    var base = 0;
-    while (base < n) {
-        var w = 0;
-        while (w < BATCH_MAX_PARALLEL && base + w < n) {
-            var a = load64(args + (base + w) * 8);
-            store64(a + 24, w + 1);
-            var t = thread_create(&_hoosh_batch_worker, a);
-            store64(handles + w * 8, t);
-            w = w + 1;
-        }
-        var target = base + w;
-        while (load64(&_batch_done) < target) { }
-        # Reap the wave's threads (free their stacks). Safe now — the barrier
-        # has confirmed every worker stored its result.
-        var j = 0;
-        while (j < w) {
-            thread_join(load64(handles + j * 8));
-            j = j + 1;
-        }
-        base = base + w;
+    # Barrier: wait for all workers, then reap stacks (sleep, don't busy-spin).
+    while (load64(&_batch_done) < n) { sleep_ms(1); }
+    var j = 0;
+    while (j < n) {
+        thread_join(load64(handles + j * 8));
+        j = j + 1;
     }
 
     # Assemble {"results":[{"index":i,"status":<n>,"body":<raw>}, ...]}.
@@ -493,6 +534,5 @@ fn handle_batch(cfd, body_ptr, body_len) {
     }
     str_builder_add_cstr(sb, "]}");
     var body = str_builder_build(sb);
-    mutex_unlock(_batch_exec_lock);
     return http_ok(cfd, to_cstr(body), str_len(body));
 }

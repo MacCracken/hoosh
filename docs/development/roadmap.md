@@ -304,8 +304,19 @@ changes.
       (live-verified: 20/20 concurrent chats during a 28-item batch). One batch
       executes at a time (`_batch_exec_lock`) to keep crypto lanes exclusive.
       See [ADR 009](../decisions/009-concurrent-batch-inference.md) §"Update (2.3.2)".
-- [ ] **Deferred:** concurrent execution of multiple async batches (global lane
-      pool/semaphore); completed-batch eviction from the registry.
+      See [ADR 009](../decisions/009-concurrent-batch-inference.md) §"Update (2.3.2)".
+
+### v2.3.3 — Concurrent batches + registry eviction — ✅ SHIPPED 2026-06-10
+- [x] **Concurrent async batches** — replaced the one-at-a-time exec lock with a
+      **global crypto-lane pool** (banks 1..7 shared across all batches; ≤7 live
+      workers total). Multiple async batches run concurrently and interleave
+      fairly. Live-verified (4 batches progressing simultaneously, 12/12 each).
+- [x] **Registry eviction** — `BATCH_MAX_TRACKED`=64; oldest terminal batch
+      evicted on overflow (evicted ids 404). Bounds the map (not heap — bump
+      allocator never frees).
+- [x] **De-spin** — lane acquire + barriers `sleep_ms(1)` instead of busy-spin,
+      keeping the accept loop responsive to polls. Toolchain → **6.1.28**.
+      See [ADR 009](../decisions/009-concurrent-batch-inference.md) §"Update (2.3.3)".
 
 ### v2.4.0 — Multi-threaded accept loop
 Now **unblocked** (allocator thread-safe, verified in 2.3.1). Thread the accept
@@ -314,7 +325,7 @@ pass across every handler (cache/budget/audit/rate/cost/metrics). 2.3.2's sync
 pass already locked the chat path; this extends it to the remaining mutating
 handlers. Enables loopback-style batching and general throughput.
 
-### v2.3.3 — Observability
+### v2.3.4 — Observability
 - [ ] OpenTelemetry trace propagation (`telemetry.rs`)
 - [ ] Event pub/sub bus (`events.rs`) — HealthChanged / InferenceCompleted /
       InferenceFailed / RateLimited

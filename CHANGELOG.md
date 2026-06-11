@@ -7,6 +7,40 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-06-10
+
+**Concurrent async batches + registry eviction** — the deferred follow-ups to
+2.3.2. Multiple async batches now execute *concurrently* (sharing a global
+crypto-lane pool), and the batch registry is bounded. Also bumps the toolchain to
+Cyrius **6.1.28**.
+
+### Added
+- **Global crypto-lane pool** — replaces the one-batch-at-a-time `_batch_exec_lock`.
+  sigil's 7 worker crypto lanes (banks 1..7; bank 0 = accept thread) are handed
+  out across **all** batches: a worker acquires a free lane → uses it as its
+  crypto bank → releases it. Total live workers stay ≤ 7 globally regardless of
+  how many batches run, with no cross-batch lane collision. Both sync and async
+  batches draw from the pool. Live-verified: 4 async batches of 12 items
+  progressed simultaneously (e.g. 8/2/1/3 → 11/9/6/9), all completed 12/12, with
+  GET polls returning live progress (HTTP 200) and 15/15 concurrent chats served.
+- **Registry eviction** — `BATCH_MAX_TRACKED` (64); on submit over the cap, the
+  oldest *terminal* (completed/cancelled) batch is dropped from the registry +
+  id list (evicted ids 404). Bounds the tracking map (not heap — hoosh's bump
+  allocator never frees, same as every allocation). Live-verified (after 70
+  submits, the first id → 404).
+
+### Changed
+- **Runners/barriers sleep instead of busy-spin** — `_batch_lane_acquire` and
+  the completion barriers now `sleep_ms(1)` when waiting, so concurrent runners
+  don't burn cores or starve the accept loop serving `GET /v1/batch/{id}`.
+- **Toolchain: Cyrius 6.1.28** (pin). Clean `lib/` re-sync; no stdlib migration
+  this bump; 414 tests green.
+
+### Notes
+- Concurrency is bounded by the 7-lane pool; submitting many batches at once is
+  fine (they share lanes fairly), but per-batch throughput drops as lanes are
+  split across active batches. See ADR-009.
+
 ## [2.3.2] — 2026-06-10
 
 **Async batch inference** — `POST /v1/batch` with `{"async":true}` returns a

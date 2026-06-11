@@ -148,3 +148,36 @@ and clients poll `GET /v1/batch/{id}` / `POST /v1/batch/{id}/cancel`.
 **Deferred:** concurrent execution of multiple async batches (needs a global lane
 pool / semaphore across batches), and eviction of completed batches from the
 registry (currently retained for the process lifetime).
+
+## Update (2.3.3): concurrent batches + lane pool
+
+2.3.2 ran one batch at a time (`_batch_exec_lock`) so the per-wave crypto banks
+(1..7) stayed exclusive. 2.3.3 lets **multiple async batches run concurrently** by
+replacing the exec lock with a **global crypto-lane pool**:
+
+- The 7 worker lanes (sigil banks 1..7; bank 0 = accept thread) are a shared
+  pool of 0/1 slots. A worker `_batch_lane_acquire()`s a free lane (CAS), uses it
+  as its `crypto_bank_set` arg, and `_batch_lane_release()`s it when done. Total
+  live workers across *all* batches stay ≤ 7 — so no two workers ever share a
+  lane, regardless of how many batches run. Both sync and async paths draw from
+  the pool (the sync path no longer needs the exec lock).
+- Runners pace spawning by lane availability (`_batch_lane_acquire` blocks until a
+  lane frees), so a batch never creates more than ~7 in-flight workers' worth of
+  contention. Per-batch order is preserved; batches interleave fairly.
+
+**De-spin.** The lane acquire and the completion barriers originally busy-spun.
+With multiple concurrent runners that burned cores and made the accept loop
+serving `GET /v1/batch/{id}` unresponsive under load. They now `sleep_ms(1)` while
+waiting (chrono's nanosleep), which blocks the thread and keeps the accept loop
+responsive — verified: 4 concurrent batches polled live (HTTP 200, advancing
+progress) with 15/15 concurrent chats.
+
+**Registry eviction.** The `id → BatchState` map is bounded at
+`BATCH_MAX_TRACKED` (64); on submit over the cap the oldest terminal batch is
+removed from the map + insertion-ordered id list. NB: hoosh's bump allocator
+never frees, so this bounds the *map* (lookup cost, "expired id 404s"), not heap
+— the same applies to every allocation in the gateway and is orthogonal to
+batching.
+
+**Still deferred:** a blocking (futex) lane semaphore instead of sleep-poll; and
+the broader multi-threaded accept loop (2.4.0).
