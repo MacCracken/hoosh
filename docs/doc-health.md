@@ -12,9 +12,9 @@ type: state
 > 427 tests / 16 benches / pin 6.1.29; +batch/MCP/observability/OTLP; config
 > example → real `hoosh.cyml`; test table → prose), **overview.md** (de-Rusted —
 > Cyrius module map + AGNOS-distlib deps + current endpoints, replacing the `.rs`
-> tree / Rust-crate table / trait types), **roadmap.md** (416 → ~150 L: shipped
+> tree / Rust-crate table / trait types), **roadmap.md** (416 → ~120 L: shipped
 > collapsed to a CHANGELOG-pointer table, v2.4.0 mis-ordering + a duplicate line
-> fixed, open items kept detailed), **CONTRIBUTING.md** (de-Rusted — cyrius
+> fixed, open work reframed as the **v2.4.x concurrency & completeness arc**), **CONTRIBUTING.md** (de-Rusted — cyrius
 > fmt/lint/vet/deny + dev loop, replacing cargo/clippy/`Cargo.toml`/MSRV),
 > **BACKLOG.md** (P1–P9 reconciled: 7 cleared with release pointers, P4/P5 → roadmap,
 > stale "no DNS" D2 retired), **performance.md** (de-Rusted — points at the
