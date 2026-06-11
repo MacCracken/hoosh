@@ -15,24 +15,22 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | Metric | Value |
 |--------|-------|
-| **Language** | Cyrius (cc3 3.6.7+) |
-| **Source** | 1,515 lines / 1 file |
-| **Binary** | 479 KB (static ELF, x86_64) |
-| **Compile time** | 225ms |
-| **Dependencies** | 0 external (stdlib only) |
-| **Tests** | 231 assertions, 81 groups, 0 failures |
-| **Benchmarks** | 10 operations |
+| **Language** | Cyrius (pin 6.1.29) |
+| **Source** | ~7,750 lines / 30 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.0 MB (static ELF, x86_64) |
+| **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
+| **Tests** | 427 assertions, 100 groups, 0 failures |
+| **Benchmarks** | 16 operations |
 | **Providers** | 14 (6 local, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
 
-### Port comparison (Rust v1.3.0 → Cyrius v2.0.0)
+### Port comparison (Rust v1.3.0 → Cyrius)
 
 | | Rust | Cyrius | Ratio |
 |---|------|--------|-------|
-| Source | 22,956 lines / 58 files | 1,515 lines / 1 file | **15x fewer** |
-| Binary | ~5.1 MB | 479 KB | **10.6x smaller** |
-| Compile | ~15s | 225ms | **67x faster** |
-| Dependencies | 40+ crates | 0 | **Zero deps** |
+| Source | 22,956 lines / 58 files | ~7,750 lines / 30 files | **~3x fewer** |
+| Binary | ~5.1 MB | ~2.0 MB | **~2.5x smaller** |
+| Dependencies | 40+ crates | 0 third-party | **Zero third-party** |
 
 ---
 
@@ -44,6 +42,8 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 |------------|---------|
 | **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
 | **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
+| **Batch inference** | `POST /v1/batch` — concurrent (in-process worker pool) sync, or `"async":true` → job id with `GET /v1/batch/{id}` progress + cancel |
+| **MCP tool server** | `/v1/tools/list` + `/v1/tools/call` (JSON-RPC 2.0 via bote) |
 | **Provider routing** | Priority, round-robin, lowest-latency (EMA), direct — with model pattern matching |
 | **Tool calling** | Forwards `tools` (OpenAI/Anthropic/Gemini native formats), surfaces unified OpenAI `tool_calls` |
 | **Authentication** | Bearer token auth with constant-time comparison (HMAC-SHA256 via sigil) |
@@ -51,7 +51,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **Token budgets** | Per-agent named pools with reserve/commit lifecycle |
 | **Data Loss Prevention** | PII/secret scanning (8 built-ins) with privacy-aware routing — Restricted blocked, Confidential forced local (opt-in `[dlp]`) |
 | **Cost tracking** | Per-provider cost accumulation, reset endpoint |
-| **Observability** | Prometheus `/metrics`, HMAC-SHA256 audit chain |
+| **Observability** | Prometheus `/metrics` (incl. per-provider latency histograms), majra event bus + `GET /v1/events/recent`, W3C `traceparent` propagation, opt-in OpenTelemetry OTLP/JSON span export, HMAC-SHA256 audit chain |
 | **Health checks** | Per-provider TCP probe via `/v1/health/providers` |
 | **Response caching** | Exact-key LRU cache (eviction stats) + opt-in semantic cache (embedding cosine similarity) + startup warming |
 | **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.cyml` |
@@ -172,22 +172,22 @@ Response:
 `hoosh.cyml`:
 
 ```toml
-[[server]]
+[server]
 port = 8088
 
-[[cache]]
+[cache]
 max_entries = 10000
 enabled = true
 
 [[providers]]
 type = "Ollama"
-base_url = "http://localhost:11434"
+# base_url = "http://localhost:11434"   # default
 priority = 1
 models = ["llama*", "mistral*", "qwen*"]
 
 [[providers]]
 type = "OpenAi"
-base_url = "https://api.openai.com"
+api_key = "$OPENAI_API_KEY"             # $ENV expansion — keep secrets out of the file
 priority = 10
 models = ["gpt-*", "o1-*"]
 
@@ -195,12 +195,12 @@ models = ["gpt-*", "o1-*"]
 name = "default"
 capacity = 100000
 
-[[budgets]]
-name = "agent-1"
-capacity = 50000
-
 [[auth]]
 tokens = "your-secret-token"
+
+# Opt-in: OpenTelemetry OTLP/JSON span export to a collector
+# [[telemetry]]
+# otlp_endpoint = "http://localhost:4318/v1/traces"
 ```
 
 ---
@@ -208,36 +208,19 @@ tokens = "your-secret-token"
 ## Testing
 
 ```bash
-# Run tests (231 assertions)
+# Run tests (427 assertions across 100 groups)
 cyrius test tests/hoosh.tcyr
 
-# Run benchmarks (10 operations)
+# Run benchmarks (16 operations)
 cyrius bench tests/hoosh.bcyr
 ```
 
-### Test coverage
-
-| Module | Assertions |
-|--------|-----------|
-| Error types | 22 |
-| Provider types | 13 |
-| Router (4 strategies) | 32 |
-| Token budget | 19 |
-| Cache + stats | 14 |
-| Cost tracker | 15 |
-| Queue (5-tier priority) | 15 |
-| Health FSM | 30 |
-| Rate limiter | 5 |
-| Metrics | 8 |
-| Provider registry | 8 |
-| Audit chain (HMAC-SHA256) | 12 |
-| Config (TOML) | 8 |
-| JSON parse/build | 5 |
-| Inference types | 13 |
-| Token counting | 8 |
-| DLP scanning | 6 |
-| Cosine similarity | 3 |
-| Auth (constant-time) | 3 |
+`tests/hoosh.tcyr` is self-contained (stdlib + the vendored bote-core, mirroring
+src logic) and covers: error/HTTP mapping, routing (4 strategies), token budgets,
+cache + cost, queue priority, health FSM, rate limiting, metrics, audit chain
+(HMAC-SHA256), config (TOML), JSON, token counting, DLP, cosine similarity, auth,
+tool-call conversion + pruning, MCP dispatch, batch parsing + lane pool, and
+observability (latency buckets, traceparent extraction, OTLP path/attribute JSON).
 
 ---
 

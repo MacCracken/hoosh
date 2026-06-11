@@ -1,129 +1,88 @@
 # Contributing to Hoosh
 
+Hoosh is a single-binary **Cyrius** project. Build/CI use the toolchain pinned in
+`cyrius.cyml` (`~/.cyrius/versions/<pin>/bin/cyrius`). See
+[CLAUDE.md](CLAUDE.md) for the full development process and
+[docs/architecture/overview.md](docs/architecture/overview.md) for the module map.
+
 ## Project Layout
 
 ```
 src/
-├── main.rs              # CLI entry point (serve, models, infer, health, info)
-├── lib.rs               # Public API exports
-├── inference/           # Core types: InferenceRequest, InferenceResponse, MessageContent, batch
-├── provider/            # LlmProvider trait + 14 backends (Ollama, OpenAI, Anthropic, ...)
-│   ├── mod.rs           # Trait, ProviderType, ProviderRegistry
-│   ├── openai_compat.rs # Shared OpenAI-compatible streaming base
-│   ├── metadata.rs      # Model registry (63 models, tiers, modalities)
-│   └── retry.rs         # Jittered exponential backoff
-├── server/              # Axum HTTP server, handlers, types
-├── router.rs            # Provider selection, load balancing, DLP-aware routing
-├── cache/               # Response cache (TTL, stats, semantic, warming)
-├── context/             # Token counting, context compaction, prompt compression
-├── cost/                # Pricing table, cost tracking, cost optimizer
-├── budget/              # Token pool management (reserve/commit/release)
-├── dlp/                 # PII scanning, classification, privacy-aware routing
-├── audit.rs             # HMAC-SHA256 tamper-proof audit chain
-├── health.rs            # Background health checks, failover
-├── hardware.rs          # GPU/TPU/NPU detection (ai-hwaccel)
-├── middleware/           # Auth (bearer token), rate limiting (sliding window)
-├── tools/               # MCP bridge, tool definitions, format conversion
-├── config.rs            # hoosh.cyml parsing
-├── error.rs             # HooshError enum
-├── events.rs            # Provider event bus (majra pubsub)
-├── metrics.rs           # Prometheus counters
-├── queue.rs             # Priority inference queue
-├── client.rs            # HooshClient HTTP wrapper
-└── tests/               # Integration + conformance test suite
+├── main.cyr            CLI (serve/models/health/infer/info/version) + HTTP route dispatch + accept loop
+├── lib/*.cyr           29 modules — see docs/architecture/overview.md for the table
+└── vendor/             committed distlib bundles (bote-core.cyr, majra.cyr)
+tests/
+├── hoosh.tcyr          self-contained test suite (cyrius test)
+└── hoosh.bcyr          microbenchmark suite (cyrius bench)
+scripts/                bench-history.sh, version-bump.sh, sync-bote.sh
+docs/                   architecture, decisions (ADRs), development
 ```
 
 ## Development Workflow
 
-1. Fork and clone the repository
-2. Create a feature branch from `main`
-3. Make changes, add tests
-4. Run `make check` to verify locally
-5. Submit a pull request
+1. Branch from `main` (the maintainer handles all commits/pushes/tags).
+2. Make changes; add tests to `tests/hoosh.tcyr` and a benchmark to
+   `tests/hoosh.bcyr` for new hot-path code.
+3. Run the cleanliness gate + tests + benchmarks (below) — all must be green.
+4. Update `CHANGELOG.md` (+ roadmap/ADR/docs for design changes).
+5. Open a PR.
 
-## Local CI Checks
+## Local checks (the CI gate)
 
 ```bash
-make check         # fmt + clippy + test + audit + deny
-make bench         # synthetic benchmarks
-make bench-history # benchmarks with CSV history tracking
-make coverage      # coverage report (HTML + lcov)
-make semver        # semver compatibility check
-make fuzz          # fuzz deserialization paths (requires nightly)
-make msrv          # MSRV check (1.89)
-make doc           # docs with warnings-as-errors
+CYR=~/.cyrius/versions/$(grep '^cyrius' cyrius.cyml | grep -oE '[0-9.]+')/bin/cyrius
+
+# Cleanliness — must be clean
+$CYR fmt <file> --check          # all src/**/*.cyr, tests/*.tcyr, tests/*.bcyr
+$CYR lint src/main.cyr           # no `warn` lines
+$CYR vet src/main.cyr            # no UNTRUST outside src/ + cyrius.lock
+$CYR deny src/main.cyr           # no policy violations
+
+# Tests + benchmarks (benchmarks are a mandatory release gate)
+$CYR test tests/hoosh.tcyr
+./scripts/bench-history.sh bench-history.csv benchmarks.md
 ```
+
+After a toolchain pin bump, wipe `lib/` and re-sync (`cyrius lib sync` +
+`cyrius deps`) before trusting a local build — stale `lib/` masks stdlib renames.
 
 ## Code Style
 
-- `cargo fmt` — enforced in CI
-- `cargo clippy --all-features --all-targets -- -D warnings` — zero warnings
-- `#[non_exhaustive]` on all public enums
-- `#[must_use]` on all pure functions
-- `#[inline]` on hot-path functions
-- `write!` over `format!` on hot paths
-- Tests for all public APIs
-- Doc comments with examples on all public items
-- No `unwrap()` or `panic!()` in library code
+Match the surrounding code. Key idioms (full list in CLAUDE.md → Key Principles):
+
+- Build strings with `str_builder`; `alloc` only when necessary (avoid temporaries).
+- Syscalls via `sys_*` wrappers — never raw `syscall(N, …)` numbers.
+- Single-pass include order — modules `include`d before first use.
+- Vec arena over HashMap when indices are known.
+- **Do not panic in library code** — return error codes / `Result`; fatal exits
+  only in `main`.
+- The self-contained `tests/hoosh.tcyr` may only call stdlib + vendored symbols
+  (a call to an undefined `src` fn compiles but SIGILLs at runtime).
 
 ## Commit Messages
 
-Use imperative mood, present tense:
-- `add connection pooling to HooshClient`
-- `fix token budget overflow on streaming disconnect`
-- `update benchmark results for v1.0.0`
-
-## Pull Request Requirements
-
-- All CI checks pass (fmt, clippy, test, audit, deny, semver)
-- New public API items have doc comments with examples
-- New features have tests (target 85%+ coverage)
-- Performance-sensitive changes include benchmark results
-- CHANGELOG.md updated if user-facing
-
-## Running Tests
-
-```bash
-cargo test --all-features              # all tests (no providers needed)
-cargo test -- --ignored                # live Ollama tests
-cargo test -- conformance              # OpenAI API conformance suite
-cargo bench --bench routing --bench providers --bench hot_path --bench e2e  # benchmarks
-```
+Imperative mood, present tense — e.g. `add connection pooling`, `fix token budget
+overflow on streaming disconnect`. (The maintainer makes commits.)
 
 ## Adding a Provider
 
-1. Create `src/provider/<name>.rs`
-2. Implement `LlmProvider` trait (`infer`, `infer_stream`, `list_models`, `health_check`, `embeddings`)
-3. Add `ProviderType` variant (with `is_local()` and `supports_streaming()`)
-4. Add feature flag in `Cargo.toml`
-5. Register in `ProviderRegistry::register_from_route()`
-6. Add to `default_base_url()` in `config.rs`
-7. Add model entries to `ModelMetadataRegistry::load_defaults()`
-8. Add pricing to `cost/mod.rs` `PRICING` table
-9. Add mock server tests
-10. Update docs
-
-## Updating Benchmarks
-
-After performance-relevant changes:
-
-```bash
-./scripts/bench-history.sh   # runs benchmarks, appends CSV, generates markdown
-```
-
-Results tracked in `bench-history.csv`. Markdown summary in `benchmarks.md`.
+1. Add a `PROV_*` entry + `provider_name` case in `src/lib/types.cyr` (bump
+   `PROV_COUNT`).
+2. Wire request shaping / response extraction in `src/lib/provider.cyr` (local
+   raw-socket vs. remote sandhi path; auth headers for remote).
+3. Default base URL + config handling in `src/lib/config.cyr` / `route.cyr`.
+4. Add pricing (`src/lib/pricing.cyr`) + model metadata (`src/lib/metadata.cyr`)
+   if it should participate in the cost optimizer.
+5. Add a mock-backend test to `tests/hoosh.tcyr` and update docs.
 
 ## Versioning
 
-Version is tracked in three places (kept in sync by `scripts/version-bump.sh`):
-- `Cargo.toml` — package version
-- `VERSION` — plain text version file
-- `CHANGELOG.md` — release notes
-
-```bash
-./scripts/version-bump.sh 1.2.0
-```
+`VERSION` is the source of truth (`cyrius.cyml` tracks it via `${file:VERSION}`).
+Use `./scripts/version-bump.sh <v>` (updates VERSION, CLAUDE.md, `types.cyr`
+`HOOSH_VERSION`, and a CHANGELOG stub). Keep the zugot recipe version in sync.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [GPL-3.0-only](LICENSE) license.
+By contributing, you agree that your contributions will be licensed under the
+[GPL-3.0-only](LICENSE) license.
