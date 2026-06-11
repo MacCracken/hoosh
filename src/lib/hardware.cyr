@@ -10,13 +10,21 @@
 # Global registry — initialized once at startup
 var _hw_registry = 0;
 
-# Detect hardware and populate the global registry.
-# NOTE: ai-hwaccel's threaded detector (registry_detect_threaded) was
-# evaluated here but segfaults under hoosh's single-threaded runtime —
-# revisit alongside the threaded accept loop (roadmap concurrency item),
-# where the thread runtime is set up deliberately. Serial for now.
+# Detect hardware and populate the global registry, using ai-hwaccel's THREADED
+# detector — the CLI-tool probes (nvidia-smi, vulkaninfo, hl-smi, neuron-ls, …)
+# run in parallel threads while sysfs backends run on this thread; results are
+# per-thread vecs merged after join (race-free by construction).
+#
+# This segfaulted before v2.4.0 under the pre-thread-safe allocator (concurrent
+# parent-side allocs corrupted the heap). It is safe since the v6.0.64 CAS
+# spinlock: the only shared mutation is alloc (now atomic), and the fork+exec
+# child does ONLY raw syscalls (no child-side alloc → fork-safe even from a
+# worker thread). registry_detect_threaded has an internal serial fallback if
+# thread_create fails. Give the probe threads stack headroom for parsing CLI
+# output (matches the v2.4.0 worker pool); set before the first thread_create.
 fn hw_init() {
-    _hw_registry = registry_detect();
+    if (THREAD_STACK_SIZE < 1048576) { THREAD_STACK_SIZE = 1048576; }
+    _hw_registry = registry_detect_threaded();
     return _hw_registry;
 }
 

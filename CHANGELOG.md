@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.2] — 2026-06-10
+
+**Threaded hardware detection** — the last hardware item of the v2.4.x arc, now
+unblocked by the v2.4.0 thread-safe foundation.
+
+### Changed
+- **`hw_init` uses ai-hwaccel's threaded detector** (`registry_detect_threaded`)
+  — the CLI-tool probes (nvidia-smi, vulkaninfo, hl-smi, neuron-ls, …) run in
+  parallel threads while sysfs backends run inline; per-thread result vecs are
+  merged after join (race-free). Previously serial: the threaded detector
+  segfaulted under the pre-thread-safe allocator. It's safe since the v6.0.64 CAS
+  spinlock — the only shared mutation is `alloc` (atomic), and the fork+exec child
+  does only raw syscalls (no child-side alloc → fork-safe from a thread). Probe
+  threads get 1 MB stacks (set before the first `thread_create`); internal serial
+  fallback if `thread_create` fails. **Verified**: detection output is byte-identical
+  to serial (3 profiles, ROCm GPU), no segfault across repeated runs, server
+  startup clean.
+
 ## [2.4.1] — 2026-06-10
 
 **Hardware planning endpoints** — the remaining ai-hwaccel surface from the

@@ -25,6 +25,7 @@ One line per release; see CHANGELOG for detail.
 | **2.3.4 / 2.3.5** | Observability — latency histograms, majra event bus + `/v1/events/recent`, traceparent propagation, then OTLP/JSON span export ([ADR 010](../decisions/010-observability.md)) |
 | **2.4.0** | Multi-threaded accept loop — unified 7-worker pool serves all traffic concurrently; batch unified onto it ([ADR 011](../decisions/011-multithreaded-accept-loop.md)) |
 | **2.4.1** | Hardware planning endpoints — `/v1/hardware/model-format` + `/v1/hardware/requirement-match` |
+| **2.4.2** | Threaded hardware detection — parallel CLI probes (`registry_detect_threaded`), unblocked by the 2.4.0 thread-safe foundation |
 
 **Toolchain**: Cyrius pin currently **6.1.29** (bumped per release; clean `lib/`
 re-sync each time — see [the bump note](#toolchain)).
@@ -57,8 +58,9 @@ unblocks threaded hardware detection (below).
       from raw model bytes (**2.4.1**).
 - [x] `POST /v1/hardware/requirement-match` — scheduler requirement matching
       against detected hardware (**2.4.1**).
-- [ ] Threaded detection at startup (`registry_detect_threaded`) — was blocked on
-      the single-threaded runtime; unblocked by v2.4.0, not yet wired.
+- [x] Threaded detection at startup (`registry_detect_threaded`) — parallel CLI
+      probes; was blocked on the pre-thread-safe allocator, wired in **2.4.2**
+      (verified byte-identical to serial).
 
 **New backends** — vLLM (PagedAttention), TensorRT-LLM (NVIDIA), ONNX Runtime.
 
