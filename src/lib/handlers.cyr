@@ -496,6 +496,15 @@ fn handle_health_providers(cfd) {
                 if (cr >= 0) { up = 1; }
                 sys_close(fd);
             }
+            # HealthChanged event on a flip (state per route base_url; stored as
+            # up+1 so 0 = never-seen). Accept-thread only — no lock.
+            var hkey = route_base_url(r);
+            var hprev = map_get(_health_map, hkey);
+            var hcur = up + 1;
+            if (hprev != 0 && hprev != hcur) {
+                event_health_changed(provider_name(route_provider(r)), hkey, up);
+            }
+            map_set(_health_map, hkey, hcur);
             if (first == 0) { str_builder_add_cstr(sb, ","); }
             str_builder_add_cstr(sb, "{\"provider\":\"");
             str_builder_add_cstr(sb, provider_name(route_provider(r)));
@@ -839,6 +848,12 @@ fn handle_metrics(cfd) {
     str_builder_add_cstr(sb, "# TYPE hoosh_providers_configured gauge\n");
     str_builder_add_cstr(sb, "hoosh_providers_configured ");
     str_builder_add_int(sb, _met_providers);
+    str_builder_add_cstr(sb, "\n");
+    metrics_emit_latency(sb);
+    str_builder_add_cstr(sb, "# HELP hoosh_events_published_total Provider events published to the bus\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_events_published_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_events_published_total ");
+    str_builder_add_int(sb, events_total_published());
     str_builder_add_cstr(sb, "\n");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
@@ -1548,6 +1563,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # Rate limit
     var rl = route_rate_limiter(route);
     if (ratelimit_check(rl) == 0) {
+        event_rate_limited(provider_name(route_provider(route)));
         store64(out + 8, _resp_err("429", "Too Many Requests", "provider rate limit exceeded", "server_error"));
         return out;
     }
@@ -1660,6 +1676,7 @@ fn _chat_assemble(prep, result) {
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         hlog_error("chat: provider backend unreachable after retries");
+        event_inference_failed(provider_name(route_provider(route)), model_cstr, "backend unreachable");
         return _resp_err("502", "Bad Gateway", "provider backend unreachable", "server_error");
     }
 

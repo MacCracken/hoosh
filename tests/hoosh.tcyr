@@ -999,6 +999,59 @@ fn _t_lane_release(lanes, lane) {
     return 0;
 }
 
+# Mirror of src/lib/metrics.cyr _lat_bound + the bucket-find loop.
+fn _t_lat_bound(i) {
+    if (i == 0) { return 5; }
+    if (i == 1) { return 10; }
+    if (i == 2) { return 25; }
+    if (i == 3) { return 50; }
+    if (i == 4) { return 100; }
+    if (i == 5) { return 250; }
+    if (i == 6) { return 500; }
+    if (i == 7) { return 1000; }
+    if (i == 8) { return 2500; }
+    if (i == 9) { return 5000; }
+    return 10000;
+}
+fn _t_lat_bucket(ms) {
+    var b = 0;
+    while (b < 11 && ms > _t_lat_bound(b)) { b = b + 1; }
+    return b;
+}
+
+# Mirror of src/lib/trace.cyr trace_extract — incoming traceparent header.
+fn _t_trace_ci_eq(a, pat, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (ca != load8(pat + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn _t_trace_extract(buf, buf_len) {
+    var i = 0;
+    while (i < buf_len - 12) {
+        if (i == 0 || load8(buf + i - 1) == 10) {
+            if (_t_trace_ci_eq(buf + i, "traceparent:", 12) == 1) {
+                var j = i + 12;
+                while (j < buf_len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
+                var s = j;
+                while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
+                var n = j - s;
+                if (n <= 0 || n > 200) { return 0; }
+                var out = alloc(n + 1);
+                memcpy(out, buf + s, n);
+                store8(out + n, 0);
+                return out;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4357,6 +4410,25 @@ fn main() {
     assert_eq(_t_lane_acquire(lanes, 7), 0, "lanes: full pool → 0 (would block)");
     _t_lane_release(lanes, 5);
     assert_eq(_t_lane_acquire(lanes, 7), 5, "lanes: free then acquire → 5");
+
+    # ── Observability: latency buckets + traceparent extraction ───
+    test_group("observability");
+    assert_eq(_t_lat_bucket(3), 0, "lat: 3ms → bucket 0 (le 5)");
+    assert_eq(_t_lat_bucket(5), 0, "lat: 5ms → bucket 0 (le 5)");
+    assert_eq(_t_lat_bucket(50), 3, "lat: 50ms → bucket 3 (le 50)");
+    assert_eq(_t_lat_bucket(51), 4, "lat: 51ms → bucket 4 (le 100)");
+    assert_eq(_t_lat_bucket(20000), 11, "lat: 20s → overflow bucket 11");
+    var treq = "POST /x HTTP/1.1\r\nHost: h\r\ntraceparent: 00-abc-def-01\r\nContent-Type: application/json\r\n\r\nbody";
+    var tp = _t_trace_extract(treq, strlen(treq));
+    assert_eq(tp != 0, 1, "trace: header located");
+    assert_eq(_cmp_substr(tp, strlen(tp), "00-abc-def-01", 13) >= 0, 1, "trace: value extracted");
+    assert_eq(strlen(tp), 13, "trace: value is exactly the header value (no trailing CR)");
+    var tnone = "POST /x HTTP/1.1\r\nHost: h\r\n\r\nbody";
+    assert_eq(_t_trace_extract(tnone, strlen(tnone)), 0, "trace: absent → 0");
+    # Case-insensitive header name.
+    var tcase = "GET / HTTP/1.1\r\nTraceParent: 00-XY-ZW-01\r\n\r\n";
+    var tpc = _t_trace_extract(tcase, strlen(tcase));
+    assert_eq(tpc != 0, 1, "trace: case-insensitive header name");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

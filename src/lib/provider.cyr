@@ -627,6 +627,7 @@ fn _bearer_value(key) {
 fn _provider_headers(route) {
     var h = sandhi_headers_new();
     sandhi_headers_add(h, "Content-Type", "application/json");
+    sandhi_headers_add(h, "traceparent", trace_current_or_new());
     var key = route_api_key(route);
     if (key != 0) {
         if (route_provider(route) == PROV_ANTHROPIC) {
@@ -833,6 +834,7 @@ fn _extract_openai_tool_calls(rb, rbl) {
 }
 
 fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw, tools_len) {
+    var _fwd_t0 = clock_now_ns();
     var base = route_base_url(route);
     var is_anthropic = (route_provider(route) == PROV_ANTHROPIC);
     var is_google = (route_provider(route) == PROV_GOOGLE);
@@ -921,7 +923,10 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         } }
     var ptok = tokens / 0x100000000;
     var ctok = tokens % 0x100000000;
+    var _fwd_ms = (clock_now_ns() - _fwd_t0) / 1000000;
     metrics_record(ptok, ctok);
+    metrics_record_latency(route_provider(route), _fwd_ms);
+    event_inference_completed(provider_name(route_provider(route)), model, _fwd_ms, ptok + ctok);
 
     # Surface tool calls (slot 32; 0 = none), converting each provider's shape to
     # OpenAI tool_calls.

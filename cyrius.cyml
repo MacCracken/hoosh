@@ -44,3 +44,9 @@ modules = ["dist/ai-hwaccel.cyr"]
 # majra symbols), so we vendor it directly as `src/vendor/bote-core.cyr`
 # (committed; see that file's header for the pinned bote tag) and include
 # it from src/main.cyr. Re-sync with `./scripts/sync-bote.sh <tag>`.
+#
+# majra (2.4.5) — provider event bus pubsub — is vendored the same way at
+# src/vendor/majra.cyr (self-contained dist/majra.cyr). Note: majra defines
+# ratelimit_new/ratelimit_check that collide by name with src/lib/ratelimit.cyr
+# (different arity); harmless — they're dead code in majra's core pubsub, so
+# hoosh's win (last-definition). Powers src/lib/events.cyr.

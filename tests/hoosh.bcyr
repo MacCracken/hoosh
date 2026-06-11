@@ -23,6 +23,26 @@ include "src/vendor/bote-core.cyr"
 # ================================================================
 
 # Mirror of src/lib/batch.cyr _batch_split for the batch-parse bench.
+# Mirror of src/lib/metrics.cyr latency bucket-find (per-forward cost).
+fn _bench_lat_bound(i) {
+    if (i == 0) { return 5; }
+    if (i == 1) { return 10; }
+    if (i == 2) { return 25; }
+    if (i == 3) { return 50; }
+    if (i == 4) { return 100; }
+    if (i == 5) { return 250; }
+    if (i == 6) { return 500; }
+    if (i == 7) { return 1000; }
+    if (i == 8) { return 2500; }
+    if (i == 9) { return 5000; }
+    return 10000;
+}
+fn _bench_lat_bucket(ms) {
+    var b = 0;
+    while (b < 11 && ms > _bench_lat_bound(b)) { b = b + 1; }
+    return b;
+}
+
 fn _bench_batch_split(arr_ptr, arr_len) {
     var items = vec_new();
     var i = 0;
@@ -881,6 +901,17 @@ fn main() {
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: latency_bucket_find (per-forward histogram cost) ─
+    b = bench_new("latency_bucket_find");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_lat_bucket(i % 12000);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
     bench_report(b);
 
     println("");

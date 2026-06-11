@@ -1,0 +1,125 @@
+# events.cyr — provider event bus (majra pubsub) + recent-events ring.
+#
+# Mirrors rust-old/src/events.rs: a majra TypedPubSub carrying the four
+# ProviderEvent kinds. The bus is the pub/sub substrate (publish count tracked,
+# ready for in-process/external consumers); since hoosh's loop is synchronous and
+# a never-drained subscriber channel would fill and block a publish, hoosh's own
+# observability is a bounded **recent-events ring** exposed at GET
+# /v1/events/recent — events are appended there as they publish.
+
+var EVENT_RING_MAX = 128;
+var _event_bus = 0;
+var _event_ring = 0;
+var _event_head = 0;
+var _event_count = 0;
+var _event_lock = 0;
+
+fn events_init() {
+    if (_event_bus != 0) { return 0; }
+    _event_bus = pubsub_new();
+    _event_ring = alloc(EVENT_RING_MAX * 8);
+    var i = 0;
+    while (i < EVENT_RING_MAX) { store64(_event_ring + i * 8, 0); i = i + 1; }
+    _event_lock = mutex_new();
+    return 0;
+}
+
+fn _ev_topic_health() { return "providers/health"; }
+fn _ev_topic_inference() { return "providers/inference"; }
+fn _ev_topic_errors() { return "providers/errors"; }
+fn _ev_topic_ratelimit() { return "providers/rate_limit"; }
+
+# Total events published to the bus (exposed in /metrics).
+fn events_total_published() {
+    if (_event_bus == 0) { return 0; }
+    return pubsub_total_published(_event_bus);
+}
+
+# Publish a finished JSON event to the majra bus + append it to the recent ring.
+fn event_emit(topic, json) {
+    if (_event_bus == 0) { return 0; }
+    pubsub_publish(_event_bus, topic, json);
+    mutex_lock(_event_lock);
+    store64(_event_ring + (_event_head % EVENT_RING_MAX) * 8, json);
+    _event_head = _event_head + 1;
+    _event_count = _event_count + 1;
+    mutex_unlock(_event_lock);
+    return 0;
+}
+
+# ── ProviderEvent builders (escape free-form fields with bote-core's helper) ──
+fn event_inference_completed(provider, model, latency_ms, tokens) {
+    if (_event_bus == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"event\":\"inference_completed\",\"provider\":\"");
+    str_builder_add_cstr(sb, provider);
+    str_builder_add_cstr(sb, "\",\"model\":\"");
+    _json_emit_escaped(sb, model);
+    str_builder_add_cstr(sb, "\",\"latency_ms\":");
+    str_builder_add_int(sb, latency_ms);
+    str_builder_add_cstr(sb, ",\"tokens\":");
+    str_builder_add_int(sb, tokens);
+    str_builder_add_cstr(sb, "}");
+    event_emit(_ev_topic_inference(), str_data(str_builder_build(sb)));
+    return 0;
+}
+
+fn event_inference_failed(provider, model, err) {
+    if (_event_bus == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"event\":\"inference_failed\",\"provider\":\"");
+    str_builder_add_cstr(sb, provider);
+    str_builder_add_cstr(sb, "\",\"model\":\"");
+    _json_emit_escaped(sb, model);
+    str_builder_add_cstr(sb, "\",\"error\":\"");
+    _json_emit_escaped(sb, err);
+    str_builder_add_cstr(sb, "\"}");
+    event_emit(_ev_topic_errors(), str_data(str_builder_build(sb)));
+    return 0;
+}
+
+fn event_rate_limited(provider) {
+    if (_event_bus == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"event\":\"rate_limited\",\"provider\":\"");
+    str_builder_add_cstr(sb, provider);
+    str_builder_add_cstr(sb, "\"}");
+    event_emit(_ev_topic_ratelimit(), str_data(str_builder_build(sb)));
+    return 0;
+}
+
+fn event_health_changed(provider, base_url, healthy) {
+    if (_event_bus == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"event\":\"health_changed\",\"provider\":\"");
+    str_builder_add_cstr(sb, provider);
+    str_builder_add_cstr(sb, "\",\"base_url\":\"");
+    _json_emit_escaped(sb, base_url);
+    str_builder_add_cstr(sb, "\",\"healthy\":");
+    if (healthy == 1) { str_builder_add_cstr(sb, "true"); } else { str_builder_add_cstr(sb, "false"); }
+    str_builder_add_cstr(sb, "}");
+    event_emit(_ev_topic_health(), str_data(str_builder_build(sb)));
+    return 0;
+}
+
+# GET /v1/events/recent — the recent-events ring, oldest first.
+fn handle_events_recent(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"events\":[");
+    if (_event_bus != 0) {
+        mutex_lock(_event_lock);
+        var n = _event_count;
+        if (n > EVENT_RING_MAX) { n = EVENT_RING_MAX; }
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            var idx = (_event_head - n + i) % EVENT_RING_MAX;
+            str_builder_add_cstr(sb, load64(_event_ring + idx * 8));
+            i = i + 1;
+        }
+        mutex_unlock(_event_lock);
+    }
+    str_builder_add_cstr(sb, "]}");
+    var body = str_builder_build(sb);
+    return http_ok(cfd, to_cstr(body), str_len(body));
+}

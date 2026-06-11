@@ -118,6 +118,7 @@ Thread-safe DashMap cache with TTL. Keyed on prompt hash. Skips caching for stre
 | `/v1/batch` | POST | Concurrent batch inference (sync; `"async":true` → job id) |
 | `/v1/batch/{id}` | GET | Async batch progress |
 | `/v1/batch/{id}/cancel` | POST | Cancel an async batch |
+| `/v1/events/recent` | GET | Recent provider events (majra pub/sub bus) |
 | `/v1/models` | GET | List available models |
 | `/api/tags` | GET | List models (native Ollama-compatible shape) |
 | `/v1/models/pull` | POST | Pull a model (Ollama `pull_model`) |

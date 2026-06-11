@@ -325,11 +325,21 @@ pass across every handler (cache/budget/audit/rate/cost/metrics). 2.3.2's sync
 pass already locked the chat path; this extends it to the remaining mutating
 handlers. Enables loopback-style batching and general throughput.
 
-### v2.3.4 — Observability
-- [ ] OpenTelemetry trace propagation (`telemetry.rs`)
-- [ ] Event pub/sub bus (`events.rs`) — HealthChanged / InferenceCompleted /
-      InferenceFailed / RateLimited
-- [ ] Per-provider latency histograms in Prometheus
+### v2.3.4 — Observability — ✅ SHIPPED 2026-06-10
+- [x] **Per-provider latency histograms** — `hoosh_provider_latency_ms`
+      Prometheus histogram (per provider) in `/metrics`.
+- [x] **Event pub/sub bus** (`events.rs`) — majra pubsub carrying HealthChanged /
+      InferenceCompleted / InferenceFailed / RateLimited, published as JSON; bus
+      count in `/metrics`, recent events at **`GET /v1/events/recent`**.
+- [x] **W3C `traceparent` propagation** (the lightweight OTel slice) — incoming
+      traceparent forwarded to backends, generated when absent.
+- [ ] **→ 2.3.5:** full OpenTelemetry OTLP span export (`telemetry.rs`) — needs a
+      gRPC/protobuf exporter; its own effort.
+      See [ADR 010](../decisions/010-observability.md).
+
+### v2.3.5 — OpenTelemetry OTLP export
+- [ ] OTLP span exporter + span emission around inference (deferred from 2.3.4;
+      builds on the 2.3.4 traceparent propagation).
 
 ---
 

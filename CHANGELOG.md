@@ -7,6 +7,43 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.4] — 2026-06-10
+
+**Observability** — per-provider latency histograms, a provider event bus
+(majra pub/sub) with a recent-events endpoint, and W3C `traceparent` propagation.
+Full OpenTelemetry OTLP export is deferred to 2.3.5. See ADR-010.
+
+### Added
+- **Per-provider latency histograms** (`/metrics`) — `hoosh_provider_latency_ms`
+  Prometheus histogram (11 le-buckets + sum + count, per provider), recorded
+  around each provider forward (atomic — batch workers record concurrently).
+- **Provider event bus** (`src/lib/events.cyr`, **majra 2.4.5** pubsub) — the
+  four `ProviderEvent` kinds from `events.rs` are published as JSON: HealthChanged
+  (on a health-poll flip), InferenceCompleted (provider/model/latency/tokens),
+  InferenceFailed (provider/model/error), RateLimited (provider). majra is the
+  pub/sub substrate (`hoosh_events_published_total` in `/metrics`); since hoosh's
+  loop is synchronous, observability is a bounded **recent-events ring** at
+  **`GET /v1/events/recent`** (a never-drained subscriber channel would fill and
+  block, so events append to the ring as they publish). Live-verified all four.
+- **W3C `traceparent` propagation** (`src/lib/trace.cyr`) — the incoming
+  `traceparent` is forwarded verbatim to backend requests (local + remote), or a
+  fresh one is generated (`clock_now_ns` + atomic counter) when absent, so the
+  gateway→backend hop joins the trace. Carried through the deep, threaded forward
+  path via a **thread-local** slot (slot 1; slot 0 is sigil's crypto bank) rather
+  than threading the header through every signature. Live-verified (incoming
+  forwarded; absent → generated).
+
+### Notes
+- **majra is vendored** at `src/vendor/majra.cyr` (committed, not `[deps]` — same
+  rationale as bote-core). Its `ratelimit_new`/`ratelimit_check` collide by name
+  with hoosh's (different signatures); harmless — they're dead code in majra's
+  core pubsub, so hoosh's win and work. One benign `last-definition-wins` build
+  note, like the existing bayan ones.
+- **Gotcha fixed during bring-up:** `thread_local_init()` is NOT idempotent — it
+  installs a fresh zeroed TLS block. Calling it per-access wiped the slot (and
+  would clobber sigil's crypto bank). It is now called exactly once per thread
+  (main via `crypto_tls_main_init` at startup; workers via CLONE_SETTLS).
+
 ## [2.3.3] — 2026-06-10
 
 **Concurrent async batches + registry eviction** — the deferred follow-ups to

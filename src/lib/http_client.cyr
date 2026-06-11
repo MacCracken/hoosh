@@ -22,6 +22,11 @@ fn _build_req_header(buf, method, path, host, body_len) {
     var cl_len = fmt_int_buf(body_len, cl_buf);
     memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    var _tp = trace_current_or_new();
+    var _tpl = strlen(_tp);
+    memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
+    memcpy(buf + pos, _tp, _tpl); pos = pos + _tpl;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     return pos;
 }
@@ -43,6 +48,11 @@ fn _build_post_header(buf, path, host, body_len) {
     var cl_buf = alloc(32);
     var cl_len = fmt_int_buf(body_len, cl_buf);
     memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
+    var _tp = trace_current_or_new();
+    var _tpl = strlen(_tp);
+    memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
+    memcpy(buf + pos, _tp, _tpl); pos = pos + _tpl;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     return pos;

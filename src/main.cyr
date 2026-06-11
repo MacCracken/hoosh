@@ -22,6 +22,11 @@ include "lib/ai-hwaccel.cyr"
 # see cyrius.cyml). Powers /v1/tools/list + /v1/tools/call via src/lib/mcp.cyr.
 include "src/vendor/bote-core.cyr"
 
+# majra pub/sub (majra 2.4.5) — provider event bus, self-contained distlib
+# bundle committed under src/vendor/ (same rationale as bote-core). Powers the
+# event bus in src/lib/events.cyr.
+include "src/vendor/majra.cyr"
+
 # ================================================================
 # Hoosh modules
 # ================================================================
@@ -39,6 +44,7 @@ include "src/lib/router.cyr"
 include "src/lib/budget.cyr"
 include "src/lib/cache.cyr"
 include "src/lib/metrics.cyr"
+include "src/lib/trace.cyr"
 include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 include "src/lib/http_client.cyr"
@@ -50,6 +56,7 @@ include "src/lib/retry.cyr"
 include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
 include "src/lib/batch.cyr"
+include "src/lib/events.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/config.cyr"
 
@@ -76,6 +83,10 @@ var _warming = 0;
 
 fn http_route(cfd, method, path, buf, buf_len) {
     hlog_request(method, path);
+    # W3C Trace Context: carry the incoming traceparent (or none) for this
+    # request so outgoing backend forwards join the trace. Reset per request
+    # (the accept thread is reused); the forward generates one if none arrived.
+    trace_set(trace_extract(buf, buf_len));
     # CORS preflight
     if (streq(method, "OPTIONS") == 1) {
         var cr = make_crlf();
@@ -114,6 +125,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
     if (streq(path, "/v1/cache/stats") == 1) { return handle_cache_stats(cfd); }
     if (streq(path, "/v1/tools/list") == 1) { return handle_tools_list(cfd); }
+    if (streq(path, "/v1/events/recent") == 1) { return handle_events_recent(cfd); }
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
     if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
@@ -313,6 +325,16 @@ fn cmd_serve(port) {
 
     # Async batch registry + exec lock (POST /v1/batch async, GET /v1/batch/{id}).
     batch_registry_init();
+
+    # Per-provider latency histogram storage (Prometheus /metrics).
+    metrics_latency_init();
+
+    # Install the accept thread's thread-local block once (slot 0 = sigil crypto
+    # bank, slot 1 = traceparent). Idempotent + shared with the batch path.
+    crypto_tls_main_init();
+
+    # Provider event bus (majra pubsub) + recent-events ring (GET /v1/events/recent).
+    events_init();
 
     while (1 == 1) {
         var client = sock_accept(sfd);

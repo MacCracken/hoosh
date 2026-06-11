@@ -1,0 +1,110 @@
+# trace.cyr — W3C Trace Context (`traceparent`) propagation.
+#
+# The traceparent arrives in the request headers, but the forward path is deep
+# (handle_chat → _chat_prep/_chat_finish → provider_forward → header builders)
+# and runs on batch worker threads. Rather than thread the header through every
+# signature, the current request's traceparent is carried in a **thread-local**
+# slot: http_route sets it (incoming or none); the outgoing header builders read
+# it (generating a fresh one if absent). Each batch worker is a fresh thread with
+# a zeroed TLS slot, so it generates its own per-item traceparent automatically.
+#
+# Slot 1 — slot 0 is sigil's crypto bank ([[sigil-crypto-needs-per-thread-bank]]).
+# Trace ids are unique (clock_now_ns + atomic counter), not crypto-random —
+# uniqueness is what correlation needs.
+
+var TRACE_SLOT = 1;
+var _trace_counter = 0;
+
+# NB: thread_local_init() is NOT idempotent — it installs a fresh zeroed TLS
+# block, wiping all slots (including sigil's crypto bank at slot 0). It must be
+# called exactly once per thread: the main thread via crypto_tls_main_init() at
+# startup, worker threads via CLONE_SETTLS in thread_create. So trace_* only
+# get/set, never init.
+fn trace_set(tp) {
+    thread_local_set(TRACE_SLOT, tp);
+    return 0;
+}
+
+# Write the 16 lowercase-hex digits of a 64-bit value to out[0..16).
+fn _trace_hex64(val, out) {
+    var i = 0;
+    while (i < 16) {
+        var nib = (val / _trace_pow16(15 - i)) % 16;
+        var c = 48 + nib;
+        if (nib > 9) { c = 87 + nib; }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _trace_pow16(n) {
+    var r = 1;
+    var i = 0;
+    while (i < n) { r = r * 16; i = i + 1; }
+    return r;
+}
+
+# Build a fresh "00-<32hex traceid>-<16hex spanid>-01" (56 bytes incl. NUL).
+fn trace_generate() {
+    var old = load64(&_trace_counter);
+    while (atomic_cas(&_trace_counter, old, old + 1) == 0) { old = load64(&_trace_counter); }
+    var c = old + 1;
+    var t = clock_now_ns();
+    var buf = alloc(64);
+    memcpy(buf, "00-", 3);
+    _trace_hex64(t, buf + 3);
+    _trace_hex64(c, buf + 19);
+    store8(buf + 35, 45);
+    _trace_hex64(t + c * 2654435761, buf + 36);
+    memcpy(buf + 52, "-01", 3);
+    store8(buf + 55, 0);
+    return buf;
+}
+
+# The current thread's traceparent, generating + storing one if none is set.
+fn trace_current_or_new() {
+    var tp = thread_local_get(TRACE_SLOT);
+    if (tp == 0) {
+        tp = trace_generate();
+        thread_local_set(TRACE_SLOT, tp);
+    }
+    return tp;
+}
+
+# Case-insensitive compare of `a[0..n)` against the lowercase pattern `pat`.
+fn _trace_ci_eq(a, pat, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (ca != load8(pat + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Extract the incoming `traceparent` header value from a raw HTTP request.
+# Returns a NUL-terminated copy, or 0 if absent. Header name is matched
+# case-insensitively at a line start.
+fn trace_extract(buf, buf_len) {
+    var i = 0;
+    while (i < buf_len - 12) {
+        if (i == 0 || load8(buf + i - 1) == 10) {
+            if (_trace_ci_eq(buf + i, "traceparent:", 12) == 1) {
+                var j = i + 12;
+                while (j < buf_len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
+                var s = j;
+                while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
+                var n = j - s;
+                if (n <= 0 || n > 200) { return 0; }
+                var out = alloc(n + 1);
+                memcpy(out, buf + s, n);
+                store8(out + n, 0);
+                return out;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
