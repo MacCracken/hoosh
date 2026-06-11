@@ -26,6 +26,7 @@ One line per release; see CHANGELOG for detail.
 | **2.4.0** | Multi-threaded accept loop — unified 7-worker pool serves all traffic concurrently; batch unified onto it ([ADR 011](../decisions/011-multithreaded-accept-loop.md)) |
 | **2.4.1** | Hardware planning endpoints — `/v1/hardware/model-format` + `/v1/hardware/requirement-match` |
 | **2.4.2** | Threaded hardware detection — parallel CLI probes (`registry_detect_threaded`), unblocked by the 2.4.0 thread-safe foundation |
+| **2.4.3** | OTLP remote/`https` export (worker-routed TLS) + scaffolding (state.md, fuzz harnesses, CI security scan) |
 
 **Toolchain**: Cyrius pin currently **6.1.29** (bumped per release; clean `lib/`
 re-sync each time — see [the bump note](#toolchain)).
@@ -65,20 +66,18 @@ unblocks threaded hardware detection (below).
 **New backends** — vLLM (PagedAttention), TensorRT-LLM (NVIDIA), ONNX Runtime.
 
 **OTLP follow-ups** (extends 2.3.5):
-- **Remote / `https://` collector** — current exporter is localhost-`http` only;
-  remote needs DNS + TLS via sandhi.
-- **Nested spans** — provider-forward / cache / retry child spans under the
-  inference span.
-- **OTLP/protobuf** — the standard wire format; *upstream-gated* on a cyrius
-  protobuf lib (proposed: `cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`).
-  Add `[[telemetry]] encoding = "protobuf"` once it lands.
+- [x] **Remote / `https://` collector** — DNS + TLS via sandhi; https POSTs
+      worker-routed so a banked worker does the TLS (**2.4.3**).
+- [ ] **Nested spans** — provider-forward / cache / retry child spans under the
+      inference span.
+- [ ] **OTLP/protobuf** — the standard wire format; *upstream-gated* on a cyrius
+      protobuf lib (proposed: `cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`).
 
 **Scaffolding modernization** (sibling-repo conventions):
-- [x] `docs/doc-health.md` — doc currency tracker (done — 2026-06-10 doc sweep).
-- [ ] `docs/development/state.md` — volatile state (version, test/bench counts,
-      binary size, recent releases), refreshed each release (patra/cyrius pattern).
-- [ ] Fuzz harnesses (`fuzz/*.fcyr`) + a CI fuzz step.
-- [ ] Security-pattern scan in CI (raw `execve`, hardcoded `/etc` paths).
+- [x] `docs/doc-health.md` — doc currency tracker (2026-06-10 doc sweep).
+- [x] `docs/development/state.md` — volatile state snapshot, per release (**2.4.3**).
+- [x] Fuzz harnesses (`fuzz/*.fcyr`) + a CI fuzz step (**2.4.3**).
+- [x] Security-pattern scan in CI (`scripts/security-scan.sh`) (**2.4.3**).
 - [ ] Split `tests/hoosh.tcyr`/`hoosh.bcyr` into per-topic units — only if the
       suite keeps growing (currently fine as single files).
 

@@ -115,10 +115,23 @@ fn _otlp_build_batch(frags, n) {
     return str_builder_build(sb);
 }
 
-# POST an OTLP/JSON body to the (localhost http) collector. Best-effort: a small
-# response buffer (collector replies are tiny) keeps the per-cycle allocation
-# down. Ignores the response.
+# True if the configured endpoint is a remote https:// collector.
+fn _otlp_is_https() {
+    if (_otlp_endpoint == 0) { return 0; }
+    return memeq(_otlp_endpoint, "https", 5);
+}
+
+# POST an OTLP/JSON body to the collector. Best-effort, ignores the response.
+# https:// → sandhi (DNS + TLS); this path only ever runs on a banked pool worker
+# (the bankless exporter thread routes https POSTs through the queue). Local
+# http:// → raw socket (the exporter posts these directly; no crypto bank).
 fn _otlp_post(body, blen) {
+    if (_otlp_is_https() == 1) {
+        var h = sandhi_headers_new();
+        sandhi_headers_add(h, "Content-Type", "application/json");
+        sandhi_http_post(_otlp_endpoint, h, body, blen);
+        return 0;
+    }
     var port = url_port(_otlp_endpoint);
     var path = _otlp_path(_otlp_endpoint);
     var fd = sys_socket(2, 1, 0);
@@ -159,7 +172,15 @@ fn _otlp_exporter_thread(arg) {
         mutex_unlock(_otlp_lock);
         if (n > 0) {
             var doc = _otlp_build_batch(snapshot, n);
-            _otlp_post(str_data(doc), str_len(doc));
+            # https TLS needs a sigil crypto bank, which this exporter thread does
+            # not own (banks 0..7 = main + 7 pool workers). Route the POST through
+            # the work queue so a banked worker does the TLS. Local http needs no
+            # bank — post it directly here.
+            if (_otlp_is_https() == 1) {
+                wq_push(job_otlp_export(str_data(doc), str_len(doc)));
+            } else {
+                _otlp_post(str_data(doc), str_len(doc));
+            }
         }
     }
     return 0;

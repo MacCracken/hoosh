@@ -20,11 +20,12 @@ level = "info"
 # path = "hoosh.patra"
 
 # OpenTelemetry — export one OTLP/HTTP+JSON span per inference to a collector's
-# /v1/traces (localhost http sidecar). Off unless otlp_endpoint is set. The span
-# carries the request's traceparent trace-id, so it joins the caller's trace.
-# A background thread batches + POSTs every second (non-blocking).
+# /v1/traces. Off unless otlp_endpoint is set. The span carries the request's
+# traceparent trace-id, so it joins the caller's trace. A background thread
+# batches + POSTs every second (non-blocking). Both a local http sidecar and a
+# remote https collector (DNS + TLS via sandhi) are supported.
 # [[telemetry]]
-# otlp_endpoint = "http://localhost:4318/v1/traces"
+# otlp_endpoint = "http://localhost:4318/v1/traces"   # or https://collector.example.com/v1/traces
 # service_name = "hoosh"
 
 [cache]

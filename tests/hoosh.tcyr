@@ -4499,6 +4499,9 @@ fn main() {
     _t_otlp_attr_int(osb, "latency_ms", 50);
     var oattr = str_data(str_builder_build(osb));
     assert_streq(oattr, "{\"key\":\"latency_ms\",\"value\":{\"intValue\":\"50\"}}", "otlp: int attr is a JSON string value");
+    # OTLP endpoint scheme detection (https → worker-routed TLS; http → direct).
+    assert_eq(memeq("https://collector:4318/v1/traces", "https", 5), 1, "otlp: https endpoint detected");
+    assert_eq(memeq("http://localhost:4318/v1/traces", "https", 5), 0, "otlp: http endpoint not https");
 
     # ── Worker-pool work queue (FIFO ring + wrap-around) ──────────
     test_group("pool");

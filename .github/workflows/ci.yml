@@ -98,6 +98,20 @@ jobs:
       - name: Test suite
         run: cyrius test tests/hoosh.tcyr
 
+      - name: Security scan
+        run: ./scripts/security-scan.sh
+
+      - name: Fuzz
+        # Each fuzz/*.fcyr hammers a hand-rolled parser with adversarial input.
+        # A crash → non-zero exit; a hang → caught by the timeout. Both fail CI.
+        run: |
+          for f in fuzz/*.fcyr; do
+            name=$(basename "$f" .fcyr)
+            cyrius build "$f" "build/fuzz_$name"
+            timeout 30 "build/fuzz_$name" || { echo "FUZZ CRASH/TIMEOUT: $name"; exit 1; }
+            echo "  fuzz ok: $name"
+          done
+
       - name: Benchmarks (mandatory release gate)
         # Benchmarks are required for every release (see CLAUDE.md). The
         # gate fails if the suite does not build/run or records no data.

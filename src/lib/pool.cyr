@@ -15,6 +15,7 @@
 var WORKER_COUNT = 7;
 var JOB_CONN = 0;
 var JOB_BATCH_ITEM = 1;
+var JOB_OTLP_EXPORT = 2;
 
 # ── Work queue: a bounded ring of job pointers + mutex. wq_pop is non-blocking
 # (returns 0 when empty) so workers + the sync-batch barrier can work-steal. ──
@@ -83,6 +84,16 @@ fn job_batch_item(req_ptr, req_len, slot, completed_ctr, failed_ctr) {
     return j;
 }
 
+# An OTLP/JSON export POST: [type, doc_ptr, doc_len]. The bankless exporter
+# thread enqueues this for an https collector so a banked worker does the TLS.
+fn job_otlp_export(doc_ptr, doc_len) {
+    var j = alloc(24);
+    store64(j, JOB_OTLP_EXPORT);
+    store64(j + 8, doc_ptr);
+    store64(j + 16, doc_len);
+    return j;
+}
+
 # Read one full HTTP request off the connection, route it, close. Runs on a
 # worker thread (its crypto bank already set).
 fn _handle_conn(cfd) {
@@ -109,6 +120,11 @@ fn _handle_conn(cfd) {
 fn job_process(job) {
     if (load64(job) == JOB_CONN) {
         _handle_conn(load64(job + 8));
+        return 0;
+    }
+    if (load64(job) == JOB_OTLP_EXPORT) {
+        # On a banked worker → safe to TLS to a remote OTLP collector.
+        _otlp_post(load64(job + 8), load64(job + 16));
         return 0;
     }
     # JOB_BATCH_ITEM — produce the response, store it, then bump the failure +

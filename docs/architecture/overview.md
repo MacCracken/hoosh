@@ -71,7 +71,7 @@ dispatch, and the `cmd_serve` accept loop + startup init.
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring |
-| `otlp.cyr` | OpenTelemetry OTLP/JSON span export (opt-in) |
+| `otlp.cyr` | OpenTelemetry OTLP/JSON span export (opt-in) — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms |
 | `cache.cyr` / `semantic.cyr` | Exact-key LRU cache + semantic (embedding cosine) cache |

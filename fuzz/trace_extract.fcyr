@@ -1,0 +1,96 @@
+# Fuzz: trace_extract — the incoming-`traceparent` header scanner
+# (src/lib/trace.cyr). It walks the raw HTTP request doing bounded pointer
+# arithmetic (line-start detection, case-insensitive name match, value copy with
+# a length cap), so truncated headers, missing CRLFs, oversized values, and
+# binary garbage must not crash or OOB-read. Self-contained mirror.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fmt.cyr"
+
+# Mirror of src/lib/trace.cyr _trace_ci_eq + trace_extract.
+fn _trace_ci_eq(a, pat, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i);
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (ca != load8(pat + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn trace_extract(buf, buf_len) {
+    var i = 0;
+    while (i < buf_len - 12) {
+        if (i == 0 || load8(buf + i - 1) == 10) {
+            if (_trace_ci_eq(buf + i, "traceparent:", 12) == 1) {
+                var j = i + 12;
+                while (j < buf_len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
+                var s = j;
+                while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
+                var n = j - s;
+                if (n <= 0 || n > 200) { return 0; }
+                var out = alloc(n + 1);
+                memcpy(out, buf + s, n);
+                store8(out + n, 0);
+                return out;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _fuzz_cstr(s) {
+    var n = strlen(s);
+    if (n == 0) { trace_extract(s, 0); return 0; }
+    var buf = alloc(n);
+    memcpy(buf, s, n);
+    trace_extract(buf, n);
+    return 0;
+}
+
+alloc_init();
+
+# ── Crafted adversarial requests ──
+_fuzz_cstr("POST / HTTP/1.1\r\ntraceparent: 00-abc-def-01\r\n\r\n");  # valid
+_fuzz_cstr("traceparent: at-buffer-start-no-prior-newline");          # i==0 branch
+_fuzz_cstr("X\ntraceparent:");                                          # name then EOF (empty value)
+_fuzz_cstr("\ntraceparent:    \t  ");                                   # only whitespace value
+_fuzz_cstr("GET / HTTP/1.1\r\nHost: x\r\n\r\n");                        # absent
+_fuzz_cstr("traceparent");                                              # shorter than 12, no colon
+_fuzz_cstr("\nTRACEPARENT: UPPER-01\r\n");                              # case-insensitive
+_fuzz_cstr("\ntraceparent: no-crlf-ever-just-runs-to-the-end");         # no terminator
+_fuzz_cstr("");                                                          # empty
+_fuzz_cstr("\n");                                                        # single newline
+_fuzz_cstr("\ntraceparent:\r");                                         # value empty, CR immediately
+
+# Oversized value (>200 → must return 0, not copy).
+var big = alloc(512);
+memcpy(big, "\ntraceparent: ", 14);
+var p = 14;
+while (p < 500) { store8(big + p, 65); p = p + 1; }
+store8(big + 500, 13);
+trace_extract(big, 501);
+
+# ── Generated stress over header-relevant bytes ──
+var ALPHA = "traceparent: \r\n\t01-";
+var alen = strlen(ALPHA);
+var seed = 88172645;
+var trial = 0;
+while (trial < 4000) {
+    var len = 1 + (trial % 199);
+    var buf = alloc(len);
+    var k = 0;
+    while (k < len) {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        store8(buf + k, load8(ALPHA + (seed % alen)));
+        k = k + 1;
+    }
+    trace_extract(buf, len);
+    trial = trial + 1;
+}
+
+syscall(60, 0);

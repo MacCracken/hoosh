@@ -12,6 +12,7 @@
 ## Development
 
 - [Roadmap](development/roadmap.md) — shipped summary + open/planned work
+- [Current State](development/state.md) — volatile state snapshot (version, sizes, counts), per release
 - [Performance & Benchmarks](development/performance.md) — the bench system + how to run it
 - [Doc Health](doc-health.md) — documentation currency tracker
 

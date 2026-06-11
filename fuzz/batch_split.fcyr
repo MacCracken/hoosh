@@ -1,0 +1,111 @@
+# Fuzz: _batch_split — the depth-aware JSON-array splitter used by POST /v1/batch
+# (src/lib/batch.cyr). It does raw pointer arithmetic over the request body with
+# string-escape + nesting awareness, so adversarial input (unbalanced brackets,
+# trailing escapes, unterminated strings, truncation, deep nesting) must not
+# crash, OOB-read, or hang. Self-contained mirror (hoosh's batch.cyr isn't
+# includable standalone). Exits non-zero (syscall 60) only on a logic violation;
+# a segfault/hang is caught by CI's per-fuzz build+run with `timeout`.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fmt.cyr"
+
+# Mirror of src/lib/batch.cyr _batch_split.
+fn _batch_split(arr_ptr, arr_len) {
+    var items = vec_new();
+    var i = 0;
+    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
+    if (i >= arr_len) { return items; }
+    i = i + 1;
+    var depth = 0;
+    var start = 0 - 1;
+    while (i < arr_len) {
+        var ch = load8(arr_ptr + i);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < arr_len) {
+                var c2 = load8(arr_ptr + i);
+                if (c2 == 92) { i = i + 2; } else {
+                    if (c2 == 34) { break; }
+                    i = i + 1;
+                }
+            }
+            i = i + 1;
+        } else {
+            if (ch == 123 || ch == 91) {
+                if (depth == 0 && start < 0) { start = i; }
+                depth = depth + 1;
+                i = i + 1;
+            } else {
+                if (ch == 125 || ch == 93) {
+                    depth = depth - 1;
+                    i = i + 1;
+                    if (depth < 0) { break; }
+                    if (depth == 0 && start >= 0) {
+                        var slc = alloc(16);
+                        store64(slc, arr_ptr + start);
+                        store64(slc + 8, i - start);
+                        vec_push(items, slc);
+                        start = 0 - 1;
+                    }
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return items;
+}
+
+# Run _batch_split on a NUL-terminated cstr (len = strlen). Just must not crash.
+fn _fuzz_cstr(s) {
+    var n = strlen(s);
+    if (n == 0) { _batch_split(s, 0); return 0; }
+    var buf = alloc(n);
+    memcpy(buf, s, n);
+    _batch_split(buf, n);
+    return 0;
+}
+
+alloc_init();
+
+# ── Crafted adversarial inputs (each must return without crashing) ──
+_fuzz_cstr("[{\"a\":1},{\"b\":2}]");          # valid
+_fuzz_cstr("[{\"x\":[1,[2,[3,[4]]]]},{}]");   # deep nesting
+_fuzz_cstr("[{{{{{{");                          # unbalanced open
+_fuzz_cstr("]}}}}}]");                          # unbalanced close / negative depth
+_fuzz_cstr("[{\"a\":\"x\\");                    # trailing backslash inside string
+_fuzz_cstr("[{\"a\":\"never terminated");       # unterminated string
+_fuzz_cstr("[\"\\\"\\\"\\\"\"]");               # escaped quotes
+_fuzz_cstr("[");                                 # lone open
+_fuzz_cstr("]");                                 # lone close
+_fuzz_cstr("[]");                                # empty array
+_fuzz_cstr("");                                  # empty
+_fuzz_cstr("no array here at all");              # no bracket
+_fuzz_cstr("[}{][}{]");                          # interleaved garbage
+_fuzz_cstr("[\\\\\\\\\\\\]");                    # backslash run
+_fuzz_cstr("[{},{},{},{},{}]");                  # many items
+
+# ── Generated stress: byte patterns over the structural alphabet ──
+# A deterministic LCG over { [ ] } " \ , space, 'a' — the bytes that drive the
+# parser's branches — across many lengths. No RNG primitive needed.
+var ALPHA = "{[]}\"\\, a";   # 9 structural bytes
+var alen = strlen(ALPHA);
+var seed = 2463534242;
+var trial = 0;
+while (trial < 4000) {
+    var len = 1 + (trial % 257);
+    var buf = alloc(len);
+    var k = 0;
+    while (k < len) {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        store8(buf + k, load8(ALPHA + (seed % alen)));
+        k = k + 1;
+    }
+    _batch_split(buf, len);
+    trial = trial + 1;
+}
+
+syscall(60, 0);

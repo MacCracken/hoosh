@@ -6,10 +6,12 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-10 (**v2.4.2** — threaded hardware detection). Doc
-> touch: CHANGELOG [2.4.2], roadmap (threaded-detection checked + shipped row),
-> hardware.cyr `hw_init` rationale. Gates: 442 tests, 17 benches, clean.
-> **Prior**: 2026-06-10 (**v2.4.1** — hardware planning endpoints + Cyrius
+> **Last refresh**: 2026-06-10 (**v2.4.3** — OTLP remote/https + scaffolding).
+> Doc touch: CHANGELOG [2.4.3], roadmap (OTLP/scaffolding checked + shipped row),
+> overview/hoosh.cyml (otlp https), **+state.md** (volatile-state doc — closes the
+> open follow-up), index (+state.md link). New: `fuzz/*.fcyr`,
+> `scripts/security-scan.sh`. Gates: 444 tests, 17 benches, clean. **Prior**:
+> 2026-06-10 (**v2.4.2** — threaded hardware detection). **Prior**: 2026-06-10 (**v2.4.1** — hardware planning endpoints + Cyrius
 > 6.1.30). Doc touch: CHANGELOG [2.4.1], roadmap (hw bullets checked + shipped
 > row), overview.md (`hardware.cyr` desc), CLAUDE.md pin. **Prior**: 2026-06-10 (**v2.4.0** — multi-threaded
 > accept loop). Doc
@@ -93,11 +95,6 @@ slow cadence; supersede with a new ADR or an `## Update` section rather than edi
 
 ## Open follow-ups
 
-- `docs/development/state.md` — volatile-state file (version, test/bench counts,
-  binary size, recent releases) refreshed each release, per the patra/cyrius
-  pattern. Tracked in the roadmap's scaffolding-modernization list; this
-  doc-health file partially overlaps it but state.md is the per-release numeric
-  snapshot. **Not yet created.**
 - ADR-003 ↔ ADR-010 reconciliation (majra is now also the event-bus substrate) —
   cosmetic; do it only if ADR-003 is otherwise revised.
 
