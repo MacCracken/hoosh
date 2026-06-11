@@ -1072,6 +1072,32 @@ fn _t_otlp_attr_int(sb, k, v) {
     return 0;
 }
 
+# Mirror of src/lib/pool.cyr work-queue ring (FIFO + wrap-around), minus the
+# mutex (single-threaded test of the ring logic).
+var _T_WQ_MAX = 4;
+var _t_wq_ring = 0;
+var _t_wq_head = 0;
+var _t_wq_count = 0;
+fn _t_wq_init() {
+    _t_wq_ring = alloc(_T_WQ_MAX * 8);
+    _t_wq_head = 0;
+    _t_wq_count = 0;
+    return 0;
+}
+fn _t_wq_push(job) {
+    if (_t_wq_count >= _T_WQ_MAX) { return 0; }
+    store64(_t_wq_ring + ((_t_wq_head + _t_wq_count) % _T_WQ_MAX) * 8, job);
+    _t_wq_count = _t_wq_count + 1;
+    return 1;
+}
+fn _t_wq_pop() {
+    if (_t_wq_count == 0) { return 0; }
+    var j = load64(_t_wq_ring + (_t_wq_head % _T_WQ_MAX) * 8);
+    _t_wq_head = (_t_wq_head + 1) % _T_WQ_MAX;
+    _t_wq_count = _t_wq_count - 1;
+    return j;
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4460,6 +4486,24 @@ fn main() {
     _t_otlp_attr_int(osb, "latency_ms", 50);
     var oattr = str_data(str_builder_build(osb));
     assert_streq(oattr, "{\"key\":\"latency_ms\",\"value\":{\"intValue\":\"50\"}}", "otlp: int attr is a JSON string value");
+
+    # ── Worker-pool work queue (FIFO ring + wrap-around) ──────────
+    test_group("pool");
+    _t_wq_init();
+    assert_eq(_t_wq_pop(), 0, "wq: empty pop → 0");
+    _t_wq_push(101); _t_wq_push(102); _t_wq_push(103);
+    assert_eq(_t_wq_pop(), 101, "wq: FIFO order (1)");
+    assert_eq(_t_wq_pop(), 102, "wq: FIFO order (2)");
+    # Wrap-around: head advanced, push past the physical end.
+    _t_wq_push(104); _t_wq_push(105); _t_wq_push(106);
+    assert_eq(_t_wq_pop(), 103, "wq: FIFO across wrap (3)");
+    assert_eq(_t_wq_pop(), 104, "wq: FIFO across wrap (4)");
+    assert_eq(_t_wq_pop(), 105, "wq: FIFO across wrap (5)");
+    assert_eq(_t_wq_pop(), 106, "wq: FIFO across wrap (6)");
+    assert_eq(_t_wq_pop(), 0, "wq: drained → 0");
+    # Full ring rejects the overflow push.
+    _t_wq_push(1); _t_wq_push(2); _t_wq_push(3); _t_wq_push(4);
+    assert_eq(_t_wq_push(5), 0, "wq: full ring rejects push");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

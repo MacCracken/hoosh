@@ -26,7 +26,7 @@
 Clients (curl, daimon, AGNOS consumer apps)
     │  HTTP (OpenAI-compatible)
     ▼
-Accept loop (single-threaded today; concurrent batch workers) ── main.cyr
+Accept loop (accept + enqueue) → unified 7-worker pool ── main.cyr / pool.cyr
     │
     ├─ Auth (bearer, constant-time) ── auth.cyr
     ├─ Trace context (traceparent, thread-local) ── trace.cyr
@@ -67,7 +67,8 @@ dispatch, and the `cmd_serve` accept loop + startup init.
 | `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing |
 | `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building |
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
-| `batch.cyr` | `/v1/batch` sync + async; crypto-lane pool; batch registry |
+| `pool.cyr` | Unified worker pool (v2.4.0) — work-queue ring + 7 banked workers; the accept loop enqueues, workers run every request concurrently |
+| `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring |
 | `otlp.cyr` | OpenTelemetry OTLP/JSON span export (opt-in) |

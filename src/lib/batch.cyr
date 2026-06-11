@@ -1,23 +1,23 @@
-# batch.cyr — synchronous batch inference (POST /v1/batch)
+# batch.cyr — batch inference (POST /v1/batch), sync + async.
 #
-# Accepts {"requests":[ <chat req>, <chat req>, ... ]} and runs the items
-# CONCURRENTLY on worker threads, returning {"results":[ {index,status,body},
-# ... ]} once all complete. Each item is a normal /v1/chat/completions body;
-# items are always treated as non-streaming (a batch returns one aggregate
-# JSON document, so per-item SSE makes no sense).
+# Accepts {"requests":[ <chat req>, ... ]} and runs the items CONCURRENTLY.
+# Sync mode returns {"results":[ {index,status,body}, ... ]} once all complete;
+# async mode ("async":true) returns a job id polled at GET /v1/batch/{id}
+# (+ POST /v1/batch/{id}/cancel). Each item is a normal /v1/chat/completions
+# body, always non-streaming (a batch is one aggregate document).
 #
-# Concurrency model: the handler runs on the single accept-loop thread and
-# JOINS all workers before returning, so the workers are the only concurrent
-# actors. Each worker calls _chat_produce, which holds _chat_lock around the
-# shared-state phases (cache/budget/audit) and releases it for the network
-# forward — so the forwards overlap (the throughput win) while bookkeeping
-# stays serialized. The allocator is thread-safe (cyrius 6.0.64 spinlock);
-# metrics_record is atomic. See ADR-009.
+# Concurrency model (v2.4.0): each item is enqueued as a JOB_BATCH_ITEM into the
+# unified worker pool (pool.cyr); the pool's banked workers run them via
+# _chat_produce, which holds _chat_lock around the shared-state phases
+# (cache/budget/audit) and releases it for the network forward — forwards overlap
+# (the throughput win), bookkeeping stays serialized. Sync mode's submitting
+# worker WORK-STEALS the queue while waiting on its per-batch counter, so a sync
+# batch can't stall the pool. Async mode spawns a bankless coordinator thread
+# that enqueues + waits on BS_COMPLETED. No separate crypto-lane pool — items
+# share the workers' permanent banks. See ADR-009 + ADR-011.
 #
-# Bounds: at most BATCH_MAX_ITEMS items per request; at most BATCH_MAX_PARALLEL
-# workers in flight at once (processed in waves). Ports the concurrency core of
-# rust-old/src/inference/batch.rs; async job-id/progress-poll/cancel are
-# deferred (see roadmap).
+# Bounds: at most BATCH_MAX_ITEMS items per request. Concurrent crypto threads
+# are capped at WORKER_COUNT (≤7) by the pool. Ports rust-old/src/inference/batch.rs.
 
 # Max items per request, and max workers in flight per wave. The parallel cap
 # is bounded by sigil's crypto scratch banks (SIGIL_CRYPTO_BANKS=8): bank 0 is
@@ -25,20 +25,10 @@
 var BATCH_MAX_ITEMS = 64;
 var BATCH_MAX_PARALLEL = 7;
 
-# Atomic completion counter. Workers bump it when they finish; the handler
-# waits on it as a barrier between waves instead of trusting thread_join's
-# timing (empirically thread_join can return before the worker has stored its
-# result, which would let the next wave overlap and — worse — let result
-# assembly read a slot before its worker filled it). One batch runs at a time
-# on the accept thread, so a single global counter is safe.
-var _batch_done = 0;
-
-fn _batch_inc_done() {
-    var old = load64(&_batch_done);
-    while (atomic_cas(&_batch_done, old, old + 1) == 0) { old = load64(&_batch_done); }
-    return 0;
-}
-
+# Atomic add — bumps a batch's completion/failure counters from the pool workers
+# (job_process in pool.cyr) and the runner. Each batch's completion counter is
+# per-batch (sync: a local; async: BS_COMPLETED), so concurrent batches never
+# share a barrier. See [ADR 011].
 fn _batch_atomic_add(ptr, delta) {
     var old = load64(ptr);
     while (atomic_cas(ptr, old, old + delta) == 0) { old = load64(ptr); }
@@ -65,9 +55,10 @@ var BS_CANCEL    = 40;   # atomic i64 (0/1)
 var BS_RESULTS   = 48;   # alloc(total*8) — per-item response descriptor or 0
 var BS_REQS      = 56;   # alloc(total*16) — per-item [owned_body_ptr, len]
 
-# id → BatchState. Touched ONLY by the accept thread (POST insert, GET/cancel
-# lookup), which is single-threaded, so the map needs no lock. The runner holds
-# its BatchState pointer directly and never touches the registry.
+# id → BatchState. Now touched by multiple pool workers (POST insert on one,
+# GET/cancel on another), so registry mutation + lookup are guarded by
+# _batch_reg_lock. The runner holds its BatchState pointer directly and never
+# touches the registry.
 var _batch_registry = 0;
 var _batch_id_counter = 0;
 # Insertion-ordered ids, for evicting the oldest TERMINAL batch when the tracked
@@ -77,44 +68,20 @@ var _batch_id_counter = 0;
 var _batch_ids = 0;
 var BATCH_MAX_TRACKED = 64;
 
-# ── Global crypto-lane pool ──────────────
-# sigil has SIGIL_CRYPTO_BANKS (8) crypto scratch lanes; lane 0 is the accept
-# thread, lanes 1..7 are for batch workers. This pool hands those 7 lanes out
-# ACROSS ALL batches (sync + async), so multiple async batches can run their
-# workers concurrently without ever colliding on a lane — total live workers are
-# capped at 7 globally. Each lane slot is 0=free / 1=taken; a worker holds its
-# lane index from acquire to release and uses it as its crypto_bank_set arg.
-var BATCH_LANES = 7;       # SIGIL_CRYPTO_BANKS - 1
-var _batch_lanes = 0;      # alloc(BATCH_LANES * 8), index 0 → lane 1, …
+# Crypto banks are owned permanently by the unified pool workers (pool.cyr); a
+# batch item is just a job those workers run, so there is no longer a separate
+# batch lane pool. Total concurrent crypto threads = WORKER_COUNT (≤7). See
+# [ADR 011].
 
-# Acquire a free lane (spins until one frees). Returns lane index 1..7.
-fn _batch_lane_acquire() {
-    while (1 == 1) {
-        var i = 0;
-        while (i < BATCH_LANES) {
-            if (atomic_cas(_batch_lanes + i * 8, 0, 1) == 1) { return i + 1; }
-            i = i + 1;
-        }
-        # No free lane — sleep (not busy-spin) so concurrent runners don't starve
-        # the accept loop serving GET /v1/batch/{id} polls.
-        sleep_ms(1);
-    }
-    return 0;
-}
-
-fn _batch_lane_release(lane) {
-    atomic_store(_batch_lanes + (lane - 1) * 8, 0);
-    return 0;
-}
+# Registry lock — the registry map + id list are now touched by multiple pool
+# workers concurrently (POST submit on one worker, GET/cancel on another), so map
+# mutation + iteration must be serialized.
+var _batch_reg_lock = 0;
 
 fn batch_registry_init() {
     if (_batch_registry == 0) { _batch_registry = map_new(); }
     if (_batch_ids == 0) { _batch_ids = vec_new(); }
-    if (_batch_lanes == 0) {
-        _batch_lanes = alloc(BATCH_LANES * 8);
-        var i = 0;
-        while (i < BATCH_LANES) { store64(_batch_lanes + i * 8, 0); i = i + 1; }
-    }
+    if (_batch_reg_lock == 0) { _batch_reg_lock = mutex_new(); }
     return 0;
 }
 
@@ -158,61 +125,28 @@ fn _batch_status_name(s) {
     return "cancelled";
 }
 
-# Async worker: arg = [req_ptr(0), req_len(8), result_slot(16), bank(24), bs(32)].
-# Async worker: arg = [req_ptr(0), req_len(8), result_slot(16), lane(24), bs(32)].
-fn _async_batch_worker(arg) {
-    var lane = load64(arg + 24);
-    crypto_bank_set(lane);
-    var d = _chat_produce(load64(arg), load64(arg + 8));
-    store64(load64(arg + 16), d);
-    var bs = load64(arg + 32);
-    if (d == 0) {
-        _batch_atomic_add(bs + BS_FAILED, 1);
-    } else {
-        if (atoi(load64(d)) != 200) { _batch_atomic_add(bs + BS_FAILED, 1); }
-    }
-    # Free the lane (crypto is done), then bump the completion counter LAST so the
-    # slot + failure count are visible before the runner's barrier observes it.
-    _batch_lane_release(lane);
-    _batch_atomic_add(bs + BS_COMPLETED, 1);
-    return 0;
-}
-
-# Background runner thread (arg = BatchState). Spawns one worker per item, pacing
-# spawns by GLOBAL lane availability (_batch_lane_acquire blocks until a lane
-# frees), so live workers across ALL concurrent batches stay ≤ BATCH_LANES. No
-# exec lock — multiple async batches run concurrently, sharing the lane pool.
-# Checks the cancel flag before each spawn (in-flight items finish).
+# Background runner thread (arg = BatchState). Enqueues one job per item into the
+# unified worker pool (pool.cyr), then waits on BS_COMPLETED. This coordinator has
+# no crypto bank (it only enqueues + polls); the pool workers do the crypto.
+# Checks the cancel flag before each enqueue (in-flight items finish).
 fn _async_batch_run(bs) {
     store64(bs + BS_STATUS, BATCH_RUNNING);
     var total = load64(bs + BS_TOTAL);
     var reqs = load64(bs + BS_REQS);
     var results = load64(bs + BS_RESULTS);
-    var handles = alloc(total * 8);
     var launched = 0;
     var idx = 0;
     while (idx < total) {
         if (load64(bs + BS_CANCEL) == 1) { idx = total; } else {
-            var lane = _batch_lane_acquire();
-            var a = alloc(40);
-            store64(a, load64(reqs + idx * 16));
-            store64(a + 8, load64(reqs + idx * 16 + 8));
-            store64(a + 16, results + idx * 8);
-            store64(a + 24, lane);
-            store64(a + 32, bs);
-            store64(handles + launched * 8, thread_create(&_async_batch_worker, a));
+            wq_push(job_batch_item(load64(reqs + idx * 16), load64(reqs + idx * 16 + 8),
+            results + idx * 8, bs + BS_COMPLETED, bs + BS_FAILED));
             launched = launched + 1;
             idx = idx + 1;
         }
     }
-    # Wait for every launched worker, then reap stacks. Sleep, don't busy-spin —
-    # the accept loop must stay responsive to polls while this runs.
+    # This coordinator thread (no crypto bank) just waits — the pool workers
+    # process the enqueued items. Sleep, don't busy-spin.
     while (load64(bs + BS_COMPLETED) < launched) { sleep_ms(1); }
-    var j = 0;
-    while (j < launched) {
-        thread_join(load64(handles + j * 8));
-        j = j + 1;
-    }
     if (load64(bs + BS_CANCEL) == 1) {
         store64(bs + BS_STATUS, BATCH_CANCELLED);
     } else {
@@ -244,9 +178,11 @@ fn batch_submit(items) {
         store64(reqs + i * 16 + 8, len);
         i = i + 1;
     }
+    mutex_lock(_batch_reg_lock);
     map_set(_batch_registry, id, bs);
     vec_push(_batch_ids, id);
     _batch_evict_terminal();
+    mutex_unlock(_batch_reg_lock);
     thread_create(&_async_batch_run, bs);
     return bs;
 }
@@ -293,7 +229,9 @@ fn _batch_is_async(body, len) {
 # result slots (a pending item shows status:null,body:null).
 fn handle_batch_get(cfd, id) {
     if (_batch_registry == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    mutex_lock(_batch_reg_lock);
     var bs = map_get(_batch_registry, id);
+    mutex_unlock(_batch_reg_lock);
     if (bs == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
     var total = load64(bs + BS_TOTAL);
     var results = load64(bs + BS_RESULTS);
@@ -335,7 +273,9 @@ fn handle_batch_get(cfd, id) {
 # further waves launch).
 fn handle_batch_cancel(cfd, id) {
     if (_batch_registry == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
+    mutex_lock(_batch_reg_lock);
     var bs = map_get(_batch_registry, id);
+    mutex_unlock(_batch_reg_lock);
     if (bs == 0) { return http_error(cfd, "404", "Not Found", "no such batch"); }
     store64(bs + BS_CANCEL, 1);
     var sb = str_builder_new();
@@ -344,24 +284,6 @@ fn handle_batch_cancel(cfd, id) {
     str_builder_add_cstr(sb, "\",\"status\":\"cancelling\"}");
     var body = str_builder_build(sb);
     return http_ok(cfd, to_cstr(body), str_len(body));
-}
-
-# Worker thread: arg = [req_ptr(0), req_len(8), result_slot(16), crypto_bank(24)].
-# FIRST assigns this thread its sigil crypto scratch bank — every sha256/HMAC/TLS
-# primitive in the chat pipeline (_cache_key, audit chain, remote TLS) reads a
-# thread-local scratch bank, and without a per-worker bank index it dereferences
-# an uninitialized slot and corrupts memory. Then produces a response descriptor,
-# stores it, and signals completion. See ADR-009.
-fn _hoosh_batch_worker(arg) {
-    var lane = load64(arg + 24);
-    crypto_bank_set(lane);
-    var req_ptr = load64(arg);
-    var req_len = load64(arg + 8);
-    var slot = load64(arg + 16);
-    store64(slot, _chat_produce(req_ptr, req_len));
-    _batch_lane_release(lane);
-    _batch_inc_done();
-    return 0;
 }
 
 # Locate the raw "requests" array (including its surrounding [ ]) in the body.
@@ -478,38 +400,27 @@ fn handle_batch(cfd, body_ptr, body_len) {
         return http_ok(cfd, to_cstr(asbody), str_len(asbody));
     }
 
-    # Synchronous mode (default): run the batch inline and return all results.
-    # Workers draw crypto lanes from the shared global pool (same as async
-    # batches), so a sync batch and concurrent background async batches never
-    # collide on a lane. One sync batch runs at a time (accept thread), so the
-    # _batch_done barrier counter is safe to reset + reuse here.
-    batch_registry_init();
-    crypto_tls_main_init();
-
+    # Synchronous mode (default): enqueue each item as a job into the unified
+    # worker pool and return all results. The submitting worker WORK-STEALS from
+    # the queue while waiting, so a sync batch can't stall the pool even with many
+    # concurrent sync batches (each per-batch `completed` counter is local, so
+    # concurrent sync batches don't share a barrier). See [ADR 011].
+    var completed = alloc(8); store64(completed, 0);
+    var failed = alloc(8); store64(failed, 0);
     var slots = alloc(n * 8);
-    var handles = alloc(n * 8);
-    store64(&_batch_done, 0);
     var k = 0;
     while (k < n) {
         var it = vec_get(items, k);
         var slot = alloc(8);
         store64(slot, 0);
         store64(slots + k * 8, slot);
-        var lane = _batch_lane_acquire();
-        var a = alloc(32);
-        store64(a, load64(it));
-        store64(a + 8, load64(it + 8));
-        store64(a + 16, slot);
-        store64(a + 24, lane);
-        store64(handles + k * 8, thread_create(&_hoosh_batch_worker, a));
+        wq_push(job_batch_item(load64(it), load64(it + 8), slot, completed, failed));
         k = k + 1;
     }
-    # Barrier: wait for all workers, then reap stacks (sleep, don't busy-spin).
-    while (load64(&_batch_done) < n) { sleep_ms(1); }
-    var j = 0;
-    while (j < n) {
-        thread_join(load64(handles + j * 8));
-        j = j + 1;
+    # Barrier with work-stealing — process queued jobs until this batch is done.
+    while (load64(completed) < n) {
+        var job = wq_pop();
+        if (job == 0) { sleep_ms(1); } else { job_process(job); }
     }
 
     # Assemble {"results":[{"index":i,"status":<n>,"body":<raw>}, ...]}.

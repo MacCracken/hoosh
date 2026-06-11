@@ -58,6 +58,7 @@ include "src/lib/handlers.cyr"
 include "src/lib/batch.cyr"
 include "src/lib/events.cyr"
 include "src/lib/otlp.cyr"
+include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/config.cyr"
 
@@ -141,7 +142,13 @@ fn http_route(cfd, method, path, buf, buf_len) {
         return http_ok(cfd, body, strlen(body));
     }
     if (streq(path, "/v1/admin/reload") == 1) {
+        # _chat_lock serializes the reload with budget/routing readers that also
+        # hold it (chat prep/assemble, token handlers). _router is rebuilt as a
+        # fresh pointer (atomic swap; lock-free forwarders read old-or-new, both
+        # valid — the bump allocator never frees). See [ADR 011].
+        mutex_lock(_chat_lock);
         load_config("hoosh.cyml");
+        mutex_unlock(_chat_lock);
         hlog_info("config reloaded from hoosh.cyml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
@@ -341,25 +348,17 @@ fn cmd_serve(port) {
     # [[telemetry]] otlp_endpoint is configured (no-op otherwise).
     otlp_init();
 
+    # Unified worker pool (v2.4.0): WORKER_COUNT banked threads drain the work
+    # queue. crypto_tls_main_init() above readied the bank scratch; pool_start
+    # spawns the workers, each owning a crypto bank. Batch items share this pool.
+    pool_start();
+
+    # Accept loop: accept connections and hand each to the pool. All request
+    # handling (recv/route/respond/close) runs on the workers, concurrently.
     while (1 == 1) {
         var client = sock_accept(sfd);
         if (is_err_result(client) == 1) { continue; }
-        var cfd = payload(client);
-        var req_buf = alloc(65536);
-        var recv_r = sock_recv(cfd, req_buf, 65535);
-        if (is_err_result(recv_r) == 1) { sock_close(cfd); continue; }
-        var req_len = payload(recv_r);
-        if (req_len > 0) {
-            store8(req_buf + req_len, 0);
-            var method = http_parse_method(req_buf, req_len);
-            var path = http_parse_path(req_buf, req_len);
-            if (path != 0) {
-                http_route(cfd, method, path, req_buf, req_len);
-            } else {
-                http_bad_request(cfd, "malformed request");
-            }
-        }
-        sock_close(cfd);
+        wq_push(_job_conn(payload(client)));
     }
     return 0;
 }

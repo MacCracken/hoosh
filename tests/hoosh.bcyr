@@ -43,6 +43,26 @@ fn _bench_lat_bucket(ms) {
     return b;
 }
 
+# Mirror of src/lib/pool.cyr work-queue ring (per-request dispatch cost), minus
+# the mutex (measures the push/pop ring arithmetic).
+var _BWQ_MAX = 1024;
+var _bwq_ring = 0;
+var _bwq_head = 0;
+var _bwq_count = 0;
+fn _bench_wq_push(job) {
+    if (_bwq_count >= _BWQ_MAX) { return 0; }
+    store64(_bwq_ring + ((_bwq_head + _bwq_count) % _BWQ_MAX) * 8, job);
+    _bwq_count = _bwq_count + 1;
+    return 1;
+}
+fn _bench_wq_pop() {
+    if (_bwq_count == 0) { return 0; }
+    var j = load64(_bwq_ring + (_bwq_head % _BWQ_MAX) * 8);
+    _bwq_head = (_bwq_head + 1) % _BWQ_MAX;
+    _bwq_count = _bwq_count - 1;
+    return j;
+}
+
 fn _bench_batch_split(arr_ptr, arr_len) {
     var items = vec_new();
     var i = 0;
@@ -909,6 +929,19 @@ fn main() {
     i = 0;
     while (i < 100000) {
         _bench_lat_bucket(i % 12000);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # ── Benchmark: work_queue_push_pop (per-request dispatch cost) ──
+    _bwq_ring = alloc(_BWQ_MAX * 8);
+    b = bench_new("work_queue_push_pop");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_wq_push(i);
+        _bench_wq_pop();
         i = i + 1;
     }
     bench_batch_stop(b, 100000);

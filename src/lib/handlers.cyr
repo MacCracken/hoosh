@@ -497,14 +497,17 @@ fn handle_health_providers(cfd) {
                 sys_close(fd);
             }
             # HealthChanged event on a flip (state per route base_url; stored as
-            # up+1 so 0 = never-seen). Accept-thread only — no lock.
+            # up+1 so 0 = never-seen). _chat_lock guards the shared _health_map —
+            # concurrent health polls run on different pool workers (v2.4.0).
             var hkey = route_base_url(r);
-            var hprev = map_get(_health_map, hkey);
             var hcur = up + 1;
+            mutex_lock(_chat_lock);
+            var hprev = map_get(_health_map, hkey);
+            map_set(_health_map, hkey, hcur);
+            mutex_unlock(_chat_lock);
             if (hprev != 0 && hprev != hcur) {
                 event_health_changed(provider_name(route_provider(r)), hkey, up);
             }
-            map_set(_health_map, hkey, hcur);
             if (first == 0) { str_builder_add_cstr(sb, ","); }
             str_builder_add_cstr(sb, "{\"provider\":\"");
             str_builder_add_cstr(sb, provider_name(route_provider(r)));
@@ -533,16 +536,22 @@ fn handle_tokens_check(cfd, body_ptr, body_len) {
     var pname = to_cstr(pool_name);
     var tokens = 0;
     if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    # _chat_lock guards the shared budget — concurrent with chat reserve/commit
+    # and other token handlers on the pool workers (v2.4.0).
+    mutex_lock(_chat_lock);
     var p = budget_get_pool(_budget, pname);
+    var avail = 0;
+    if (p != 0) { avail = pool_available(p); }
+    mutex_unlock(_chat_lock);
     if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
     var allowed = 0;
-    if (pool_available(p) >= tokens) { allowed = 1; }
+    if (avail >= tokens) { allowed = 1; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"allowed\":");
     if (allowed == 1) { str_builder_add_cstr(sb, "true"); }
     else { str_builder_add_cstr(sb, "false"); }
     str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_int(sb, avail);
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
@@ -558,15 +567,19 @@ fn handle_tokens_reserve(cfd, body_ptr, body_len) {
     var pname = to_cstr(pool_name);
     var tokens = 0;
     if (tokens_str != 0) { tokens = str_to_int(tokens_str); }
+    mutex_lock(_chat_lock);
     var reserved = budget_reserve(_budget, pname, tokens);
     var p = budget_get_pool(_budget, pname);
+    var avail = 0;
+    if (p != 0) { avail = pool_available(p); }
+    mutex_unlock(_chat_lock);
     if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"reserved\":");
     if (reserved == 1) { str_builder_add_cstr(sb, "true"); }
     else { str_builder_add_cstr(sb, "false"); }
     str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_int(sb, avail);
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
@@ -585,14 +598,22 @@ fn handle_tokens_report(cfd, body_ptr, body_len) {
     var actual = 0;
     if (reserved_str != 0) { reserved = str_to_int(reserved_str); }
     if (actual_str != 0) { actual = str_to_int(actual_str); }
+    mutex_lock(_chat_lock);
     var p = budget_get_pool(_budget, pname);
+    var used = 0;
+    var avail = 0;
+    if (p != 0) {
+        pool_commit(p, reserved, actual);
+        used = load64(p + POOL_USED);
+        avail = pool_available(p);
+    }
+    mutex_unlock(_chat_lock);
     if (p == 0) { return http_error(cfd, "404", "Not Found", "token pool not found"); }
-    pool_commit(p, reserved, actual);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"used\":");
-    str_builder_add_int(sb, load64(p + POOL_USED));
+    str_builder_add_int(sb, used);
     str_builder_add_cstr(sb, ",\"available\":");
-    str_builder_add_int(sb, pool_available(p));
+    str_builder_add_int(sb, avail);
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }

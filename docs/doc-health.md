@@ -6,7 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-10 (**v2.3.5**, Cyrius 6.1.29). **Full doc-staleness
+> **Last refresh**: 2026-06-10 (**v2.4.0** — multi-threaded accept loop). Doc
+> touch: +**ADR-011** (unified worker pool), CHANGELOG [2.4.0], roadmap (2.4.0 →
+> shipped row + arc anchor marked done), overview.md (+`pool.cyr`, accept-loop
+> line), index.md (+ADR-011). Gates: 436 tests, 17 benches, clean. **Prior**:
+> 2026-06-10 (**v2.3.5**, Cyrius 6.1.29). **Full doc-staleness
 > sweep** — the user-facing + reference docs had drifted to the Rust era and to
 > pre-2.3.x counts. Touched: **README** (stats → ~7,750 L / 30 files / ~2.0 MB /
 > 427 tests / 16 benches / pin 6.1.29; +batch/MCP/observability/OTLP; config
@@ -30,7 +34,7 @@ type: state
 | Tier | Count | Notes |
 |------|-------|-------|
 | 🟢 **Fresh** | 11 | Swept this pass or auto-maintained — accurate as of v2.3.5 |
-| 🔵 **Point-in-time** | 10 | ADRs — decision records, frozen by design; re-read, not rewritten |
+| 🔵 **Point-in-time** | 11 | ADRs — decision records, frozen by design; re-read, not rewritten |
 | 🟢 **Policy / legal** | 3 | No version drift (SECURITY, CODE_OF_CONDUCT, LICENSE) |
 | ❓ **Open** | 1 | `docs/development/state.md` not yet created (roadmap scaffolding item) |
 
@@ -69,6 +73,7 @@ slow cadence; supersede with a new ADR or an `## Update` section rather than edi
 | 008 Persistence via Patra | Accepted | Current |
 | 009 Concurrent Batch Inference | Accepted | Current (2.3.1–2.3.3, with Update sections) |
 | 010 Observability | Accepted | Current (2.3.4–2.3.5, with Update section) |
+| 011 Multi-threaded accept loop | Accepted | Current (2.4.0) |
 
 ## Policy / legal
 

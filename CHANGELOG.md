@@ -7,6 +7,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-06-10
+
+**Multi-threaded accept loop** — interactive traffic now runs concurrently, not
+just batch. A unified pool of 7 banked worker threads serves all requests; the
+accept loop only accepts + enqueues. See [ADR-011](docs/decisions/011-multithreaded-accept-loop.md).
+
+### Added
+- **Unified worker pool** (`src/lib/pool.cyr`) — `WORKER_COUNT = 7` threads, each
+  permanently owning a sigil crypto bank (1..7), draining a bounded work-queue
+  ring. The accept loop hands each connection to the pool as a job. Bounded by the
+  8-crypto-bank limit (bank 0 = main); no thread-per-connection, no DoS surface.
+- **Batch unified onto the pool** — `/v1/batch` items are now queue jobs run by
+  the same workers (the separate crypto-lane pool is gone). Sync batch
+  **work-steals** the queue while waiting (can't stall the pool); async batch uses
+  a bankless coordinator thread. The full 7-bank budget is shared dynamically
+  between interactive + batch, with no static split.
+
+### Changed
+- **Synchronization pass** — shared state guarded for concurrent handlers: a
+  `_batch_reg_lock` for the batch registry (map/id-list), `_chat_lock` extended to
+  the token handlers (budget) and the health map. Config hot-reload rebuilds
+  `_router` as an atomic pointer swap (lock-free readers, safe via the never-frees
+  allocator) under `_chat_lock`. Worker stacks bumped to 1 MB.
+
+### Performance
+- Live-verified: 14 concurrent 50 ms chats in **115 ms** (≈6× faster than the
+  ~700 ms serialized path), 50 in 417 ms; 200 mixed requests + reload-under-load
+  survived; sync/async/concurrent batches all correct. `work_queue_push_pop`
+  dispatch overhead **8 ns**.
+
 ## [2.3.5] — 2026-06-10
 
 **OpenTelemetry OTLP span export** — the deferred half of the 2.3.4 observability

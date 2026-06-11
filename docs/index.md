@@ -27,6 +27,7 @@
 - [ADR-008: Persistence via Patra](decisions/008-persistence-via-patra.md) — opt-in audit-chain + budget persistence
 - [ADR-009: Concurrent Batch Inference](decisions/009-concurrent-batch-inference.md) — worker/crypto-lane pools, thread-safety
 - [ADR-010: Observability](decisions/010-observability.md) — latency histograms, event bus, traceparent, OTLP export
+- [ADR-011: Multi-threaded accept loop](decisions/011-multithreaded-accept-loop.md) — unified 7-worker pool, crypto-bank budget, synchronization pass
 
 ## Reference
 

@@ -23,6 +23,7 @@ One line per release; see CHANGELOG for detail.
 | **2.3.0** | MCP tool server (`/v1/tools/list` + `/v1/tools/call`, bote) |
 | **2.3.1 / 2.3.2 / 2.3.3** | Batch inference — concurrent (`/v1/batch`), then async (job-id/progress/cancel), then concurrent multi-batch + registry eviction ([ADR 009](../decisions/009-concurrent-batch-inference.md)) |
 | **2.3.4 / 2.3.5** | Observability — latency histograms, majra event bus + `/v1/events/recent`, traceparent propagation, then OTLP/JSON span export ([ADR 010](../decisions/010-observability.md)) |
+| **2.4.0** | Multi-threaded accept loop — unified 7-worker pool serves all traffic concurrently; batch unified onto it ([ADR 011](../decisions/011-multithreaded-accept-loop.md)) |
 
 **Toolchain**: Cyrius pin currently **6.1.29** (bumped per release; clean `lib/`
 re-sync each time — see [the bump note](#toolchain)).
@@ -31,23 +32,22 @@ re-sync each time — see [the bump note](#toolchain)).
 
 ## v2.4.x — Concurrency & completeness arc
 
-The next focus, mirroring the 2.2.x parity arc: **v2.4.0 lands the foundation**
-(the multi-threaded accept loop); later point releases work the remaining
-completeness + hardening items. Order within the arc is a guide, not a commitment;
-items tagged *upstream-gated* wait on a sibling repo.
+Mirroring the 2.2.x parity arc: **v2.4.0 landed the foundation** (the
+multi-threaded accept loop, ✅ shipped); the point releases below work the
+remaining completeness + hardening items. Order within the arc is a guide, not a
+commitment; items tagged *upstream-gated* wait on a sibling repo.
 
-### v2.4.0 — Multi-threaded accept loop  *(arc foundation)*
-Thread the accept loop so **all** traffic runs concurrently, not just batch
-workers. **Unblocked** since 2.3.1 — the cyrius allocator is thread-safe (v6.0.64
-CAS spinlock, re-verified by a 4-thread × 200k-alloc stress, 0 corruption).
-Requires a **shared-state synchronization pass** across every mutating handler
-(cache / budget / audit / rate / cost / metrics). 2.3.x already locked the chat
-path (`_chat_lock`) and made metrics atomic; this extends that to the rest, plus
-per-worker sigil crypto banks (see [ADR 009 §5](../decisions/009-concurrent-batch-inference.md))
-for any handler that hashes/HMACs/TLSes on a worker thread. Also enables
-loopback-style batching, unblocks threaded hardware detection (below), and lifts
-the per-request alloc-spinlock contention ceiling (a per-thread-arena allocator is
-the deeper follow-up).
+### v2.4.0 — Multi-threaded accept loop  *(arc foundation)* — ✅ SHIPPED 2026-06-10
+A unified pool of 7 banked worker threads serves all traffic concurrently; the
+accept loop only accepts + enqueues. Batch items share the same pool (the separate
+crypto-lane pool is gone); sync batch work-steals the queue. Synchronization pass
+landed (batch-registry lock, `_chat_lock` extended to token/health handlers,
+lock-free atomic `_router` swap on reload). Live-verified: 14 concurrent chats in
+115 ms (≈6× the serialized path), 200 mixed + reload-under-load survived.
+See [ADR 011](../decisions/011-multithreaded-accept-loop.md).
+**Follow-on:** the concurrency ceiling is 7 (the sigil bank budget) — a
+per-thread-arena allocator + more banks would lift it (deferred). Also now
+unblocks threaded hardware detection (below).
 
 ### v2.4.x candidates (point releases)
 
