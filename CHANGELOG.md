@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.4] — 2026-06-10
+
+**New backends** — vLLM, TensorRT-LLM, and ONNX Runtime, completing the v2.4.x
+arc's new-backend item. **17 providers** now (was 14).
+
+### Added
+- **vLLM** (`type = "vLLM"`), **TensorRT-LLM** (`"TensorRT-LLM"` / `"TensorRT"` /
+  `"trtllm"`), **ONNX Runtime** (`"ONNX"` / `"ONNXRuntime"`) provider types. All
+  three serve an OpenAI-compatible API, so they route through the existing local
+  OpenAI-compatible forward (`/v1/chat/completions`) — `types.cyr` gains the enum
+  entries + name/is-local/parse/default-url; no forward-path change. Default base
+  URLs `http://localhost:8000`; marked **local** (free in the cost optimizer,
+  permitted for Confidential-classified traffic under DLP). Live-verified: all
+  three parse + register + route + forward to a mock (`POST /v1/chat/completions`
+  confirmed); vLLM end-to-end chat round-trip.
+
 ## [2.4.3] — 2026-06-10
 
 **OTLP remote/https export + scaffolding** — an observability follow-up plus

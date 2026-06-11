@@ -21,7 +21,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
 | **Tests** | 427 assertions, 100 groups, 0 failures |
 | **Benchmarks** | 16 operations |
-| **Providers** | 14 (6 local, 8 remote) |
+| **Providers** | 17 (9 local, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
 
 ### Port comparison (Rust v1.3.0 → Cyrius)
@@ -40,7 +40,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 
 | Capability | Details |
 |------------|---------|
-| **14 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
+| **17 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
 | **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
 | **Batch inference** | `POST /v1/batch` — concurrent (in-process worker pool) sync, or `"async":true` → job id with `GET /v1/batch/{id}` progress + cancel |
 | **MCP tool server** | `/v1/tools/list` + `/v1/tools/call` (JSON-RPC 2.0 via bote) |

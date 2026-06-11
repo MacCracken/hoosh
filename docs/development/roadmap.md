@@ -27,6 +27,7 @@ One line per release; see CHANGELOG for detail.
 | **2.4.1** | Hardware planning endpoints — `/v1/hardware/model-format` + `/v1/hardware/requirement-match` |
 | **2.4.2** | Threaded hardware detection — parallel CLI probes (`registry_detect_threaded`), unblocked by the 2.4.0 thread-safe foundation |
 | **2.4.3** | OTLP remote/`https` export (worker-routed TLS) + scaffolding (state.md, fuzz harnesses, CI security scan) |
+| **2.4.4** | New backends — vLLM, TensorRT-LLM, ONNX Runtime (OpenAI-compatible local provider types) |
 
 **Toolchain**: Cyrius pin currently **6.1.29** (bumped per release; clean `lib/`
 re-sync each time — see [the bump note](#toolchain)).
@@ -63,7 +64,8 @@ unblocks threaded hardware detection (below).
       probes; was blocked on the pre-thread-safe allocator, wired in **2.4.2**
       (verified byte-identical to serial).
 
-**New backends** — vLLM (PagedAttention), TensorRT-LLM (NVIDIA), ONNX Runtime.
+**New backends** — [x] vLLM (PagedAttention), TensorRT-LLM (NVIDIA), ONNX Runtime
+(**2.4.4**) — added as OpenAI-compatible local provider types.
 
 **OTLP follow-ups** (extends 2.3.5):
 - [x] **Remote / `https://` collector** — DNS + TLS via sandhi; https POSTs

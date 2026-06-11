@@ -88,7 +88,10 @@ enum Provider {
     PROV_GROK       = 11;
     PROV_OPENROUTER = 12;
     PROV_WHISPER    = 13;
-    PROV_COUNT      = 14;
+    PROV_VLLM       = 14;
+    PROV_TENSORRT   = 15;
+    PROV_ONNX       = 16;
+    PROV_COUNT      = 17;
 }
 
 fn provider_is_local(prov) {
@@ -98,6 +101,9 @@ fn provider_is_local(prov) {
     if (prov == PROV_LMSTUDIO) { return 1; }
     if (prov == PROV_LOCALAI) { return 1; }
     if (prov == PROV_WHISPER) { return 1; }
+    if (prov == PROV_VLLM) { return 1; }
+    if (prov == PROV_TENSORRT) { return 1; }
+    if (prov == PROV_ONNX) { return 1; }
     return 0;
 }
 
@@ -116,6 +122,9 @@ fn provider_name(prov) {
     if (prov == PROV_GROK) { return "grok"; }
     if (prov == PROV_OPENROUTER) { return "openrouter"; }
     if (prov == PROV_WHISPER) { return "whisper"; }
+    if (prov == PROV_VLLM) { return "vllm"; }
+    if (prov == PROV_TENSORRT) { return "tensorrt"; }
+    if (prov == PROV_ONNX) { return "onnx"; }
     return "unknown";
 }
 
@@ -2646,7 +2655,7 @@ fn main() {
     # ── Provider types ───────────────────────────────────────────
     test_group("provider_types");
 
-    assert_eq(PROV_COUNT, 14, "14 provider types");
+    assert_eq(PROV_COUNT, 17, "17 provider types");
     assert(provider_is_local(PROV_OLLAMA) == 1, "ollama is local");
     assert(provider_is_local(PROV_LLAMACPP) == 1, "llamacpp is local");
     assert(provider_is_local(PROV_SYNAPSE) == 1, "synapse is local");
@@ -2657,10 +2666,16 @@ fn main() {
     assert(provider_is_local(PROV_ANTHROPIC) == 0, "anthropic is remote");
     assert(provider_is_local(PROV_DEEPSEEK) == 0, "deepseek is remote");
     assert(provider_is_local(PROV_GROQ) == 0, "groq is remote");
+    assert(provider_is_local(PROV_VLLM) == 1, "vllm is local");
+    assert(provider_is_local(PROV_TENSORRT) == 1, "tensorrt is local");
+    assert(provider_is_local(PROV_ONNX) == 1, "onnx is local");
 
     assert_streq(provider_name(PROV_OLLAMA), "ollama", "name ollama");
     assert_streq(provider_name(PROV_OPENAI), "openai", "name openai");
     assert_streq(provider_name(PROV_ANTHROPIC), "anthropic", "name anthropic");
+    assert_streq(provider_name(PROV_VLLM), "vllm", "name vllm");
+    assert_streq(provider_name(PROV_TENSORRT), "tensorrt", "name tensorrt");
+    assert_streq(provider_name(PROV_ONNX), "onnx", "name onnx");
 
     # ── Router: priority routing ──────────────────────────────────
     test_group("router_priority");

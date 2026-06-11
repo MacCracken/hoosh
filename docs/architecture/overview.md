@@ -11,7 +11,7 @@
 
 ## Design Principles
 
-1. **Provider-agnostic** — uniform OpenAI-compatible API across 14 backends
+1. **Provider-agnostic** — uniform OpenAI-compatible API across 17 backends
    (local + remote); model-pattern routing picks the backend.
 2. **Local-first** — prefer on-device inference; remote APIs as fallback.
 3. **Token-aware** — every request tracked against per-agent budgets.
@@ -40,7 +40,7 @@ Router (priority │ round-robin │ lowest-latency │ direct) ── router.cy
     ├─ Compaction + compression ── compact.cyr / compression.cyr
     ▼
 Provider forward ── provider.cyr
-    ├─ Local: raw socket → 127.0.0.1 (Ollama, llama.cpp, Synapse, LM Studio, LocalAI)
+    ├─ Local: raw socket → 127.0.0.1 (Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX)
     └─ Remote: sandhi HTTPS → (OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter)
     │
     ▼

@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.4.3";
+var HOOSH_VERSION = "2.4.4";
 
 # ================================================================
 # Error types
@@ -63,12 +63,16 @@ enum Provider {
     PROV_GROK       = 11;
     PROV_OPENROUTER = 12;
     PROV_WHISPER    = 13;
-    PROV_COUNT      = 14;
+    PROV_VLLM       = 14;
+    PROV_TENSORRT   = 15;
+    PROV_ONNX       = 16;
+    PROV_COUNT      = 17;
 }
 
 fn provider_is_local(prov) {
     if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
     if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
+    if (prov == PROV_VLLM || prov == PROV_TENSORRT || prov == PROV_ONNX) { return 1; }
     return 0;
 }
 
@@ -87,6 +91,9 @@ fn provider_name(prov) {
     if (prov == PROV_GROK) { return "grok"; }
     if (prov == PROV_OPENROUTER) { return "openrouter"; }
     if (prov == PROV_WHISPER) { return "whisper"; }
+    if (prov == PROV_VLLM) { return "vllm"; }
+    if (prov == PROV_TENSORRT) { return "tensorrt"; }
+    if (prov == PROV_ONNX) { return "onnx"; }
     return "unknown";
 }
 
@@ -120,6 +127,12 @@ fn provider_parse(name) {
     if (streq(lname, "grok") == 1) { return PROV_GROK; }
     if (streq(lname, "openrouter") == 1) { return PROV_OPENROUTER; }
     if (streq(lname, "whisper") == 1) { return PROV_WHISPER; }
+    if (streq(lname, "vllm") == 1) { return PROV_VLLM; }
+    if (streq(lname, "tensorrt") == 1) { return PROV_TENSORRT; }
+    if (streq(lname, "tensorrt-llm") == 1) { return PROV_TENSORRT; }
+    if (streq(lname, "trtllm") == 1) { return PROV_TENSORRT; }
+    if (streq(lname, "onnx") == 1) { return PROV_ONNX; }
+    if (streq(lname, "onnxruntime") == 1) { return PROV_ONNX; }
     return 0 - 1;
 }
 
@@ -137,6 +150,9 @@ fn provider_default_url(prov) {
     if (prov == PROV_GROQ) { return "https://api.groq.com"; }
     if (prov == PROV_GROK) { return "https://api.x.ai"; }
     if (prov == PROV_OPENROUTER) { return "https://openrouter.ai/api"; }
+    if (prov == PROV_VLLM) { return "http://localhost:8000"; }
+    if (prov == PROV_TENSORRT) { return "http://localhost:8000"; }
+    if (prov == PROV_ONNX) { return "http://localhost:8000"; }
     return "http://localhost:8080";
 }
 
