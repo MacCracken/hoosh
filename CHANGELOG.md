@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-06-10
+
+**OpenTelemetry OTLP span export** — the deferred half of the 2.3.4 observability
+work. One span per inference request is exported to a collector over OTLP/HTTP
+with **JSON** encoding (no protobuf — a Cyrius protobuf lib is proposed upstream
+for a future OTLP/protobuf path). Also bumps the toolchain to Cyrius **6.1.29**.
+
+### Added
+- **`src/lib/otlp.cyr`** — opt-in OTLP exporter, off unless `[[telemetry]]
+  otlp_endpoint` is set. Each inference enqueues an OTLP span (traceId/spanId
+  from the 2.3.4 traceparent → joins the caller's trace; epoch-ns start/end;
+  attributes provider/model/latency_ms/tokens; status OK/ERROR) into a bounded
+  ring; a **background thread** batches the ring into an OTLP `resourceSpans`
+  document and POSTs it to the collector every second (non-blocking). Localhost
+  http collector (the common sidecar); remote/https is a follow-up.
+  **Live-verified** against a mock collector: success (status 1) + failure
+  (status 2) spans, correct trace-id correlation, epoch timestamps, batching.
+- **`[[telemetry]]` config** — `otlp_endpoint` (e.g. `http://localhost:4318/v1/traces`)
+  + `service_name`. Absent → no exporter, no overhead.
+- **CLOCK_REALTIME epoch-ns clock** for OTLP timestamps (`clock_now_ns` is
+  monotonic).
+
+### Changed
+- **Toolchain: Cyrius 6.1.29** (pin). Clean `lib/` re-sync; no stdlib migration;
+  427 tests green.
+
 ## [2.3.4] — 2026-06-10
 
 **Observability** — per-provider latency histograms, a provider event bus

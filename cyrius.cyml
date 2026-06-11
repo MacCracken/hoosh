@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.1.28"
+cyrius = "6.1.29"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]

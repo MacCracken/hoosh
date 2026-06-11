@@ -337,9 +337,12 @@ handlers. Enables loopback-style batching and general throughput.
       gRPC/protobuf exporter; its own effort.
       See [ADR 010](../decisions/010-observability.md).
 
-### v2.3.5 — OpenTelemetry OTLP export
-- [ ] OTLP span exporter + span emission around inference (deferred from 2.3.4;
-      builds on the 2.3.4 traceparent propagation).
+### v2.3.5 — OpenTelemetry OTLP export — ✅ SHIPPED 2026-06-10
+- [x] OTLP/HTTP+JSON span exporter — one span per inference (traceId from the
+      traceparent), background batch export to a collector; opt-in `[[telemetry]]`.
+      Live-verified. See [ADR 010](../decisions/010-observability.md) §"Update (2.3.5)".
+- [ ] **Follow-ups:** OTLP/protobuf (needs a cyrius protobuf lib — proposed
+      upstream); remote/https collector; nested spans.
 
 ---
 

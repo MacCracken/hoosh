@@ -1677,6 +1677,7 @@ fn _chat_assemble(prep, result) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         hlog_error("chat: provider backend unreachable after retries");
         event_inference_failed(provider_name(route_provider(route)), model_cstr, "backend unreachable");
+        otlp_enqueue_inference_span(provider_name(route_provider(route)), model_cstr, 0, 0, 0);
         return _resp_err("502", "Bad Gateway", "provider backend unreachable", "server_error");
     }
 

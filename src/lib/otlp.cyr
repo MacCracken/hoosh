@@ -1,0 +1,178 @@
+# otlp.cyr — OpenTelemetry OTLP/HTTP+JSON span export (opt-in).
+#
+# Ports the intent of rust-old/src/telemetry.rs without an OTel SDK: one span per
+# inference request, exported to a collector's /v1/traces over plain HTTP using
+# the OTLP/JSON encoding (str_builder, no protobuf — a Cyrius protobuf lib is
+# proposed separately for an OTLP/protobuf path).
+#
+# Off unless [[telemetry]] otlp_endpoint is set. Non-blocking: inference enqueues
+# a span fragment into a bounded ring; a background thread batches the ring and
+# POSTs every OTLP_BATCH_MS. Spans correlate via the 2.3.4 traceparent's trace-id
+# + span-id. Only a localhost http:// collector is supported in this release
+# (the common sidecar); remote/https is a follow-up.
+
+var _otlp_endpoint = 0;        # cstr "http://host:port/path", or 0 = disabled
+var _otlp_service = "hoosh";
+var OTLP_RING_MAX = 256;
+var OTLP_BATCH_MS = 1000;
+var _otlp_spans = 0;           # alloc(OTLP_RING_MAX*8): span-fragment cstrs
+var _otlp_head = 0;
+var _otlp_count = 0;
+var _otlp_lock = 0;
+var _otlp_started = 0;
+var CLOCK_REALTIME_ID = 0;     # clock_gettime clock id (chrono uses 228 + an id)
+
+# Unix-epoch nanoseconds (OTLP timestamps are wall-clock, unlike clock_now_ns
+# which is CLOCK_MONOTONIC). Mirrors chrono's syscall(228, <clock>, &ts) shape.
+fn _otlp_epoch_ns() {
+    var ts[16];
+    syscall(228, CLOCK_REALTIME_ID, &ts);
+    return load64(&ts) * 1000000000 + load64(&ts + 8);
+}
+
+# Path component of "http://host:port/path" (the first '/' after the host:port).
+fn _otlp_path(url) {
+    var i = 7;
+    while (load8(url + i) != 0) {
+        if (load8(url + i) == 47) { return url + i; }
+        i = i + 1;
+    }
+    return "/v1/traces";
+}
+
+# One OTLP attribute: {"key":"<k>","value":{"stringValue":"<v>"}} (escaped).
+fn _otlp_attr_str(sb, k, v) {
+    str_builder_add_cstr(sb, "{\"key\":\"");
+    str_builder_add_cstr(sb, k);
+    str_builder_add_cstr(sb, "\",\"value\":{\"stringValue\":\"");
+    _json_emit_escaped(sb, v);
+    str_builder_add_cstr(sb, "\"}}");
+    return 0;
+}
+
+# OTLP/JSON intValue is a STRING per the JSON mapping.
+fn _otlp_attr_int(sb, k, v) {
+    str_builder_add_cstr(sb, "{\"key\":\"");
+    str_builder_add_cstr(sb, k);
+    str_builder_add_cstr(sb, "\",\"value\":{\"intValue\":\"");
+    str_builder_add_int(sb, v);
+    str_builder_add_cstr(sb, "\"}}");
+    return 0;
+}
+
+# Enqueue one inference span. ok=1 → status OK(1), else ERROR(2). No-op when
+# telemetry is disabled. Concurrent with batch workers — ring guarded by a lock.
+fn otlp_enqueue_inference_span(provider, model, latency_ms, tokens, ok) {
+    if (_otlp_endpoint == 0) { return 0; }
+    if (_otlp_spans == 0) { return 0; }
+    var tp = trace_current_or_new();
+    var end_ns = _otlp_epoch_ns();
+    var start_ns = end_ns - latency_ms * 1000000;
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"traceId\":\"");
+    var i = 0;
+    while (i < 32) { str_builder_add_byte(sb, load8(tp + 3 + i)); i = i + 1; }
+    str_builder_add_cstr(sb, "\",\"spanId\":\"");
+    i = 0;
+    while (i < 16) { str_builder_add_byte(sb, load8(tp + 36 + i)); i = i + 1; }
+    str_builder_add_cstr(sb, "\",\"name\":\"inference\",\"kind\":3,\"startTimeUnixNano\":\"");
+    str_builder_add_int(sb, start_ns);
+    str_builder_add_cstr(sb, "\",\"endTimeUnixNano\":\"");
+    str_builder_add_int(sb, end_ns);
+    str_builder_add_cstr(sb, "\",\"attributes\":[");
+    _otlp_attr_str(sb, "provider", provider);
+    str_builder_add_cstr(sb, ",");
+    _otlp_attr_str(sb, "model", model);
+    str_builder_add_cstr(sb, ",");
+    _otlp_attr_int(sb, "latency_ms", latency_ms);
+    str_builder_add_cstr(sb, ",");
+    _otlp_attr_int(sb, "tokens", tokens);
+    str_builder_add_cstr(sb, "],\"status\":{\"code\":");
+    if (ok == 1) { str_builder_add_cstr(sb, "1"); } else { str_builder_add_cstr(sb, "2"); }
+    str_builder_add_cstr(sb, "}}");
+    var frag = str_data(str_builder_build(sb));
+    mutex_lock(_otlp_lock);
+    store64(_otlp_spans + (_otlp_head % OTLP_RING_MAX) * 8, frag);
+    _otlp_head = _otlp_head + 1;
+    _otlp_count = _otlp_count + 1;
+    mutex_unlock(_otlp_lock);
+    return 0;
+}
+
+# Wrap n span fragments (oldest-first) in an OTLP ResourceSpans document.
+fn _otlp_build_batch(frags, n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"resourceSpans\":[{\"resource\":{\"attributes\":[");
+    _otlp_attr_str(sb, "service.name", _otlp_service);
+    str_builder_add_cstr(sb, "]},\"scopeSpans\":[{\"scope\":{\"name\":\"hoosh\"},\"spans\":[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, load64(frags + i * 8));
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}]}]}");
+    return str_builder_build(sb);
+}
+
+# POST an OTLP/JSON body to the (localhost http) collector. Best-effort: a small
+# response buffer (collector replies are tiny) keeps the per-cycle allocation
+# down. Ignores the response.
+fn _otlp_post(body, blen) {
+    var port = url_port(_otlp_endpoint);
+    var path = _otlp_path(_otlp_endpoint);
+    var fd = sys_socket(2, 1, 0);
+    if (fd < 0) { return 0; }
+    var sa = sockaddr_in(0x0100007F, port);
+    if (sys_connect(fd, sa, 16) < 0) { sys_close(fd); return 0; }
+    var hdr = str_builder_new();
+    str_builder_add_cstr(hdr, "POST ");
+    str_builder_add_cstr(hdr, path);
+    str_builder_add_cstr(hdr, " HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ");
+    str_builder_add_int(hdr, blen);
+    str_builder_add_cstr(hdr, "\r\nConnection: close\r\n\r\n");
+    var hc = to_cstr(str_builder_build(hdr));
+    sys_write(fd, hc, strlen(hc));
+    sys_write(fd, body, blen);
+    var rbuf = alloc(512);
+    var n = 1;
+    while (n > 0) { n = sys_read(fd, rbuf, 512); }
+    sys_close(fd);
+    return 0;
+}
+
+# Background exporter: drain the ring + POST every OTLP_BATCH_MS.
+fn _otlp_exporter_thread(arg) {
+    var snapshot = alloc(OTLP_RING_MAX * 8);
+    while (1 == 1) {
+        sleep_ms(OTLP_BATCH_MS);
+        mutex_lock(_otlp_lock);
+        var n = _otlp_count;
+        if (n > OTLP_RING_MAX) { n = OTLP_RING_MAX; }
+        var i = 0;
+        while (i < n) {
+            var idx = (_otlp_head - n + i) % OTLP_RING_MAX;
+            store64(snapshot + i * 8, load64(_otlp_spans + idx * 8));
+            i = i + 1;
+        }
+        _otlp_count = 0;
+        mutex_unlock(_otlp_lock);
+        if (n > 0) {
+            var doc = _otlp_build_batch(snapshot, n);
+            _otlp_post(str_data(doc), str_len(doc));
+        }
+    }
+    return 0;
+}
+
+fn otlp_init() {
+    if (_otlp_endpoint == 0) { return 0; }
+    if (_otlp_started == 1) { return 0; }
+    _otlp_spans = alloc(OTLP_RING_MAX * 8);
+    var i = 0;
+    while (i < OTLP_RING_MAX) { store64(_otlp_spans + i * 8, 0); i = i + 1; }
+    _otlp_lock = mutex_new();
+    _otlp_started = 1;
+    thread_create(&_otlp_exporter_thread, 0);
+    return 0;
+}

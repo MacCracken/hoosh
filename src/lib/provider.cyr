@@ -927,6 +927,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
     metrics_record(ptok, ctok);
     metrics_record_latency(route_provider(route), _fwd_ms);
     event_inference_completed(provider_name(route_provider(route)), model, _fwd_ms, ptok + ctok);
+    otlp_enqueue_inference_span(provider_name(route_provider(route)), model, _fwd_ms, ptok + ctok, 1);
 
     # Surface tool calls (slot 32; 0 = none), converting each provider's shape to
     # OpenAI tool_calls.

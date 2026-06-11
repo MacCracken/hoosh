@@ -42,6 +42,17 @@ fn load_config(path) {
         }
     }
 
+    # Parse [telemetry] section — OpenTelemetry OTLP/HTTP+JSON export (off by
+    # default; enabled when otlp_endpoint is set).
+    var tel_secs = toml_get_sections(sections, "telemetry");
+    if (vec_len(tel_secs) > 0) {
+        var tp = toml_section_pairs(vec_get(tel_secs, 0));
+        var ep_str = toml_get(tp, "otlp_endpoint");
+        if (ep_str != 0) { _otlp_endpoint = to_cstr(ep_str); }
+        var svc_str = toml_get(tp, "service_name");
+        if (svc_str != 0) { _otlp_service = to_cstr(svc_str); }
+    }
+
     # Parse [dlp] section — Data Loss Prevention scanner (off by default).
     var dlp_secs = toml_get_sections(sections, "dlp");
     if (vec_len(dlp_secs) > 0) {

@@ -81,3 +81,33 @@ every traceparent.)
   multi-release effort (2.3.5).
 - **Thread the traceparent through every signature** — invasive across ~6
   functions and the batch worker; the thread-local carrier is far smaller.
+
+## Update (2.3.5): OTLP span export
+
+The deferred OTel half. One span per inference exported to a collector over
+**OTLP/HTTP + JSON** (`src/lib/otlp.cyr`).
+
+**JSON, not protobuf.** Full OTLP/gRPC+protobuf needs a protobuf wire encoder
+with no Cyrius lib — a large, error-prone effort. OTLP/HTTP also accepts JSON
+(`Content-Type: application/json` on the collector's `/v1/traces`), buildable
+with `str_builder`. A Cyrius stdlib protobuf lib is proposed upstream
+(`cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`); an
+OTLP/protobuf content-type is a follow-up once it lands.
+
+**Non-blocking background exporter.** A synchronous per-request POST would add
+collector-RTT to every request. Instead each inference enqueues a span fragment
+into a bounded ring (under a mutex — batch workers enqueue concurrently); a
+background thread wakes every `OTLP_BATCH_MS`, drains the ring, wraps the
+fragments in one `resourceSpans` document, and POSTs it. The exporter does no
+crypto (plain HTTP), so it needs no sigil bank; the POST uses a small response
+buffer to limit the bump-allocator's per-cycle leak.
+
+**Correlation + timing.** The span's traceId + spanId come from the request's
+traceparent (2.3.4), so the gateway span joins the caller's trace. OTLP
+timestamps are wall-clock epoch ns — `clock_now_ns` is `CLOCK_MONOTONIC`, so a
+`CLOCK_REALTIME` `clock_gettime` is used; `start = end − latency` from the
+monotonic-measured duration (one realtime read per span).
+
+**Scope / deferred:** localhost `http://` collector only (the common sidecar) —
+remote + `https://` (via sandhi) and OTLP/protobuf are follow-ups; spans are
+inference-only (no nested provider/cache spans yet).

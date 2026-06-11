@@ -57,6 +57,7 @@ include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
 include "src/lib/batch.cyr"
 include "src/lib/events.cyr"
+include "src/lib/otlp.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/config.cyr"
 
@@ -335,6 +336,10 @@ fn cmd_serve(port) {
 
     # Provider event bus (majra pubsub) + recent-events ring (GET /v1/events/recent).
     events_init();
+
+    # OpenTelemetry OTLP exporter — spawns the background export thread if
+    # [[telemetry]] otlp_endpoint is configured (no-op otherwise).
+    otlp_init();
 
     while (1 == 1) {
         var client = sock_accept(sfd);

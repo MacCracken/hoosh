@@ -1052,6 +1052,26 @@ fn _t_trace_extract(buf, buf_len) {
     return 0;
 }
 
+# Mirror of src/lib/otlp.cyr _otlp_path — path component of an http URL.
+fn _t_otlp_path(url) {
+    var i = 7;
+    while (load8(url + i) != 0) {
+        if (load8(url + i) == 47) { return url + i; }
+        i = i + 1;
+    }
+    return "/v1/traces";
+}
+
+# Mirror of src/lib/otlp.cyr _otlp_attr_int — OTLP/JSON int attribute (string val).
+fn _t_otlp_attr_int(sb, k, v) {
+    str_builder_add_cstr(sb, "{\"key\":\"");
+    str_builder_add_cstr(sb, k);
+    str_builder_add_cstr(sb, "\",\"value\":{\"intValue\":\"");
+    str_builder_add_int(sb, v);
+    str_builder_add_cstr(sb, "\"}}");
+    return 0;
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4429,6 +4449,17 @@ fn main() {
     var tcase = "GET / HTTP/1.1\r\nTraceParent: 00-XY-ZW-01\r\n\r\n";
     var tpc = _t_trace_extract(tcase, strlen(tcase));
     assert_eq(tpc != 0, 1, "trace: case-insensitive header name");
+
+    # OTLP path extraction + int-attribute JSON (OTLP/JSON encodes ints as strings).
+    var ourl = "http://localhost:4318/v1/traces";
+    var opath = _t_otlp_path(ourl);
+    assert_streq(opath, "/v1/traces", "otlp: path extracted from endpoint URL");
+    var ohost = "http://collector:4317";
+    assert_streq(_t_otlp_path(ohost), "/v1/traces", "otlp: default path when none in URL");
+    var osb = str_builder_new();
+    _t_otlp_attr_int(osb, "latency_ms", 50);
+    var oattr = str_data(str_builder_build(osb));
+    assert_streq(oattr, "{\"key\":\"latency_ms\",\"value\":{\"intValue\":\"50\"}}", "otlp: int attr is a JSON string value");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
