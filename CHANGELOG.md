@@ -7,6 +7,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.5] — 2026-06-10
+
+**Hardening review** — closes the v2.4.x arc. A concurrency/correctness/security
+audit of the 2.4.x code with concrete fixes, plus Cyrius **6.1.31**.
+
+### Fixed (concurrency — v2.4.0 sync-pass misses)
+- **`GET /v1/cache/stats`** read `map_count` over the cache entries map without a
+  lock — racing the chat path's `cache_insert`/evict (`map_set`/`map_delete` →
+  rehash) on the pool workers, a latent crash. Now snapshots the four values
+  under `_chat_lock`.
+- **`GET /v1/tokens/pools`** iterated `map_keys(_budget)` + read pool fields
+  unlocked — racing reload's `budget_add_pool` and reserve/commit writes. Now
+  under `_chat_lock`. Both verified with a 240-way concurrent stress (chat +
+  stats + pools), no crash.
+
+### Fixed (correctness)
+- **Routing strategy is now configurable** — `[server] strategy =
+  "priority"|"round-robin"|"lowest-latency"|"direct"`. It was hardcoded to
+  `priority`, so three implemented strategies were unreachable.
+- **Lowest-latency routing now works** — its EMA writer (`router_report_latency`)
+  was never called (dead), and `router_select` treated untried backends as
+  *max* latency, so they were never explored. Now the forward feeds the EMA
+  (thread-safe via a dedicated `_lat_lock`, gated on the active strategy), and
+  untried backends are explored before exploiting the fastest. Live-verified
+  24:1 toward the fast backend across two mocks.
+
+### Changed
+- **Toolchain: Cyrius 6.1.31** (pin). Clean `lib/` re-sync; no stdlib migration.
+- Removed dead `_cost_map` (declared + `map_new`'d, never used).
+
 ## [2.4.4] — 2026-06-10
 
 **New backends** — vLLM, TensorRT-LLM, and ONNX Runtime, completing the v2.4.x

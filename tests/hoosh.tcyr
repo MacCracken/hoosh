@@ -1084,6 +1084,31 @@ fn _t_req_from_str(s) {
     return 0 - 1;
 }
 
+# Mirror of src/lib/config.cyr strategy_from_str (STRAT_* values inlined:
+# priority=0 round-robin=1 lowest-latency=2 direct=3).
+fn _t_strategy_from_str(s) {
+    if (streq(s, "round-robin") == 1 || streq(s, "roundrobin") == 1) { return 1; }
+    if (streq(s, "lowest-latency") == 1 || streq(s, "lowest_latency") == 1) { return 2; }
+    if (streq(s, "direct") == 1) { return 3; }
+    return 0;
+}
+
+# Mirror of src/lib/router.cyr lowest-latency pick (untried = 0 latency = explore,
+# else lowest EMA wins). `lats` is a vec of i64 latencies (0 = untried). Returns
+# the index of the chosen candidate.
+fn _t_ll_pick(lats) {
+    var n = vec_len(lats);
+    var best = 0;
+    var best_lat = 0x7FFFFFFFFFFFFFFF;
+    var k = 0;
+    while (k < n) {
+        var lat = vec_get(lats, k);
+        if (lat < best_lat) { best = k; best_lat = lat; }
+        k = k + 1;
+    }
+    return best;
+}
+
 # Mirror of src/lib/otlp.cyr _otlp_attr_int — OTLP/JSON int attribute (string val).
 fn _t_otlp_attr_int(sb, k, v) {
     str_builder_add_cstr(sb, "{\"key\":\"");
@@ -4544,6 +4569,25 @@ fn main() {
     assert_eq(_t_req_from_str("gpu-or-tpu"), 5, "req: gpu-or-tpu → REQ_GPU_OR_TPU");
     assert_eq(_t_req_from_str("any-accelerator"), 6, "req: any-accelerator → REQ_ANY_ACCELERATOR");
     assert_eq(_t_req_from_str("quantum"), 0 - 1, "req: unknown → -1");
+
+    # ── Routing strategy config + lowest-latency pick (2.4.5) ────
+    test_group("routing_strategy");
+    assert_eq(_t_strategy_from_str("priority"), 0, "strat: priority → 0");
+    assert_eq(_t_strategy_from_str("round-robin"), 1, "strat: round-robin → 1");
+    assert_eq(_t_strategy_from_str("lowest-latency"), 2, "strat: lowest-latency → 2");
+    assert_eq(_t_strategy_from_str("direct"), 3, "strat: direct → 3");
+    assert_eq(_t_strategy_from_str("bogus"), 0, "strat: unknown → priority");
+    # Lowest-latency: an untried candidate (lat 0) is explored over a tried one.
+    var ll1 = vec_new();
+    vec_push(ll1, 50);    # cand 0: 50ms (tried)
+    vec_push(ll1, 0);     # cand 1: untried → explore
+    assert_eq(_t_ll_pick(ll1), 1, "ll: untried candidate explored");
+    # All tried → lowest wins.
+    var ll2 = vec_new();
+    vec_push(ll2, 80);
+    vec_push(ll2, 15);
+    vec_push(ll2, 40);
+    assert_eq(_t_ll_pick(ll2), 1, "ll: lowest latency wins");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

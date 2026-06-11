@@ -928,6 +928,11 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
     metrics_record_latency(route_provider(route), _fwd_ms);
     event_inference_completed(provider_name(route_provider(route)), model, _fwd_ms, ptok + ctok);
     otlp_enqueue_inference_span(provider_name(route_provider(route)), model, _fwd_ms, ptok + ctok, 1);
+    # Feed the lowest-latency EMA (only when that strategy is active — avoids the
+    # _lat_lock per request otherwise). router_select reads this map.
+    if (load64(_router + ROUTER_STRATEGY) == STRAT_LOWEST_LATENCY) {
+        router_report_latency(_router, route_base_url(route), _fwd_ms);
+    }
 
     # Surface tool calls (slot 32; 0 = none), converting each provider's shape to
     # OpenAI tool_calls.

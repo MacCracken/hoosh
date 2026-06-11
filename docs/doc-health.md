@@ -6,10 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-10 (**v2.4.4** — new backends vLLM/TensorRT-LLM/ONNX).
-> Doc touch: CHANGELOG [2.4.4], roadmap (backends checked + shipped row),
-> README/overview/state (14→17 providers). Gates: 450 tests, 17 benches, clean.
-> **Prior**: 2026-06-10 (**v2.4.3** — OTLP remote/https + scaffolding).
+> **Last refresh**: 2026-06-10 (**v2.4.5** — hardening review; v2.4.x arc complete,
+> Cyrius 6.1.31). Doc touch: CHANGELOG [2.4.5], **ADR-011 §2.4.5** (sync-pass audit
+> follow-ups), roadmap (shipped row), state.md (arc complete + handoff),
+> README/hoosh.cyml (`strategy` option). Gates: 457 tests, 17 benches, clean.
+> **Prior**: 2026-06-10 (**v2.4.4** — new backends vLLM/TensorRT-LLM/ONNX).
 > Doc touch: CHANGELOG [2.4.3], roadmap (OTLP/scaffolding checked + shipped row),
 > overview/hoosh.cyml (otlp https), **+state.md** (volatile-state doc — closes the
 > open follow-up), index (+state.md link). New: `fuzz/*.fcyr`,

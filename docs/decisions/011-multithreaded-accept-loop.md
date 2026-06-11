@@ -103,3 +103,16 @@ for the unified pool. Per-handler fine-grained locking (vs the coarse `_chat_loc
 + batch registry lock) was deferred: the fast handlers serialize cheaply under
 `_chat_lock` while the slow forwards already run unlocked, so the coarse lock
 captures the throughput win without the audit surface of fine-grained locking.
+
+## Update (2.4.5): sync-pass audit follow-ups
+
+A hardening audit found two read paths the original sync pass missed — both
+iterate a shared map structurally concurrent with a writer on the pool workers:
+`GET /v1/cache/stats` (`map_count` vs `cache_insert`/evict) and
+`GET /v1/tokens/pools` (`map_keys(_budget)` vs reload's `budget_add_pool` +
+reserve/commit). A map rehash mid-iteration is a crash, not just a torn read, so
+both now take `_chat_lock` for the snapshot. Lesson: the sync pass must cover
+**readers that iterate** shared maps, not only writers — a `map_count`/`map_keys`
+during another worker's `map_set`/`map_delete` is unsafe. Also un-deaded the
+lowest-latency strategy, whose per-request EMA update uses a dedicated `_lat_lock`
+(not `_chat_lock`) so latency recording doesn't serialize with chat bookkeeping.

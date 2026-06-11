@@ -10,7 +10,14 @@ enum RouterField {
     ROUTER_LATENCIES = 32;
 }
 
+# Guards the lowest-latency EMA map (read in router_select, written per-request
+# by router_report_latency from the unlocked forward on the v2.4.0 pool workers).
+# A dedicated lock (not _chat_lock) so latency recording doesn't serialize with
+# chat bookkeeping. Created once at startup (router_new runs single-threaded).
+var _lat_lock = 0;
+
 fn router_new(routes, count, strategy) {
+    if (_lat_lock == 0) { _lat_lock = mutex_new(); }
     var rt = alloc(ROUTER_SIZE);
     store64(rt + ROUTER_ROUTES, routes);
     store64(rt + ROUTER_COUNT, count);
@@ -63,14 +70,19 @@ fn router_select(rt, model) {
         var best = load64(cand);
         var best_lat = 0x7FFFFFFFFFFFFFFF;
         var k = 0;
+        mutex_lock(_lat_lock);
         while (k < cn) {
             var c = load64(cand + k * 8);
             var url = route_base_url(c);
+            # map_get returns 0 for an UNTRIED backend — treat that as 0 latency so
+            # it gets explored (and then records a real latency), instead of MAX
+            # which would avoid it forever. Once all are tried, the lowest real
+            # EMA wins. (A genuine sub-1ms forward reading as "untried" is benign.)
             var lat = map_get(lat_map, url);
-            if (lat == 0) { lat = 0x7FFFFFFFFFFFFFFF; }
             if (lat < best_lat) { best = c; best_lat = lat; }
             k = k + 1;
         }
+        mutex_unlock(_lat_lock);
         return best;
     }
     return load64(cand);
@@ -106,10 +118,14 @@ fn router_select_local(rt, model) {
     return load64(cand);
 }
 
+# Record a forward's latency into the EMA (3:7 new:old). Called per-request from
+# the unlocked forward path; serialized with router_select's read via _lat_lock.
 fn router_report_latency(rt, base_url, latency_ms) {
     var lat_map = load64(rt + ROUTER_LATENCIES);
+    mutex_lock(_lat_lock);
     var old = map_get(lat_map, base_url);
     if (old == 0) { map_set(lat_map, base_url, latency_ms); }
     else { map_set(lat_map, base_url, (old * 7 + latency_ms * 3) / 10); }
+    mutex_unlock(_lat_lock);
     return 0;
 }

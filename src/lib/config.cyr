@@ -2,6 +2,16 @@
 # Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr
 # Reads: [[server]], [[providers]], [[cache]], [[budgets]], [[auth]]
 
+# Routing strategy from [server] strategy (default priority). Maps the four
+# implemented strategies; an unknown value falls back to priority.
+fn strategy_from_str(s) {
+    if (streq(s, "round-robin") == 1 || streq(s, "roundrobin") == 1) { return STRAT_ROUND_ROBIN; }
+    if (streq(s, "lowest-latency") == 1 || streq(s, "lowest_latency") == 1) { return STRAT_LOWEST_LATENCY; }
+    if (streq(s, "direct") == 1) { return STRAT_DIRECT; }
+    return STRAT_PRIORITY;
+}
+var _route_strategy = 0;   # STRAT_PRIORITY
+
 # Expand a config value: "$NAME" -> getenv("NAME"), so secrets (API keys)
 # live in the environment, not in hoosh.cyml. Returns 0 if the env var is
 # unset; passes non-"$" values through unchanged.
@@ -21,6 +31,8 @@ fn load_config(path) {
         var srv = toml_section_pairs(vec_get(srv_secs, 0));
         var port_str = toml_get(srv, "port");
         if (port_str != 0) { _http_port = str_to_int(port_str); }
+        var strat_str = toml_get(srv, "strategy");
+        if (strat_str != 0) { _route_strategy = strategy_from_str(to_cstr(strat_str)); }
     }
 
     # Parse [storage] section — opt-in patra persistence (path only)
@@ -210,7 +222,7 @@ fn load_config(path) {
             store64(routes + ri * 8, route);
             ri = ri + 1;
         }
-        _router = router_new(routes, route_count, STRAT_PRIORITY);
+        _router = router_new(routes, route_count, _route_strategy);
         _met_providers = route_count;
     }
 

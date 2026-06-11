@@ -281,15 +281,24 @@ fn warming_run() {
 
 # GET /v1/cache/stats
 fn handle_cache_stats(cfd) {
+    # _chat_lock: map_count over the entries map races the chat path's
+    # cache_insert/evict (map_set/map_delete → rehash) on the pool workers
+    # (v2.4.0). Snapshot the four values under the lock, then build unlocked.
+    mutex_lock(_chat_lock);
+    var entries = map_count(load64(_cache + CACHE_ENTRIES));
+    var hits = load64(_cache + CACHE_HITS);
+    var misses = load64(_cache + CACHE_MISSES);
+    var evictions = load64(_cache + CACHE_EVICTIONS);
+    mutex_unlock(_chat_lock);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"entries\":");
-    str_builder_add_int(sb, map_count(load64(_cache + CACHE_ENTRIES)));
+    str_builder_add_int(sb, entries);
     str_builder_add_cstr(sb, ",\"hits\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_HITS));
+    str_builder_add_int(sb, hits);
     str_builder_add_cstr(sb, ",\"misses\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_MISSES));
+    str_builder_add_int(sb, misses);
     str_builder_add_cstr(sb, ",\"evictions\":");
-    str_builder_add_int(sb, load64(_cache + CACHE_EVICTIONS));
+    str_builder_add_int(sb, evictions);
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
@@ -298,6 +307,10 @@ fn handle_cache_stats(cfd) {
 fn handle_token_pools(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"pools\":[");
+    # _chat_lock: map_keys/map_get over _budget races a concurrent reload's
+    # budget_add_pool (map_set → rehash) and pool-field writes from chat/token
+    # reserve/commit on the pool workers (v2.4.0). Hold it for the snapshot.
+    mutex_lock(_chat_lock);
     var keys = map_keys(_budget);
     var first = 1;
     var i = 0;
@@ -317,6 +330,7 @@ fn handle_token_pools(cfd) {
         first = 0;
         i = i + 1;
     }
+    mutex_unlock(_chat_lock);
     str_builder_add_cstr(sb, "]}");
     return http_json_ok(cfd, str_builder_build(sb));
 }

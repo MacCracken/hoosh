@@ -4,7 +4,7 @@
 [server]
 bind = "127.0.0.1"
 port = 8088
-strategy = "priority"
+strategy = "priority"   # priority | round-robin | lowest-latency | direct
 
 # Operational logging (stderr). Levels: fatal, error, warn, info, debug, trace.
 # Default is info. The CLI banner / `info` / `help` output stays on stdout.

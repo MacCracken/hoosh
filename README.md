@@ -174,6 +174,7 @@ Response:
 ```toml
 [server]
 port = 8088
+# strategy = "priority"   # priority | round-robin | lowest-latency | direct
 
 [cache]
 max_entries = 10000

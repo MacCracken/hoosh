@@ -71,7 +71,6 @@ var _budget = 0;
 var _cache = 0;
 var _health_map = 0;
 var _rate_map = 0;
-var _cost_map = 0;
 var _auth_tokens = 0;
 var _config_path = 0;
 var _http_port = 8088;
@@ -527,7 +526,6 @@ fn main() {
     _cache = cache_new(10000, 1);
     _health_map = map_new();
     _rate_map = map_new();
-    _cost_map = map_new();
     _auth_tokens = vec_new();
     _retry_cfg = retry_config_default();
     _audit_chain = audit_chain_new("hoosh-audit-key", 15, 10000);

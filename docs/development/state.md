@@ -9,8 +9,8 @@
 
 | | |
 |---|---|
-| **Version** | **2.4.4** (v2.4.x — Concurrency & completeness arc; see [roadmap.md](roadmap.md)) |
-| **Toolchain** | Cyrius pin **6.1.30** (`cyrius.cyml`) |
+| **Version** | **2.4.5** (v2.4.x — Concurrency & completeness arc, **complete**; see [roadmap.md](roadmap.md)) |
+| **Toolchain** | Cyrius pin **6.1.31** (`cyrius.cyml`) |
 | **Binary** (x86_64 static ELF) | ~2.04 MB (`CYRIUS_DCE=1` build) |
 | **Source** | ~7,900 lines / 31 files (`src/main.cyr` + 30 `src/lib/*.cyr`) + 2 vendored distlib bundles (~5,150 lines) |
 | **Tests** | 442 assertions · 102 groups (`tests/hoosh.tcyr`) |
@@ -24,13 +24,15 @@
 
 Shipped: 2.4.0 (multi-threaded accept loop), 2.4.1 (hardware planning endpoints),
 2.4.2 (threaded hw detection), 2.4.3 (OTLP remote/https + scaffolding),
-**2.4.4 (new backends — vLLM / TensorRT-LLM / ONNX)**.
+2.4.4 (new backends — vLLM / TensorRT-LLM / ONNX), **2.4.5 (hardening review)** —
+**arc complete**.
 
-Next in arc: **2.4.5** hardening / refactor / security / optimization review.
-Upstream-gated: OTLP/protobuf (cyrius protobuf lib), cert pinning + connection
-pooling (sandhi TLS-policy threading); deferred: OTLP nested spans.
+Open (post-arc): OTLP nested spans; **upstream-gated** — OTLP/protobuf (cyrius
+protobuf lib), cert pinning + connection pooling (sandhi TLS-policy threading),
+szál MCP tools; tests/bench split (only if the suite grows).
 
-> **Handoff (2026-06-10):** 2.4.4 adds vLLM / TensorRT-LLM / ONNX as OpenAI-
-> compatible local provider types (17 providers total) — `types.cyr` enum +
-> name/is-local/parse/default-url only; they reuse the existing local forward.
-> Crypto-bank ceiling (8: main + 7 workers) remains the concurrency cap.
+> **Handoff (2026-06-10):** 2.4.5 is a hardening review — fixed two unlocked
+> shared-map iterations from the v2.4.0 sync pass (`cache_stats`/`tokens_pools`,
+> crash-risk), made the routing strategy configurable + un-deaded a working
+> lowest-latency (explore/exploit, `_lat_lock`), removed dead `_cost_map`, pin →
+> 6.1.31. Crypto-bank ceiling (8: main + 7 workers) remains the concurrency cap.
