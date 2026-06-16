@@ -6,7 +6,12 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-10 (**v2.4.5** — hardening review; v2.4.x arc complete,
+> **Last refresh**: 2026-06-15 (**v2.4.6** — toolchain + dependency refresh;
+> Cyrius 6.2.11, ai-hwaccel 2.3.12, bote 2.7.6, majra 2.4.7). Doc touch:
+> CHANGELOG [2.4.6], roadmap (shipped row + bump note), state.md (version /
+> toolchain / handoff), **ADR-005** (bote 2.7.6 `tool_registry_new` rename),
+> CLAUDE.md pin. Gates: 457 tests, 17 benches, clean.
+> **Prior**: 2026-06-10 (**v2.4.5** — hardening review; v2.4.x arc complete,
 > Cyrius 6.1.31). Doc touch: CHANGELOG [2.4.5], **ADR-011 §2.4.5** (sync-pass audit
 > follow-ups), roadmap (shipped row), state.md (arc complete + handoff),
 > README/hoosh.cyml (`strategy` option). Gates: 457 tests, 17 benches, clean.

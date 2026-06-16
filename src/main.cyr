@@ -15,14 +15,14 @@
 
 include "lib/ai-hwaccel.cyr"
 
-# MCP protocol core (bote 2.7.3) — self-contained JSON-RPC 2.0 registry/
+# MCP protocol core (bote 2.7.6) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
 # via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
 # cyrius resolves transitively and that collide with the agnos stdlib —
 # see cyrius.cyml). Powers /v1/tools/list + /v1/tools/call via src/lib/mcp.cyr.
 include "src/vendor/bote-core.cyr"
 
-# majra pub/sub (majra 2.4.5) — provider event bus, self-contained distlib
+# majra pub/sub (majra 2.4.7) — provider event bus, self-contained distlib
 # bundle committed under src/vendor/ (same rationale as bote-core). Powers the
 # event bus in src/lib/events.cyr.
 include "src/vendor/majra.cyr"

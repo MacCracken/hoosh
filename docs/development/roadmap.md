@@ -29,8 +29,9 @@ One line per release; see CHANGELOG for detail.
 | **2.4.3** | OTLP remote/`https` export (worker-routed TLS) + scaffolding (state.md, fuzz harnesses, CI security scan) |
 | **2.4.4** | New backends — vLLM, TensorRT-LLM, ONNX Runtime (OpenAI-compatible local provider types) |
 | **2.4.5** | Hardening review — concurrency sync-pass fixes (cache_stats/tokens_pools), configurable routing strategy + working lowest-latency, dead-code removal ([ADR 011](../decisions/011-multithreaded-accept-loop.md) §2.4.5) |
+| **2.4.6** | Toolchain + dependency refresh — Cyrius 6.2.11, ai-hwaccel 2.3.12, bote 2.7.6 (`registry_new` → `tool_registry_new`), majra 2.4.7 |
 
-**Toolchain**: Cyrius pin currently **6.1.29** (bumped per release; clean `lib/`
+**Toolchain**: Cyrius pin currently **6.2.11** (bumped per release; clean `lib/`
 re-sync each time — see [the bump note](#toolchain)).
 
 ---
@@ -102,7 +103,10 @@ alongside `bote_echo` — no transport changes. ([ADR 005](../decisions/005-mcp-
 > **Toolchain bumps** (process, not arc work): on each pin bump, wipe `lib/` and
 > run a clean `cyrius lib sync` + `cyrius deps`, then the full CI step order,
 > before trusting a local build — stale `lib/` masks stdlib module renames (e.g.
-> 6.1.27 merged `bigint`/`toml`/`json` → `bayan`).
+> 6.1.27 merged `bigint`/`toml`/`json` → `bayan`). Compiler strictness can also
+> tighten: 6.2.11 turned duplicate same-scope `var` declarations into a hard
+> error (the 2.4.6 bump renamed three such test vars; block-scoped shadowing
+> still compiles).
 
 ---
 

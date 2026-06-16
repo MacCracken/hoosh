@@ -34,7 +34,9 @@ fn _hoosh_tool_echo(args, claims) {
 # Build the registry + dispatcher and register the built-in tools.
 # Idempotent: a second call rebuilds (only invoked once from cmd_serve).
 fn mcp_init() {
-    var reg = registry_new();
+    # bote 2.7.6 renamed the registry constructor to tool_registry_new
+    # (ai-hwaccel also defines registry_new — call bote's explicitly).
+    var reg = tool_registry_new();
     var disp = dispatcher_new(reg);
     # Empty object schema — bote_echo accepts any arguments.
     var schema = schema_new("object", vec_new(), vec_new());

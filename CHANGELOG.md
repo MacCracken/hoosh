@@ -7,6 +7,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.4.6] — 2026-06-15
+
+**Toolchain + dependency refresh.** Bumps Cyrius to **6.2.11** and all
+dependencies to their latest tags, with the one breaking-API fix the bote
+update requires.
+
+### Changed
+- **Toolchain: Cyrius 6.2.11** (pin, was 6.1.31). Clean `lib/` re-sync; no
+  stdlib module migration (the 6.2.x snapshot only *adds* modules —
+  `tls_native_*` split, `*_agnos` variants — and removes none).
+- **ai-hwaccel 2.3.9 → 2.3.12** (`cyrius.cyml` tag). `dist/ai-hwaccel.cyr`
+  re-vendored; the vendored `data/cloud_pricing.json` + `data/models.json` are
+  byte-/content-identical at the new tag, so they are unchanged.
+- **bote 2.7.3 → 2.7.6** (`src/vendor/bote-core.cyr`). Code is identical apart
+  from the rename below and whitespace.
+- **majra 2.4.5 → 2.4.7** (`src/vendor/majra.cyr`). Version header only — the
+  bundle body is unchanged.
+
+### Fixed
+- **bote renamed its registry constructor `registry_new` → `tool_registry_new`.**
+  This matters because ai-hwaccel *also* defines `registry_new`, so leaving the
+  call unchanged would have silently bound hoosh's MCP registry to the hardware
+  registry ("last definition wins"). Updated the call sites in `src/lib/mcp.cyr`
+  and the test/bench harnesses to call `tool_registry_new` explicitly. The other
+  `registry_*` ops keep their names. All 457 tests pass, MCP benchmarks intact.
+- **Cyrius 6.2.11 now hard-errors on duplicate same-scope variables.** The test
+  harness redeclared three top-level `var`s in `main()` (`tp`, `ll1`, `ll2`);
+  renamed the second occurrences (`tval`, `llv1`, `llv2`). Block-scoped
+  shadowing (e.g. `rec`) is still allowed and was left as-is.
+
 ## [2.4.5] — 2026-06-10
 
 **Hardening review** — closes the v2.4.x arc. A concurrency/correctness/security

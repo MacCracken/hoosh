@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.1.31"
+cyrius = "6.2.11"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -23,7 +23,7 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.3.9"
+tag = "2.3.12"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
@@ -38,14 +38,17 @@ modules = ["dist/ai-hwaccel.cyr"]
 # for its full bundle's `events_majra`/`audit_libro` modules. `cyrius deps`
 # recurses into those git sub-deps, vendoring libro/majra → bayan/ganita/
 # agnosys and adding them all to the compile set — where the agnos superset
-# (agnosys) collides with bote-core's `registry_new` ("last definition
+# (agnosys) collides with bote-core's registry constructor ("last definition
 # wins", a correctness hazard) and trips an agnosys slice-include error.
+# (As of bote 2.7.6 the constructor is `tool_registry_new`; the other
+# `registry_*` ops keep their names — and ai-hwaccel still ships its own
+# `registry_new`, so hoosh calls `tool_registry_new` explicitly in mcp.cyr.)
 # The core bundle itself is fully self-contained (no includes, no libro/
 # majra symbols), so we vendor it directly as `src/vendor/bote-core.cyr`
 # (committed; see that file's header for the pinned bote tag) and include
 # it from src/main.cyr. Re-sync with `./scripts/sync-bote.sh <tag>`.
 #
-# majra (2.4.5) — provider event bus pubsub — is vendored the same way at
+# majra (2.4.7) — provider event bus pubsub — is vendored the same way at
 # src/vendor/majra.cyr (self-contained dist/majra.cyr). Note: majra defines
 # ratelimit_new/ratelimit_check that collide by name with src/lib/ratelimit.cyr
 # (different arity); harmless — they're dead code in majra's core pubsub, so

@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| **Version** | **2.4.5** (v2.4.x — Concurrency & completeness arc, **complete**; see [roadmap.md](roadmap.md)) |
-| **Toolchain** | Cyrius pin **6.1.31** (`cyrius.cyml`) |
+| **Version** | **2.4.6** (toolchain + dependency refresh; v2.4.x — Concurrency & completeness arc **complete** at 2.4.5; see [roadmap.md](roadmap.md)) |
+| **Toolchain** | Cyrius pin **6.2.11** (`cyrius.cyml`) |
 | **Binary** (x86_64 static ELF) | ~2.04 MB (`CYRIUS_DCE=1` build) |
 | **Source** | ~7,900 lines / 31 files (`src/main.cyr` + 30 `src/lib/*.cyr`) + 2 vendored distlib bundles (~5,150 lines) |
-| **Tests** | 442 assertions · 102 groups (`tests/hoosh.tcyr`) |
+| **Tests** | 457 assertions · 103 groups (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 17 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | `fuzz/*.fcyr` (parser harnesses) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
@@ -31,6 +31,15 @@ Open (post-arc): OTLP nested spans; **upstream-gated** — OTLP/protobuf (cyrius
 protobuf lib), cert pinning + connection pooling (sandhi TLS-policy threading),
 szál MCP tools; tests/bench split (only if the suite grows).
 
+> **Handoff (2026-06-15):** 2.4.6 is a toolchain + dependency refresh — pin →
+> Cyrius **6.2.11**, ai-hwaccel 2.3.9 → 2.3.12, bote 2.7.3 → 2.7.6, majra
+> 2.4.5 → 2.4.7. bote renamed its registry constructor `registry_new` →
+> `tool_registry_new`; updated `src/lib/mcp.cyr` + the test/bench harnesses to
+> call it explicitly (ai-hwaccel also defines `registry_new`, so the rename
+> averted a silent wrong-binding). 6.2.11 made duplicate same-scope `var`s a
+> hard error → renamed three test vars. All 457 tests green, 17 benchmarks
+> recorded. No source/feature changes.
+>
 > **Handoff (2026-06-10):** 2.4.5 is a hardening review — fixed two unlocked
 > shared-map iterations from the v2.4.0 sync pass (`cache_stats`/`tokens_pools`,
 > crash-risk), made the routing strategy configurable + un-deaded a working

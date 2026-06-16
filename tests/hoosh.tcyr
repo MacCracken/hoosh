@@ -4425,7 +4425,7 @@ fn main() {
     # Exercises the real bote-core registry/dispatcher/codec that
     # src/lib/mcp.cyr drives behind /v1/tools/list + /v1/tools/call.
     test_group("mcp_tools");
-    var mcp_reg = registry_new();
+    var mcp_reg = tool_registry_new();
     var mcp_disp = dispatcher_new(mcp_reg);
     var mcp_sch = schema_new("object", vec_new(), vec_new());
     var mcp_td = tool_def_new("bote_echo", "Echo the provided arguments", mcp_sch);
@@ -4518,10 +4518,10 @@ fn main() {
     assert_eq(_t_lat_bucket(51), 4, "lat: 51ms → bucket 4 (le 100)");
     assert_eq(_t_lat_bucket(20000), 11, "lat: 20s → overflow bucket 11");
     var treq = "POST /x HTTP/1.1\r\nHost: h\r\ntraceparent: 00-abc-def-01\r\nContent-Type: application/json\r\n\r\nbody";
-    var tp = _t_trace_extract(treq, strlen(treq));
-    assert_eq(tp != 0, 1, "trace: header located");
-    assert_eq(_cmp_substr(tp, strlen(tp), "00-abc-def-01", 13) >= 0, 1, "trace: value extracted");
-    assert_eq(strlen(tp), 13, "trace: value is exactly the header value (no trailing CR)");
+    var tval = _t_trace_extract(treq, strlen(treq));
+    assert_eq(tval != 0, 1, "trace: header located");
+    assert_eq(_cmp_substr(tval, strlen(tval), "00-abc-def-01", 13) >= 0, 1, "trace: value extracted");
+    assert_eq(strlen(tval), 13, "trace: value is exactly the header value (no trailing CR)");
     var tnone = "POST /x HTTP/1.1\r\nHost: h\r\n\r\nbody";
     assert_eq(_t_trace_extract(tnone, strlen(tnone)), 0, "trace: absent → 0");
     # Case-insensitive header name.
@@ -4578,16 +4578,16 @@ fn main() {
     assert_eq(_t_strategy_from_str("direct"), 3, "strat: direct → 3");
     assert_eq(_t_strategy_from_str("bogus"), 0, "strat: unknown → priority");
     # Lowest-latency: an untried candidate (lat 0) is explored over a tried one.
-    var ll1 = vec_new();
-    vec_push(ll1, 50);    # cand 0: 50ms (tried)
-    vec_push(ll1, 0);     # cand 1: untried → explore
-    assert_eq(_t_ll_pick(ll1), 1, "ll: untried candidate explored");
+    var llv1 = vec_new();
+    vec_push(llv1, 50);    # cand 0: 50ms (tried)
+    vec_push(llv1, 0);     # cand 1: untried → explore
+    assert_eq(_t_ll_pick(llv1), 1, "ll: untried candidate explored");
     # All tried → lowest wins.
-    var ll2 = vec_new();
-    vec_push(ll2, 80);
-    vec_push(ll2, 15);
-    vec_push(ll2, 40);
-    assert_eq(_t_ll_pick(ll2), 1, "ll: lowest latency wins");
+    var llv2 = vec_new();
+    vec_push(llv2, 80);
+    vec_push(llv2, 15);
+    vec_push(llv2, 40);
+    assert_eq(_t_ll_pick(llv2), 1, "ll: lowest latency wins");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

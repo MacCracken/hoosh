@@ -17,10 +17,10 @@
 # untrusted. The fmt/lint CI globs are src/main.cyr + src/lib/*.cyr, so the
 # generated bundle in src/vendor/ is excluded from those gates.
 #
-# Usage: ./scripts/sync-bote.sh [tag]   (default: 2.7.3)
+# Usage: ./scripts/sync-bote.sh [tag]   (default: 2.7.6)
 set -euo pipefail
 
-TAG="${1:-2.7.3}"
+TAG="${1:-2.7.6}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$REPO_ROOT/src/vendor/bote-core.cyr"
 URL="https://raw.githubusercontent.com/MacCracken/bote/${TAG}/dist/bote-core.cyr"

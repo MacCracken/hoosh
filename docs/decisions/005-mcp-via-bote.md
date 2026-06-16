@@ -91,9 +91,15 @@ in `tools/list` and dispatch through `tools/call` with no transport changes.
 ### bote is vendored, not a `[deps.bote]` block
 
 bote is consumed as a single committed file, `src/vendor/bote-core.cyr`
-(bote 2.7.3's `[lib.core]` profile — 9 transport-free modules: error, protocol,
+(bote 2.7.6's `[lib.core]` profile — 9 transport-free modules: error, protocol,
 jsonx, registry, events, audit, dispatch, codec, schema), **not** via a
 `[deps.bote]` entry in `cyrius.cyml`.
+
+> **bote 2.7.6 API note.** The registry constructor was renamed `registry_new`
+> → `tool_registry_new`; the other `registry_*` ops are unchanged. ai-hwaccel
+> *also* defines `registry_new`, so hoosh's `mcp_init` calls `tool_registry_new`
+> explicitly to bind bote's registry (not the hardware one) under last-definition
+> linking.
 
 **Why.** Unlike ai-hwaccel (whose manifest declares no git sub-deps), bote's
 manifest declares `[deps.libro]` + `[deps.majra]` for its *full* bundle's

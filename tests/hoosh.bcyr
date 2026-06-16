@@ -883,7 +883,7 @@ fn main() {
     # ── Benchmark: mcp_tools_list (bote dispatch) ─────────────────
     # Full JSON-RPC parse → dispatch → tools/list result serialize, the
     # per-request cost behind GET /v1/tools/list.
-    var mcp_reg = registry_new();
+    var mcp_reg = tool_registry_new();
     var mcp_disp = dispatcher_new(mcp_reg);
     var mcp_sch = schema_new("object", vec_new(), vec_new());
     var mcp_td = tool_def_new("bote_echo", "Echo", mcp_sch);
