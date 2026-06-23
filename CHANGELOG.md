@@ -5,6 +5,25 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.7] — 2026-06-23
+
+**Toolchain refresh.** Bumps Cyrius to **6.2.37** with the one single-pass
+include-order fix the new stdlib requires.
+
+### Changed
+- **Toolchain: Cyrius 6.2.37** (pin, was 6.2.11). Clean `lib/` re-sync; no
+  stdlib module migration.
+
+### Fixed
+- **Test/bench harness `undefined variable 'sys_getrandom'` under 6.2.37.**
+  Since stdlib 6.2.28, `tls_native_conn` takes `&sys_getrandom`. `cyrius build`
+  prepends the auto-injected `[deps]` stdlib set (incl. `tls`) ahead of a file's
+  explicit includes, in array order — so an explicit `include "lib/syscalls.cyr"`
+  in `tests/hoosh.tcyr` / `tests/hoosh.bcyr` landed *after* the prepended `tls`,
+  leaving `sys_getrandom` undefined at that point. Dropped the explicit syscalls
+  include from both harnesses (it auto-injects at its array position, before
+  `tls`); `sys_*` wrappers stay in scope. All 457 tests pass, benchmarks intact.
+
 ## [Unreleased]
 
 ## [2.4.6] — 2026-06-15

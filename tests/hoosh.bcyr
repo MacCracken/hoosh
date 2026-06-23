@@ -14,7 +14,11 @@ include "lib/hashmap.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
 include "lib/chrono.cyr"
-include "lib/syscalls.cyr"
+# NOTE: do NOT explicitly `include "lib/syscalls.cyr"` here — see the same note
+# in tests/hoosh.tcyr. `cyrius build` prepends the auto-injected stdlib `tls`
+# (which takes `&sys_getrandom` since 6.2.28) ahead of this file's explicit
+# includes; an explicit syscalls here would land after it → single-pass
+# "undefined variable 'sys_getrandom'". Let syscalls auto-inject before tls.
 include "src/vendor/bote-core.cyr"
 
 # ================================================================

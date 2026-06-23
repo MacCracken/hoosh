@@ -16,7 +16,13 @@ include "lib/freelist.cyr"
 include "lib/bayan.cyr"
 include "lib/ct.cyr"
 include "lib/sigil.cyr"
-include "lib/syscalls.cyr"
+# NOTE: do NOT explicitly `include "lib/syscalls.cyr"` here. `cyrius build`
+# auto-injects the cyrius.cyml [deps] stdlib set (tls/sandhi/net/…) ahead of
+# this file's explicit includes, in array order. Since 6.2.28 tls_native_conn
+# takes `&sys_getrandom`, so the auto-injected `tls` must see `syscalls` first.
+# An explicit syscalls include here lands AFTER the prepended `tls` → single-pass
+# "undefined variable 'sys_getrandom'". Letting syscalls auto-inject (array idx
+# before tls) keeps the order correct. sys_* wrappers are still in scope.
 include "lib/assert.cyr"
 include "lib/sakshi.cyr"
 include "src/vendor/bote-core.cyr"
