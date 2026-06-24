@@ -434,11 +434,11 @@ fn cmd_health() {
     while (i < count) {
         var r = load64(routes + i * 8);
         if (route_enabled(r) == 1) {
-            var port = url_port(route_base_url(r));
+            var base = route_base_url(r);
             var up = 0;
             var fd = sys_socket(2, 1, 0);
             if (fd >= 0) {
-                var sa = sockaddr_in(0x0100007F, port);
+                var sa = sockaddr_in(host_addr(url_host(base)), url_port(base));
                 var cr = sys_connect(fd, sa, 16);
                 if (cr >= 0) { up = 1; }
                 sys_close(fd);

@@ -13,10 +13,10 @@ fn handle_health(cfd) {
     var healthy = 1;
     if (count > 0) {
         var r = load64(routes);
-        var port = url_port(route_base_url(r));
+        var base = route_base_url(r);
         var fd = sys_socket(2, 1, 0);
         if (fd >= 0) {
-            var sa = sockaddr_in(0x0100007F, port);
+            var sa = sockaddr_in(host_addr(url_host(base)), url_port(base));
             var cr = sys_connect(fd, sa, 16);
             if (cr < 0) { healthy = 0; }
             sys_close(fd);
@@ -153,8 +153,7 @@ fn handle_model_pull(cfd, body_ptr, body_len) {
         return http_error(cfd, "404", "Not Found", "no ollama provider configured");
     }
     var fb = _build_name_body(model_cstr);
-    var port = url_port(route_base_url(route));
-    var resp = http_req_local("POST", port, "/api/pull",
+    var resp = http_req_local("POST", route_base_url(route), "/api/pull",
     load64(fb), load64(fb + 8));
     return _lifecycle_reply(cfd, resp, "ollama pull failed");
 }
@@ -173,8 +172,7 @@ fn handle_model_delete(cfd, body_ptr, body_len) {
         return http_error(cfd, "404", "Not Found", "no ollama provider configured");
     }
     var fb = _build_name_body(model_cstr);
-    var port = url_port(route_base_url(route));
-    var resp = http_req_local("DELETE", port, "/api/delete",
+    var resp = http_req_local("DELETE", route_base_url(route), "/api/delete",
     load64(fb), load64(fb + 8));
     return _lifecycle_reply(cfd, resp, "ollama delete failed");
 }
@@ -196,8 +194,7 @@ fn handle_synapse_training(cfd, body_ptr, body_len) {
     str_builder_add_cstr(psb, "/v1/training/");
     str_builder_add_cstr(psb, job_cstr);
     var path = to_cstr(str_builder_build(psb));
-    var port = url_port(route_base_url(route));
-    var resp = http_req_local("GET", port, path, 0, 0);
+    var resp = http_req_local("GET", route_base_url(route), path, 0, 0);
     return _lifecycle_reply(cfd, resp, "synapse training status failed");
 }
 
@@ -207,8 +204,7 @@ fn handle_synapse_sync(cfd) {
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no synapse provider configured");
     }
-    var port = url_port(route_base_url(route));
-    var resp = http_req_local("POST", port, "/v1/catalog/sync", 0, 0);
+    var resp = http_req_local("POST", route_base_url(route), "/v1/catalog/sync", 0, 0);
     return _lifecycle_reply(cfd, resp, "synapse catalog sync failed");
 }
 
@@ -501,11 +497,11 @@ fn handle_health_providers(cfd) {
     while (hi < rcount) {
         var r = load64(routes + hi * 8);
         if (route_enabled(r) == 1) {
-            var port = url_port(route_base_url(r));
+            var base = route_base_url(r);
             var up = 0;
             var fd = sys_socket(2, 1, 0);
             if (fd >= 0) {
-                var sa = sockaddr_in(0x0100007F, port);
+                var sa = sockaddr_in(host_addr(url_host(base)), url_port(base));
                 var cr = sys_connect(fd, sa, 16);
                 if (cr >= 0) { up = 1; }
                 sys_close(fd);
@@ -1485,10 +1481,10 @@ fn _embed_query_body(body_ptr, body_len) {
         memcpy(rb, sandhi_http_body(sresp), rbl);
         store8(rb + rbl, 0);
     } else {
-        var port = url_port(route_base_url(route));
+        var base = route_base_url(route);
         var epath = "/v1/embeddings";
         if (route_provider(route) == PROV_OLLAMA) { epath = "/api/embeddings"; }
-        var resp = http_post_local(port, epath, body, blen);
+        var resp = http_post_local(base, epath, body, blen);
         if (resp == 0) { return 0; }
         if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
         rb = http_body(resp);

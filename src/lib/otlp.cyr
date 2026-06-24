@@ -132,11 +132,10 @@ fn _otlp_post(body, blen) {
         sandhi_http_post(_otlp_endpoint, h, body, blen);
         return 0;
     }
-    var port = url_port(_otlp_endpoint);
     var path = _otlp_path(_otlp_endpoint);
     var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0; }
-    var sa = sockaddr_in(0x0100007F, port);
+    var sa = sockaddr_in(host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint));
     if (sys_connect(fd, sa, 16) < 0) { sys_close(fd); return 0; }
     var hdr = str_builder_new();
     str_builder_add_cstr(hdr, "POST ");

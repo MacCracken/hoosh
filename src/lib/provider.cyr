@@ -56,15 +56,15 @@ fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, too
 }
 
 # Forward to Ollama native API
-fn ollama_infer(port, model, prompt) {
+fn ollama_infer(base_url, model, prompt) {
     var body = _build_chat_body(model, prompt);
-    return http_post_local(port, "/api/chat", body, strlen(body));
+    return http_post_local(base_url, "/api/chat", body, strlen(body));
 }
 
 # Forward to OpenAI-compatible endpoint
-fn openai_compat_infer(port, model, prompt) {
+fn openai_compat_infer(base_url, model, prompt) {
     var body = _build_chat_body(model, prompt);
-    return http_post_local(port, "/v1/chat/completions", body, strlen(body));
+    return http_post_local(base_url, "/v1/chat/completions", body, strlen(body));
 }
 
 # First byte index of the value for the first object key exactly matching
@@ -894,9 +894,8 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         memcpy(rb, sandhi_http_body(sresp), rbl);
         store8(rb + rbl, 0);
     } else {
-        # Local path: raw socket to 127.0.0.1:<port>, plaintext.
-        var port = url_port(base);
-        var resp = http_post_local(port, path, body, blen);
+        # Local path: raw socket to the URL's host:port, plaintext.
+        var resp = http_post_local(base, path, body, blen);
         if (resp == 0) { return 0; }
         if (http_status(resp) < 200) { return 0; }
         if (http_status(resp) >= 300) { return 0; }
@@ -964,12 +963,12 @@ fn provider_forward_stream(route, model, messages_raw, messages_len) {
     # providers stream incrementally via sandhi_http_stream in the handler
     # (handle_chat_stream's remote branch) and never reach here.
     if (route_is_remote(route) == 1) { return 0 - 1; }
-    var port = url_port(route_base_url(route));
+    var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
     model, messages_raw, messages_len, 0, 0);
     var blen = strlen(body);
     var path = _provider_path(route);
-    var fd = http_post_stream(port, path, body, blen);
+    var fd = http_post_stream(base, path, body, blen);
     if (fd < 0) { return 0 - 1; }
     # Skip HTTP response headers
     var hdr_buf = alloc(4096);

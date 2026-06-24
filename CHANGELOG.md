@@ -5,6 +5,33 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.8] — 2026-06-24
+
+**Local providers reachable off-localhost + toolchain refresh.** Fixes a bug
+that made any local (plaintext `http://`) provider — Ollama, LlamaCpp —
+unreachable unless it ran on the *same host* as hoosh, and bumps Cyrius to
+**6.2.39**.
+
+### Fixed
+- **Local providers on a non-localhost host returned `502 provider backend
+  unreachable`.** The raw-socket forwarder for `http://` backends
+  (`http_client.cyr`) hardcoded the connect target to `127.0.0.1` and parsed
+  only the **port** from `base_url` — the host was discarded. So an Ollama box
+  at e.g. `http://192.168.1.186:11434` was contacted at `127.0.0.1:11434`,
+  where nothing listened. Added `url_host` (parse the host from the URL) and
+  `host_addr` (resolve it: `localhost` → loopback, dotted-quad literal parsed
+  directly, otherwise sandhi DNS; loopback fallback on miss), and routed every
+  local-path connect through them: blocking + streaming chat forward
+  (`provider.cyr`), the HTTP `/health` + provider-status probes and the CLI
+  `health` command, the Ollama/Synapse lifecycle admin (pull/delete/training/
+  catalog), embeddings, and OTLP export. The `Host:` header now carries the
+  real host. Remote `https://` routing (via sandhi) was always host-correct and
+  is unchanged.
+
+### Changed
+- **Toolchain: Cyrius 6.2.39** (pin, was 6.2.37). Clean `lib/` re-sync; no
+  stdlib module migration. All 457 tests pass.
+
 ## [2.4.7] — 2026-06-23
 
 **Toolchain refresh.** Bumps Cyrius to **6.2.37** with the one single-pass

@@ -58,17 +58,20 @@ fn _build_post_header(buf, path, host, body_len) {
     return pos;
 }
 
-# HTTP request to localhost:port with an arbitrary method (GET/POST/DELETE).
-# body may be 0 with body_len 0 for bodyless methods. Returns
+# HTTP request to the http:// backend named by base_url, with an arbitrary
+# method (GET/POST/DELETE). Connects to the URL's host:port — NOT a hardcoded
+# localhost — so LAN/remote http backends (e.g. an Ollama box at 192.168.x.y)
+# are reachable. body may be 0 with body_len 0 for bodyless methods. Returns
 # _http_parse_response result or 0.
-fn http_req_local(method, port, path, body, body_len) {
+fn http_req_local(method, base_url, path, body, body_len) {
     var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0; }
-    var sa = sockaddr_in(0x0100007F, port);
+    var host = url_host(base_url);
+    var sa = sockaddr_in(host_addr(host), url_port(base_url));
     var cr = sys_connect(fd, sa, 16);
     if (cr < 0) { sys_close(fd); return 0; }
     var hdr = alloc(2048);
-    var hlen = _build_req_header(hdr, method, path, "localhost", body_len);
+    var hlen = _build_req_header(hdr, method, path, host, body_len);
     sys_write(fd, hdr, hlen);
     if (body_len > 0) { sys_write(fd, body, body_len); }
     var rbuf = alloc(131072);
@@ -83,22 +86,24 @@ fn http_req_local(method, port, path, body, body_len) {
     return _http_parse_response(rbuf, total);
 }
 
-# HTTP POST to localhost:port. Returns _http_parse_response result or 0.
-fn http_post_local(port, path, body, body_len) {
-    return http_req_local("POST", port, path, body, body_len);
+# HTTP POST to the http:// backend named by base_url. Returns
+# _http_parse_response result or 0.
+fn http_post_local(base_url, path, body, body_len) {
+    return http_req_local("POST", base_url, path, body, body_len);
 }
 
 # HTTP POST that returns the open fd for streaming reads.
 # Caller must skip HTTP headers then read chunks.
 # Returns fd (>= 0) or -1 on failure.
-fn http_post_stream(port, path, body, body_len) {
+fn http_post_stream(base_url, path, body, body_len) {
     var fd = sys_socket(2, 1, 0);
     if (fd < 0) { return 0 - 1; }
-    var sa = sockaddr_in(0x0100007F, port);
+    var host = url_host(base_url);
+    var sa = sockaddr_in(host_addr(host), url_port(base_url));
     var cr = sys_connect(fd, sa, 16);
     if (cr < 0) { sys_close(fd); return 0 - 1; }
     var hdr = alloc(2048);
-    var hlen = _build_post_header(hdr, path, "localhost", body_len);
+    var hlen = _build_post_header(hdr, path, host, body_len);
     sys_write(fd, hdr, hlen);
     sys_write(fd, body, body_len);
     return fd;
@@ -134,4 +139,46 @@ fn url_port(url) {
         i = i + 1;
     }
     return 80;
+}
+
+# Host substring of a plaintext http://host[:port][/path] URL, as a fresh
+# cstr. Mirrors url_port's assumption that the scheme is "http://" (7 chars) —
+# the local raw-socket path is always plaintext (https routes go via sandhi).
+# An empty host falls back to "localhost".
+fn url_host(url) {
+    var start = 7;                            # past "http://"
+    var i = start;
+    var c = load8(url + i);
+    while (c != 0 && c != 58 && c != 47) {    # stop at ':' (port) or '/' (path)
+        i = i + 1;
+        c = load8(url + i);
+    }
+    var len = i - start;
+    if (len <= 0) {
+        var lh = alloc(10);
+        memcpy(lh, "localhost", 9);
+        store8(lh + 9, 0);
+        return lh;
+    }
+    var h = alloc(len + 1);
+    memcpy(h, url + start, len);
+    store8(h + len, 0);
+    return h;
+}
+
+# Resolve a host cstr to a network-byte-order IPv4 address for sockaddr_in:
+# "localhost" -> 127.0.0.1; a dotted-quad literal is parsed directly; any other
+# name is resolved via sandhi's DNS. On any miss, fall back to loopback (the
+# historical hardcoded target) so a misconfigured host fails cleanly as
+# "backend unreachable" rather than dereferencing garbage. The DNS leg only
+# runs for non-literal hostnames — bare-IP backends (the common local case)
+# never touch it.
+fn host_addr(host) {
+    if (host == 0) { return 0x0100007F; }
+    if (strlen(host) == 9 && memeq(host, "localhost", 9) == 1) { return 0x0100007F; }
+    var lit = sandhi_net_parse_ipv4(host);
+    if (lit != 0 - 1) { return lit; }
+    var dns = sandhi_resolve_ipv4(host);
+    if (dns != 0 - 1 && dns != 0) { return dns; }
+    return 0x0100007F;
 }
