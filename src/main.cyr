@@ -121,6 +121,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
     if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
+    if (streq(path, "/v1/models/catalog") == 1) { return handle_models_catalog(cfd); }
     if (streq(path, "/api/tags") == 1) { return handle_ollama_tags(cfd); }
     if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }

@@ -55,6 +55,54 @@ fn handle_models(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# Provider of the first ENABLED route whose patterns match `model`, or -1 if no
+# configured route can serve it. The pricing catalog (metadata.cyr) is global, but
+# the catalog endpoint must only advertise models THIS gateway can actually route.
+fn _catalog_provider_for(model) {
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (route_matches_model(r, model) == 1) { return route_provider(r); }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# GET /v1/models/catalog — concrete, switchable model ids (not provider names, and
+# not glob patterns) from the pricing catalog, each tagged with the provider that
+# would route it as `owned_by`. Only models an ENABLED route actually matches are
+# listed, so the catalog reflects what THIS gateway can serve. Shape mirrors
+# /v1/models so the same client parser works:
+#   {"object":"list","data":[{"id":"claude-sonnet-4","object":"model","owned_by":"anthropic"},...]}
+# Clients drill down per provider by filtering on owned_by.
+fn handle_models_catalog(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var n = metadata_count();
+    var first = 1;
+    var i = 0;
+    while (i < n) {
+        var key = metadata_key(i);
+        var prov = _catalog_provider_for(key);
+        if (prov != (0 - 1)) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"id\":\"");
+            str_builder_add_cstr(sb, key);
+            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+            str_builder_add_cstr(sb, provider_name(prov));
+            str_builder_add_cstr(sb, "\"}");
+            first = 0;
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 # Find the first enabled route for a provider type, or 0 if none.
 fn _router_find_provider(prov) {
     var routes = load64(_router + ROUTER_ROUTES);

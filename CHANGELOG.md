@@ -5,6 +5,24 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.9] — 2026-06-24
+
+**Concrete per-provider model catalog.** `/v1/models` lists provider *names* (one
+per enabled route); it does not enumerate the specific models a client can switch
+to. New endpoint surfaces them.
+
+### Added
+- **`GET /v1/models/catalog`** — concrete, switchable model ids from the pricing
+  catalog (metadata.cyr), each tagged with the provider that would route it as
+  `owned_by`. Only models an **enabled route actually matches** are listed, so the
+  catalog reflects what this gateway can serve (e.g. with no DeepSeek/Groq route
+  configured, those models are omitted; `o1` is omitted when only `o1-*` is
+  configured). Shape mirrors `/v1/models` so the same client parser works:
+  `{"object":"list","data":[{"id","object":"model","owned_by"}]}`. Clients drill
+  down per provider by filtering on `owned_by`. (`handle_models_catalog`,
+  `_catalog_provider_for`; new `metadata_count` / `metadata_key` accessors.)
+  `/v1/models` (provider list) is unchanged.
+
 ## [2.4.8] — 2026-06-24
 
 **Local providers reachable off-localhost + toolchain refresh.** Fixes a bug

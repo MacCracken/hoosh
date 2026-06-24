@@ -53,6 +53,12 @@ fn _meta_init() {
     return 0;
 }
 
+# Number of concrete priced models in the catalog (after lazy init).
+fn metadata_count() { _meta_init(); return _meta_n; }
+
+# The model-id key (cstr) of catalog entry i, 0 <= i < metadata_count().
+fn metadata_key(i) { _meta_init(); return load64(_meta_tbl + i * 48); }
+
 # Copy entry e's fields into out: ctx(0) tier(8) vision(16) tools(24) sys(32).
 fn _meta_copy(e, out) {
     store64(out, load64(e + 8));
