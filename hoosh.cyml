@@ -84,7 +84,7 @@ capacity = 500
 
 [[providers]]
 type = "Ollama"
-# base_url = "http://localhost:11434"  # default
+base_url = "http://192.168.1.186:11434"  # default
 priority = 1
 models = ["llama*", "mistral*", "qwen*", "phi*", "gemma*"]
 
