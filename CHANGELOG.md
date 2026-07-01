@@ -5,6 +5,28 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.11] — 2026-07-01
+
+**AGNOS cross-build readiness.** hoosh now compiles cleanly under
+`cyrius build --agnos`. Host build byte-identical; 457 assertions still pass.
+
+### Changed
+- **Networking ported to the portable `net.cyr` socket API.** The six
+  outbound-TCP sites (`main.cyr`, `lib/http_client.cyr` ×2, `lib/otlp.cyr`,
+  `lib/handlers.cyr` ×2) used raw Linux BSD sockets (`sys_socket` / `sys_connect`)
+  — undefined on agnos's frozen syscall surface. They now use `tcp_socket()` +
+  `sock_connect(fd, addr, port)`, which dispatch per target (Linux
+  `socket`/`connect`; agnos `sock_connect`#47 yielding a tagged fd). The existing
+  `sys_write` / `sys_read` / `sys_close` on the fd are unchanged — the agnos
+  syscall peer routes tagged fds to `sock_send`/`recv`/`close` (#48/#49/#50), so
+  hoosh's gateway networking **runs** on agnos, not merely compiles.
+
+### Fixed
+- **`--agnos` build**: guarded the Linux-only `THREAD_STACK_SIZE` knob in
+  `lib/hardware.cyr` (HW-probe threads) and `lib/pool.cyr` (worker pool) behind
+  `#ifndef CYRIUS_TARGET_AGNOS` — the agnos threading lib has no such global, so
+  detection and the pool fall back to their existing paths.
+
 ## [2.4.10] — 2026-06-30
 
 Tier-4 (consumer) step of the coordinated base-security-stack migration

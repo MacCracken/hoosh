@@ -437,11 +437,11 @@ fn cmd_health() {
         if (route_enabled(r) == 1) {
             var base = route_base_url(r);
             var up = 0;
-            var fd = sys_socket(2, 1, 0);
-            if (fd >= 0) {
-                var sa = sockaddr_in(host_addr(url_host(base)), url_port(base));
-                var cr = sys_connect(fd, sa, 16);
-                if (cr >= 0) { up = 1; }
+            var _sr = tcp_socket();
+            if (is_ok(_sr) == 1) {
+                var fd = payload(_sr);
+                var _cr = sock_connect(fd, host_addr(url_host(base)), url_port(base));
+                if (is_ok(_cr) == 1) { up = 1; }
                 sys_close(fd);
             }
             sys_write(1, "  ", 2);

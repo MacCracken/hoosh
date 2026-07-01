@@ -23,7 +23,13 @@ var _hw_registry = 0;
 # thread_create fails. Give the probe threads stack headroom for parsing CLI
 # output (matches the v2.4.0 worker pool); set before the first thread_create.
 fn hw_init() {
+    # THREAD_STACK_SIZE is a Linux/posix threading knob (lib/thread.cyr); the
+    # agnos threading lib (thread_agnos.cyr) has no such global. Guard the bump
+    # out on agnos — registry_detect_threaded() has an internal serial fallback
+    # when thread_create isn't available, so detection still runs there.
+    #ifndef CYRIUS_TARGET_AGNOS
     if (THREAD_STACK_SIZE < 1048576) { THREAD_STACK_SIZE = 1048576; }
+    #endif
     _hw_registry = registry_detect_threaded();
     return _hw_registry;
 }

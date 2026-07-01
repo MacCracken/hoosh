@@ -155,7 +155,11 @@ fn pool_start() {
     # Workers run the full request chain (was the 8 MB main stack; batch workers
     # already proved the chat path fits the 64 KB default). Give solid headroom
     # for deeper/other handlers — 7 × 1 MB is negligible.
+    # THREAD_STACK_SIZE is a Linux/posix knob (lib/thread.cyr) absent on agnos —
+    # guard the set-out there (agnos thread_create uses its own stack model).
+    #ifndef CYRIUS_TARGET_AGNOS
     THREAD_STACK_SIZE = 1048576;
+    #endif
     wq_init();
     var i = 1;
     while (i <= WORKER_COUNT) {

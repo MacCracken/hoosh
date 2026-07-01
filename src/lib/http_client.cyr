@@ -64,12 +64,12 @@ fn _build_post_header(buf, path, host, body_len) {
 # are reachable. body may be 0 with body_len 0 for bodyless methods. Returns
 # _http_parse_response result or 0.
 fn http_req_local(method, base_url, path, body, body_len) {
-    var fd = sys_socket(2, 1, 0);
-    if (fd < 0) { return 0; }
+    var _sr = tcp_socket();
+    if (is_ok(_sr) == 0) { return 0; }
+    var fd = payload(_sr);
     var host = url_host(base_url);
-    var sa = sockaddr_in(host_addr(host), url_port(base_url));
-    var cr = sys_connect(fd, sa, 16);
-    if (cr < 0) { sys_close(fd); return 0; }
+    var _cr = sock_connect(fd, host_addr(host), url_port(base_url));
+    if (is_ok(_cr) == 0) { sock_close(fd); return 0; }
     var hdr = alloc(2048);
     var hlen = _build_req_header(hdr, method, path, host, body_len);
     sys_write(fd, hdr, hlen);
@@ -96,12 +96,12 @@ fn http_post_local(base_url, path, body, body_len) {
 # Caller must skip HTTP headers then read chunks.
 # Returns fd (>= 0) or -1 on failure.
 fn http_post_stream(base_url, path, body, body_len) {
-    var fd = sys_socket(2, 1, 0);
-    if (fd < 0) { return 0 - 1; }
+    var _sr = tcp_socket();
+    if (is_ok(_sr) == 0) { return 0 - 1; }
+    var fd = payload(_sr);
     var host = url_host(base_url);
-    var sa = sockaddr_in(host_addr(host), url_port(base_url));
-    var cr = sys_connect(fd, sa, 16);
-    if (cr < 0) { sys_close(fd); return 0 - 1; }
+    var _cr = sock_connect(fd, host_addr(host), url_port(base_url));
+    if (is_ok(_cr) == 0) { sock_close(fd); return 0 - 1; }
     var hdr = alloc(2048);
     var hlen = _build_post_header(hdr, path, host, body_len);
     sys_write(fd, hdr, hlen);
