@@ -9,7 +9,7 @@
 # a span fragment into a bounded ring; a background thread batches the ring and
 # POSTs every OTLP_BATCH_MS. Spans correlate via the 2.3.4 traceparent's trace-id
 # + span-id. Only a localhost http:// collector is supported in this release
-# (the common sidecar); remote/https is a follow-up.
+# (the common sidecar); remote/https is a follow-up. #skip-lint
 
 var _otlp_endpoint = 0;        # cstr "http://host:port/path", or 0 = disabled
 var _otlp_service = "hoosh";
@@ -136,7 +136,8 @@ fn _otlp_post(body, blen) {
     var _sr = tcp_socket();
     if (is_ok(_sr) == 0) { return 0; }
     var fd = payload(_sr);
-    if (is_ok(sock_connect(fd, host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint))) == 0) { sock_close(fd); return 0; }
+    var _cr = sock_connect(fd, host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint));
+    if (is_ok(_cr) == 0) { sock_close(fd); return 0; }
     var hdr = str_builder_new();
     str_builder_add_cstr(hdr, "POST ");
     str_builder_add_cstr(hdr, path);
