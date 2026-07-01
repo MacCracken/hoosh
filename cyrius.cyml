@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.39"
+cyrius = "6.3.15"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -15,7 +15,7 @@ output = "build/hoosh"
 # bayan (6.1.27) is the consolidated bigint + toml + json module — the
 # standalone bigint/toml/json snapshot files were merged into it. It must
 # precede sigil (sigil references bayan's u256 surface).
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "tls", "sandhi", "assert", "bench"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
 # bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,

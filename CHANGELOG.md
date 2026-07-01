@@ -5,6 +5,31 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.10] — 2026-06-30
+
+Tier-4 (consumer) step of the coordinated base-security-stack migration
+to cyrius **6.3.15**. Toolchain pin + re-sync of the vendored bundles to
+the migrated versions, plus the stdlib boundary reconciliation the 6.3.x
+line requires. All 457 assertions pass on the new stack.
+
+### Changed
+
+- **Cyrius toolchain pin: 6.2.39 → 6.3.15.**
+- **Vendored bundles re-synced**: `src/vendor/majra.cyr` 2.4.7 → **2.5.0**
+  and `src/vendor/bote-core.cyr` 2.7.6 → **2.7.7** (the migrated tiers).
+- **`[deps] stdlib`**: added `atomic` + `sync` (patra's transitive
+  `lib/sync.cyr` requirement on 6.3.x), `random` (sigil's `random_bytes`
+  pull-through, before `sigil`), and `async` (tls/sandhi inter-dep on
+  6.3.x, before `tls`).
+
+### Fixed
+
+- **Vendored majra var-bomb** (`src/vendor/majra.cyr`). The stale 2.4.7
+  bundle carried the undersized `var ts[2]` / `var buf[2]` / `var hdr[1]`
+  locals that cyrius 6.3.13's move of function-local `var X[N]` arrays to
+  the guard-paged thread stack turns from a benign adjacent-scribble into
+  a hard SIGSEGV. The 2.5.0 re-sync brings the correctly-sized buffers.
+
 ## [2.4.9] — 2026-06-24
 
 **Concrete per-provider model catalog.** `/v1/models` lists provider *names* (one
