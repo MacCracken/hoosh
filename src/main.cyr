@@ -460,6 +460,48 @@ fn cmd_health() {
     return 1;
 }
 
+# Connect-latency micro-benchmark (perf detour): loop N tcp_socket+sock_connect+close
+# to <url>'s host:port via net.cyr — the exact connect path cmd_health / the gateway
+# use — and report avg connect latency. Isolates the connect from ELF-load/startup so
+# the number is comparable across Linux (native) and agnos (QEMU/SLIRP). agnos's
+# monotonic clock is 10ms-quantized (uptime_ms), so we time a loop TOTAL over many
+# connects and report the per-connect average (washes out the quantization when the
+# total >> 10ms).
+fn cmd_bench_connect(url, n) {
+    if (n <= 0) { n = 2000; }
+    var host = url_host(url);
+    var addr = host_addr(host);
+    var port = url_port(url);
+    # Warmup one connect so the timed loop measures steady-state (ARP/route primed,
+    # and on agnos the 8-slot conn table warmed), not first-connect setup.
+    var w = tcp_socket();
+    if (is_ok(w) == 1) { var wf = payload(w); sock_connect(wf, addr, port); sock_close(wf); }
+    var ok = 0;
+    var t0 = clock_now_ns();
+    var i = 0;
+    while (i < n) {
+        var sr = tcp_socket();
+        if (is_ok(sr) == 1) {
+            var fd = payload(sr);
+            if (is_ok(sock_connect(fd, addr, port)) == 1) { ok = ok + 1; }
+            sock_close(fd);
+        }
+        i = i + 1;
+    }
+    var t1 = clock_now_ns();
+    var total_us = (t1 - t0) / 1000;
+    var avg_us = total_us;
+    if (n > 0) { avg_us = total_us / n; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "bench: N=");    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, " ok=");         str_builder_add_int(sb, ok);
+    str_builder_add_cstr(sb, " total=");      str_builder_add_int(sb, total_us);
+    str_builder_add_cstr(sb, "us avg=");      str_builder_add_int(sb, avg_us);
+    str_builder_add_cstr(sb, "us/connect");
+    println(to_cstr(str_builder_build(sb)));
+    return 0;
+}
+
 fn cmd_infer(model, prompt) {
     var route = router_select(_router, model);
     if (route == 0) {
@@ -580,6 +622,12 @@ fn main() {
     }
     if (streq(cmd, "models") == 1) { return cmd_models(); }
     if (streq(cmd, "health") == 1) { return cmd_health(); }
+    if (streq(cmd, "bench") == 1) {
+        if (ac < 3) { println("Usage: hoosh bench <url> [count]"); return 1; }
+        var bn = 2000;
+        if (ac >= 4) { bn = atoi(argv(3)); }
+        return cmd_bench_connect(argv(2), bn);
+    }
     if (streq(cmd, "infer") == 1) {
         if (ac < 4) {
             println("Usage: hoosh infer <model> <prompt>");

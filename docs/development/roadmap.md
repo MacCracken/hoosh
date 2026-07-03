@@ -30,9 +30,15 @@ One line per release; see CHANGELOG for detail.
 | **2.4.4** | New backends — vLLM, TensorRT-LLM, ONNX Runtime (OpenAI-compatible local provider types) |
 | **2.4.5** | Hardening review — concurrency sync-pass fixes (cache_stats/tokens_pools), configurable routing strategy + working lowest-latency, dead-code removal ([ADR 011](../decisions/011-multithreaded-accept-loop.md) §2.4.5) |
 | **2.4.6** | Toolchain + dependency refresh — Cyrius 6.2.11, ai-hwaccel 2.3.12, bote 2.7.6 (`registry_new` → `tool_registry_new`), majra 2.4.7 |
+| **2.4.7** | Toolchain refresh — Cyrius 6.2.37 (single-pass include order) |
+| **2.4.8** | Local providers reachable off-localhost + toolchain refresh |
+| **2.4.9** | Concrete per-provider model catalog (`/v1/models` lists provider model names) |
+| **2.4.10** | Tier-4 consumer step of the coordinated base-security-stack migration |
+| **2.4.11** | AGNOS cross-build readiness — networking ported to the portable `net.cyr` socket API |
+| **2.4.12** | Tool-continuation fix — OpenAI `tool_calls`/`role:tool` messages now translate to Anthropic `tool_use`/`tool_result` blocks; agentic loops complete (was a misclassified 502) |
 
-**Toolchain**: Cyrius pin currently **6.2.11** (bumped per release; clean `lib/`
-re-sync each time — see [the bump note](#toolchain)).
+**Toolchain**: Cyrius pin bumped per release; clean `lib/` re-sync each time —
+see [the bump note](#toolchain).
 
 ---
 

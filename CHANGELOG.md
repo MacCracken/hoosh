@@ -5,6 +5,42 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.12] — 2026-07-03
+
+**Tool-continuation fix — agentic loops now complete on Anthropic backends.**
+The Anthropic request-builder copied OpenAI messages verbatim, so a follow-up
+turn carrying an assistant `tool_calls` message plus a `role:"tool"` result was
+sent to Anthropic unchanged — shapes the Messages API rejects — and the failure
+surfaced (misclassified) as `502 provider backend unreachable`. This broke every
+multi-step agentic tool loop: the model could call a tool once, but feeding the
+result back to continue failed. Single-turn and repeated-single-turn calls were
+unaffected, which is why the break was specific to the tool-continuation shape.
+
+### Fixed
+- **`_build_anthropic_body_x` (`src/lib/provider.cyr`) now translates OpenAI tool
+  messages into Anthropic content blocks** as it re-emits the `messages` array:
+  - an assistant message with `tool_calls` → `{"role":"assistant","content":[…]}`
+    with a `text` block (only when `content` is a non-empty string; `content:null`
+    is dropped) followed by one `tool_use` block per call — the call's `arguments`
+    **string** is unescaped into the `input` **object** (empty/absent → `{}`), and
+    `tool_use.id` carries the OpenAI `id` so it matches the tool result;
+  - a `role:"tool"` message → `{"role":"user","content":[{"type":"tool_result",
+    "tool_use_id":<tool_call_id>,"content":<result string>}]}`;
+  - every other message (plain `{role, content-string}`) still passes through
+    verbatim — already Anthropic-shaped.
+  New helper `_json_unesc_span` reverses JSON string-escaping so an `arguments`
+  string becomes a literal JSON object in `input`.
+
+### Verified
+- The exact filed repro (assistant `tool_calls` + `role:"tool"` continuation) now
+  returns **200** with a correct completion; streaming and a two-`tool_call` /
+  two-result continuation both return 200 (streaming also restores the closing
+  summary that previously came back empty).
+- Full vertical re-proven: thoth → hoosh (`claude-opus-4-8`) → tool call →
+  t-ron allow → daimon → bote 3.0.0 `fs_write` (file written) → **continuation
+  turn returns the final summary**; the one-shot agentic loop exits 0.
+- Suite green (457 assertions).
+
 ## [2.4.11] — 2026-07-01
 
 **AGNOS cross-build readiness.** hoosh now compiles cleanly under

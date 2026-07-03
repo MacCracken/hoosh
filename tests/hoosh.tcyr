@@ -2030,6 +2030,26 @@ fn _antc(s) {
     return _anthropic_tool_calls(b, n);
 }
 
+# Mirror of src/lib/provider.cyr _json_unesc_span — reverse JSON string-escaping
+# so an OpenAI `arguments` STRING becomes a literal JSON object for `input`.
+fn _json_unesc_span(sb, ptr, len) {
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i);
+        if (c == 92) {
+            if (i + 1 < len) {
+                var n = load8(ptr + i + 1);
+                if (n == 34) { str_builder_putc(sb, 34); i = i + 2; continue; }
+                if (n == 92) { str_builder_putc(sb, 92); i = i + 2; continue; }
+                str_builder_putc(sb, 92); i = i + 1; continue;
+            }
+        }
+        str_builder_putc(sb, c);
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _build_anthropic_body_x(model, messages_raw, messages_len, stream) {
     var sys_sb = str_builder_new();
     var msgs_sb = str_builder_new();
@@ -2067,9 +2087,95 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream) {
             }
         }
         if (keep == 1) {
-            if (first == 0) { str_builder_putc(msgs_sb, ','); }
-            str_builder_add(msgs_sb, str_new(messages_raw + obj_start, obj_len));
-            first = 0;
+            # Tool-continuation translation (mirror of src/lib/provider.cyr):
+            # assistant `tool_calls` -> content[] of tool_use blocks; `role:"tool"`
+            # -> a user message with a tool_result block; else verbatim.
+            var mp = messages_raw + obj_start;
+            var tcspan = _json_arr_span(mp, obj_len, "tool_calls", 10);
+            var is_tool = 0;
+            var rolef = _json_obj_str_field(mp, obj_len, "role", 4);
+            if (rolef != 0) {
+                if (load64(rolef + 8) == 4) {
+                    if (memeq(load64(rolef), "tool", 4) == 1) { is_tool = 1; }
+                }
+            }
+            if (tcspan != 0) {
+                if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                str_builder_add_cstr(msgs_sb, "{\"role\":\"assistant\",\"content\":[");
+                var bf = 1;
+                var cf2 = _json_obj_str_field(mp, obj_len, "content", 7);
+                if (cf2 != 0) {
+                    if (load64(cf2 + 8) > 0) {
+                        str_builder_add_cstr(msgs_sb, "{\"type\":\"text\",\"text\":\"");
+                        str_builder_add(msgs_sb, str_new(load64(cf2), load64(cf2 + 8)));
+                        str_builder_add_cstr(msgs_sb, "\"}");
+                        bf = 0;
+                    }
+                }
+                var tcp = load64(tcspan);
+                var tcl = load64(tcspan + 8);
+                var k = 1;
+                while (k < tcl) {
+                    if (load8(tcp + k) == 123) {
+                        var toe = _json_span_end(tcp, tcl, k);
+                        var tol = toe - k;
+                        var idf = _json_obj_str_field(tcp + k, tol, "id", 2);
+                        var fspan = _json_obj_obj_span(tcp + k, tol, "function", 8);
+                        if (idf != 0) {
+                            if (fspan != 0) {
+                                var fp = load64(fspan);
+                                var fl = load64(fspan + 8);
+                                var nmf = _json_obj_str_field(fp, fl, "name", 4);
+                                var argf = _json_obj_str_field(fp, fl, "arguments", 9);
+                                if (nmf != 0) {
+                                    if (bf == 0) { str_builder_putc(msgs_sb, ','); }
+                                    str_builder_add_cstr(msgs_sb, "{\"type\":\"tool_use\",\"id\":\"");
+                                    str_builder_add(msgs_sb, str_new(load64(idf), load64(idf + 8)));
+                                    str_builder_add_cstr(msgs_sb, "\",\"name\":\"");
+                                    str_builder_add(msgs_sb, str_new(load64(nmf), load64(nmf + 8)));
+                                    str_builder_add_cstr(msgs_sb, "\",\"input\":");
+                                    if (argf != 0) {
+                                        if (load64(argf + 8) > 0) {
+                                            _json_unesc_span(msgs_sb, load64(argf), load64(argf + 8));
+                                        } else {
+                                            str_builder_add_cstr(msgs_sb, "{}");
+                                        }
+                                    } else {
+                                        str_builder_add_cstr(msgs_sb, "{}");
+                                    }
+                                    str_builder_putc(msgs_sb, '}');
+                                    bf = 0;
+                                }
+                            }
+                        }
+                        k = toe;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                str_builder_add_cstr(msgs_sb, "]}");
+                first = 0;
+                keep = 0;
+            }
+            if (keep == 1) {
+                if (is_tool == 1) {
+                    var tidf = _json_obj_str_field(mp, obj_len, "tool_call_id", 12);
+                    var trc = _json_obj_str_field(mp, obj_len, "content", 7);
+                    if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                    str_builder_add_cstr(msgs_sb, "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"");
+                    if (tidf != 0) { str_builder_add(msgs_sb, str_new(load64(tidf), load64(tidf + 8))); }
+                    str_builder_add_cstr(msgs_sb, "\",\"content\":\"");
+                    if (trc != 0) { str_builder_add(msgs_sb, str_new(load64(trc), load64(trc + 8))); }
+                    str_builder_add_cstr(msgs_sb, "\"}]}");
+                    first = 0;
+                    keep = 0;
+                }
+            }
+            if (keep == 1) {
+                if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                str_builder_add(msgs_sb, str_new(mp, obj_len));
+                first = 0;
+            }
         }
         i = obj_end;
     }
@@ -4081,6 +4187,26 @@ fn main() {
     assert_streq(hb3,
     "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"A\\nB\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
     "anthropic hoist: two system turns joined with newline");
+
+    # Tool-continuation translation (regression guard for the 2.4.12 fix): an
+    # OpenAI assistant `tool_calls` message + a `role:"tool"` result become
+    # Anthropic `tool_use` / `tool_result` content blocks — the `arguments` STRING
+    # is unescaped into the `input` OBJECT, `content:null` drops, and the plain
+    # user turn passes through. Before 2.4.12 these were emitted verbatim, which
+    # Anthropic rejects (400) — surfaced as a misclassified 502.
+    var tm1 = "[{\"role\":\"user\",\"content\":\"read probe.txt\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"fs_read\",\"arguments\":\"{\\\"path\\\":\\\"probe.txt\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"hello\"}]";
+    var tb1 = _build_anthropic_body("claude", tm1, strlen(tm1));
+    assert_streq(tb1,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"read probe.txt\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"fs_read\",\"input\":{\"path\":\"probe.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"hello\"}]}]}",
+    "anthropic tool-continuation: tool_calls->tool_use (args unescaped), role:tool->tool_result");
+
+    # Assistant text preamble + tool_call: the non-empty `content` becomes a text
+    # block before the tool_use; an empty-object `arguments` stays {}.
+    var tm2 = "[{\"role\":\"assistant\",\"content\":\"Let me check\",\"tool_calls\":[{\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}]";
+    var tb2 = _build_anthropic_body("claude", tm2, strlen(tm2));
+    assert_streq(tb2,
+    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me check\"},{\"type\":\"tool_use\",\"id\":\"c2\",\"name\":\"ping\",\"input\":{}}]}]}",
+    "anthropic tool-continuation: assistant text preamble + tool_use, empty args -> {}");
 
     # Gemini shaping: OpenAI messages -> contents (assistant->model), system ->
     # systemInstruction; URL carries model + key query param.

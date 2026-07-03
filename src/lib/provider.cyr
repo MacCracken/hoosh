@@ -316,6 +316,32 @@ fn _json_esc_span(sb, ptr, len) {
     return 0;
 }
 
+# Unescape a JSON string's raw bytes into sb — the inverse of `_json_esc_span` for
+# the ONE layer of string-escaping that wraps an OpenAI tool_call's `arguments`
+# (a JSON OBJECT serialized as a string). A compact object embedded as a string
+# only carries `\"` and `\\` at that outer layer (inner escapes like a `\n` inside
+# a value become `\\n`), so reversing just `\"`→`"` and `\\`→`\` reconstructs the
+# object exactly; any other `\X` (incl. `\uXXXX`) is preserved verbatim — it is a
+# valid JSON escape INSIDE the reconstructed object. Used to turn OpenAI
+# `"arguments":"{...}"` into Anthropic `"input":{...}`.
+fn _json_unesc_span(sb, ptr, len) {
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i);
+        if (c == 92) {                 # backslash
+            if (i + 1 < len) {
+                var n = load8(ptr + i + 1);
+                if (n == 34) { str_builder_putc(sb, 34); i = i + 2; continue; }   # \" -> "
+                if (n == 92) { str_builder_putc(sb, 92); i = i + 2; continue; }   # \\ -> \
+                str_builder_putc(sb, 92); i = i + 1; continue;   # other \X: keep verbatim
+            }
+        }
+        str_builder_putc(sb, c);
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Convert an OpenAI `tools` array to Anthropic/Gemini shape. Each OpenAI tool is
 # `{"type":"function","function":{name,description,parameters}}`; we emit
 # `{"name","description","<schema_key>":<parameters>}` where schema_key is
@@ -414,9 +440,98 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
             }
         }
         if (keep == 1) {
-            if (first == 0) { str_builder_putc(msgs_sb, ','); }
-            str_builder_add(msgs_sb, str_new(messages_raw + obj_start, obj_len));
-            first = 0;
+            # Tool-continuation translation: OpenAI tool shapes are NOT valid Anthropic
+            # messages, so translate them into content blocks. An assistant turn with
+            # `tool_calls` -> content[] of `tool_use` blocks (each call's `arguments`
+            # STRING becomes `input` OBJECT via _json_unesc_span); a `role:"tool"` result
+            # -> a user message with a `tool_result` block. A plain {role,content-string}
+            # is already Anthropic-shaped and passes through verbatim (the else).
+            var mp = messages_raw + obj_start;
+            var tcspan = _json_arr_span(mp, obj_len, "tool_calls", 10);
+            var is_tool = 0;
+            var rolef = _json_obj_str_field(mp, obj_len, "role", 4);
+            if (rolef != 0) {
+                if (load64(rolef + 8) == 4) {
+                    if (memeq(load64(rolef), "tool", 4) == 1) { is_tool = 1; }
+                }
+            }
+            if (tcspan != 0) {
+                if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                str_builder_add_cstr(msgs_sb, "{\"role\":\"assistant\",\"content\":[");
+                var bf = 1;
+                var cf2 = _json_obj_str_field(mp, obj_len, "content", 7);
+                if (cf2 != 0) {
+                    if (load64(cf2 + 8) > 0) {
+                        str_builder_add_cstr(msgs_sb, "{\"type\":\"text\",\"text\":\"");
+                        str_builder_add(msgs_sb, str_new(load64(cf2), load64(cf2 + 8)));
+                        str_builder_add_cstr(msgs_sb, "\"}");
+                        bf = 0;
+                    }
+                }
+                var tcp = load64(tcspan);
+                var tcl = load64(tcspan + 8);
+                var k = 1;
+                while (k < tcl) {
+                    if (load8(tcp + k) == 123) {
+                        var toe = _json_span_end(tcp, tcl, k);
+                        var tol = toe - k;
+                        var idf = _json_obj_str_field(tcp + k, tol, "id", 2);
+                        var fspan = _json_obj_obj_span(tcp + k, tol, "function", 8);
+                        if (idf != 0) {
+                            if (fspan != 0) {
+                                var fp = load64(fspan);
+                                var fl = load64(fspan + 8);
+                                var nmf = _json_obj_str_field(fp, fl, "name", 4);
+                                var argf = _json_obj_str_field(fp, fl, "arguments", 9);
+                                if (nmf != 0) {
+                                    if (bf == 0) { str_builder_putc(msgs_sb, ','); }
+                                    str_builder_add_cstr(msgs_sb, "{\"type\":\"tool_use\",\"id\":\"");
+                                    str_builder_add(msgs_sb, str_new(load64(idf), load64(idf + 8)));
+                                    str_builder_add_cstr(msgs_sb, "\",\"name\":\"");
+                                    str_builder_add(msgs_sb, str_new(load64(nmf), load64(nmf + 8)));
+                                    str_builder_add_cstr(msgs_sb, "\",\"input\":");
+                                    if (argf != 0) {
+                                        if (load64(argf + 8) > 0) {
+                                            _json_unesc_span(msgs_sb, load64(argf), load64(argf + 8));
+                                        } else {
+                                            str_builder_add_cstr(msgs_sb, "{}");
+                                        }
+                                    } else {
+                                        str_builder_add_cstr(msgs_sb, "{}");
+                                    }
+                                    str_builder_putc(msgs_sb, '}');
+                                    bf = 0;
+                                }
+                            }
+                        }
+                        k = toe;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                str_builder_add_cstr(msgs_sb, "]}");
+                first = 0;
+                keep = 0;
+            }
+            if (keep == 1) {
+                if (is_tool == 1) {
+                    var tidf = _json_obj_str_field(mp, obj_len, "tool_call_id", 12);
+                    var trc = _json_obj_str_field(mp, obj_len, "content", 7);
+                    if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                    str_builder_add_cstr(msgs_sb, "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"");
+                    if (tidf != 0) { str_builder_add(msgs_sb, str_new(load64(tidf), load64(tidf + 8))); }
+                    str_builder_add_cstr(msgs_sb, "\",\"content\":\"");
+                    if (trc != 0) { str_builder_add(msgs_sb, str_new(load64(trc), load64(trc + 8))); }
+                    str_builder_add_cstr(msgs_sb, "\"}]}");
+                    first = 0;
+                    keep = 0;
+                }
+            }
+            if (keep == 1) {
+                if (first == 0) { str_builder_putc(msgs_sb, ','); }
+                str_builder_add(msgs_sb, str_new(mp, obj_len));
+                first = 0;
+            }
         }
         i = obj_end;
     }
