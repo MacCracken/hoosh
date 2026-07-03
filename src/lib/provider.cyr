@@ -321,8 +321,9 @@ fn _json_esc_span(sb, ptr, len) {
 # (a JSON OBJECT serialized as a string). A compact object embedded as a string
 # only carries `\"` and `\\` at that outer layer (inner escapes like a `\n` inside
 # a value become `\\n`), so reversing just `\"`→`"` and `\\`→`\` reconstructs the
-# object exactly; any other `\X` (incl. `\uXXXX`) is preserved verbatim — it is a
-# valid JSON escape INSIDE the reconstructed object. Used to turn OpenAI
+# object exactly; any other `\`-escape (e.g. `\n`, `\t`, a `\u` unicode escape) is
+# preserved verbatim — it is a valid JSON escape INSIDE the reconstructed object.
+# Used to turn OpenAI
 # `"arguments":"{...}"` into Anthropic `"input":{...}`.
 fn _json_unesc_span(sb, ptr, len) {
     var i = 0;
@@ -518,7 +519,8 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
                     var tidf = _json_obj_str_field(mp, obj_len, "tool_call_id", 12);
                     var trc = _json_obj_str_field(mp, obj_len, "content", 7);
                     if (first == 0) { str_builder_putc(msgs_sb, ','); }
-                    str_builder_add_cstr(msgs_sb, "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"");
+                    str_builder_add_cstr(msgs_sb, "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",");
+                    str_builder_add_cstr(msgs_sb, "\"tool_use_id\":\"");
                     if (tidf != 0) { str_builder_add(msgs_sb, str_new(load64(tidf), load64(tidf + 8))); }
                     str_builder_add_cstr(msgs_sb, "\",\"content\":\"");
                     if (trc != 0) { str_builder_add(msgs_sb, str_new(load64(trc), load64(trc + 8))); }
