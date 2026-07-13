@@ -5,6 +5,24 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.4.13] — 2026-07-13
+
+**Fix: a client disconnecting mid-stream (SIGPIPE) crashed the gateway.**
+
+### Fixed
+- **The gateway process died when an SSE-streaming client disconnected mid-response** — e.g. thoth aborting a
+  streaming turn with its Esc-interrupt. `cmd_serve` runs hoosh's own accept loop and writes SSE chunks with bare
+  `sys_write` (no `MSG_NOSIGNAL`), so the *next* chunk write after the client went away raised **SIGPIPE**, whose
+  default disposition **terminates the process**. hoosh crashed a moment after any interrupted stream, so every
+  following request "failed to connect." `cmd_serve` now installs the SIGPIPE→`SIG_IGN` guard at startup (sandhi's
+  proven `rt_sigaction` helper — the same one `sandhi_server_run` installs, which our hand-rolled loop bypassed), so
+  a write to a dead peer yields an `EPIPE` error instead of killing the gateway. Verified: repeated mid-stream client
+  aborts leave hoosh alive and serving subsequent requests.
+- **Follow-up (not in this patch):** the SSE writers don't yet check the `sys_write` return, so after a client
+  disconnects hoosh keeps pulling the rest of the response from the provider and writing (ignored) `EPIPE`s until the
+  upstream stream ends — harmless now (no crash) but wasteful. Detecting the write error to abort the upstream
+  early is a follow-up.
+
 ## [2.4.12] — 2026-07-03
 
 **Tool-continuation fix — agentic loops now complete on Anthropic backends.**

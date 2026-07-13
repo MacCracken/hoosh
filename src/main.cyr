@@ -297,6 +297,14 @@ fn cmd_serve(port) {
     var lr = sock_listen(sfd, 128);
     if (is_err_result(lr) == 1) { println("error: failed to listen"); return 1; }
 
+    # Ignore SIGPIPE (2.4.13): hoosh runs its OWN accept loop and writes SSE chunks with bare `sys_write`
+    # (MSG_NOSIGNAL-less), so a client that disconnects MID-STREAM — e.g. thoth's Esc-interrupt aborting a streaming
+    # turn — makes the NEXT chunk write raise SIGPIPE, whose default disposition TERMINATES the gateway. That killed
+    # hoosh a moment after any interrupted stream, so every following request "failed to connect." sandhi installs
+    # this guard inside `sandhi_server_run`, which our hand-rolled loop bypasses; call its proven portable helper
+    # (rt_sigaction SIGPIPE→SIG_IGN) once here so a dead peer yields an EPIPE write error instead of a crash.
+    _sandhi_server_ignore_sigpipe();
+
     sys_write(1, "hoosh v", 7);
     sys_write(1, HOOSH_VERSION, strlen(HOOSH_VERSION));
     sys_write(1, " listening on 0.0.0.0:", 22);
