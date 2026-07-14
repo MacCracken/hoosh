@@ -302,7 +302,7 @@ fn warming_run() {
             var body = _warming_body(model, prompt);
             var key = _cache_key(model, to_cstr(body), str_len(body));
             if (cache_get(_cache, key) == 0) {
-                var result = retry_forward(_retry_cfg, route, model, prompt, 0, 0, 0, 0);
+                var result = retry_forward(_retry_cfg, route, model, prompt, 0, 0, 0, 0, 0);
                 if (result != 0) {
                     var env = _chat_completion_body(model, load64(result),
                     load64(result + 16), load64(result + 24), 0);
@@ -1060,6 +1060,29 @@ fn _req_is_stream(body_ptr, body_len) {
     return 0;
 }
 
+# 2.5.0: the OpenAI `reasoning_effort` -> an Anthropic thinking EFFORT LEVEL (1=low, 2=medium, 3=high, 0=none), fed
+# to the adaptive `output_config.effort`. A RAW byte scan (like _req_is_stream), NOT json_get: clients put
+# reasoning_effort AFTER the nested `messages` array, which the flat json_parse can't reach. Matches
+# `"reasoning_effort":"low|medium|high"` (optional space) with a closing quote.
+fn _req_reasoning_effort(body_ptr, body_len) {
+    var i = 0;
+    while (i + 19 < body_len) {
+        if (memeq(body_ptr + i, "\"reasoning_effort\":", 19) == 1) {
+            var j = i + 19;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }   # skip spaces
+            if (j < body_len && load8(body_ptr + j) == 34) {                    # opening quote
+                j = j + 1;
+                if (j + 3 < body_len && memeq(body_ptr + j, "low", 3) == 1 && load8(body_ptr + j + 3) == 34) { return 1; }
+                if (j + 6 < body_len && memeq(body_ptr + j, "medium", 6) == 1 && load8(body_ptr + j + 6) == 34) { return 2; }
+                if (j + 4 < body_len && memeq(body_ptr + j, "high", 4) == 1 && load8(body_ptr + j + 4) == 34) { return 3; }
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Extract raw "messages" array from request body
 # Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0.
 # Balanced-bracket scan with JSON string handling (mirrors _extract_messages).
@@ -1172,6 +1195,32 @@ fn _sse_chunk(cfd, model, content, content_len) {
     return 0;
 }
 
+# Stream one SSE chunk carrying an extended-thinking delta (2.5.0) as `delta.reasoning_content` — the de-facto
+# OpenAI-compat field for a model's reasoning stream (DeepSeek/others use it), kept SEPARATE from `delta.content`
+# so a client can fold the reasoning apart from the answer. Byte-for-byte `_sse_chunk` but for the delta key.
+fn _sse_reasoning_chunk(cfd, model, content, content_len) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+    str_builder_add_cstr(sb, "\"delta\":{\"reasoning_content\":\"");
+    var cs = str_builder_build(sb);
+    var prefix = to_cstr(cs);
+    var plen = strlen(prefix);
+    var suffix = "\"},\"finish_reason\":null}]}";
+    var slen = strlen(suffix);
+    var total = plen + content_len + slen;
+    var buf = alloc(total + 1);
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, content, content_len);
+    memcpy(buf + plen + content_len, suffix, slen);
+    store8(buf + total, 0);
+    http_sse_event(cfd, buf, total);
+    return 0;
+}
+
 # Stream one SSE chunk wrapping a tool_calls delta (passed through verbatim).
 fn _sse_tool_chunk(cfd, model, tool_calls) {
     var sb = str_builder_new();
@@ -1263,6 +1312,14 @@ fn _remote_stream_cb(ctx, ev) {
         # content_block_delta carries delta.text; other event types have no
         # "text":"..." and extract to empty (skipped below).
         txt = anthropic_extract_text(data, dlen);
+        # 2.5.0 extended thinking: a thinking_delta -> emit a `reasoning_content` chunk (separate from the answer
+        # content so the client can fold it). Empty on text/signature/message events. Only sent when the request
+        # enabled thinking (budget_tokens), so this is inert for a normal turn.
+        var think = anthropic_extract_thinking(data, dlen);
+        if (strlen(think) > 0) {
+            _sse_reasoning_chunk(load64(ctx), load64(ctx + 8), think, strlen(think));
+            store64(ctx + 24, load64(ctx + 24) + 1);
+        }
     } else {
         if (prov == PROV_GOOGLE) {
             # candidates[].content.parts[].text
@@ -1305,10 +1362,10 @@ fn _remote_stream_cb(ctx, ev) {
 # Build the streaming request body for a remote provider. Tools are forwarded on
 # all three families; their streaming tool deltas are converted in
 # _remote_stream_cb.
-fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len) {
+fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, budget) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
-        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len);
+        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, budget);
     }
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
@@ -1325,7 +1382,7 @@ fn _remote_stream_url(route, model) {
 }
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
-fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len) {
+fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, budget) {
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -1334,7 +1391,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len)
     if (route_is_remote(route) == 1) {
         http_sse_begin(cfd);
         var sbody = _remote_stream_body(route, model, msg_raw, msg_len,
-        tools_raw, tools_len);
+        tools_raw, tools_len, budget);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
         var ctx = alloc(32);
@@ -1359,7 +1416,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len)
             if (emitted == 0) {
                 var rresult = retry_forward(
                 _retry_cfg, route, model, "hello", msg_raw, msg_len,
-                tools_raw, tools_len);
+                tools_raw, tools_len, budget);
                 if (rresult != 0) {
                     var rtext = load64(rresult);
                     if (strlen(rtext) > 0) {
@@ -1617,11 +1674,13 @@ fn _resp_write(cfd, r) {
 #   +8  route / terminal-descriptor   +16 model_cstr   +24 msg_raw
 #   +32 msg_raw_len   +40 tools_raw    +48 tools_len    +56 bpool
 #   +64 est_tokens    +72 prompt_cstr  +80 ckey         +88 sem_vec  +96 sem_n
+#   +104 thinking_budget (2.5.0)
 # Cache lookups are skipped when is_stream != 0 (matches the prior behavior:
 # streaming responses are never cache-served).
 fn _chat_prep(body_ptr, body_len, is_stream) {
-    var out = alloc(104);
+    var out = alloc(112);   # 2.5.0: +104 holds the extended-thinking budget (was alloc(104), fully used through +96)
     store64(out, 0);
+    store64(out + 104, 0);   # default: thinking off (set below from reasoning_effort)
     if (body_len == 0) {
         store64(out + 8, _resp_err("400", "Bad Request", "empty request body", "invalid_request_error"));
         return out;
@@ -1717,6 +1776,11 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     var est_tokens = 2048;
     var max_tok_str = json_get(pairs, str_from("max_tokens"));
     if (max_tok_str != 0) { est_tokens = str_to_int(max_tok_str); }
+
+    # 2.5.0 extended thinking: map the OpenAI `reasoning_effort` to an Anthropic thinking budget_tokens for THIS
+    # request, carried on the per-request prep struct (out + 88) — hoosh is multi-threaded, so a global would race.
+    # low/medium/high -> a budget; absent/unknown -> 0 (thinking off, request byte-identical to before).
+    store64(out + 104, _req_reasoning_effort(body_ptr, body_len));
     var bpool = budget_get_pool(_budget, pool_name);
     if (bpool != 0) {
         if (pool_available(bpool) < est_tokens) {
@@ -1800,7 +1864,7 @@ fn _chat_forward(prep) {
     var prompt_cstr = load64(prep + 72);
     return retry_forward(
     _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len,
-    tools_raw, tools_len);
+    tools_raw, tools_len, load64(prep + 104));
 }
 
 # Build the response descriptor from a forward result. Mutates shared state
@@ -1904,7 +1968,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
             return http_bad_request(cfd, "streaming requires messages array");
         }
         var sr = handle_chat_stream(
-        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len);
+        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104));
         if (bpool != 0) {
             mutex_lock(_chat_lock);
             pool_commit(bpool, est_tokens, 0);

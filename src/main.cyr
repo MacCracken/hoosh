@@ -516,7 +516,7 @@ fn cmd_infer(model, prompt) {
         println("error: no provider for model");
         return 1;
     }
-    var result = provider_forward(route, model, prompt, 0, 0, 0, 0);
+    var result = provider_forward(route, model, prompt, 0, 0, 0, 0, 0);   # 2.5.0: no thinking budget on the CLI infer path
     if (result == 0) {
         println("error: inference failed");
         return 1;

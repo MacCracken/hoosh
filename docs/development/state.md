@@ -9,8 +9,8 @@
 
 | | |
 |---|---|
-| **Version** | **2.4.13** (SIGPIPE fix — a client disconnecting mid-SSE-stream, e.g. thoth's Esc-interrupt, crashed the gateway; `cmd_serve` now installs SIGPIPE→SIG_IGN; see [CHANGELOG.md](../../CHANGELOG.md)) |
-| **Toolchain** | Cyrius pin **6.3.15** (`cyrius.cyml`) |
+| **Version** | **2.5.0** (extended thinking: `reasoning_effort` → Anthropic adaptive thinking + `output_config.effort`; a `reasoning_content` stream via `thinking_delta` translation — inert on Opus 4.8, which keeps reasoning internal; toolchain + deps refresh; see [CHANGELOG.md](../../CHANGELOG.md)) |
+| **Toolchain** | Cyrius pin **6.4.62** (`cyrius.cyml`); `ai-hwaccel` **2.3.14** |
 | **Binary** (x86_64 static ELF) | ~2.04 MB (`CYRIUS_DCE=1` build) |
 | **Source** | ~7,900 lines / 31 files (`src/main.cyr` + 30 `src/lib/*.cyr`) + 2 vendored distlib bundles (~5,150 lines) |
 | **Tests** | 459 assertions · 103 groups (`tests/hoosh.tcyr`) |

@@ -5,6 +5,33 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] — 2026-07-14
+
+**Extended thinking / reasoning: `reasoning_effort` control + a `reasoning_content` stream. Toolchain + deps refresh.**
+
+### Added
+- **`reasoning_effort` (`low`/`medium`/`high`) now controls Anthropic extended thinking.** hoosh maps it to the
+  model's **adaptive** thinking API — `"thinking":{"type":"adaptive"},"output_config":{"effort":"..."}` — and raises
+  `max_tokens` to leave room for a reasoning-influenced answer. This is the format current models (Opus 4.8, Sonnet
+  4.x) require; the legacy `"thinking":{"type":"enabled"}`+`budget_tokens` is **rejected** by them ("not supported
+  for this model"). The effort is read with a **raw byte scan** (`_req_reasoning_effort`, like `_req_is_stream`) —
+  NOT the flat `json_parse`, which can't reach a top-level key that follows the nested `messages` array (where
+  OpenAI clients put it). Threaded per-request on the prep struct (hoosh is multi-threaded — a global would race).
+  Without `reasoning_effort` the request is byte-identical to before.
+- **A `reasoning_content` streaming delta** — hoosh now translates a provider's reasoning stream into the de-facto
+  OpenAI-compat `delta.reasoning_content` field, kept SEPARATE from `delta.content` so a client can fold the
+  reasoning apart from the answer. For Anthropic, an SSE `thinking_delta` → `reasoning_content` (new
+  `anthropic_extract_thinking` + `_sse_reasoning_chunk`). Inert on a normal turn, and — usefully — inert on **Opus
+  4.8**, which keeps its reasoning INTERNAL (it streams only `text_delta`, never `thinking_delta`, even at high
+  effort); the translation is there for models that DO expose thinking. Verified live: `reasoning_effort` requests
+  complete (were rejected/empty before this cut); unit-tested (`_req_reasoning_effort` incl. the after-`messages`
+  case).
+
+### Changed
+- **Toolchain + dependency refresh**: Cyrius pin **6.3.15 → 6.4.62** (`cyrius.cyml`, vendored stdlib re-synced),
+  and the `ai-hwaccel` dep **2.3.12 → 2.3.14**. Build + the 459-test suite green on the new toolchain (464 with the
+  new `reasoning_effort` tests).
+
 ## [2.4.13] — 2026-07-13
 
 **Fix: a client disconnecting mid-stream (SIGPIPE) crashed the gateway.**

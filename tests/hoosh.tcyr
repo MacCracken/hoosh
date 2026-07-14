@@ -2754,12 +2754,47 @@ enum AuditField {
     AE_MODEL = 32; AE_HASH = 40; AE_SIG = 48; AE_PREV = 56;
 }
 
+# 2.5.0: copy of _req_reasoning_effort (handlers.cyr) — the raw byte scan mapping OpenAI reasoning_effort to an
+# Anthropic thinking effort level (1=low/2=medium/3=high/0=none). A raw scan, NOT json_get, because clients put
+# reasoning_effort AFTER the nested `messages` array, which hoosh's flat json_parse cannot reach.
+fn _req_reasoning_effort(body_ptr, body_len) {
+    var i = 0;
+    while (i + 19 < body_len) {
+        if (memeq(body_ptr + i, "\"reasoning_effort\":", 19) == 1) {
+            var j = i + 19;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            if (j < body_len && load8(body_ptr + j) == 34) {
+                j = j + 1;
+                if (j + 3 < body_len && memeq(body_ptr + j, "low", 3) == 1 && load8(body_ptr + j + 3) == 34) { return 1; }
+                if (j + 6 < body_len && memeq(body_ptr + j, "medium", 6) == 1 && load8(body_ptr + j + 6) == 34) { return 2; }
+                if (j + 4 < body_len && memeq(body_ptr + j, "high", 4) == 1 && load8(body_ptr + j + 4) == 34) { return 3; }
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ================================================================
 # TESTS
 # ================================================================
 
 fn main() {
     alloc_init();
+
+    # ── reasoning_effort parse (2.5.0) — CRUCIALLY, must find the key AFTER the nested messages array ─────
+    test_group("reasoning_effort");
+    var _rb1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"reasoning_effort\":\"high\",\"stream\":true}";
+    assert_eq(_req_reasoning_effort(_rb1, strlen(_rb1)), 3, "reasoning_effort AFTER messages -> high(3) (raw scan, not json_get)");
+    var _rb2 = "{\"reasoning_effort\":\"medium\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}";
+    assert_eq(_req_reasoning_effort(_rb2, strlen(_rb2)), 2, "reasoning_effort before messages -> medium(2)");
+    var _rb3 = "{\"reasoning_effort\": \"low\"}";
+    assert_eq(_req_reasoning_effort(_rb3, strlen(_rb3)), 1, "reasoning_effort with a space -> low(1)");
+    var _rb4 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    assert_eq(_req_reasoning_effort(_rb4, strlen(_rb4)), 0, "no reasoning_effort -> 0 (thinking off)");
+    var _rb5 = "{\"reasoning_effort\":\"bogus\"}";
+    assert_eq(_req_reasoning_effort(_rb5, strlen(_rb5)), 0, "unknown effort value -> 0");
 
     # ── Error types ──────────────────────────────────────────────
     test_group("error_types");
