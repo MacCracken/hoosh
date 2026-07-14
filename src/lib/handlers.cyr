@@ -1071,10 +1071,11 @@ fn _req_reasoning_effort(body_ptr, body_len) {
             var j = i + 19;
             while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }   # skip spaces
             if (j < body_len && load8(body_ptr + j) == 34) {                    # opening quote
-                j = j + 1;
-                if (j + 3 < body_len && memeq(body_ptr + j, "low", 3) == 1 && load8(body_ptr + j + 3) == 34) { return 1; }
-                if (j + 6 < body_len && memeq(body_ptr + j, "medium", 6) == 1 && load8(body_ptr + j + 6) == 34) { return 2; }
-                if (j + 4 < body_len && memeq(body_ptr + j, "high", 4) == 1 && load8(body_ptr + j + 4) == 34) { return 3; }
+                var p = body_ptr + j + 1;
+                var rem = body_len - j - 1;
+                if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
+                if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
+                if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
             }
             return 0;
         }
