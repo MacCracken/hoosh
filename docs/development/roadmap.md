@@ -110,25 +110,35 @@ it audits what the other bands leave behind, so it closes the arc. Items marked 
 > sending them alongside `reasoning_effort` would turn a working request into a 400.
 > Effort wins; sampling is dropped for that request.
 
-### v2.5.3 — Provider correctness
-- [ ] ⚠ **Groq default base URL is wrong** — `types.cyr:150` returns
-      `https://api.groq.com`; `_provider_url` concatenates, yielding
-      `…/v1/chat/completions`. Groq's OpenAI-compatible endpoint is under `/openai`
-      (Rust: `provider/groq.rs:21`). **The default Groq route 404s.**
-- [ ] ⚠ **Retry has no retryability gate** — `retry.cyr` carries no status inspection.
-      Rust gated on `HooshError::is_retryable()` (`provider/retry.rs:64`), failing fast
-      on 400/401/404. The port burns the full backoff schedule on permanent errors.
-- [ ] **Connect / total timeouts** — `connect_timeout(10s)`, 300 s provider total
-      (`client.rs:127`, `provider/mod.rs:26`).
-- [ ] **Ollama passthrough** — `options.temperature`, `options.num_predict` from
-      `max_tokens`; embeddings normalized to the OpenAI `{object:"list", data:[…]}`
-      envelope (`ollama.rs:125-133,314-340`).
-- [ ] **Model catalog completion** — Rust shipped 66 defaults behind a `>= 60` test
-      invariant. The Mistral family (`mistral-large`, `mistral-small`, `codestral`,
-      `pixtral-large`, `mistral-nemo`) and the local `llama3*` defaults are reported
-      absent (`provider/metadata.rs:523,579`).
-- [ ] **`ANTHROPIC_API_VERSION` env override** — hardcoded `"2023-06-01"` at
-      `provider.cyr:775`.
+### v2.5.3 — Provider correctness — ✅ SHIPPED 2026-07-22
+- [x] ⚠ **Groq default base URL is wrong** — now `https://api.groq.com/openai`, so the
+      default route builds Groq's real endpoint instead of 404ing.
+- [x] ⚠ **Retry has no retryability gate** — `provider_forward` now classifies the
+      response: a 4xx other than 408/429 returns `FWD_PERMANENT` and `retry_forward`
+      stops immediately. Measured: a backend 400 costs 1 attempt / ~7 ms (was 4
+      attempts over the full backoff); 500/429/503 still get all 4.
+- [x] ⚠ **No socket timeouts at all** — the local provider path had neither a connect
+      nor an I/O deadline, so a wedged backend pinned a worker thread forever; with
+      7 workers, seven such calls hang the gateway. Now `connect_timeout` 10 s
+      (`net_connect_nb`) + 300 s recv/send (`SO_RCVTIMEO`/`SO_SNDTIMEO`), matching
+      rust-old. Measured: a blackholed IP now fails at ~10 s, not the ~130 s OS default.
+- [x] ⚠ **Ollama never saw any sampling param** — Ollama's native `/api/chat` reads
+      `options.{temperature,top_p,num_predict}` and ignores the OpenAI-style top-level
+      fields, so 2.5.2's forwarding was inert for the flagship local provider. The body
+      builders now emit the native shape for ollama routes.
+- [x] **Model catalog completion** — 16 → 34 entries: the Mistral family
+      (`mistral-large`, `mistral-small`, `codestral`, `pixtral-large`,
+      `open-mistral-nemo`) and the local defaults (`llama3`/`3.1`/`3.2`/`3.3`,
+      `codellama`, `mistral`, `mixtral`, `qwen2.5`/`qwen3`, `gemma2`/`gemma3`, `phi3`,
+      `deepseek-r1`). Local models previously fell through the unknown-model path,
+      which skips context compaction and cost/tier reasoning entirely.
+- [x] **`ANTHROPIC_API_VERSION` env override** — was hardcoded `"2023-06-01"`.
+
+> **Deferred to 2.5.7**: Ollama's embeddings response is still passed through rather
+> than normalized to the OpenAI `{object:"list", data:[…]}` envelope
+> (`ollama.rs:314-340`). `/v1/embeddings` needs its own pass — see
+> [the review](rust-old-parity-review.md)'s note that the handler also passes a port
+> where a base-url cstr is expected.
 
 ### v2.5.4 — Cache expiry
 - [ ] ⚠ **`[cache] ttl_secs` is inert** — `hoosh.cyml:33` ships `ttl_secs = 300`;

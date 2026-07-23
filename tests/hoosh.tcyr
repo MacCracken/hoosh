@@ -1244,6 +1244,68 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.3 provider correctness mirrors ──
+# Mirror of src/lib/types.cyr status_retryable — 408/429/5xx retryable.
+fn _t_status_retryable(st) {
+    if (st == 408 || st == 429) { return 1; }
+    if (st >= 500) { return 1; }
+    if (st >= 400) { return 0; }
+    return 1;
+}
+
+# Mirror of src/lib/types.cyr provider_default_url for the remote providers
+# whose base URL carries a path prefix.
+fn _t_default_url(prov) {
+    if (prov == 10) { return "https://api.groq.com/openai"; }
+    if (prov == 12) { return "https://openrouter.ai/api"; }
+    if (prov == 6) { return "https://api.anthropic.com"; }
+    return "http://localhost:8080";
+}
+
+# Mirror of src/lib/types.cyr _sb_add_sampling — the ollama=1 branch nests the
+# knobs under `options` and renames the cap to num_predict.
+fn _t_sampling_str(gen_mt, gen_tp, gen_pp, ollama) {
+    var sb = str_builder_new();
+    if (gen_mt <= 0 && gen_tp == _T_GEN_UNSET && gen_pp == _T_GEN_UNSET) {
+        return str_cstr(str_builder_build(sb));
+    }
+    if (ollama == 1) {
+        str_builder_add_cstr(sb, ",\"options\":{");
+        var first = 1;
+        if (gen_tp != _T_GEN_UNSET) {
+            str_builder_add_cstr(sb, "\"temperature\":");
+            _t_sb_add_milli(sb, gen_tp);
+            first = 0;
+        }
+        if (gen_pp != _T_GEN_UNSET) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"top_p\":");
+            _t_sb_add_milli(sb, gen_pp);
+            first = 0;
+        }
+        if (gen_mt > 0) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"num_predict\":");
+            str_builder_add_int(sb, gen_mt);
+        }
+        str_builder_add_cstr(sb, "}");
+        return str_cstr(str_builder_build(sb));
+    }
+    if (gen_mt > 0) {
+        str_builder_add_cstr(sb, ",\"max_tokens\":");
+        str_builder_add_int(sb, gen_mt);
+    }
+    if (gen_tp != _T_GEN_UNSET) {
+        str_builder_add_cstr(sb, ",\"temperature\":");
+        _t_sb_add_milli(sb, gen_tp);
+    }
+    if (gen_pp != _T_GEN_UNSET) {
+        str_builder_add_cstr(sb, ",\"top_p\":");
+        _t_sb_add_milli(sb, gen_pp);
+    }
+    return str_cstr(str_builder_build(sb));
+}
+
 # Mirror of src/main.cyr _requires_post — POST-only (body-taking) paths.
 fn _t_requires_post(path) {
     if (streq(path, "/v1/chat/completions") == 1) { return 1; }
@@ -5062,6 +5124,60 @@ fn main() {
     assert_eq(_t_requires_post("/v1/models"), 0, "post: models unenforced");
     assert_eq(_t_requires_post("/v1/health"), 0, "post: health unenforced");
     assert_eq(_t_requires_post("/metrics"), 0, "post: metrics unenforced");
+
+    # ── v2.5.3 provider correctness ──
+    test_group("status_retryable");
+    # rust-old gated backoff on is_retryable; the port retried everything and
+    # spent the full ~30 s schedule proving a 400 was still a 400.
+    assert_eq(_t_status_retryable(400), 0, "retry: 400 permanent");
+    assert_eq(_t_status_retryable(401), 0, "retry: 401 permanent");
+    assert_eq(_t_status_retryable(403), 0, "retry: 403 permanent");
+    assert_eq(_t_status_retryable(404), 0, "retry: 404 permanent");
+    assert_eq(_t_status_retryable(422), 0, "retry: 422 permanent");
+    # 408/429 are the two 4xx worth another attempt.
+    assert_eq(_t_status_retryable(408), 1, "retry: 408 retryable");
+    assert_eq(_t_status_retryable(429), 1, "retry: 429 retryable");
+    assert_eq(_t_status_retryable(500), 1, "retry: 500 retryable");
+    assert_eq(_t_status_retryable(502), 1, "retry: 502 retryable");
+    assert_eq(_t_status_retryable(503), 1, "retry: 503 retryable");
+
+    test_group("groq_base_url");
+    # Groq's OpenAI-compatible surface is under /openai — without the prefix
+    # every request builds .../v1/chat/completions and 404s.
+    assert_streq(_t_default_url(10), "https://api.groq.com/openai", "groq: /openai prefix present");
+    # Concatenation with the chat path must yield Groq's real endpoint.
+    var gsb = str_builder_new();
+    str_builder_add_cstr(gsb, _t_default_url(10));
+    str_builder_add_cstr(gsb, "/v1/chat/completions");
+    assert_streq(str_cstr(str_builder_build(gsb)),
+    "https://api.groq.com/openai/v1/chat/completions", "groq: full URL correct");
+    # OpenRouter's existing /api prefix must be unaffected.
+    assert_streq(_t_default_url(12), "https://openrouter.ai/api", "groq fix: openrouter untouched");
+
+    test_group("ollama_native_sampling");
+    # Ollama's /api/chat ignores top-level temperature/max_tokens — it reads
+    # options.{temperature,top_p,num_predict}. Emitting the OpenAI shape for an
+    # ollama route silently dropped every sampling param.
+    assert_streq(_t_sampling_str(512, 700, 900, 1),
+    ",\"options\":{\"temperature\":0.7,\"top_p\":0.9,\"num_predict\":512}",
+    "ollama: nested options with num_predict");
+    assert_streq(_t_sampling_str(512, 700, 900, 0),
+    ",\"max_tokens\":512,\"temperature\":0.7,\"top_p\":0.9",
+    "openai-compat: flat top-level fields");
+    # Partial sets must not emit a dangling comma inside options.
+    assert_streq(_t_sampling_str(0, 700, _T_GEN_UNSET, 1),
+    ",\"options\":{\"temperature\":0.7}", "ollama: temperature only");
+    assert_streq(_t_sampling_str(256, _T_GEN_UNSET, _T_GEN_UNSET, 1),
+    ",\"options\":{\"num_predict\":256}", "ollama: num_predict only");
+    # Nothing set -> nothing emitted, so the body stays byte-identical to a
+    # pre-2.5.2 request.
+    assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 1), "",
+    "ollama: no params -> no options object");
+    assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 0), "",
+    "openai-compat: no params -> nothing emitted");
+    # temperature 0 must still emit for Ollama.
+    assert_streq(_t_sampling_str(0, 0, _T_GEN_UNSET, 1),
+    ",\"options\":{\"temperature\":0}", "ollama: temperature 0 emitted");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

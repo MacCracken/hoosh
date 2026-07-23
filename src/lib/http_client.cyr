@@ -1,6 +1,13 @@
 # http_client.cyr — HTTP POST client for forwarding to provider backends
 # Uses raw TCP sockets with proper CRLF byte construction
 
+# Socket deadlines for the local (plaintext) provider path, matching rust-old:
+# connect_timeout(10s) from client.rs:127 and the 300 s request timeout from
+# provider/mod.rs:26. Before 2.5.3 there were none — a backend that accepted a
+# connection and then went silent pinned a worker thread forever.
+var HTTP_CONNECT_TIMEOUT_MS = 10000;
+var HTTP_IO_TIMEOUT_S = 300;
+
 # Generic request header for an arbitrary method (GET/POST/DELETE/...).
 # method must be a cstr like "POST" or "DELETE"; a single space follows it.
 fn _build_req_header(buf, method, path, host, body_len) {
@@ -68,8 +75,17 @@ fn http_req_local(method, base_url, path, body, body_len) {
     if (is_ok(_sr) == 0) { return 0; }
     var fd = payload(_sr);
     var host = url_host(base_url);
-    var _cr = sock_connect(fd, host_addr(host), url_port(base_url));
-    if (is_ok(_cr) == 0) { sock_close(fd); return 0; }
+    # 2.5.3: bounded connect + read/write. rust-old had connect_timeout(10s) and
+    # a 300 s request timeout (client.rs:127, provider/mod.rs:26); the port had
+    # NEITHER, so a wedged local backend parked a worker inside connect() or
+    # read() indefinitely — and with only 7 workers, seven such calls hang the
+    # whole gateway.
+    if (net_connect_nb(fd, host_addr(host), url_port(base_url), HTTP_CONNECT_TIMEOUT_MS) != 0) {
+        sock_close(fd);
+        return 0;
+    }
+    sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
+    sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     var hdr = alloc(2048);
     var hlen = _build_req_header(hdr, method, path, host, body_len);
     sys_write(fd, hdr, hlen);
@@ -100,8 +116,15 @@ fn http_post_stream(base_url, path, body, body_len) {
     if (is_ok(_sr) == 0) { return 0 - 1; }
     var fd = payload(_sr);
     var host = url_host(base_url);
-    var _cr = sock_connect(fd, host_addr(host), url_port(base_url));
-    if (is_ok(_cr) == 0) { sock_close(fd); return 0 - 1; }
+    if (net_connect_nb(fd, host_addr(host), url_port(base_url), HTTP_CONNECT_TIMEOUT_MS) != 0) {
+        sock_close(fd);
+        return 0 - 1;
+    }
+    # The read timeout is the whole-stream idle bound, not a per-token one: an
+    # SSE stream legitimately pauses between tokens, so this only fires when the
+    # backend has genuinely stopped talking.
+    sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
+    sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     var hdr = alloc(2048);
     var hlen = _build_post_header(hdr, path, host, body_len);
     sys_write(fd, hdr, hlen);

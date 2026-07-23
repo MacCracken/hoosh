@@ -6,7 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-22 (**v2.5.2** — request-path fidelity, the second
+> **Last refresh**: 2026-07-22 (**v2.5.3** — provider correctness, the third
+> closeout band). Doc touch: CHANGELOG [2.5.3], roadmap (2.5.3 marked shipped +
+> an embeddings-normalization gap deferred to 2.5.7), CLAUDE.md pin. Gates: 535
+> tests, 17 benches, clean.
+> **Prior**: 2026-07-22 (**v2.5.2** — request-path fidelity, the second
 > closeout band). Doc touch: CHANGELOG [2.5.2], roadmap (2.5.2 marked shipped +
 > an Anthropic thinking-vs-sampling note), hoosh.cyml (per-provider knob comment
 > incl. `max_tokens_limit`), CLAUDE.md pin. Gates: 515 tests, 17 benches, clean.

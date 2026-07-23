@@ -26,7 +26,7 @@ fn _sb_add_span(sb, ptr, len) {
     return 0;
 }
 
-fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
+fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -36,13 +36,13 @@ fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len,
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
     }
-    _sb_add_sampling(sb, gen);
+    _sb_add_sampling(sb, gen, ollama);
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
 
 # Build streaming chat body from model + raw messages (+ optional tools).
-fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
+fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -52,7 +52,7 @@ fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, too
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
     }
-    _sb_add_sampling(sb, gen);
+    _sb_add_sampling(sb, gen, ollama);
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
@@ -799,7 +799,12 @@ fn _provider_headers(route) {
     if (key != 0) {
         if (route_provider(route) == PROV_ANTHROPIC) {
             sandhi_headers_add(h, "x-api-key", key);
-            sandhi_headers_add(h, "anthropic-version", "2023-06-01");
+            # ANTHROPIC_API_VERSION overrides the pinned default, so a new API
+            # version can be adopted without a rebuild (rust-old read the same
+            # env var). Unset -> the version hoosh is tested against.
+            var av = getenv("ANTHROPIC_API_VERSION");
+            if (av == 0) { av = "2023-06-01"; }
+            sandhi_headers_add(h, "anthropic-version", av);
         } else {
             if (route_provider(route) != PROV_GOOGLE) {
                 sandhi_headers_add(h, "Authorization", _bearer_value(key));
@@ -1023,8 +1028,9 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             }
         } else {
             if (messages_raw != 0) {
+                # Ollama's native /api/chat nests sampling under `options`.
                 body = _build_chat_body_raw(model, messages_raw, messages_len,
-                tools_raw, tools_len, gen);
+                tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA));
             } else {
                 body = _build_chat_body(model, prompt);
             }
@@ -1050,8 +1056,15 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);
-        if (sst < 200) { return 0; }
-        if (sst >= 300) { return 0; }
+        if (sst < 200 || sst >= 300) {
+            # 2.5.3: a 4xx that is not 408/429 will fail identically on every
+            # attempt — report it as permanent so retry_forward stops now.
+            if (status_retryable(sst) == 0) {
+                hlog_warn("provider: permanent error, not retrying");
+                return FWD_PERMANENT;
+            }
+            return 0;
+        }
         # Copy into a buffer with 1 byte of slack: the extractors below
         # null-terminate in place (store8(buf+len, 0)), and sandhi's body
         # buffer has no guaranteed trailing slack — writing past it corrupts
@@ -1064,8 +1077,14 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         # Local path: raw socket to the URL's host:port, plaintext.
         var resp = http_post_local(base, path, body, blen);
         if (resp == 0) { return 0; }
-        if (http_status(resp) < 200) { return 0; }
-        if (http_status(resp) >= 300) { return 0; }
+        var lst = http_status(resp);
+        if (lst < 200 || lst >= 300) {
+            if (status_retryable(lst) == 0) {
+                hlog_warn("provider: permanent error, not retrying");
+                return FWD_PERMANENT;
+            }
+            return 0;
+        }
         rb = http_body(resp);
         rbl = http_body_len(resp);
     }
@@ -1132,7 +1151,7 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, gen) {
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
-    model, messages_raw, messages_len, 0, 0, gen);
+    model, messages_raw, messages_len, 0, 0, gen, (route_provider(route) == PROV_OLLAMA));
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

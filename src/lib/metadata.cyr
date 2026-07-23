@@ -29,9 +29,14 @@ fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys) {
     return 0;
 }
 
+# Catalog size. Lookup is exact-match then LONGEST-PREFIX, so a general key
+# ("llama3") and a specific one ("llama3.1") can coexist — the specific entry
+# wins for the models that carry its prefix.
+var _META_CAP = 34;
+
 fn _meta_init() {
     if (_meta_tbl != 0) { return 0; }
-    var arr = alloc(16 * 48);
+    var arr = alloc(_META_CAP * 48);
     _meta_add(arr, 0, "claude-opus-4", 200000, TIER_PREMIUM, 1, 1, 1);
     _meta_add(arr, 1, "claude-sonnet-4", 200000, TIER_STANDARD, 1, 1, 1);
     _meta_add(arr, 2, "claude-3.5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
@@ -48,8 +53,30 @@ fn _meta_init() {
     _meta_add(arr, 13, "llama-3.3-70b", 128000, TIER_STANDARD, 0, 1, 1);
     _meta_add(arr, 14, "llama-3.1-8b", 128000, TIER_ECONOMY, 0, 0, 1);
     _meta_add(arr, 15, "gemini-2.0-flash", 1048576, TIER_ECONOMY, 1, 1, 1);
+    # Mistral family (2.5.3 — absent since the port; rust-old metadata.rs:523).
+    _meta_add(arr, 16, "mistral-large", 128000, TIER_PREMIUM, 0, 1, 1);
+    _meta_add(arr, 17, "mistral-small", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 18, "codestral", 256000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 19, "pixtral-large", 128000, TIER_PREMIUM, 1, 1, 1);
+    _meta_add(arr, 20, "open-mistral-nemo", 128000, TIER_ECONOMY, 0, 1, 1);
+    # Local Ollama / llama.cpp defaults (rust-old metadata.rs:579). Without
+    # these, every local model fell through to the unknown-model path, which
+    # skips context compaction and cost/tier reasoning entirely.
+    _meta_add(arr, 21, "llama3", 8192, TIER_STANDARD, 0, 0, 1);
+    _meta_add(arr, 22, "llama3.1", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 23, "llama3.2", 128000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 24, "llama3.3", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 25, "codellama", 16384, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 26, "mistral", 32768, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 27, "mixtral", 32768, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 28, "qwen2.5", 32768, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 29, "qwen3", 32768, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 30, "gemma2", 8192, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 31, "gemma3", 128000, TIER_ECONOMY, 1, 0, 1);
+    _meta_add(arr, 32, "phi3", 128000, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 33, "deepseek-r1", 65536, TIER_REASONING, 0, 0, 1);
     _meta_tbl = arr;
-    _meta_n = 16;
+    _meta_n = _META_CAP;
     return 0;
 }
 

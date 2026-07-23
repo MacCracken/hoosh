@@ -50,6 +50,11 @@ fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_l
     while (attempt <= max) {
         var result = provider_forward(
         route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, gen);
+        # 2.5.3: a permanent failure (4xx that is not 408/429) is returned as
+        # FWD_PERMANENT and ends the loop immediately — retrying a 400/401/404
+        # cannot change the answer, and the old unconditional loop spent the
+        # whole backoff schedule (up to ~30 s) proving that.
+        if (result == FWD_PERMANENT) { return 0; }
         if (result != 0) { return result; }
         if (attempt >= max) { return 0; }
         var delay = retry_delay_ms(cfg, attempt);

@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.5.2";
+var HOOSH_VERSION = "2.5.3";
 
 # ================================================================
 # Error types
@@ -147,7 +147,10 @@ fn provider_default_url(prov) {
     if (prov == PROV_DEEPSEEK) { return "https://api.deepseek.com"; }
     if (prov == PROV_MISTRAL) { return "https://api.mistral.ai"; }
     if (prov == PROV_GOOGLE) { return "https://generativelanguage.googleapis.com"; }
-    if (prov == PROV_GROQ) { return "https://api.groq.com"; }
+    # Groq's OpenAI-compatible surface lives under /openai — without the prefix
+    # every request builds https://api.groq.com/v1/chat/completions and 404s.
+    # rust-old had this right (provider/groq.rs:21); the port dropped it.
+    if (prov == PROV_GROQ) { return "https://api.groq.com/openai"; }
     if (prov == PROV_GROK) { return "https://api.x.ai"; }
     if (prov == PROV_OPENROUTER) { return "https://openrouter.ai/api"; }
     if (prov == PROV_VLLM) { return "http://localhost:8000"; }
@@ -233,23 +236,72 @@ fn _sb_add_milli(sb, v) {
     return 0;
 }
 
-# Append the OpenAI-compatible sampling fields a request actually set. Each is
-# prefixed with a comma, so the caller must have emitted at least one field.
-fn _sb_add_sampling(sb, gen) {
+# Append the sampling fields a request actually set. Each is prefixed with a
+# comma, so the caller must have emitted at least one field.
+#
+# `ollama` selects Ollama's NATIVE /api/chat shape, which nests the knobs under
+# `options` and calls the output cap `num_predict`. Ollama ignores the
+# OpenAI-style top-level fields entirely, so emitting those for an ollama route
+# silently dropped every sampling param (2.5.2 forwarded them but Ollama — the
+# flagship local provider — never saw them).
+fn _sb_add_sampling(sb, gen, ollama) {
     var mt = gen_max_tokens(gen);
+    var tp = gen_temp(gen);
+    var pp = gen_top_p(gen);
+    if (mt <= 0 && tp == GEN_UNSET && pp == GEN_UNSET) { return 0; }
+
+    if (ollama == 1) {
+        str_builder_add_cstr(sb, ",\"options\":{");
+        var first = 1;
+        if (tp != GEN_UNSET) {
+            str_builder_add_cstr(sb, "\"temperature\":");
+            _sb_add_milli(sb, tp);
+            first = 0;
+        }
+        if (pp != GEN_UNSET) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"top_p\":");
+            _sb_add_milli(sb, pp);
+            first = 0;
+        }
+        if (mt > 0) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"num_predict\":");
+            str_builder_add_int(sb, mt);
+        }
+        str_builder_add_cstr(sb, "}");
+        return 0;
+    }
+
     if (mt > 0) {
         str_builder_add_cstr(sb, ",\"max_tokens\":");
         str_builder_add_int(sb, mt);
     }
-    var tp = gen_temp(gen);
     if (tp != GEN_UNSET) {
         str_builder_add_cstr(sb, ",\"temperature\":");
         _sb_add_milli(sb, tp);
     }
-    var pp = gen_top_p(gen);
     if (pp != GEN_UNSET) {
         str_builder_add_cstr(sb, ",\"top_p\":");
         _sb_add_milli(sb, pp);
     }
     return 0;
+}
+
+# ================================================================
+# Provider forward outcome (2.5.3)
+# ================================================================
+#
+# A success is a pointer (> 0). 0 is a RETRYABLE failure — connect error,
+# timeout, 429, 5xx. FWD_PERMANENT is a failure retrying cannot fix (4xx other
+# than 408/429): rust-old gated its backoff on HooshError::is_retryable
+# (provider/retry.rs:64), while the port retried everything and burned the full
+# schedule on requests that could never succeed.
+var FWD_PERMANENT = 0 - 2;
+
+fn status_retryable(st) {
+    if (st == 408 || st == 429) { return 1; }
+    if (st >= 500) { return 1; }
+    if (st >= 400) { return 0; }
+    return 1;
 }

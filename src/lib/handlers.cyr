@@ -1483,7 +1483,8 @@ fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
     }
-    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen);
+    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen,
+    (prov == PROV_OLLAMA));
 }
 
 # Build the streaming request URL for a remote provider.

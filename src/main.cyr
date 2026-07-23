@@ -566,7 +566,8 @@ fn cmd_infer(model, prompt) {
         return 1;
     }
     var result = provider_forward(route, model, prompt, 0, 0, 0, 0, 0);   # 2.5.0: no thinking on CLI infer
-    if (result == 0) {
+    # <= 0 covers both the retryable (0) and permanent (FWD_PERMANENT) failures.
+    if (result <= 0) {
         println("error: inference failed");
         return 1;
     }

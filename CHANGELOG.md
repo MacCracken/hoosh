@@ -5,6 +5,53 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.3] — 2026-07-22
+
+**Provider correctness — the third band of the rust-old parity closeout arc.** Four defects that made hoosh
+misbehave against real backends: a default route that 404s, retries that never gave up, sockets with no
+deadlines, and sampling params that never reached Ollama.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **The default Groq route 404s.** `provider_default_url` returned `https://api.groq.com`, and since the URL is
+  built by plain concatenation every request went to `https://api.groq.com/v1/chat/completions`. Groq's
+  OpenAI-compatible surface lives under `/openai`. rust-old had this right (`provider/groq.rs:21`); the port
+  dropped the prefix. Now `https://api.groq.com/openai`.
+- **Retries burned the full backoff schedule on permanent errors.** `provider_forward` returned a bare 0 for
+  every failure, so `retry_forward` could not tell "the backend is down" from "your request is malformed" and
+  retried a 400 four times over ~30 s. It now classifies the response and returns `FWD_PERMANENT` for a 4xx that
+  is not 408/429, which ends the loop immediately. rust-old gated this on `HooshError::is_retryable`
+  (`provider/retry.rs:64`). Measured against a mock backend: a 400 now costs **1 attempt / ~7 ms** (was 4
+  attempts / ~1.6 s at the test config); 500, 429 and 503 still get all four.
+- **The local provider path had no socket timeouts at all** — neither connect nor read/write. A backend that
+  accepted a connection and then went silent pinned a worker thread **forever**; with a 7-worker pool, seven
+  such calls hang the gateway with no recovery short of a restart. Now `connect_timeout` 10 s (via
+  `net_connect_nb`) plus 300 s `SO_RCVTIMEO`/`SO_SNDTIMEO`, matching rust-old's `client.rs:127` and
+  `provider/mod.rs:26`. Measured: a request to a blackholed IP now fails at **~10 s** instead of the ~130 s
+  kernel default. The streaming path gets the same deadlines — the read timeout is a whole-stream idle bound,
+  so a normally-paused SSE stream is unaffected.
+- **Ollama ignored every sampling parameter.** Ollama's native `/api/chat` reads
+  `options.{temperature,top_p,num_predict}` and discards the OpenAI-style top-level fields — so 2.5.2's
+  forwarding work was inert for the flagship local provider. The body builders now emit the native shape for
+  ollama routes and the flat shape for everyone else.
+
+### Added
+- **`ANTHROPIC_API_VERSION` env override** — the `anthropic-version` header was hardcoded to `2023-06-01`, so
+  adopting a new API version required a rebuild. rust-old read the same variable.
+- **18 more model catalog entries** (16 → 34): the Mistral family (`mistral-large`, `mistral-small`,
+  `codestral`, `pixtral-large`, `open-mistral-nemo`) and the local Ollama/llama.cpp defaults (`llama3`,
+  `llama3.1`, `llama3.2`, `llama3.3`, `codellama`, `mistral`, `mixtral`, `qwen2.5`, `qwen3`, `gemma2`,
+  `gemma3`, `phi3`, `deepseek-r1`). Lookup is exact-match then longest-prefix, so the general and specific keys
+  coexist. Local models previously fell through the unknown-model path, which skips context compaction and
+  cost/tier reasoning entirely.
+
+### Known gap
+- Ollama's **embeddings** response is still passed through rather than normalized to the OpenAI
+  `{object:"list", data:[…]}` envelope. `/v1/embeddings` needs its own pass (the handler also passes a port
+  where a base-url cstr is expected) — tracked in the roadmap under 2.5.7.
+
+Gates: 535 tests (was 515), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.2] — 2026-07-22
 
 **Request-path fidelity — the second band of the rust-old parity closeout arc.** Sampling parameters now reach
