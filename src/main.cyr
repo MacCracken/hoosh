@@ -437,6 +437,10 @@ fn cmd_serve(port) {
     # [server] health_check_interval_secs = 0.
     health_start();
 
+    # Periodic hardware re-detection (2.5.7) — no-op unless
+    # [hardware] refresh_interval_secs is set.
+    hw_refresh_start();
+
     # Accept loop: accept connections and hand each to the pool. All request
     # handling (recv/route/respond/close) runs on the workers, concurrently.
     while (1 == 1) {
@@ -657,11 +661,12 @@ fn main() {
     _router = router_new(default_routes, 1, STRAT_PRIORITY);
     _met_providers = 1;
 
-    # Detect hardware accelerators
-    hw_init();
-
-    # Load config
+    # Load config FIRST (2.5.7): [hardware] disabled_backends has to be known
+    # before detection runs, or the backends it names get probed once anyway.
     load_config("hoosh.cyml");
+
+    # Detect hardware accelerators, honoring [hardware].
+    hw_init();
 
     # Audit chain (2.5.7) — built from [audit] now that config is parsed. 0 when
     # auditing is off, which every audit_record call site already tolerates.

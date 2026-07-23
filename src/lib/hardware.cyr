@@ -7,8 +7,65 @@
 # Requires: ai-hwaccel 2.3.7 bundle (registry, profile, quantization, plan,
 #   cost, training, model, json_out — vendored as lib/ai-hwaccel.cyr)
 
-# Global registry — initialized once at startup
+# Global registry — initialized at startup, optionally refreshed in place
 var _hw_registry = 0;
+
+# ── [hardware] configuration (2.5.7) ──
+#   disabled_backends     — detection backends to skip, by name ("cuda", "rocm", …)
+#   vram_reserve_bytes    — VRAM held back from placement decisions (leave room
+#                           for the display server, other tenants, KV-cache slack)
+#   refresh_interval_secs — how often the refresh thread wakes; 0 = never
+#   cache_ttl_secs        — how stale a snapshot may be before a wake actually
+#                           re-probes. Detection shells out to nvidia-smi and
+#                           friends, so this is the knob that stops a short
+#                           refresh interval from spawning probes constantly.
+var _hw_builder_mask = 0 - 1;      # -1 = "not configured", use builder_all()
+var _hw_vram_reserve = 0;
+var _hw_refresh_s = 0;
+var _hw_cache_ttl_s = 300;
+var _hw_last_detect_ms = 0;
+var _hw_lock = 0;
+
+fn hardware_reserve_bytes() { return _hw_vram_reserve; }
+fn hardware_refresh_interval() { return _hw_refresh_s; }
+fn hardware_cache_ttl() { return _hw_cache_ttl_s; }
+
+# Map a backend name to its Backend enum value, or -1 when unrecognized.
+fn _hw_backend_from_name(name) {
+    var b = 0;
+    while (b < BACKEND_COUNT) {
+        if (streq(name, backend_name(b)) == 1) { return b; }
+        b = b + 1;
+    }
+    return 0 - 1;
+}
+
+# Build the detection mask from a list of backend names to disable. Returns the
+# mask, and reports any name that matched nothing so a typo is visible rather
+# than silently disabling nothing.
+fn hardware_configure_backends(names, count) {
+    var mask = builder_all();
+    var i = 0;
+    while (i < count) {
+        var nm = load64(names + i * 8);
+        var b = _hw_backend_from_name(nm);
+        if (b < 0) {
+            hlog_warn("hardware: unknown backend in disabled_backends, ignoring");
+        } else {
+            mask = mask & (0 - 1 - (1 << b));
+        }
+        i = i + 1;
+    }
+    _hw_builder_mask = mask;
+    return mask;
+}
+
+fn hardware_configure(vram_reserve, refresh_secs, cache_ttl_secs) {
+    if (vram_reserve >= 0) { _hw_vram_reserve = vram_reserve; }
+    if (refresh_secs >= 0) { _hw_refresh_s = refresh_secs; }
+    if (cache_ttl_secs >= 0) { _hw_cache_ttl_s = cache_ttl_secs; }
+    return 0;
+}
 
 # Detect hardware and populate the global registry, using ai-hwaccel's THREADED
 # detector — the CLI-tool probes (nvidia-smi, vulkaninfo, hl-smi, neuron-ls, …)
@@ -30,8 +87,94 @@ fn hw_init() {
     #ifndef CYRIUS_TARGET_AGNOS
     if (THREAD_STACK_SIZE < 1048576) { THREAD_STACK_SIZE = 1048576; }
     #endif
-    _hw_registry = registry_detect_threaded();
+    if (_hw_lock == 0) { _hw_lock = mutex_new(); }
+    # 2.5.7: honor [hardware] disabled_backends. -1 means the key was absent,
+    # in which case every backend is probed exactly as before.
+    if (_hw_builder_mask == 0 - 1) {
+        _hw_registry = registry_detect_threaded();
+    } else {
+        _hw_registry = registry_detect_threaded_with(_hw_builder_mask);
+    }
+    _hw_last_detect_ms = clock_now_ms();
     return _hw_registry;
+}
+
+# Re-probe and swap in a fresh registry. Skips when the current snapshot is
+# younger than cache_ttl_secs — detection shells out to nvidia-smi/vulkaninfo,
+# so this is what keeps a short refresh interval from thrashing subprocesses.
+# Returns 1 when a re-detect happened.
+fn hw_refresh() {
+    var age = clock_now_ms() - _hw_last_detect_ms;
+    if (_hw_cache_ttl_s > 0 && age < _hw_cache_ttl_s * 1000) { return 0; }
+    var mask = _hw_builder_mask;
+    var fresh = 0;
+    if (mask == 0 - 1) {
+        fresh = registry_detect_threaded();
+    } else {
+        fresh = registry_detect_threaded_with(mask);
+    }
+    if (fresh == 0) { return 0; }
+    # Pointer swap under the lock; readers hold it for the duration of a read.
+    # The bump allocator never frees, so the old registry stays valid for any
+    # reader that grabbed it before the swap.
+    mutex_lock(_hw_lock);
+    _hw_registry = fresh;
+    _hw_last_detect_ms = clock_now_ms();
+    mutex_unlock(_hw_lock);
+    hlog_info("hardware: registry refreshed");
+    return 1;
+}
+
+fn _hw_refresh_thread(arg) {
+    while (1 == 1) {
+        sleep_ms(_hw_refresh_s * 1000);
+        if (_hw_refresh_s > 0) { hw_refresh(); }
+    }
+    return 0;
+}
+
+# Start periodic re-detection. No-op when refresh_interval_secs is 0 (default),
+# which keeps the pre-2.5.7 behavior of detecting once at startup.
+fn hw_refresh_start() {
+    if (_hw_refresh_s <= 0) { return 0; }
+    if (_hw_lock == 0) { _hw_lock = mutex_new(); }
+    thread_create(&_hw_refresh_thread, 0);
+    hlog_info("hardware: periodic re-detection enabled");
+    return 1;
+}
+
+# VRAM actually available for placement: total accelerator memory, minus what
+# devices report as already in use, minus the configured reserve.
+#
+# 2.5.7: placement decisions previously compared against TOTAL accelerator
+# memory, which assumes an idle, exclusively-owned GPU. On a card already
+# running a display server or another model, that overcommits and the load
+# fails at the backend instead of being planned around here.
+fn hw_available_vram() {
+    if (_hw_registry == 0) { return 0; }
+    var total = reg_total_accel_memory(_hw_registry);
+    var used = 0;
+    var profs = reg_profiles(_hw_registry);
+    var n = vec_len(profs);
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(profs, i);
+        if (profile_accel_type(p) != ACCEL_CPU) {
+            if (profile_available(p) == 1) {
+                used = used + profile_mem_used(p);
+            }
+        }
+        i = i + 1;
+    }
+    var avail = total - used - _hw_vram_reserve;
+    if (avail < 0) { return 0; }
+    return avail;
+}
+
+# Whether a model of `needed` bytes fits the AVAILABLE (not total) VRAM.
+fn hw_fits_available(needed) {
+    if (needed <= hw_available_vram()) { return 1; }
+    return 0;
 }
 
 # Whether hardware detection has run
@@ -167,6 +310,19 @@ fn hw_placement_json(sb, model_params, quant) {
         } else {
             str_builder_add_cstr(sb, "false");
         }
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    # 2.5.7: the same question against VRAM that is actually free right now —
+    # total minus in-use minus [hardware] vram_reserve_bytes. `fits_available`
+    # is the one to plan against on a shared or already-loaded card.
+    str_builder_add_cstr(sb, ",\"available_vram_bytes\":");
+    str_builder_add_int(sb, hw_available_vram());
+    str_builder_add_cstr(sb, ",\"vram_reserve_bytes\":");
+    str_builder_add_int(sb, hardware_reserve_bytes());
+    str_builder_add_cstr(sb, ",\"fits_available\":");
+    if (hw_fits_available(needed) == 1) {
+        str_builder_add_cstr(sb, "true");
     } else {
         str_builder_add_cstr(sb, "false");
     }

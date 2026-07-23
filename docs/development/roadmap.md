@@ -245,11 +245,24 @@ Three deliberate departures from rust-old, all verified:
 > space (Python's `json.dumps` does by default), so **ordinary client traffic had its
 > system prompt dropped during compaction**. Both are fixed and covered.
 
-**Deferred to [2.5.9](#v259--hardware-planning-closeout): `[hardware]`**
-(`cache_ttl_secs`, `disabled_backends`, `vram_reserve_bytes`, `refresh_interval_secs`).
-Their consumers — `detect_selective`, `available_vram(reserved)`, periodic
-re-detection — are 2.5.9 items. Adding readers for keys nothing acts on would recreate
-exactly the inert-knob problem this band exists to fix (see `ttl_secs`, 2.5.4).
+- [x] **`[hardware]`** — all four keys, each landed **with** the code that acts on it:
+      - `disabled_backends` → an ai-hwaccel builder mask; named backends are not
+        probed. An unrecognized name warns rather than silently disabling nothing.
+      - `vram_reserve_bytes` → `hw_available_vram()` = total accelerator memory −
+        in-use − reserve. Placement previously compared against **total**, which
+        assumes an idle, exclusively-owned card; on a GPU already running a display
+        server or another model that overcommits and the load fails at the backend
+        instead of being planned around. `/v1/hardware/placement` now reports
+        `available_vram_bytes`, `vram_reserve_bytes` and `fits_available` alongside
+        the existing `fits_single_device`.
+      - `refresh_interval_secs` → a background re-detection thread (0 = off, the
+        previous detect-once-at-startup behavior).
+      - `cache_ttl_secs` → the minimum snapshot age before a wake actually re-probes.
+        Detection shells out to `nvidia-smi` and friends, so this is what stops a
+        short refresh interval from spawning probes constantly.
+
+      Config load also moved **before** `hw_init()` — `disabled_backends` has to be
+      known before detection runs, or the backends it names get probed once anyway.
 
 ### v2.5.8 — CLI & process lifecycle
 - [ ] **`serve --bind <addr>` / `-c|--config <path>`** — `main.cyr:623` takes a bare
@@ -267,17 +280,14 @@ exactly the inert-knob problem this band exists to fix (see `ttl_secs`, 2.5.4).
 <a id="v259--hardware-planning-closeout"></a>
 
 ### v2.5.9 — Hardware planning closeout
-- [ ] **`[hardware]` config keys** (deferred here from 2.5.7, so each lands with the
-      code that acts on it): `disabled_backends` → `detect_selective`,
-      `vram_reserve_bytes` → `available_vram(reserved)`, `refresh_interval_secs` +
-      `cache_ttl_secs` → periodic re-detection.
+> `available_vram(reserved)`, `detect_selective` (as a builder mask) and periodic
+> re-detection landed early in **2.5.7** with the `[hardware]` config keys that drive
+> them. What remains below is the placement/simulation surface.
 - [ ] **`POST /v1/hardware/simulate`** — what-if add/remove/replace devices, re-run
       sharding, return `{original, simulated}`; validated (`model_params > 0`, ≤ 64
       devices, non-zero `memory_bytes`). Never ported and never deferred
       (`handlers.rs:1099-1183`, `hardware.rs:389-415`).
-- [ ] ⚠ **`available_vram(reserved)` / `fits_model`** — the port compares against
-      **total** accelerator memory; Rust subtracted in-use memory and a reserve
-      (`hardware.rs:276-296`). Overcommits a busy GPU.
+- [x] ⚠ **`available_vram(reserved)` / `fits_model`** — landed in **2.5.7**.
 - [ ] **`Router::select_with_hardware`** — deprioritize local providers when the model
       won't fit available VRAM (`router.rs:218-295`).
 - [ ] **Topology / telemetry accessors** — `system_io()`, `has_fast_interconnect()`,

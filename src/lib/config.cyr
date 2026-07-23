@@ -25,6 +25,7 @@ fn _config_expand_env(value) {
 # allocated 8 slots and never checked, so a 9th pattern wrote past the end.
 var MAX_MODEL_PATTERNS = 32;
 var MAX_AUTH_TOKENS = 32;
+var MAX_DISABLED_BACKENDS = 32;
 
 # Parse a TOML string array — `["a", "b"]` — into up to `max` freshly allocated
 # cstrs at `out`; returns the count. A bare scalar (`x = "solo"`) parses as a
@@ -321,6 +322,30 @@ fn load_config(path) {
             if (jf < 0) { jf = 0; }
         }
         _retry_cfg = retry_config_new_x(mr, bd, md, jf);
+    }
+
+    # Parse [hardware] section (2.5.7). Detection has already run by the time
+    # config is parsed on the reload path, so disabled_backends takes effect at
+    # the next hw_init/hw_refresh.
+    var hw_secs = toml_get_sections(sections, "hardware");
+    if (vec_len(hw_secs) > 0) {
+        var hp = toml_section_pairs(vec_get(hw_secs, 0));
+        var vr = 0 - 1;
+        var vr_str = toml_get(hp, "vram_reserve_bytes");
+        if (vr_str != 0) { vr = str_to_int(vr_str); }
+        var ri = 0 - 1;
+        var ri_str = toml_get(hp, "refresh_interval_secs");
+        if (ri_str != 0) { ri = str_to_int(ri_str); }
+        var ct = 0 - 1;
+        var ct_str = toml_get(hp, "cache_ttl_secs");
+        if (ct_str != 0) { ct = str_to_int(ct_str); }
+        hardware_configure(vr, ri, ct);
+        var db_str = toml_get(hp, "disabled_backends");
+        if (db_str != 0) {
+            var dbs = alloc(MAX_DISABLED_BACKENDS * 8);
+            var dbn = _config_str_array(to_cstr(db_str), dbs, MAX_DISABLED_BACKENDS);
+            hardware_configure_backends(dbs, dbn);
+        }
     }
 
     # Parse [context] section — compaction knobs (2.5.7).

@@ -48,15 +48,30 @@ See [the parity review](docs/development/rust-old-parity-review.md).
   model accepts, so a 200k-context model was compacted as aggressively as an 8k one. Models absent from the
   catalog keep the old heuristic rather than an invented limit.
 
-### Deferred
-- **`[hardware]`** (`cache_ttl_secs`, `disabled_backends`, `vram_reserve_bytes`, `refresh_interval_secs`) moves
-  to **2.5.9**, where its consumers land (`detect_selective`, `available_vram(reserved)`, periodic
-  re-detection). Adding readers for keys nothing acts on would recreate the inert-knob problem this band exists
-  to fix — see `ttl_secs` in 2.5.4.
+### Added — `[hardware]`
+All four keys, each with the code that acts on it:
+- **`disabled_backends`** — a list of ai-hwaccel detection backends to skip (`"cuda"`, `"rocm"`, `"vulkan"`, …),
+  applied as a builder mask. An unrecognized name logs a warning rather than silently disabling nothing.
+- **`vram_reserve_bytes`** — VRAM held back from placement. New `hw_available_vram()` = total accelerator
+  memory − what devices report in use − the reserve. **Placement previously compared against TOTAL accelerator
+  memory**, which assumes an idle, exclusively-owned card; on a GPU already running a display server or another
+  model that overcommits, and the load fails at the backend instead of being planned around here.
+  `/v1/hardware/placement` now reports `available_vram_bytes`, `vram_reserve_bytes` and `fits_available`
+  alongside the existing `fits_single_device`. Verified: a 6 GB reserve drops available VRAM by exactly 6 GB
+  and flips `fits_available` to false while `fits_single_device` stays true.
+- **`refresh_interval_secs`** — background re-detection thread; `0` (default) keeps the previous
+  detect-once-at-startup behavior. Verified: 4 refreshes in a 10 s window at a 2 s interval.
+- **`cache_ttl_secs`** — minimum snapshot age before a wake actually re-probes. Detection shells out to
+  `nvidia-smi`/`vulkaninfo`, so this is what stops a short refresh interval from spawning probes constantly.
+  Verified: interval 1 s with TTL 3600 s wakes repeatedly and re-probes zero times.
 
-Gates: 617 tests (was 600), 17 benchmarks; fmt/lint/vet/deny clean. (`mcp_tools_list` and
-`estimate_tokens_per_provider` show >10% swings in the CSV; both are untouched by this release and sit within
-run-to-run variance — `mcp_tools_list` measured 4.40–4.73 µs across three consecutive repeats.)
+Config load also moved **before** `hw_init()` — `disabled_backends` has to be known before detection runs, or
+the backends it names get probed once anyway.
+
+Gates: 631 tests (was 600), 17 benchmarks; fmt/lint/vet/deny clean. (`mcp_tools_list` and
+`estimate_tokens_per_provider` show >10% swings in the CSV in both directions across consecutive runs — both
+are untouched by this release and sit within run-to-run variance; `mcp_tools_list` measured 3.92–4.73 µs across
+repeats.)
 
 ## [2.5.6] — 2026-07-23
 

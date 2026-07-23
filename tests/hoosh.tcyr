@@ -1244,6 +1244,23 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.7 [hardware] mirrors ──
+# Mirror of src/lib/hardware.cyr's builder-mask and available-VRAM arithmetic.
+var _T_BACKEND_COUNT = 17;
+
+fn _t_builder_all() { return (1 << _T_BACKEND_COUNT) - 1; }
+fn _t_builder_is_enabled(mask, backend) { return (mask >> backend) & 1; }
+
+# Clear one backend's bit — what disabled_backends does per name.
+fn _t_builder_disable(mask, backend) { return mask & (0 - 1 - (1 << backend)); }
+
+# available = total_accel - in_use - reserve, floored at 0.
+fn _t_available_vram(total, used, reserve) {
+    var avail = total - used - reserve;
+    if (avail < 0) { return 0; }
+    return avail;
+}
+
 # ── 2.5.7 compaction role-matcher mirror ──
 # Mirror of src/lib/compact.cyr _cmp_ws / _msg_role_is.
 fn _t_cmp_ws(p, len, j) {
@@ -5699,6 +5716,40 @@ fn main() {
     assert_eq(200000 * 80 / 100, 160000, "context: 200k window at 0.8");
     assert_eq(8192 * 80 / 100, 6553, "context: 8k window at 0.8");
     assert_eq(128000 * 50 / 100, 64000, "context: threshold is configurable");
+
+    test_group("hardware_disabled_backends");
+    # disabled_backends clears one bit per named backend; everything else keeps
+    # probing. All 17 backends are enabled by default.
+    var hmask = _t_builder_all();
+    assert_eq(_t_builder_is_enabled(hmask, 0), 1, "hw: cuda enabled by default");
+    assert_eq(_t_builder_is_enabled(hmask, 1), 1, "hw: rocm enabled by default");
+    hmask = _t_builder_disable(hmask, 0);
+    assert_eq(_t_builder_is_enabled(hmask, 0), 0, "hw: cuda disabled");
+    assert_eq(_t_builder_is_enabled(hmask, 1), 1, "hw: rocm untouched");
+    # Disabling two leaves the rest alone.
+    hmask = _t_builder_disable(hmask, 3);
+    assert_eq(_t_builder_is_enabled(hmask, 3), 0, "hw: vulkan disabled");
+    assert_eq(_t_builder_is_enabled(hmask, 2), 1, "hw: apple still enabled");
+    # Disabling the same backend twice is idempotent, not a toggle.
+    hmask = _t_builder_disable(hmask, 0);
+    assert_eq(_t_builder_is_enabled(hmask, 0), 0, "hw: disable is idempotent");
+
+    test_group("hardware_available_vram");
+    # Placement compared against TOTAL accelerator memory before 2.5.7, which
+    # assumes an idle, exclusively-owned card. Available subtracts what devices
+    # report in use, then the configured reserve.
+    assert_eq(_t_available_vram(24000, 0, 0), 24000, "vram: idle card, no reserve");
+    assert_eq(_t_available_vram(24000, 8000, 0), 16000, "vram: in-use subtracted");
+    assert_eq(_t_available_vram(24000, 8000, 4000), 12000, "vram: reserve subtracted too");
+    # A reserve larger than what is free floors at 0 rather than going negative
+    # and reading as a huge unsigned budget.
+    assert_eq(_t_available_vram(24000, 20000, 8000), 0, "vram: over-reserved floors at 0");
+    assert_eq(_t_available_vram(0, 0, 1000), 0, "vram: no accelerator floors at 0");
+    # The case the reserve exists for: fits the card, does not fit what is free.
+    var need = 2400;
+    assert_eq(need <= 24000, 1, "vram: model fits the card");
+    assert_eq(need <= _t_available_vram(24000, 20000, 2000), 0,
+    "vram: same model does NOT fit available -> overcommit prevented");
 
     test_group("compact_system_detect_whitespace");
     # The pre-2.5.7 detector was the compact literal `"role":"system"`. Virtually
