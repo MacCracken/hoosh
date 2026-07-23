@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.5.1";
+var HOOSH_VERSION = "2.5.2";
 
 # ================================================================
 # Error types
@@ -165,4 +165,91 @@ enum Strategy {
     STRAT_ROUND_ROBIN    = 1;
     STRAT_LOWEST_LATENCY = 2;
     STRAT_DIRECT         = 3;
+}
+
+# ================================================================
+# Per-request generation options (2.5.2)
+# ================================================================
+#
+# Sampling knobs + the 2.5.0 thinking effort, carried as ONE pointer through
+# retry_forward -> provider_forward -> the body builders. Before 2.5.2 only
+# `effort` was threaded (as a bare i64) and temperature/top_p/max_tokens were
+# dropped on the floor — a client asking for temperature 0 silently got the
+# provider default. hoosh is multi-threaded, so these are strictly per-request;
+# a global would race.
+#
+#   +0  effort      0 none | 1 low | 2 medium | 3 high
+#   +8  max_tokens  0 = unset (leave it to the provider default)
+#   +16 temp_milli  GEN_UNSET = unset, else temperature x1000 (0..2000)
+#   +24 top_p_milli GEN_UNSET = unset, else top_p x1000 (0..1000)
+#
+# Cyrius carries no floats here, so the fractional params are scaled ints and
+# re-rendered by _sb_add_milli on the way out.
+var GEN_UNSET = 0 - 1;
+
+fn genopts_new(effort, max_tokens, temp_milli, top_p_milli) {
+    var g = alloc(32);
+    store64(g, effort);
+    store64(g + 8, max_tokens);
+    store64(g + 16, temp_milli);
+    store64(g + 24, top_p_milli);
+    return g;
+}
+
+# Accessors tolerate a 0 pointer so any caller that has no options (batch
+# lifecycle paths, the CLI one-shot) keeps the pre-2.5.2 behavior.
+fn gen_effort(g) {
+    if (g == 0) { return 0; }
+    return load64(g);
+}
+
+fn gen_max_tokens(g) {
+    if (g == 0) { return 0; }
+    return load64(g + 8);
+}
+
+fn gen_temp(g) {
+    if (g == 0) { return GEN_UNSET; }
+    return load64(g + 16);
+}
+
+fn gen_top_p(g) {
+    if (g == 0) { return GEN_UNSET; }
+    return load64(g + 24);
+}
+
+# Emit a x1000-scaled value as a JSON number: 700 -> "0.7", 50 -> "0.05",
+# 1000 -> "1", 1500 -> "1.5". Trailing zeros trimmed so the wire form matches
+# what a client would have sent.
+fn _sb_add_milli(sb, v) {
+    str_builder_add_int(sb, v / 1000);
+    var frac = v % 1000;
+    if (frac == 0) { return 0; }
+    str_builder_add_cstr(sb, ".");
+    if (frac < 100) { str_builder_add_cstr(sb, "0"); }
+    if (frac < 10) { str_builder_add_cstr(sb, "0"); }
+    while (frac % 10 == 0) { frac = frac / 10; }
+    str_builder_add_int(sb, frac);
+    return 0;
+}
+
+# Append the OpenAI-compatible sampling fields a request actually set. Each is
+# prefixed with a comma, so the caller must have emitted at least one field.
+fn _sb_add_sampling(sb, gen) {
+    var mt = gen_max_tokens(gen);
+    if (mt > 0) {
+        str_builder_add_cstr(sb, ",\"max_tokens\":");
+        str_builder_add_int(sb, mt);
+    }
+    var tp = gen_temp(gen);
+    if (tp != GEN_UNSET) {
+        str_builder_add_cstr(sb, ",\"temperature\":");
+        _sb_add_milli(sb, tp);
+    }
+    var pp = gen_top_p(gen);
+    if (pp != GEN_UNSET) {
+        str_builder_add_cstr(sb, ",\"top_p\":");
+        _sb_add_milli(sb, pp);
+    }
+    return 0;
 }

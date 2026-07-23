@@ -101,6 +101,15 @@ fn http_bad_request(cfd, msg) {
     return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
 }
 
+fn http_method_not_allowed(cfd, allow) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"method not allowed, use ");
+    str_builder_add_cstr(sb, allow);
+    str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
+    var body = str_builder_build(sb);
+    return http_respond(cfd, "405", "Method Not Allowed", to_cstr(body), str_len(body));
+}
+
 fn http_payload_too_large(cfd) {
     var body = "{\"error\":{\"message\":\"request body too large\",\"type\":\"invalid_request_error\"}}";
     return http_respond(cfd, "413", "Payload Too Large", body, strlen(body));

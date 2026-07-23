@@ -6,10 +6,15 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-22 (**v2.5.1** — rust-old parity review + the first
+> **Last refresh**: 2026-07-22 (**v2.5.2** — request-path fidelity, the second
+> closeout band). Doc touch: CHANGELOG [2.5.2], roadmap (2.5.2 marked shipped +
+> an Anthropic thinking-vs-sampling note), hoosh.cyml (per-provider knob comment
+> incl. `max_tokens_limit`), CLAUDE.md pin. Gates: 515 tests, 17 benches, clean.
+> **Prior**: 2026-07-22 (**v2.5.1** — rust-old parity review + the first
 > closeout band). Doc touch: **+`development/rust-old-parity-review.md`** (new — the
 > parity evidence record, 1,007 behaviors catalogued, 12 findings hand-verified),
-> roadmap (**+v2.5.x parity-closeout arc**, 10 bands, 2.5.1 marked shipped; parity
+> roadmap (**+v2.5.x parity-closeout arc**, 11 bands incl. the 2.5.11 P(-1)
+> security/hardening sweep that closes the arc, 2.5.1 marked shipped; parity
 > claim in *Shipped* qualified — surface area matched, request path not; missing
 > 2.4.13 + 2.5.0 rows added; **+Backlog section** absorbing the deleted root
 > `BACKLOG.md`, whose P4 had sat "open" six weeks after 2.4.0 shipped it),

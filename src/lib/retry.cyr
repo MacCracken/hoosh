@@ -44,12 +44,12 @@ fn retry_delay_ms(cfg, attempt) {
 
 # Retry provider_forward with backoff.
 # Returns result pointer (same as provider_forward) or 0.
-fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, budget) {
+fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var max = retry_max(cfg);
     var attempt = 0;
     while (attempt <= max) {
         var result = provider_forward(
-        route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, budget);
+        route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, gen);
         if (result != 0) { return result; }
         if (attempt >= max) { return 0; }
         var delay = retry_delay_ms(cfg, attempt);
@@ -61,12 +61,12 @@ fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_l
 
 # Retry streaming forward with backoff.
 # Returns backend fd or -1.
-fn retry_forward_stream(cfg, route, model, msg_raw, msg_len) {
+fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, gen) {
     var max = retry_max(cfg);
     var attempt = 0;
     while (attempt <= max) {
         var fd = provider_forward_stream(
-        route, model, msg_raw, msg_len);
+        route, model, msg_raw, msg_len, gen);
         if (fd >= 0) { return fd; }
         if (attempt >= max) { return 0 - 1; }
         var delay = retry_delay_ms(cfg, attempt);

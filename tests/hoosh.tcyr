@@ -1151,6 +1151,108 @@ fn _t_wq_pop() {
     return j;
 }
 
+# ── 2.5.2 request-path fidelity mirrors ──
+# Mirror of src/lib/types.cyr GEN_UNSET / _sb_add_milli / _sb_add_sampling.
+var _T_GEN_UNSET = 0 - 1;
+
+fn _t_sb_add_milli(sb, v) {
+    str_builder_add_int(sb, v / 1000);
+    var frac = v % 1000;
+    if (frac == 0) { return 0; }
+    str_builder_add_cstr(sb, ".");
+    if (frac < 100) { str_builder_add_cstr(sb, "0"); }
+    if (frac < 10) { str_builder_add_cstr(sb, "0"); }
+    while (frac % 10 == 0) { frac = frac / 10; }
+    str_builder_add_int(sb, frac);
+    return 0;
+}
+
+fn _t_milli_str(v) {
+    var sb = str_builder_new();
+    _t_sb_add_milli(sb, v);
+    return str_cstr(str_builder_build(sb));
+}
+
+# Mirror of src/lib/handlers.cyr _req_num_milli — raw-scan a top-level numeric
+# field to a x1000-scaled int, GEN_UNSET when absent.
+fn _t_req_num_milli(body_ptr, body_len, key, keylen) {
+    var i = 0;
+    while (i + keylen < body_len) {
+        if (memeq(body_ptr + i, key, keylen) == 1) {
+            var j = i + keylen;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            var neg = 0;
+            if (j < body_len && load8(body_ptr + j) == 45) {
+                neg = 1;
+                j = j + 1;
+            }
+            var ip = 0;
+            var digits = 0;
+            while (j < body_len) {
+                var c = load8(body_ptr + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                ip = ip * 10 + (c - 48);
+                digits = digits + 1;
+                j = j + 1;
+            }
+            if (digits == 0) { return _T_GEN_UNSET; }
+            var frac = 0;
+            var scale = 100;
+            if (j < body_len && load8(body_ptr + j) == 46) {
+                j = j + 1;
+                while (j < body_len && scale > 0) {
+                    var fc = load8(body_ptr + j) & 0xFF;
+                    if (fc < 48 || fc > 57) { break; }
+                    frac = frac + (fc - 48) * scale;
+                    scale = scale / 10;
+                    j = j + 1;
+                }
+            }
+            var v = ip * 1000 + frac;
+            if (neg == 1) { return 0 - v; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return _T_GEN_UNSET;
+}
+
+# Mirror of src/lib/handlers.cyr _json_array_count — objects at depth 1.
+fn _t_json_array_count(ptr, len) {
+    var n = 0;
+    var depth = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i) & 0xFF;
+        if (c == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(ptr + i) == 34) { break; }
+                if (load8(ptr + i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (c == 123 || c == 91) {
+            if (depth == 1 && c == 123) { n = n + 1; }
+            depth = depth + 1;
+        }
+        if (c == 125 || c == 93) { depth = depth - 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Mirror of src/main.cyr _requires_post — POST-only (body-taking) paths.
+fn _t_requires_post(path) {
+    if (streq(path, "/v1/chat/completions") == 1) { return 1; }
+    if (streq(path, "/v1/embeddings") == 1) { return 1; }
+    if (streq(path, "/v1/batch") == 1) { return 1; }
+    if (streq(path, "/v1/tools/call") == 1) { return 1; }
+    return 0;
+}
+
 # Mirror of src/lib/config.cyr _config_str_array — TOML string-array parse
 # into up to `max` cstrs at `out`, returning the count.
 fn _t_config_str_array(raw, out, max) {
@@ -4886,6 +4988,80 @@ fn main() {
     assert_streq(_t_bind_addr_str(0x0100007F), "127.0.0.1", "bind: loopback default");
     assert_streq(_t_bind_addr_str(0), "0.0.0.0", "bind: INADDR_ANY");
     assert_streq(_t_bind_addr_str(0xBA01A8C0), "192.168.1.186", "bind: LAN address");
+
+    # ── v2.5.2 request-path fidelity: sampling params + validation ──
+    test_group("req_num_milli");
+    # Sampling params are raw-scanned, NOT json_get: OpenAI clients place them
+    # after the nested `messages` array, which the flat json_parse cannot reach.
+    # That blind spot is why max_tokens silently fell back to 2048 pre-2.5.2.
+    var rn1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\"}],\"temperature\":0.7}";
+    assert_eq(_t_req_num_milli(rn1, strlen(rn1), "\"temperature\":", 14), 700,
+    "num: 0.7 after messages -> 700");
+    var rn2 = "{\"max_tokens\":1234,\"messages\":[]}";
+    assert_eq(_t_req_num_milli(rn2, strlen(rn2), "\"max_tokens\":", 13), 1234000,
+    "num: integer 1234 -> 1234000");
+    # 0 must parse as 0, NOT be confused with absent — a client asking for
+    # temperature 0 wants determinism and must not silently get the default.
+    var rn3 = "{\"temperature\":0}";
+    assert_eq(_t_req_num_milli(rn3, strlen(rn3), "\"temperature\":", 14), 0,
+    "num: explicit 0 is a value, not unset");
+    var rn4 = "{\"model\":\"m\"}";
+    assert_eq(_t_req_num_milli(rn4, strlen(rn4), "\"temperature\":", 14), _T_GEN_UNSET,
+    "num: absent -> GEN_UNSET");
+    var rn5 = "{\"top_p\": 0.95}";
+    assert_eq(_t_req_num_milli(rn5, strlen(rn5), "\"top_p\":", 8), 950,
+    "num: space after colon tolerated");
+    var rn6 = "{\"temperature\":-0.5}";
+    assert_eq(_t_req_num_milli(rn6, strlen(rn6), "\"temperature\":", 14), 0 - 500,
+    "num: negative preserved for range validation");
+    var rn7 = "{\"temperature\":2}";
+    assert_eq(_t_req_num_milli(rn7, strlen(rn7), "\"temperature\":", 14), 2000,
+    "num: 2 -> 2000 (range boundary)");
+
+    test_group("milli_render");
+    # Scaled ints render back to the wire form a client would have sent.
+    assert_streq(_t_milli_str(700), "0.7", "milli: 700 -> 0.7");
+    assert_streq(_t_milli_str(950), "0.95", "milli: 950 -> 0.95");
+    assert_streq(_t_milli_str(50), "0.05", "milli: 50 -> 0.05");
+    assert_streq(_t_milli_str(5), "0.005", "milli: 5 -> 0.005");
+    assert_streq(_t_milli_str(0), "0", "milli: 0 -> 0");
+    assert_streq(_t_milli_str(1000), "1", "milli: 1000 -> 1");
+    assert_streq(_t_milli_str(1500), "1.5", "milli: 1500 -> 1.5");
+    assert_streq(_t_milli_str(2000), "2", "milli: 2000 -> 2");
+
+    test_group("sampling_range_bounds");
+    # temperature 0..2, top_p 0..1 — boundaries inclusive.
+    assert_eq(0 > 2000, 0, "range: temp 0 in range");
+    assert_eq(2000 > 2000, 0, "range: temp 2.0 in range (inclusive)");
+    assert_eq(2001 > 2000, 1, "range: temp 2.001 rejected");
+    assert_eq((0 - 500) < 0, 1, "range: negative temp rejected");
+    assert_eq(1000 > 1000, 0, "range: top_p 1.0 in range (inclusive)");
+    assert_eq(1500 > 1000, 1, "range: top_p 1.5 rejected");
+
+    test_group("json_array_count");
+    var ac1 = "[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]";
+    assert_eq(_t_json_array_count(ac1, strlen(ac1)), 2, "count: two messages");
+    assert_eq(_t_json_array_count("[]", 2), 0, "count: empty array -> 0");
+    # Braces inside a string value must not inflate the count.
+    var ac2 = "[{\"content\":\"a{b}c\"}]";
+    assert_eq(_t_json_array_count(ac2, strlen(ac2)), 1, "count: braces in string ignored");
+    # A nested object belongs to its parent message, not a new element.
+    var ac3 = "[{\"content\":\"x\",\"meta\":{\"a\":1}}]";
+    assert_eq(_t_json_array_count(ac3, strlen(ac3)), 1, "count: nested object not counted");
+    assert_eq(256 > 256, 0, "count: 256 messages allowed");
+    assert_eq(257 > 256, 1, "count: 257 messages rejected");
+
+    test_group("requires_post");
+    # Body-taking routes are POST-only; a GET used to reach the handler with an
+    # empty body and answer a confusing 400 instead of 405.
+    assert_eq(_t_requires_post("/v1/chat/completions"), 1, "post: chat is POST-only");
+    assert_eq(_t_requires_post("/v1/embeddings"), 1, "post: embeddings is POST-only");
+    assert_eq(_t_requires_post("/v1/tools/call"), 1, "post: tools/call is POST-only");
+    # GET routes stay permissive on purpose — gating them would break clients
+    # that POST today and gain nothing.
+    assert_eq(_t_requires_post("/v1/models"), 0, "post: models unenforced");
+    assert_eq(_t_requires_post("/v1/health"), 0, "post: health unenforced");
+    assert_eq(_t_requires_post("/metrics"), 0, "post: metrics unenforced");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

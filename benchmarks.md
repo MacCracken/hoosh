@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-07-23T02:04:04Z** — commit `7799e9b`
+Latest: **2026-07-23T05:39:46Z** — commit `3c03177`
 
 ## hoosh
 
-| Benchmark | Baseline (`4e2aae1`) | Previous (`405cf55`) | Current (`7799e9b`) |
+| Benchmark | Baseline (`405cf55`) | Previous (`7799e9b`) | Current (`3c03177`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 1.00 us | 924 ns **-8%** | 892 ns **-11%** |
-| `route_round_robin_10` | 186 ns | 181 ns | 138 ns **-26%** |
-| `pool_reserve_commit` | 85 ns | 83 ns | 44 ns **-48%** |
+| `route_select_20_providers` | 924 ns | 892 ns **-3%** | 908 ns |
+| `route_round_robin_10` | 181 ns | 138 ns **-24%** | 137 ns **-24%** |
+| `pool_reserve_commit` | 83 ns | 44 ns **-47%** | 42 ns **-49%** |
 | `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 114 ns | 113 ns | 109 ns **-4%** |
-| `cache_get_miss` | 51 ns | 52 ns | 49 ns **-4%** |
-| `cache_insert` | 86 ns | 75 ns **-13%** | 71 ns **-17%** |
-| `queue_enqueue_dequeue` | 1.00 us | 1.11 us +11% | 644 ns **-36%** |
-| `queue_5tier_sort` | 1.00 us | 1.51 us +51% | 831 ns **-17%** |
-| `route_matches_model` | 33 ns | 34 ns +3% | 34 ns +3% |
-| `estimate_tokens_per_provider` | 8 ns | 9 ns +12% | 8 ns |
-| `dlp_scan_clean_prompt` | 4.00 us | 4.57 us +14% | 4.18 us +4% |
-| `mcp_tools_list` | 4.00 us | 4.98 us +24% | 4.17 us +4% |
-| `mcp_tools_call` | 9.00 us | 9.72 us +8% | 8.44 us **-6%** |
-| `batch_split_4` | 1.00 us | 1.17 us +17% | 821 ns **-18%** |
-| `latency_bucket_find` | 56 ns | 55 ns | 53 ns **-5%** |
+| `cache_get_hit` | 113 ns | 109 ns **-4%** | 107 ns **-5%** |
+| `cache_get_miss` | 52 ns | 49 ns **-6%** | 48 ns **-8%** |
+| `cache_insert` | 75 ns | 71 ns **-5%** | 69 ns **-8%** |
+| `queue_enqueue_dequeue` | 1.11 us | 644 ns **-42%** | 633 ns **-43%** |
+| `queue_5tier_sort` | 1.51 us | 831 ns **-45%** | 815 ns **-46%** |
+| `route_matches_model` | 34 ns | 34 ns | 32 ns **-6%** |
+| `estimate_tokens_per_provider` | 9 ns | 8 ns **-11%** | 8 ns **-11%** |
+| `dlp_scan_clean_prompt` | 4.57 us | 4.18 us **-9%** | 4.03 us **-12%** |
+| `mcp_tools_list` | 4.98 us | 4.17 us **-16%** | 3.88 us **-22%** |
+| `mcp_tools_call` | 9.72 us | 8.44 us **-13%** | 8.34 us **-14%** |
+| `batch_split_4` | 1.17 us | 821 ns **-30%** | 807 ns **-31%** |
+| `latency_bucket_find` | 55 ns | 53 ns **-4%** | 54 ns |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
 
 ---

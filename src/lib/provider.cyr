@@ -26,7 +26,7 @@ fn _sb_add_span(sb, ptr, len) {
     return 0;
 }
 
-fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len) {
+fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -36,12 +36,13 @@ fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len)
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
     }
+    _sb_add_sampling(sb, gen);
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
 
 # Build streaming chat body from model + raw messages (+ optional tools).
-fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len) {
+fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -51,6 +52,7 @@ fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, too
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
     }
+    _sb_add_sampling(sb, gen);
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
@@ -404,7 +406,7 @@ fn _tools_convert(tools_raw, tools_len, schema_key) {
 # {role,content} turns pass through unchanged. Objects whose content is not a
 # plain string are left in `messages` rather than dropped. `stream` adds the
 # top-level `"stream":true` flag for the incremental SSE path.
-fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw, tools_len, effort) {
+fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw, tools_len, gen) {
     var sys_sb = str_builder_new();
     var msgs_sb = str_builder_new();
     str_builder_putc(msgs_sb, '[');
@@ -545,17 +547,41 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     # 2.5.0 extended thinking: `reasoning_effort` -> Anthropic ADAPTIVE thinking + `output_config.effort`. This is
     # the format current models (Opus 4.8, Sonnet 4.x) require — the legacy `thinking.type:enabled`+budget_tokens is
     # REJECTED for them ("not supported for this model"). `effort` here is the LEVEL (1=low, 2=medium, 3=high, 0=off).
-    # max_tokens is raised to leave room for a reasoning-influenced answer. hoosh sends no temperature, so the
-    # thinking temp=1 rule is already satisfied. Level 0 keeps the historical fixed 4096 max_tokens (byte-identical).
+    # 2.5.2: max_tokens is now the CLIENT's when it set one (Anthropic requires the field, so there is always a
+    # value); the historical 4096 / thinking-headroom 16384 remain the defaults when the request omits it.
+    var effort = gen_effort(gen);
+    var a_max = gen_max_tokens(gen);
     if (effort > 0) {
-        str_builder_add_cstr(body, "\",\"max_tokens\":16384,\"thinking\":{\"type\":\"adaptive\"},");
+        if (a_max <= 0) { a_max = 16384; }
+        str_builder_add_cstr(body, "\",\"max_tokens\":");
+        str_builder_add_int(body, a_max);
+        str_builder_add_cstr(body, ",\"thinking\":{\"type\":\"adaptive\"},");
         str_builder_add_cstr(body, "\"output_config\":{\"effort\":\"");
         if (effort == 1) { str_builder_add_cstr(body, "low"); }
         if (effort == 2) { str_builder_add_cstr(body, "medium"); }
         if (effort >= 3) { str_builder_add_cstr(body, "high"); }
         str_builder_add_cstr(body, "\"},");
     } else {
-        str_builder_add_cstr(body, "\",\"max_tokens\":4096,");
+        if (a_max <= 0) { a_max = 4096; }
+        str_builder_add_cstr(body, "\",\"max_tokens\":");
+        str_builder_add_int(body, a_max);
+        str_builder_add_cstr(body, ",");
+        # temperature / top_p are forwarded ONLY with thinking off. Anthropic
+        # pins temperature to 1 when extended thinking is on and rejects any
+        # other value, so sending the client's here would turn a working
+        # reasoning_effort request into a 400. Effort wins; sampling is dropped.
+        var a_temp = gen_temp(gen);
+        if (a_temp != GEN_UNSET) {
+            str_builder_add_cstr(body, "\"temperature\":");
+            _sb_add_milli(body, a_temp);
+            str_builder_add_cstr(body, ",");
+        }
+        var a_topp = gen_top_p(gen);
+        if (a_topp != GEN_UNSET) {
+            str_builder_add_cstr(body, "\"top_p\":");
+            _sb_add_milli(body, a_topp);
+            str_builder_add_cstr(body, ",");
+        }
     }
     if (stream == 1) {
         str_builder_add_cstr(body, "\"stream\":true,");
@@ -575,9 +601,10 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     return to_cstr(str_builder_build(body));
 }
 
-# Non-streaming Anthropic body (the common case). `budget` = extended-thinking budget_tokens (0 = off, 2.5.0).
-fn _build_anthropic_body(model, messages_raw, messages_len, tools_raw, tools_len, budget) {
-    return _build_anthropic_body_x(model, messages_raw, messages_len, 0, tools_raw, tools_len, budget);
+# Non-streaming Anthropic body (the common case). `gen` = the per-request
+# generation options (thinking effort + sampling, 2.5.2; was a bare effort i64).
+fn _build_anthropic_body(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
+    return _build_anthropic_body_x(model, messages_raw, messages_len, 0, tools_raw, tools_len, gen);
 }
 
 # Anthropic /v1/messages body from a bare prompt (no messages array).
@@ -973,7 +1000,7 @@ fn _extract_openai_tool_calls(rb, rbl) {
     return 0;
 }
 
-fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw, tools_len, budget) {
+fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw, tools_len, gen) {
     var _fwd_t0 = clock_now_ns();
     var base = route_base_url(route);
     var is_anthropic = (route_provider(route) == PROV_ANTHROPIC);
@@ -982,7 +1009,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
     if (is_anthropic == 1) {
         if (messages_raw != 0) {
             body = _build_anthropic_body(model, messages_raw, messages_len,
-            tools_raw, tools_len, budget);
+            tools_raw, tools_len, gen);
         } else {
             body = _build_anthropic_body_prompt(model, prompt);
         }
@@ -997,7 +1024,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         } else {
             if (messages_raw != 0) {
                 body = _build_chat_body_raw(model, messages_raw, messages_len,
-                tools_raw, tools_len);
+                tools_raw, tools_len, gen);
             } else {
                 body = _build_chat_body(model, prompt);
             }
@@ -1098,14 +1125,14 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
 # Open a streaming connection to provider.
 # Returns backend fd (caller reads chunks + closes).
 # Returns -1 on connection failure.
-fn provider_forward_stream(route, model, messages_raw, messages_len) {
+fn provider_forward_stream(route, model, messages_raw, messages_len, gen) {
     # Local-only fast path: raw fd + sys_read can't decrypt TLS. Remote
     # providers stream incrementally via sandhi_http_stream in the handler
     # (handle_chat_stream's remote branch) and never reach here.
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
-    model, messages_raw, messages_len, 0, 0);
+    model, messages_raw, messages_len, 0, 0, gen);
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

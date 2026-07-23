@@ -8,6 +8,11 @@ bind = "127.0.0.1"
 port = 8088
 strategy = "priority"   # priority | round-robin | lowest-latency | direct
 
+# Per-provider knobs live on each [[providers]] block:
+#   max_tokens_limit = 4096   # clamp any request asking for more (0/omit = no cap)
+#   rate_limit       = 600    # requests per minute
+#   models           = ["llama*", "mistral*"]
+
 # Bearer-token auth. A LIST — issue a token per consumer and rotate by adding
 # the new one before retiring the old. Omit this section entirely and hoosh
 # serves unauthenticated (fine on loopback; pair with `bind` above before

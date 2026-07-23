@@ -56,8 +56,9 @@ fidelity, resilience, and config-reader** work did not survive the rewrite. Find
 and evidence: [rust-old-parity-review.md](rust-old-parity-review.md).
 
 Bands below are ordered by severity-over-effort, not by dependency; each is
-independently shippable. Items marked ⚠ are **regressions against rust-old**, not
-merely unported features.
+independently shippable. The one exception is **2.5.11**, the P(-1) hardening sweep —
+it audits what the other bands leave behind, so it closes the arc. Items marked ⚠ are
+**regressions against rust-old**, not merely unported features.
 
 ### v2.5.1 — Security & hard limits  *(arc foundation)* — ✅ SHIPPED 2026-07-22
 - [x] ⚠ **`[server] bind` is never read** — `hoosh.cyml` shipped `bind = "127.0.0.1"`
@@ -81,18 +82,33 @@ merely unported features.
       `models` pattern parser: it allocated 8 slots and never bounds-checked, so a 9th
       pattern wrote past the allocation. Both arrays are now capped at 32.
 
-### v2.5.2 — Request-path fidelity
-- [ ] ⚠ **`temperature` / `top_p` are silently dropped** — neither string exists in
-      `src/lib/` or `src/main.cyr`. Rust forwarded and range-validated both
-      (`server/handlers.rs:245-267`). A client asking for `temperature: 0` gets
-      nondeterministic output with no error — the loudest API-conformance break.
-- [ ] ⚠ **`max_tokens` never reaches the provider** — read once
-      (`handlers.cyr:1778`) only to size the budget reservation. Anthropic bodies
-      hardcode 4096 / 16384 (`provider.cyr:551,558`).
-- [ ] **Request validation** — empty `messages` → 400; `messages.len() > 256` → 400;
-      temperature ∈ [0,2] and top_p ∈ [0,1] range errors carrying the offending value;
-      per-route method enforcement → 405 (`handlers.rs` `validate_chat_request`).
-- [ ] **`[[providers]] max_tokens_limit`** — per-provider request clamp with a warn log.
+### v2.5.2 — Request-path fidelity — ✅ SHIPPED 2026-07-22
+- [x] ⚠ **`temperature` / `top_p` are silently dropped** — both are now parsed,
+      range-validated, and forwarded on the blocking *and* streaming paths.
+      Carried with `max_tokens` and the 2.5.0 thinking effort in one per-request
+      `genopts` record (`types.cyr`) threaded through
+      `retry_forward` → `provider_forward` → the body builders, replacing the bare
+      effort i64. Fractions are scaled ints (no floats in this codebase) rendered
+      back to wire form by `_sb_add_milli`.
+- [x] ⚠ **`max_tokens` never reaches the provider** — now forwarded. It also fixes a
+      second bug: the old `json_get("max_tokens")` could not see a key placed *after*
+      the nested `messages` array (where OpenAI clients put it), so the budget
+      reservation silently fell back to 2048. All three params use the raw byte scan
+      `_req_num_milli`, the same technique 2.5.0 needed for `reasoning_effort`.
+      Anthropic keeps its 4096 / 16384 defaults only when the request omits the field.
+- [x] **Request validation** — empty `messages` → 400; `> 256` messages → 400 with the
+      count; `temperature` ∈ [0,2] and `top_p` ∈ [0,1] → 400 echoing the offending
+      value; `max_tokens` ≤ 0 → 400.
+- [x] **Method enforcement → 405** — body-taking routes reject non-POST. Deliberately
+      one-sided: the GET routes stay verb-agnostic, since gating them would turn a
+      POST that works today into a 405 for no correctness win.
+- [x] **`[[providers]] max_tokens_limit`** — per-provider output clamp with a warn log;
+      an over-limit request is trimmed, not refused.
+
+> **Anthropic note**: `temperature`/`top_p` are forwarded only with thinking *off*.
+> Anthropic pins temperature to 1 under extended thinking and rejects other values, so
+> sending them alongside `reasoning_effort` would turn a working request into a 400.
+> Effort wins; sampling is dropped for that request.
 
 ### v2.5.3 — Provider correctness
 - [ ] ⚠ **Groq default base URL is wrong** — `types.cyr:150` returns
@@ -205,6 +221,43 @@ silent no-op today or an unavailable capability:
 - [ ] **DLP `custom_patterns`** + `PatternMatch` records (name, level, byte offset,
       length). The port is presence-only, returning just the highest level; all 8
       built-in patterns **are** present.
+
+### v2.5.11 — Security & hardening audit sweep  *(arc closeout — do last)*
+A full **[P(-1) scaffold-hardening pass](../../CLAUDE.md)** over the whole gateway once
+the parity bands have landed. Deliberately last: 2.5.2–2.5.9 change the request path,
+the resilience model, and the config surface, so auditing before they settle would
+audit code that is about to move. Run the P(-1) steps in order — baseline benches →
+audit (performance, memory, security, edge cases) → cleanliness → tests/benches from
+the observations → post-audit benches to prove the wins → repeat if heavy → doc audit.
+
+Carry-forward items observed during the 2.5.1 work, to seed the audit rather than
+bound it:
+- [ ] **Per-connection allocation is never reclaimed.** `_handle_conn` calls `alloc`
+      per request against a bump arena that [never frees](../../CLAUDE.md) — 64 KiB
+      minimum, and after 2.5.1's cap up to 1 MiB for a large body. A long-lived
+      gateway's RSS therefore grows with total requests served, not concurrency.
+      A per-worker reusable buffer (7 workers ⇒ 7 buffers) would bound it. Known and
+      deliberately deferred in 2.5.1 — it is a pool refactor, not a hot-fix.
+- [ ] **Auth fails open.** `auth.cyr` allows every request when no tokens are
+      configured. That is rust-old parity and fine on loopback, but it should be a
+      *conscious* posture: at minimum a startup WARNING when hoosh binds a non-loopback
+      address with an empty token set. Pairs with 2.5.1's `bind` default.
+- [ ] **SSE writers ignore the `sys_write` return.** Flagged as a follow-up in
+      [2.4.13](../../CHANGELOG.md): after a client disconnects, hoosh keeps pulling the
+      rest of the response from the provider and writing `EPIPE`s until the upstream
+      ends. Harmless since the SIGPIPE guard, but it wastes a worker and provider
+      tokens on an abandoned request — an unauthenticated client could abandon streams
+      in a loop.
+- [ ] **Duplicate `ratelimit_new` / `ratelimit_check`** — the build warns
+      "last definition wins". Silent shadowing in the rate-limit path is exactly the
+      kind of thing an audit exists to catch; resolve or rename.
+- [ ] **Build-surface hygiene** — 13 MB of static data and ~2,700 unreachable functions
+      (`CYRIUS_DCE=1`), plus the pinned-vs-installed toolchain drift the compiler warns
+      about on every build. Decide the intended posture and make the build quiet, so a
+      *new* warning is visible.
+- [ ] **Re-run the parity sweep's [Unverified](rust-old-parity-review.md) list** against
+      the post-2.5.x source — several leads there are security-adjacent (audit chain
+      link verification, `signing_key` sourcing, request validation limits).
 
 > **Verification note**: bands 2.5.1–2.5.6 and 2.5.9's simulate item were hand-verified
 > against source. The remainder are agent-reported leads from the same sweep — confirm

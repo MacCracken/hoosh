@@ -241,6 +241,13 @@ fn load_config(path) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }
 
+            # Per-provider output cap (2.5.2) — a request asking for more
+            # max_tokens than this is clamped down to it, with a warn log.
+            var mtl_str = toml_get(pp, "max_tokens_limit");
+            if (mtl_str != 0) {
+                route_set_max_tokens_limit(route, str_to_int(mtl_str));
+            }
+
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = toml_get(pp, "models");
             if (models_str != 0) {

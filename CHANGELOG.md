@@ -5,6 +5,53 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.2] — 2026-07-22
+
+**Request-path fidelity — the second band of the rust-old parity closeout arc.** Sampling parameters now reach
+the provider, and malformed requests are rejected with a useful message instead of being forwarded or silently
+altered. See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **`temperature` and `top_p` were silently dropped.** Neither string existed anywhere in the gateway — a client
+  asking for `temperature: 0` got nondeterministic output with no error, and no way to tell. Both are now parsed,
+  range-validated, and forwarded on the blocking *and* streaming paths, for OpenAI-compatible, Anthropic, and
+  local providers.
+- **`max_tokens` never reached the provider.** It was read once, only to size the token-budget reservation.
+  Anthropic bodies hardcoded 4096 (or 16384 with extended thinking); OpenAI-compatible bodies omitted it
+  entirely, so a client's output cap was ignored. It is now forwarded; the Anthropic defaults apply only when
+  the request omits the field.
+- **`max_tokens` was invisible when it followed `messages`.** The old `json_get` reads a flat parse that cannot
+  reach a top-level key placed after the nested `messages` array — which is exactly where OpenAI clients put it.
+  The budget reservation therefore fell back to its 2048 default on real client traffic. All three sampling
+  params now use a raw byte scan (`_req_num_milli`), the same technique 2.5.0 needed for `reasoning_effort`.
+- **A `GET` to a body-taking route answered a confusing `400 empty request body`.** Those routes now answer
+  `405 Method Not Allowed`. Enforcement is deliberately one-sided — the GET routes stay verb-agnostic, because
+  gating them would turn a `POST` that works today into a 405 with no correctness win.
+
+### Added
+- **Request validation** matching rust-old's `validate_chat_request`: empty `messages` → 400; more than 256
+  messages → 400 carrying the count; `temperature` outside [0.0, 2.0] and `top_p` outside [0.0, 1.0] → 400
+  echoing the offending value; `max_tokens` ≤ 0 → 400.
+- **`[[providers]] max_tokens_limit`** — a per-provider output clamp. A request asking for more is trimmed to the
+  limit with a warn log rather than refused.
+
+### Changed
+- **Per-request generation options are now one record.** `genopts` (`types.cyr`) carries the thinking effort plus
+  the three sampling params and is threaded through `retry_forward` → `provider_forward` → the body builders,
+  replacing the bare effort i64 that 2.5.0 introduced. Accessors tolerate a null pointer, so paths with no
+  options (batch lifecycle, CLI one-shot) keep their previous behavior. Fractional values are carried as
+  x1000-scaled ints — this codebase has no floats — and rendered back to wire form by `_sb_add_milli`.
+- **Anthropic: sampling is forwarded only with extended thinking off.** Anthropic pins temperature to 1 under
+  thinking and rejects any other value, so sending a client's `temperature` alongside `reasoning_effort` would
+  turn a working request into a 400. When both are present, effort wins and sampling is dropped for that request.
+- **`route` grew a field** (`ROUTE_MAX_TOKENS`, size 64 → 72) for the per-provider clamp.
+
+Verified against a mock backend: `temperature`/`top_p`/`max_tokens` arrive on both the blocking and SSE paths;
+`temperature: 0` survives as a value rather than being read as unset; `max_tokens` placed after `messages` is
+found; the clamp trims 5000 → 100 and leaves 50 untouched.
+
+Gates: 515 tests (was 482), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.1] — 2026-07-22
 
 **Security & hard limits — the first band of the rust-old parity closeout arc.** A full behavioral diff of the

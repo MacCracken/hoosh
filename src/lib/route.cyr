@@ -2,7 +2,7 @@
 # Requires: types.cyr
 
 enum RouteField {
-    ROUTE_SIZE       = 64;
+    ROUTE_SIZE       = 72;
     ROUTE_PROVIDER   = 0;
     ROUTE_PRIORITY   = 8;
     ROUTE_PATTERNS   = 16;
@@ -11,6 +11,7 @@ enum RouteField {
     ROUTE_BASE_URL   = 40;
     ROUTE_API_KEY    = 48;
     ROUTE_RATE_LIMIT = 56;
+    ROUTE_MAX_TOKENS = 64;
 }
 
 fn route_new(prov, priority, base_url) {
@@ -23,6 +24,7 @@ fn route_new(prov, priority, base_url) {
     store64(r + ROUTE_BASE_URL, base_url);
     store64(r + ROUTE_API_KEY, 0);
     store64(r + ROUTE_RATE_LIMIT, 0);
+    store64(r + ROUTE_MAX_TOKENS, 0);
     return r;
 }
 
@@ -32,6 +34,10 @@ fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
 fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
 fn route_api_key(r) { return load64(r + ROUTE_API_KEY); }
 fn route_rate_limiter(r) { return load64(r + ROUTE_RATE_LIMIT); }
+# Per-provider output cap (2.5.2). 0 = no limit; a request asking for more is
+# clamped to this rather than rejected.
+fn route_max_tokens_limit(r) { return load64(r + ROUTE_MAX_TOKENS); }
+fn route_set_max_tokens_limit(r, v) { store64(r + ROUTE_MAX_TOKENS, v); return 0; }
 fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
 fn route_set_rate_limit(r, rpm) {
     if (rpm > 0) {

@@ -1045,6 +1045,118 @@ fn _validate_chat(pairs, body_ptr, body_len) {
     return 0;
 }
 
+# Raw-scan a top-level numeric field -> its value x1000, or GEN_UNSET when
+# absent. Raw scan (not json_get) for the SAME reason as _req_reasoning_effort:
+# OpenAI clients place these keys AFTER the nested `messages` array, which the
+# flat json_parse cannot reach — which is why the pre-2.5.2
+# json_get("max_tokens") silently fell back to the 2048 budget default on real
+# client traffic. `key` must include the quotes and colon: "\"top_p\":".
+# Fractions beyond 3 decimals are truncated; a leading '-' is preserved so
+# out-of-range negatives reach validation rather than being silently dropped.
+fn _req_num_milli(body_ptr, body_len, key, keylen) {
+    var i = 0;
+    while (i + keylen < body_len) {
+        if (memeq(body_ptr + i, key, keylen) == 1) {
+            var j = i + keylen;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            var neg = 0;
+            if (j < body_len && load8(body_ptr + j) == 45) {
+                neg = 1;
+                j = j + 1;
+            }
+            var ip = 0;
+            var digits = 0;
+            while (j < body_len) {
+                var c = load8(body_ptr + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                ip = ip * 10 + (c - 48);
+                digits = digits + 1;
+                j = j + 1;
+            }
+            if (digits == 0) { return GEN_UNSET; }
+            var frac = 0;
+            var scale = 100;
+            if (j < body_len && load8(body_ptr + j) == 46) {
+                j = j + 1;
+                while (j < body_len && scale > 0) {
+                    var fc = load8(body_ptr + j) & 0xFF;
+                    if (fc < 48 || fc > 57) { break; }
+                    frac = frac + (fc - 48) * scale;
+                    scale = scale / 10;
+                    j = j + 1;
+                }
+            }
+            var v = ip * 1000 + frac;
+            if (neg == 1) { return 0 - v; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return GEN_UNSET;
+}
+
+# Upper bound on messages in one chat request (rust-old: handlers.rs).
+var MAX_MESSAGES = 256;
+
+# "temperature must be between 0.0 and 2.0, got 3.5" — the offending value is
+# echoed so a client can see what it actually sent.
+fn _range_err(field, milli, lo, hi) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, field);
+    str_builder_add_cstr(sb, " must be between ");
+    str_builder_add_cstr(sb, lo);
+    str_builder_add_cstr(sb, " and ");
+    str_builder_add_cstr(sb, hi);
+    str_builder_add_cstr(sb, ", got ");
+    if (milli < 0) {
+        str_builder_add_cstr(sb, "-");
+        _sb_add_milli(sb, 0 - milli);
+    } else {
+        _sb_add_milli(sb, milli);
+    }
+    return to_cstr(str_builder_build(sb));
+}
+
+# "Too many messages: 300 (max 256)"
+fn _count_err(label, got, max) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, label);
+    str_builder_add_cstr(sb, ": ");
+    str_builder_add_int(sb, got);
+    str_builder_add_cstr(sb, " (max ");
+    str_builder_add_int(sb, max);
+    str_builder_add_cstr(sb, ")");
+    return to_cstr(str_builder_build(sb));
+}
+
+# Count elements in a raw JSON array span — objects at depth 1, string-aware.
+# Used to enforce the message-count bound.
+fn _json_array_count(ptr, len) {
+    var n = 0;
+    var depth = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i) & 0xFF;
+        if (c == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(ptr + i) == 34) { break; }
+                if (load8(ptr + i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (c == 123 || c == 91) {
+            if (depth == 1 && c == 123) { n = n + 1; }
+            depth = depth + 1;
+        }
+        if (c == 125 || c == 93) { depth = depth - 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
 # Check if request has "stream":true
 fn _req_is_stream(body_ptr, body_len) {
     var i = 0;
@@ -1363,15 +1475,15 @@ fn _remote_stream_cb(ctx, ev) {
 # Build the streaming request body for a remote provider. Tools are forwarded on
 # all three families; their streaming tool deltas are converted in
 # _remote_stream_cb.
-fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, budget) {
+fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
-        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, budget);
+        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, gen);
     }
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
     }
-    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len);
+    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen);
 }
 
 # Build the streaming request URL for a remote provider.
@@ -1383,7 +1495,7 @@ fn _remote_stream_url(route, model) {
 }
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
-fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, budget) {
+fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -1392,7 +1504,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     if (route_is_remote(route) == 1) {
         http_sse_begin(cfd);
         var sbody = _remote_stream_body(route, model, msg_raw, msg_len,
-        tools_raw, tools_len, budget);
+        tools_raw, tools_len, gen);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
         var ctx = alloc(32);
@@ -1417,7 +1529,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
             if (emitted == 0) {
                 var rresult = retry_forward(
                 _retry_cfg, route, model, "hello", msg_raw, msg_len,
-                tools_raw, tools_len, budget);
+                tools_raw, tools_len, gen);
                 if (rresult != 0) {
                     var rtext = load64(rresult);
                     if (strlen(rtext) > 0) {
@@ -1444,7 +1556,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     }
 
     var bfd = retry_forward_stream(
-    _retry_cfg, route, model, msg_raw, msg_len);
+    _retry_cfg, route, model, msg_raw, msg_len, gen);
     if (bfd < 0) {
         return http_error(cfd, "502", "Bad Gateway",
         "provider backend unreachable");
@@ -1697,6 +1809,56 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         store64(out + 8, _resp_err("400", "Bad Request", verr, "invalid_request_error"));
         return out;
     }
+
+    # 2.5.2 sampling params. Raw-scanned (see _req_num_milli) because clients
+    # put them after `messages`, and range-checked here rather than in
+    # _validate_chat, which is defined ahead of the scanners in single-pass
+    # order. The error carries the offending value, matching rust-old.
+    var g_temp = _req_num_milli(body_ptr, body_len, "\"temperature\":", 14);
+    if (g_temp != GEN_UNSET) {
+        if (g_temp < 0 || g_temp > 2000) {
+            store64(out + 8, _resp_err("400", "Bad Request",
+            _range_err("temperature", g_temp, "0.0", "2.0"), "invalid_request_error"));
+            return out;
+        }
+    }
+    var g_topp = _req_num_milli(body_ptr, body_len, "\"top_p\":", 8);
+    if (g_topp != GEN_UNSET) {
+        if (g_topp < 0 || g_topp > 1000) {
+            store64(out + 8, _resp_err("400", "Bad Request",
+            _range_err("top_p", g_topp, "0.0", "1.0"), "invalid_request_error"));
+            return out;
+        }
+    }
+    var g_maxt = _req_num_milli(body_ptr, body_len, "\"max_tokens\":", 13);
+    if (g_maxt != GEN_UNSET) {
+        g_maxt = g_maxt / 1000;
+        if (g_maxt <= 0) {
+            store64(out + 8, _resp_err("400", "Bad Request",
+            "max_tokens must be greater than 0", "invalid_request_error"));
+            return out;
+        }
+    } else {
+        g_maxt = 0;
+    }
+
+    # Message-count bounds. An empty array reaches a provider as a malformed
+    # request; an unbounded one is a cheap way to make hoosh do expensive work.
+    var vmsgs = _extract_messages(body_ptr, body_len);
+    if (vmsgs != 0) {
+        var vmc = _json_array_count(load64(vmsgs), load64(vmsgs + 8));
+        if (vmc == 0) {
+            store64(out + 8, _resp_err("400", "Bad Request",
+            "messages array is empty", "invalid_request_error"));
+            return out;
+        }
+        if (vmc > MAX_MESSAGES) {
+            store64(out + 8, _resp_err("400", "Bad Request",
+            _count_err("Too many messages", vmc, MAX_MESSAGES), "invalid_request_error"));
+            return out;
+        }
+    }
+
     var model = json_get(pairs, str_from("model"));
     var model_cstr = to_cstr(model);
     var route = router_select(_router, model_cstr);
@@ -1774,14 +1936,26 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     var pool_name = "default";
     var pool_str = json_get(pairs, str_from("pool"));
     if (pool_str != 0) { pool_name = to_cstr(pool_str); }
-    var est_tokens = 2048;
-    var max_tok_str = json_get(pairs, str_from("max_tokens"));
-    if (max_tok_str != 0) { est_tokens = str_to_int(max_tok_str); }
+    # 2.5.2: per-provider output clamp. A route may cap what any one request can
+    # ask for, so an over-limit request is trimmed rather than refused.
+    var mt_limit = route_max_tokens_limit(route);
+    if (mt_limit > 0 && g_maxt > mt_limit) {
+        hlog_warn("chat: max_tokens clamped to the provider limit");
+        g_maxt = mt_limit;
+    }
 
-    # 2.5.0 extended thinking: map the OpenAI `reasoning_effort` to an Anthropic thinking budget_tokens for THIS
-    # request, carried on the per-request prep struct (out + 88) — hoosh is multi-threaded, so a global would race.
-    # low/medium/high -> a budget; absent/unknown -> 0 (thinking off, request byte-identical to before).
-    store64(out + 104, _req_reasoning_effort(body_ptr, body_len));
+    # The budget reservation follows the request's own output cap when it set
+    # one. g_maxt comes from the raw scan, so — unlike the pre-2.5.2
+    # json_get — it is actually found when the client puts max_tokens after
+    # `messages`, which is where OpenAI clients put it.
+    var est_tokens = 2048;
+    if (g_maxt > 0) { est_tokens = g_maxt; }
+
+    # 2.5.0 extended thinking + 2.5.2 sampling, carried on the per-request prep
+    # struct (out + 104) — hoosh is multi-threaded, so a global would race.
+    # Absent/unknown values leave the request byte-identical to before.
+    store64(out + 104, genopts_new(
+    _req_reasoning_effort(body_ptr, body_len), g_maxt, g_temp, g_topp));
     var bpool = budget_get_pool(_budget, pool_name);
     if (bpool != 0) {
         if (pool_available(bpool) < est_tokens) {
