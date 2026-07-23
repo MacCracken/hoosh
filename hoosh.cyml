@@ -56,6 +56,16 @@ health_check_interval_secs = 30
 # signing_key = "$HOOSH_AUDIT_KEY"
 # max_entries = 10000
 
+# Extra DLP patterns beyond the eight built-ins (email, ipv4, phone, ssn, card,
+# api_key, aws_key, github_token). Case-insensitive LITERAL substrings, not
+# regexes — operator-supplied regexes on the request path would be a ReDoS
+# surface. Use these for what only this deployment knows is sensitive.
+# level: public | internal | confidential | restricted (default confidential).
+# [[dlp_pattern]]
+# name = "project-codename"
+# pattern = "BLUEJAY"
+# level = "restricted"
+
 # Bearer-token auth. A LIST — issue a token per consumer and rotate by adding
 # the new one before retiring the old. Omit this section entirely and hoosh
 # serves unauthenticated (fine on loopback; pair with `bind` above before

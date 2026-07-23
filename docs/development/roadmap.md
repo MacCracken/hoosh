@@ -333,19 +333,46 @@ Three deliberate departures from rust-old, all verified:
 > byte-identical to serial"; that check compared profile counts on a machine with no
 > interconnects, so it could not see this. **Report upstream and revert once fixed.**
 
-### v2.5.10 — Scaffolding parity
-- [ ] **`cyrius deny` in CI** — CLAUDE.md lists it in the cleanliness check but
-      `.github/workflows/ci.yml` never runs it (Rust: `make deny` + `deny.toml`).
-- [ ] **Coverage gate** — no equivalent to rust-old's `codecov.yml` (project 85% /
-      patch 80%).
-- [ ] **Fuzz targets** — `fuzz_inference_request` and `fuzz_message_content` have no
-      `.fcyr` counterpart (current harnesses cover `batch_split` / `trace_extract`).
-- [ ] **Bench suites** — `e2e.rs` (client → gateway → Ollama round trip) and
-      `live_providers.rs` (live Ollama + hwaccel) unported; plus per-case gaps in
-      auth / rate-limit / cost / audit-verify / event-publish / tool-convert.
-- [ ] **DLP `custom_patterns`** + `PatternMatch` records (name, level, byte offset,
-      length). The port is presence-only, returning just the highest level; all 8
-      built-in patterns **are** present.
+### v2.5.10 — Scaffolding parity — ✅ SHIPPED 2026-07-23
+- [x] **`cyrius deny` in CI** — CLAUDE.md listed it in the cleanliness check; CI never
+      ran it, so a dependency violating project policy could land.
+- [x] **Coverage gate** — `scripts/coverage.sh`, wired into CI at a 30% floor
+      (currently 32%). **Symbol** coverage, not line: hoosh's tests are a
+      self-contained mirror and never execute `src/`, so a line number would be a flat
+      0%. Measures whether every function in `src/` is at least *referenced* by the
+      suites. Documented plainly as a floor against unwatched code, not a correctness
+      proof — it explicitly cannot catch mirror drift, which has bitten twice.
+- [x] **Fuzz targets** — `fuzz/inference_request.fcyr` (the raw `temperature`/`top_p`/
+      `max_tokens`/`reasoning_effort`/`stream`/message-count scanners) and
+      `fuzz/message_content.fcyr` (untagged string-or-parts content, the
+      whitespace-tolerant role matcher, the boundary scan). Both hammer every
+      truncation of a hand-built corpus plus random and structure-biased bytes.
+- [x] **Bench cases** — 8 new: `auth_verify_token` / `_wrong_late` / `_wrong_early`,
+      `rate_limit_check`, `cost_record_known_model` / `_local_free`,
+      `audit_record_sign`, `event_publish_ring`. The four things every request pays
+      for — auth compare, rate-limit check, cost accounting, audit append — had no
+      numbers at all.
+- [x] **Live/e2e suites** — `scripts/bench-live.sh`, the opt-in port of `e2e.rs` +
+      `live_providers.rs`. Not in CI, exactly as in rust-old: it needs a live gateway
+      and backend, so it measures a machine and a model rather than the code.
+- [x] **DLP `custom_patterns`** — `[[dlp_pattern]]` sections (name, pattern, level),
+      case-insensitive **literal** matching. Not regex: hoosh has no regex engine
+      (rust-old's `dlp` feature pulled in the `regex` crate), and compiling
+      operator-supplied patterns would put a backtracking matcher fed by config on the
+      request path — a ReDoS surface. Literal is the capability that ports safely.
+
+> **`cyrius coverage` is unusable as a project gate** — it reports on the vendored
+> stdlib in `lib/`, not the project (hoosh's 465 functions do not appear; the summary
+> reads "Functions: 0/1097"). Filed upstream as
+> `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`,
+> proposing a local-repo default with `--full` for today's behaviour and `--min` for CI.
+>
+> **Measured, worth keeping**: the auth compare is constant-time in the way that
+> matters — a same-length token differing in the FIRST byte and one differing in the
+> LAST both cost 100 ns against 101 ns for a match, so there is no prefix oracle. The
+> earlier 101-vs-52 ns reading was a length short-circuit (25- vs 24-byte tokens),
+> not content-dependent branching. `rate_limit_check` at 1.4 µs is almost entirely the
+> `clock_now_ms` syscall — more evidence for the 2.5.11 item.
 
 ### v2.5.11 — Security & hardening audit sweep  *(arc closeout — do last)*
 A full **[P(-1) scaffold-hardening pass](../../CLAUDE.md)** over the whole gateway once

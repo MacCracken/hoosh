@@ -1244,6 +1244,36 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.10 DLP custom-pattern mirrors ──
+# Mirror of src/lib/dlp.cyr _dlp_find_ci — case-insensitive literal search.
+fn _t_dlp_find_ci(t, len, pat) {
+    var plen = strlen(pat);
+    if (plen == 0 || plen > len) { return 0 - 1; }
+    var i = 0;
+    while (i + plen <= len) {
+        var j = 0;
+        while (j < plen) {
+            var a = load8(t + i + j) & 0xFF;
+            var b = load8(pat + j) & 0xFF;
+            if (a >= 65 && a <= 90) { a = a + 32; }
+            if (b >= 65 && b <= 90) { b = b + 32; }
+            if (a != b) { break; }
+            j = j + 1;
+        }
+        if (j == plen) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Mirror of dlp_custom_level's "highest matching level wins" fold.
+fn _t_dlp_custom_max(a, b) {
+    var best = 0 - 1;
+    if (a > best) { best = a; }
+    if (b > best) { best = b; }
+    return best;
+}
+
 # ── 2.5.8 CLI flag-parser mirrors ──
 # Mirror of src/main.cyr _flag_val / _flag_set / _positional. argv is modelled
 # as a vec of cstrs so the parsing rules can be exercised without a real argv.
@@ -5951,6 +5981,30 @@ fn main() {
     var kfs = 3 - 10;
     if (kfs < 0) { kfs = 0; }
     assert_eq(kfs, 0, "context: short conversation clamps to 0");
+
+    # ── v2.5.10 DLP custom patterns ──
+    test_group("dlp_custom_patterns");
+    # Case-insensitive LITERAL match, not regex: hoosh has no regex engine, and
+    # compiling operator-supplied patterns would put a backtracking matcher fed
+    # by config on the request path — a ReDoS surface. Literal is the capability
+    # that ports safely.
+    var cp = "Project BLUEJAY is confidential";
+    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "bluejay"), 8, "dlp: lowercase pattern matches mixed case");
+    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "BLUEJAY"), 8, "dlp: exact case matches");
+    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "Bluejay"), 8, "dlp: mixed case matches");
+    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "goshawk"), 0 - 1, "dlp: absent pattern -> -1");
+    # A pattern longer than the text cannot match and must not read past the end.
+    assert_eq(_t_dlp_find_ci("hi", 2, "much longer pattern"), 0 - 1, "dlp: over-long pattern safe");
+    # Empty pattern is rejected rather than matching everything at offset 0.
+    assert_eq(_t_dlp_find_ci(cp, strlen(cp), ""), 0 - 1, "dlp: empty pattern never matches");
+    # Match at the very start and the very end.
+    assert_eq(_t_dlp_find_ci("acme-1234", 9, "acme"), 0, "dlp: match at start");
+    assert_eq(_t_dlp_find_ci("id-acme", 7, "acme"), 3, "dlp: match at end");
+    # Custom levels raise the classification; the highest of several wins.
+    assert_eq(_t_dlp_custom_max(3, 1), 3, "dlp: highest custom level wins");
+    assert_eq(_t_dlp_custom_max(1, 2), 2, "dlp: order-independent");
+    # A custom pattern can reach restricted, same as a built-in.
+    assert_eq(CLASS_RESTRICTED > CLASS_CONFIDENTIAL, 1, "dlp: restricted outranks confidential");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

@@ -1,0 +1,242 @@
+# Fuzz: the chat-request field scanners — the raw byte walkers that read
+# `temperature`/`top_p`/`max_tokens` (_req_num_milli), `reasoning_effort`
+# (_req_reasoning_effort), `stream` (_req_is_stream) and the message count
+# (_json_array_count) straight out of a request body.
+#
+# These exist BECAUSE json_parse is flat and cannot reach a top-level key that
+# follows the nested `messages` array (see 2.5.2). That means they run over
+# attacker-controlled bytes with hand-rolled pointer arithmetic and no parser
+# backstop, so truncation, unterminated strings, lone escapes, huge digit runs
+# and deep nesting must not crash, read out of bounds, or hang.
+#
+# Port of rust-old's fuzz_inference_request target. Self-contained mirror
+# (hoosh's handlers.cyr isn't includable standalone). Exits non-zero only on a
+# logic violation; a segfault or hang is caught by CI's build+run under
+# `timeout`.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fmt.cyr"
+
+var GEN_UNSET = 0 - 1;
+
+# Mirror of src/lib/handlers.cyr _req_num_milli.
+fn _req_num_milli(body_ptr, body_len, key, keylen) {
+    var i = 0;
+    while (i + keylen < body_len) {
+        if (memeq(body_ptr + i, key, keylen) == 1) {
+            var j = i + keylen;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            var neg = 0;
+            if (j < body_len && load8(body_ptr + j) == 45) {
+                neg = 1;
+                j = j + 1;
+            }
+            var ip = 0;
+            var digits = 0;
+            while (j < body_len) {
+                var c = load8(body_ptr + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                ip = ip * 10 + (c - 48);
+                digits = digits + 1;
+                j = j + 1;
+            }
+            if (digits == 0) { return GEN_UNSET; }
+            var frac = 0;
+            var scale = 100;
+            if (j < body_len && load8(body_ptr + j) == 46) {
+                j = j + 1;
+                while (j < body_len && scale > 0) {
+                    var fc = load8(body_ptr + j) & 0xFF;
+                    if (fc < 48 || fc > 57) { break; }
+                    frac = frac + (fc - 48) * scale;
+                    scale = scale / 10;
+                    j = j + 1;
+                }
+            }
+            var v = ip * 1000 + frac;
+            if (neg == 1) { return 0 - v; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return GEN_UNSET;
+}
+
+# Mirror of src/lib/handlers.cyr _req_reasoning_effort.
+fn _req_reasoning_effort(body_ptr, body_len) {
+    var i = 0;
+    while (i + 19 < body_len) {
+        if (memeq(body_ptr + i, "\"reasoning_effort\":", 19) == 1) {
+            var j = i + 19;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            if (j < body_len && load8(body_ptr + j) == 34) {
+                var p = body_ptr + j + 1;
+                var rem = body_len - j - 1;
+                if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
+                if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
+                if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mirror of src/lib/handlers.cyr _req_is_stream.
+fn _req_is_stream(body_ptr, body_len) {
+    var i = 0;
+    while (i < body_len - 13) {
+        if (memeq(body_ptr + i, "\"stream\":true", 13) == 1) { return 1; }
+        if (memeq(body_ptr + i, "\"stream\": true", 14) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mirror of src/lib/handlers.cyr _json_array_count.
+fn _json_array_count(ptr, len) {
+    var n = 0;
+    var depth = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i) & 0xFF;
+        if (c == 34) {
+            i = i + 1;
+            while (i < len) {
+                if (load8(ptr + i) == 34) { break; }
+                if (load8(ptr + i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (c == 123 || c == 91) {
+            if (depth == 1 && c == 123) { n = n + 1; }
+            depth = depth + 1;
+        }
+        if (c == 125 || c == 93) { depth = depth - 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Run every scanner over one input. A crash or hang fails the target.
+fn _hammer(buf, len) {
+    _req_num_milli(buf, len, "\"temperature\":", 14);
+    _req_num_milli(buf, len, "\"top_p\":", 8);
+    _req_num_milli(buf, len, "\"max_tokens\":", 13);
+    _req_reasoning_effort(buf, len);
+    _req_is_stream(buf, len);
+    _json_array_count(buf, len);
+    return 0;
+}
+
+# xorshift PRNG — deterministic, so a CI failure is reproducible.
+var _seed = 0x2545F4914F6CDD1D;
+fn _rnd() {
+    _seed = _seed ^ (_seed << 13);
+    _seed = _seed ^ (_seed >> 7);
+    _seed = _seed ^ (_seed << 17);
+    if (_seed < 0) { return 0 - _seed; }
+    return _seed;
+}
+
+fn main() {
+    var CORPUS_N = 14;
+    var corpus = vec_new();
+    # Well-formed.
+    vec_push(corpus, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\"}],\"temperature\":0.7}");
+    # Truncated mid-key / mid-value / mid-number.
+    vec_push(corpus, "{\"temperature\":");
+    vec_push(corpus, "{\"temperature\":0.");
+    vec_push(corpus, "{\"reasoning_effort\":\"hi");
+    vec_push(corpus, "{\"stream\":tru");
+    # Key present, value missing or non-numeric.
+    vec_push(corpus, "{\"top_p\":}");
+    vec_push(corpus, "{\"top_p\":abc}");
+    vec_push(corpus, "{\"max_tokens\":-}");
+    # Digit runs that would overflow a naive accumulator.
+    vec_push(corpus, "{\"max_tokens\":99999999999999999999999999}");
+    vec_push(corpus, "{\"temperature\":0.99999999999999999999}");
+    # Unterminated string / lone trailing escape inside the array scanner.
+    vec_push(corpus, "[{\"content\":\"unterminated");
+    vec_push(corpus, "[{\"content\":\"trailing escape\\");
+    # Unbalanced brackets, both directions.
+    vec_push(corpus, "[{{{{{{{{");
+    vec_push(corpus, "}]}]}]}]");
+
+    var ci = 0;
+    while (ci < CORPUS_N) {
+        var s = vec_get(corpus, ci);
+        var n = strlen(s);
+        # Every truncation of every seed — the classic off-by-one hunting ground.
+        var cut = 0;
+        while (cut <= n) {
+            var b = alloc(cut + 1);
+            memcpy(b, s, cut);
+            store8(b + cut, 0);
+            _hammer(b, cut);
+            cut = cut + 1;
+        }
+        ci = ci + 1;
+    }
+
+    # Random bytes, including NULs and high bytes.
+    var iter = 0;
+    while (iter < 3000) {
+        var len = _rnd() % 96;
+        var buf = alloc(len + 1);
+        var k = 0;
+        while (k < len) {
+            store8(buf + k, _rnd() % 256);
+            k = k + 1;
+        }
+        store8(buf + len, 0);
+        _hammer(buf, len);
+        iter = iter + 1;
+    }
+
+    # Random bytes biased toward the structural characters the scanners key on,
+    # so the fuzzer actually reaches the inner loops instead of bailing early.
+    var alphabet = "{}[]\":,\\ 0123456789.truefalstem_paxokni";
+    var alen = strlen(alphabet);
+    iter = 0;
+    while (iter < 3000) {
+        var blen = _rnd() % 128;
+        var bb = alloc(blen + 1);
+        var m = 0;
+        while (m < blen) {
+            store8(bb + m, load8(alphabet + (_rnd() % alen)));
+            m = m + 1;
+        }
+        store8(bb + blen, 0);
+        _hammer(bb, blen);
+        iter = iter + 1;
+    }
+
+    # Invariants that must hold regardless of input.
+    var probe = "{\"temperature\":0}";
+    if (_req_num_milli(probe, strlen(probe), "\"temperature\":", 14) != 0) {
+        println("FAIL: explicit 0 must parse as 0, not absent");
+        return 1;
+    }
+    var absent = "{\"model\":\"m\"}";
+    if (_req_num_milli(absent, strlen(absent), "\"temperature\":", 14) != GEN_UNSET) {
+        println("FAIL: absent key must be GEN_UNSET");
+        return 1;
+    }
+    if (_json_array_count("[]", 2) != 0) {
+        println("FAIL: empty array must count 0");
+        return 1;
+    }
+
+    println("fuzz inference_request: ok");
+    return 0;
+}
+
+var r = main();
+sys_exit(r);

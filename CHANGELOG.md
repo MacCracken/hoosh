@@ -5,6 +5,64 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.10] — 2026-07-23
+
+**Scaffolding parity — the tenth and final feature band of the rust-old parity closeout arc.** The gates,
+fuzzers and benchmarks the Rust project had and the port did not. Only the 2.5.11 hardening sweep remains.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Added
+- **`cyrius deny` in CI.** CLAUDE.md has listed it in the cleanliness check since the port, but the workflow
+  never ran it — so a dependency violating project policy could land with a green build.
+- **A coverage gate** (`scripts/coverage.sh`, CI floor 30%, currently 32%). This is **symbol** coverage, not
+  line coverage, and the distinction is load-bearing: hoosh's tests are a self-contained mirror that
+  re-implements the logic under test rather than linking `src/` (`src/main.cyr` is a program, not a library —
+  including it drags in the gateway's globals and threads). No test executes a line of `src/`, so a line number
+  would be a flat 0%. The script instead asserts every function defined in `src/` is at least *referenced* by
+  the suites — a floor against adding code nothing watches. It states its own limitation plainly: it cannot
+  catch **mirror drift**, where `src/` and its mirror diverge while both stay internally consistent, which has
+  bitten twice (2.5.6 pricing, 2.5.7 audit linkage — in both the mirror was right and `src/` was wrong).
+- **Two fuzz targets**, porting rust-old's. `fuzz/inference_request.fcyr` hammers the raw byte scanners that
+  read `temperature`/`top_p`/`max_tokens`/`reasoning_effort`/`stream` and the message count — the ones that
+  exist *because* `json_parse` cannot reach a key after the nested `messages` array, so they walk
+  attacker-controlled bytes with no parser backstop. `fuzz/message_content.fcyr` covers untagged
+  string-or-parts `content`, the whitespace-tolerant role matcher and the boundary scan. Both run every
+  truncation of a hand-built corpus (unterminated strings, lone trailing escapes, unbalanced brackets,
+  overflowing digit runs) plus random and structure-biased bytes.
+- **8 benchmark cases** for the work every request pays for, which previously had no numbers at all:
+  `auth_verify_token` / `_wrong_late` / `_wrong_early`, `rate_limit_check`, `cost_record_known_model` /
+  `_local_free`, `audit_record_sign`, `event_publish_ring`. Suite is now 25 benchmarks.
+- **`scripts/bench-live.sh`** — the opt-in port of `benches/e2e.rs` + `benches/live_providers.rs`. Deliberately
+  outside CI, as in rust-old: it needs a live gateway and backend, so it measures a machine and a model rather
+  than the code. Its header states that each iteration forks a `curl` and the ~5 ms floor is the harness, not
+  the gateway — use it for relative comparisons only.
+- **DLP `custom_patterns`** via `[[dlp_pattern]]` sections (`name`, `pattern`, `level`). Case-insensitive
+  **literal** matching, not regex — hoosh has no regex engine (rust-old's `dlp` feature pulled in the `regex`
+  crate), and compiling operator-supplied patterns would put a backtracking matcher fed by config on the
+  request path, i.e. a ReDoS surface. A literal match is the capability that ports safely, and is what covers
+  the actual use case: an internal codename or customer-id prefix that only this deployment knows is
+  sensitive. Custom patterns can raise the classification to `restricted`, same as a built-in.
+
+### Measured
+- **The auth compare is constant-time in the way that matters.** A same-length token differing in the **first**
+  byte and one differing in the **last** both cost 100 ns, against 101 ns for a match — no prefix oracle, so an
+  attacker cannot recover a token byte by byte. (An earlier draft benched a 25-byte token against a 24-byte
+  one and read 101 vs 52 ns; that is the length short-circuit, which is unavoidable and not secret. The
+  benchmark now uses equal-length inputs so it measures the property it claims to.)
+- **`rate_limit_check` costs 1.4 µs**, essentially all of it the `clock_now_ms` syscall — more evidence for the
+  2.5.11 item on replacing it with a vDSO/coarse clock.
+
+### Upstream
+- **Filed: `cyrius coverage` reports on the vendored stdlib, not the local repo.** Run from a project root it
+  enumerates `lib/` — hoosh's 465 functions never appear and the summary reads "Functions: 0/1097", which is
+  both wrong for the project and permanently near zero for any project. Unusable as a gate, and misleading if
+  trusted. Filed at `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`
+  proposing a local-repo default, `--full` for today's behaviour, and `--min <pct>` for CI.
+
+Gates: 663 tests (was 652), 25 benchmarks (was 17), 4 fuzz targets (was 2); fmt/lint/vet/deny clean.
+(`pool_available` and `route_round_robin_10` show single high readings in the CSV run; both measured stable at
+their previous values across three consecutive repeats afterwards — transient, and neither was touched.)
+
 ## [2.5.9] — 2026-07-23
 
 **Hardware planning closeout — the ninth band of the rust-old parity closeout arc.**

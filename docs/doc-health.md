@@ -6,7 +6,16 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-23 (**v2.5.9** — hardware planning closeout, the
+> **Last refresh**: 2026-07-23 (**v2.5.10** — scaffolding parity; the last
+> feature band of the arc, only the 2.5.11 hardening sweep left). Doc touch:
+> CHANGELOG [2.5.10], roadmap (2.5.10 shipped + the constant-time auth
+> measurement), hoosh.cyml (**+`[[dlp_pattern]]`**), CLAUDE.md pin. **New**:
+> `scripts/coverage.sh`, `scripts/bench-live.sh`, `fuzz/inference_request.fcyr`,
+> `fuzz/message_content.fcyr`. **Upstream filed**: `cyrius coverage` reports on
+> the vendored stdlib rather than the local repo
+> (`cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`).
+> Gates: 663 tests, 25 benches, 4 fuzz targets, clean.
+> **Prior**: 2026-07-23 (**v2.5.9** — hardware planning closeout, the
 > ninth band). Doc touch: CHANGELOG [2.5.9], roadmap (2.5.9 shipped + an
 > **upstream ai-hwaccel bug report**: the threaded detector passes the registry
 > where a `system_io` is expected, corrupting warnings/system_io and — on

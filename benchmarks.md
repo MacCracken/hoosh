@@ -1,28 +1,36 @@
 # Benchmarks
 
-Latest: **2026-07-23T08:13:20Z** — commit `c0b1f5c`
+Latest: **2026-07-23T08:27:09Z** — commit `03d648c`
 
 ## hoosh
 
-| Benchmark | Baseline (`19651db`) | Previous (`bf66a35`) | Current (`c0b1f5c`) |
+| Benchmark | Baseline (`bf66a35`) | Previous (`c0b1f5c`) | Current (`03d648c`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 881 ns | 914 ns +4% | 892 ns |
-| `route_round_robin_10` | 136 ns | 139 ns | 136 ns |
-| `pool_reserve_commit` | 42 ns | 42 ns | 42 ns |
-| `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 1.44 us | 1.52 us +6% | 1.48 us |
-| `cache_get_miss` | 45 ns | 48 ns +7% | 47 ns +4% |
-| `cache_insert` | 1.43 us | 1.47 us | 1.44 us |
-| `queue_enqueue_dequeue` | 566 ns | 614 ns +8% | 623 ns +10% |
-| `queue_5tier_sort` | 782 ns | 836 ns +7% | 820 ns +5% |
-| `route_matches_model` | 31 ns | 34 ns +10% | 33 ns +6% |
-| `estimate_tokens_per_provider` | 7 ns | 8 ns +14% | 8 ns +14% |
-| `dlp_scan_clean_prompt` | 3.95 us | 4.25 us +8% | 4.29 us +9% |
-| `mcp_tools_list` | 3.92 us | 4.17 us +6% | 4.18 us +7% |
-| `mcp_tools_call` | 8.28 us | 8.66 us +5% | 8.64 us +4% |
-| `batch_split_4` | 792 ns | 849 ns +7% | 857 ns +8% |
-| `latency_bucket_find` | 54 ns | 55 ns | 56 ns +4% |
+| `route_select_20_providers` | 914 ns | 892 ns | 904 ns |
+| `route_round_robin_10` | 139 ns | 136 ns | 157 ns +13% |
+| `pool_reserve_commit` | 42 ns | 42 ns | 43 ns |
+| `pool_available` | 4 ns | 4 ns | 5 ns +25% |
+| `cache_get_hit` | 1.52 us | 1.48 us | 1.51 us |
+| `cache_get_miss` | 48 ns | 47 ns | 49 ns |
+| `cache_insert` | 1.47 us | 1.44 us | 1.45 us |
+| `queue_enqueue_dequeue` | 614 ns | 623 ns | 631 ns |
+| `queue_5tier_sort` | 836 ns | 820 ns | 830 ns |
+| `route_matches_model` | 34 ns | 33 ns | 33 ns |
+| `estimate_tokens_per_provider` | 8 ns | 8 ns | 8 ns |
+| `dlp_scan_clean_prompt` | 4.25 us | 4.29 us | 4.25 us |
+| `mcp_tools_list` | 4.17 us | 4.18 us | 4.30 us +3% |
+| `mcp_tools_call` | 8.66 us | 8.64 us | 8.69 us |
+| `batch_split_4` | 849 ns | 857 ns | 851 ns |
+| `latency_bucket_find` | 55 ns | 56 ns | 55 ns |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
+| `auth_verify_token` | — | — | 100 ns |
+| `auth_verify_wrong_late` | — | — | 100 ns |
+| `auth_verify_wrong_early` | — | — | 100 ns |
+| `rate_limit_check` | — | — | 1.41 us |
+| `cost_record_known_model` | — | — | 178 ns |
+| `cost_record_local_free` | — | — | 110 ns |
+| `audit_record_sign` | — | — | 3.71 us |
+| `event_publish_ring` | — | — | 4 ns |
 
 ---
 

@@ -1,0 +1,265 @@
+# Fuzz: the message-content walkers — the scanners that pull `content` out of a
+# messages array and decide what a message IS.
+#
+# OpenAI's `content` is untagged: either a plain string or an array of typed
+# parts (`[{"type":"text","text":"…"}, {"type":"image_url",…}]`). rust-old
+# modelled that with serde's untagged enum and fuzzed the deserializer
+# (fuzz_message_content); hoosh walks the bytes by hand, so the same adversarial
+# inputs have to be proven safe here — a message whose content is an array, or
+# is missing, or contains escaped quotes and braces, must not desync the walker.
+#
+# Covers: the whitespace-tolerant role matcher (_msg_role_is, 2.5.7 — the one
+# that silently missed `"role": "system"` and dropped system prompts), the
+# message-boundary scan, and the string-value extractor used to read content.
+#
+# Self-contained mirror. Exits non-zero only on a logic violation; a segfault or
+# hang is caught by CI's build+run under `timeout`.
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/fmt.cyr"
+
+# Mirror of src/lib/compact.cyr _cmp_ws.
+fn _cmp_ws(p, len, j) {
+    while (j < len) {
+        var c = load8(p + j);
+        if (c != 32 && c != 9 && c != 10 && c != 13) { return j; }
+        j = j + 1;
+    }
+    return j;
+}
+
+# Mirror of src/lib/compact.cyr _msg_role_is.
+fn _msg_role_is(p, len, i, want, want_len) {
+    if (i + 6 > len) { return 0; }
+    if (memeq(p + i, "\"role\"", 6) == 0) { return 0; }
+    var j = _cmp_ws(p, len, i + 6);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 58) { return 0; }
+    j = _cmp_ws(p, len, j + 1);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 34) { return 0; }
+    j = j + 1;
+    if (j + want_len >= len) { return 0; }
+    if (memeq(p + j, want, want_len) == 0) { return 0; }
+    if (load8(p + j + want_len) != 34) { return 0; }
+    return 1;
+}
+
+# Mirror of the message-boundary scan in compact_messages: a `{` whose first
+# key (past whitespace) is "role" starts a message.
+fn _count_messages(p, len) {
+    var n = 0;
+    var i = 0;
+    while (i < len - 6) {
+        if (load8(p + i) == 123) {
+            if (i + 10 < len) {
+                var bj = _cmp_ws(p, len, i + 1);
+                if (bj + 6 <= len && memeq(p + bj, "\"role\"", 6) == 1) { n = n + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Mirror of src/lib/provider.cyr _json_value_pos — whitespace-tolerant,
+# quote-anchored key lookup. Returns the value's first byte index, or -1.
+fn _json_value_pos(body, len, key, keylen) {
+    var i = 0;
+    while (i < len - keylen - 1) {
+        if (load8(body + i) == 34) {
+            if (memeq(body + i + 1, key, keylen) == 1) {
+                if (load8(body + i + 1 + keylen) == 34) {
+                    var j = i + 2 + keylen;
+                    while (j < len) {
+                        var c = load8(body + j);
+                        if (c == 32) { j = j + 1; continue; }
+                        if (c == 9) { j = j + 1; continue; }
+                        if (c == 10) { j = j + 1; continue; }
+                        if (c == 13) { j = j + 1; continue; }
+                        break;
+                    }
+                    if (j < len) {
+                        if (load8(body + j) == 58) {
+                            j = j + 1;
+                            while (j < len) {
+                                var d = load8(body + j);
+                                if (d == 32) { j = j + 1; continue; }
+                                if (d == 9) { j = j + 1; continue; }
+                                if (d == 10) { j = j + 1; continue; }
+                                if (d == 13) { j = j + 1; continue; }
+                                break;
+                            }
+                            return j;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Content as a STRING. Returns length, or -1 when content is not a string —
+# which is the untagged-array case the fuzzer is really about.
+fn _content_str_len(body, len) {
+    var p = _json_value_pos(body, len, "content", 7);
+    if (p < 0) { return 0 - 1; }
+    if (p >= len) { return 0 - 1; }
+    if (load8(body + p) != 34) { return 0 - 1; }
+    var start = p + 1;
+    var j = start;
+    while (j < len) {
+        if (load8(body + j) == 34) {
+            if (j > 0 && load8(body + j - 1) == 92) { j = j + 1; continue; }
+            break;
+        }
+        j = j + 1;
+    }
+    return j - start;
+}
+
+# Does any position in the buffer carry `"role": "<want>"`?
+fn _scan_role(p, len, want, want_len) {
+    var i = 0;
+    while (i < len) {
+        if (_msg_role_is(p, len, i, want, want_len) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _hammer(buf, len) {
+    var i = 0;
+    while (i < len) {
+        _msg_role_is(buf, len, i, "system", 6);
+        _msg_role_is(buf, len, i, "user", 4);
+        i = i + 1;
+    }
+    _count_messages(buf, len);
+    _content_str_len(buf, len);
+    _json_value_pos(buf, len, "content", 7);
+    return 0;
+}
+
+var _seed = 0x9E3779B97F4A7C15;
+fn _rnd() {
+    _seed = _seed ^ (_seed << 13);
+    _seed = _seed ^ (_seed >> 7);
+    _seed = _seed ^ (_seed << 17);
+    if (_seed < 0) { return 0 - _seed; }
+    return _seed;
+}
+
+fn main() {
+    var CORPUS_N = 16;
+    var corpus = vec_new();
+    # content as a plain string, compact and spaced (the 2.5.7 bug shape).
+    vec_push(corpus, "[{\"role\":\"system\",\"content\":\"hi\"}]");
+    vec_push(corpus, "[{\"role\": \"system\", \"content\": \"hi\"}]");
+    vec_push(corpus, "[\n  {\n    \"role\": \"user\",\n    \"content\": \"hi\"\n  }\n]");
+    # content as an ARRAY of parts — the untagged alternative.
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":[]}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"x\"}}]}]");
+    # content missing, null, numeric, or an object.
+    vec_push(corpus, "[{\"role\":\"user\"}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":null}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":42}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":{\"a\":1}}]");
+    # Escapes: escaped quote, escaped backslash before the closing quote,
+    # braces and brackets inside the string value.
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\"}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"ends with backslash\\\\\"}]");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"{[}]\"}]");
+    # `role` / `content` appearing as VALUES, not keys.
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"role: system\"}]");
+    # Unterminated, and a lone trailing escape.
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"never closed");
+    vec_push(corpus, "[{\"role\":\"user\",\"content\":\"trailing\\");
+
+    var ci = 0;
+    while (ci < CORPUS_N) {
+        var s = vec_get(corpus, ci);
+        var n = strlen(s);
+        var cut = 0;
+        while (cut <= n) {
+            var b = alloc(cut + 1);
+            memcpy(b, s, cut);
+            store8(b + cut, 0);
+            _hammer(b, cut);
+            cut = cut + 1;
+        }
+        ci = ci + 1;
+    }
+
+    var iter = 0;
+    while (iter < 2000) {
+        var len = _rnd() % 80;
+        var buf = alloc(len + 1);
+        var k = 0;
+        while (k < len) {
+            store8(buf + k, _rnd() % 256);
+            k = k + 1;
+        }
+        store8(buf + len, 0);
+        _hammer(buf, len);
+        iter = iter + 1;
+    }
+
+    var alphabet = "{}[]\":,\\ rolecntsyuxadgim01";
+    var alen = strlen(alphabet);
+    iter = 0;
+    while (iter < 2000) {
+        var blen = _rnd() % 110;
+        var bb = alloc(blen + 1);
+        var m = 0;
+        while (m < blen) {
+            store8(bb + m, load8(alphabet + (_rnd() % alen)));
+            m = m + 1;
+        }
+        store8(bb + blen, 0);
+        _hammer(bb, blen);
+        iter = iter + 1;
+    }
+
+    # Invariants. Scan for the role key rather than assuming its offset — the
+    # array and object brackets sit in front of it.
+    var compact = "[{\"role\":\"system\",\"content\":\"x\"}]";
+    if (_scan_role(compact, strlen(compact), "system", 6) != 1) {
+        println("FAIL: compact role form must match");
+        return 1;
+    }
+    var spaced = "[{\"role\": \"system\", \"content\": \"x\"}]";
+    if (_scan_role(spaced, strlen(spaced), "system", 6) != 1) {
+        println("FAIL: spaced role form must match (the 2.5.7 regression)");
+        return 1;
+    }
+    var indented = "[\n  {\n    \"role\": \"system\"\n  }\n]";
+    if (_scan_role(indented, strlen(indented), "system", 6) != 1) {
+        println("FAIL: indented role form must match");
+        return 1;
+    }
+    # `content` as an array must report "not a string", never a bogus length.
+    var arr = "[{\"role\":\"user\",\"content\":[{\"type\":\"text\"}]}]";
+    if (_content_str_len(arr, strlen(arr)) != 0 - 1) {
+        println("FAIL: array content must not read as a string");
+        return 1;
+    }
+    # A longer role must not match a shorter prefix.
+    var longer = "[{\"role\":\"systemx\"}]";
+    if (_scan_role(longer, strlen(longer), "system", 6) != 0) {
+        println("FAIL: 'systemx' must not match 'system'");
+        return 1;
+    }
+
+    println("fuzz message_content: ok");
+    return 0;
+}
+
+var r = main();
+sys_exit(r);

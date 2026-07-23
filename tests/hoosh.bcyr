@@ -14,6 +14,8 @@ include "lib/hashmap.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
 include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/sigil.cyr"
 # NOTE: do NOT explicitly `include "lib/syscalls.cyr"` here — see the same note
 # in tests/hoosh.tcyr. `cyrius build` prepends the auto-injected stdlib `tls`
 # (which takes `&sys_getrandom` since 6.2.28) ahead of this file's explicit
@@ -624,6 +626,110 @@ fn pool_commit(p, reserved, actual) {
     return 0;
 }
 
+# ── 2.5.10 mirrors: rate limit / cost / audit / events ──
+
+# Mirror of src/lib/ratelimit.cyr — token bucket, refilled from the clock.
+# Layout: rpm(0) tokens(8) last_ms(16).
+fn _bench_rl_new(rpm) {
+    var r = alloc(24);
+    store64(r, rpm);
+    store64(r + 8, rpm * 1000);
+    store64(r + 16, clock_now_ms());
+    return r;
+}
+
+fn _bench_rl_check(r) {
+    var rpm = load64(r);
+    if (rpm <= 0) { return 1; }
+    var now = clock_now_ms();
+    var elapsed = now - load64(r + 16);
+    var cur = load64(r + 8) + elapsed * rpm / 60;
+    var maxt = rpm * 1000;
+    if (cur > maxt) { cur = maxt; }
+    store64(r + 16, now);
+    if (cur < 1000) {
+        store64(r + 8, cur);
+        return 0;
+    }
+    store64(r + 8, cur - 1000);
+    return 1;
+}
+
+# Mirror of src/lib/pricing.cyr cost accumulation — local-first, then the model
+# table, then a linear scan over the per-(provider,base_url) record vec.
+fn _bench_price(model, prov) {
+    if (prov == 0 || prov == 1 || prov == 2 || prov == 3 || prov == 4) { return 0; }
+    if (streq(model, "gpt-4o") == 1) { return 2500 * 0x100000000 + 10000; }
+    if (streq(model, "claude-opus-4") == 1) { return 15000 * 0x100000000 + 75000; }
+    return 2500 * 0x100000000 + 10000;
+}
+
+fn _bench_cost_record(recs, prov, base_url, in_tok, out_tok, model) {
+    var n = vec_len(recs);
+    var rec = 0;
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(recs, i);
+        if (load64(e) == prov) {
+            if (streq(load64(e + 8), base_url) == 1) { rec = e; i = n; }
+        }
+        i = i + 1;
+    }
+    if (rec == 0) {
+        rec = alloc(48);
+        store64(rec, prov);
+        store64(rec + 8, base_url);
+        store64(rec + 16, 0);
+        store64(rec + 24, 0);
+        store64(rec + 32, 0);
+        store64(rec + 40, 0);
+        vec_push(recs, rec);
+    }
+    var packed = _bench_price(model, prov);
+    var cost = in_tok * (packed / 0x100000000) / 1000 + out_tok * (packed % 0x100000000) / 1000;
+    store64(rec + 16, load64(rec + 16) + in_tok);
+    store64(rec + 24, load64(rec + 24) + out_tok);
+    store64(rec + 32, load64(rec + 32) + cost);
+    store64(rec + 40, load64(rec + 40) + 1);
+    return cost;
+}
+
+# Mirror of src/lib/audit.cyr's per-entry work: SHA-256 the entry fields, then
+# HMAC-SHA256 "<hash>:<prev>" with the chain key.
+fn _bench_audit_sign(key, key_len, event, message) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, event);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, message);
+    var s = str_builder_build(sb);
+    var ehash = sha256_hex(str_data(s), str_len(s));
+    var sig_sb = str_builder_new();
+    str_builder_add_cstr(sig_sb, ehash);
+    str_builder_add_cstr(sig_sb, ":0000");
+    var sig_s = str_builder_build(sig_sb);
+    var digest = alloc(32);
+    hmac_sha256(key, key_len, str_data(sig_s), str_len(sig_s), digest);
+    return hex_encode(digest, 32);
+}
+
+# Mirror of src/lib/events.cyr's bounded recent-events ring.
+var _BEV_MAX = 128;
+var _bev_ring = 0;
+var _bev_head = 0;
+var _bev_count = 0;
+fn _bench_ev_init() {
+    _bev_ring = alloc(_BEV_MAX * 8);
+    _bev_head = 0;
+    _bev_count = 0;
+    return 0;
+}
+fn _bench_ev_publish(payload) {
+    store64(_bev_ring + (_bev_head % _BEV_MAX) * 8, payload);
+    _bev_head = _bev_head + 1;
+    if (_bev_count < _BEV_MAX) { _bev_count = _bev_count + 1; }
+    return 0;
+}
+
 # Cache — mirrors src/lib/cache.cyr including the 2.5.4 TTL check. The entry is
 # a struct (value / last_access_ms / created_ms), and cache_get compares the
 # entry's age against the TTL before serving. Modelling that matters: the old
@@ -970,6 +1076,113 @@ fn main() {
     while (i < 100000) {
         _bench_wq_push(i);
         _bench_wq_pop();
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # ── 2.5.10: per-request cost of the security + accounting paths ──
+    # rust-old benched these (hot_path.rs / providers.rs); the port did not, so
+    # the four things every single request pays for — auth compare, rate-limit
+    # check, cost accounting, audit append — had no numbers at all.
+
+    # Benchmark: auth_verify_token — constant-time compare on the hot path.
+    # All three tokens are the SAME LENGTH on purpose. ct_eq_bytes_lens
+    # short-circuits on a length mismatch — unavoidable and not a secret — so
+    # comparing a 25-byte token against a 24-byte one measures that early exit,
+    # not the constant-time property. What must not vary is the cost of a
+    # same-length token that differs EARLY vs LATE: if the first-byte mismatch
+    # is cheaper than the last-byte one, the compare leaks a prefix oracle and
+    # an attacker can recover the token byte by byte.
+    var _b_tok = "bearer-secret-token-12345";
+    var _b_tok2 = "bearer-secret-token-12345";
+    var _b_late = "bearer-secret-token-1234X";   # differs in the LAST byte
+    var _b_early = "Xearer-secret-token-12345";  # differs in the FIRST byte
+    b = bench_new("auth_verify_token");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        ct_eq_bytes_lens(_b_tok, strlen(_b_tok), _b_tok2, strlen(_b_tok2));
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    b = bench_new("auth_verify_wrong_late");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        ct_eq_bytes_lens(_b_tok, strlen(_b_tok), _b_late, strlen(_b_late));
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    b = bench_new("auth_verify_wrong_early");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        ct_eq_bytes_lens(_b_tok, strlen(_b_tok), _b_early, strlen(_b_early));
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # Benchmark: rate_limit_check — token-bucket refill + take.
+    var _b_rl = _bench_rl_new(600);
+    b = bench_new("rate_limit_check");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_rl_check(_b_rl);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # Benchmark: cost_record — pricing lookup + accumulate, per completion.
+    var _b_costs = vec_new();
+    b = bench_new("cost_record_known_model");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_cost_record(_b_costs, 5, "https://api.openai.com", 1000, 500, "gpt-4o");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # Local providers short-circuit before the model table (2.5.6).
+    b = bench_new("cost_record_local_free");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_cost_record(_b_costs, 0, "http://localhost:11434", 1000, 500, "llama3");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # Benchmark: audit_record — SHA-256 entry hash + HMAC signature per event.
+    # This is the most expensive thing on the success path after the forward.
+    sha256_global_init();
+    b = bench_new("audit_record_sign");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        _bench_audit_sign("audit-key", 9, "inference.request", "completed");
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # Benchmark: event_publish — bounded ring append (no subscribers).
+    _bench_ev_init();
+    b = bench_new("event_publish_ring");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        _bench_ev_publish(i);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);

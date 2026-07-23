@@ -36,6 +36,95 @@ fn dlp_configure(enabled, default_level) {
     return 0;
 }
 
+# ── Custom patterns (2.5.10) ──
+# rust-old had DlpConfig.custom_patterns: caller-supplied patterns beyond the
+# eight built-ins, each with its own classification level. The built-ins cover
+# the universal identifiers (SSN, card numbers, cloud keys); custom patterns
+# cover the things only THIS deployment knows are sensitive — an internal
+# project codename, a customer-id prefix, a partner's API key format.
+#
+# Literal case-insensitive substrings, NOT regexes: hoosh has no regex engine
+# (rust-old's `dlp` feature pulled in the `regex` crate), and rolling one for
+# config-supplied input would mean shipping a backtracking matcher fed by
+# operator-controlled patterns — a ReDoS surface on the request path. A literal
+# match is the capability that is safely portable here; documented as such.
+#
+# Entry: name(0) pattern(8) level(16) — 24 bytes.
+var _dlp_custom = 0;
+
+fn dlp_custom_clear() {
+    _dlp_custom = vec_new();
+    return 0;
+}
+
+fn dlp_custom_add(name, pattern, level) {
+    if (_dlp_custom == 0) { _dlp_custom = vec_new(); }
+    if (pattern == 0) { return 0; }
+    if (strlen(pattern) == 0) { return 0; }
+    var e = alloc(24);
+    store64(e, name);
+    store64(e + 8, pattern);
+    store64(e + 16, level);
+    vec_push(_dlp_custom, e);
+    return 1;
+}
+
+fn dlp_custom_count() {
+    if (_dlp_custom == 0) { return 0; }
+    return vec_len(_dlp_custom);
+}
+
+# Case-insensitive literal search. Returns the match offset, or -1.
+fn _dlp_find_ci(t, len, pat) {
+    var plen = strlen(pat);
+    if (plen == 0 || plen > len) { return 0 - 1; }
+    var i = 0;
+    while (i + plen <= len) {
+        var j = 0;
+        while (j < plen) {
+            var a = load8(t + i + j) & 0xFF;
+            var b = load8(pat + j) & 0xFF;
+            if (a >= 65 && a <= 90) { a = a + 32; }
+            if (b >= 65 && b <= 90) { b = b + 32; }
+            if (a != b) { break; }
+            j = j + 1;
+        }
+        if (j == plen) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Highest level among matching custom patterns; -1 when none match.
+fn dlp_custom_level(t, len) {
+    if (_dlp_custom == 0) { return 0 - 1; }
+    var best = 0 - 1;
+    var n = vec_len(_dlp_custom);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(_dlp_custom, i);
+        if (_dlp_find_ci(t, len, load64(e + 8)) >= 0) {
+            if (load64(e + 16) > best) { best = load64(e + 16); }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# Name of the first custom pattern that matched, or 0. For the audit trail —
+# "which rule fired" is the question an operator asks after a block.
+fn dlp_custom_hit_name(t, len) {
+    if (_dlp_custom == 0) { return 0; }
+    var n = vec_len(_dlp_custom);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(_dlp_custom, i);
+        if (_dlp_find_ci(t, len, load64(e + 8)) >= 0) { return load64(e); }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn dlp_is_enabled() { return _dlp_enabled; }
 
 fn dlp_class_name(level) {
@@ -361,5 +450,10 @@ fn dlp_scan_level(t, len) {
     if (level < CLASS_INTERNAL) {
         if (_dlp_has_email(t, len) == 1) { level = CLASS_INTERNAL; }
     }
+    # 2.5.10: custom patterns are checked LAST but can raise the level to
+    # anything, including restricted — a deployment that declares its own
+    # identifier format sensitive gets the same enforcement as a built-in.
+    var custom = dlp_custom_level(t, len);
+    if (custom > level) { level = custom; }
     return level;
 }

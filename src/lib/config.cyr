@@ -144,6 +144,29 @@ fn load_config(path) {
         dlp_configure(den, dlvl);
     }
 
+    # Parse [[dlp_pattern]] sections (2.5.10) — caller-supplied patterns beyond
+    # the eight built-ins: name + literal pattern + classification level.
+    dlp_custom_clear();
+    var dpat_secs = toml_get_sections(sections, "dlp_pattern");
+    var dpi = 0;
+    while (dpi < vec_len(dpat_secs)) {
+        var dpp = toml_section_pairs(vec_get(dpat_secs, dpi));
+        var dp_name = toml_get(dpp, "name");
+        var dp_pat = toml_get(dpp, "pattern");
+        var dp_lvl_str = toml_get(dpp, "level");
+        if (dp_pat != 0) {
+            var dp_lvl = CLASS_CONFIDENTIAL;
+            if (dp_lvl_str != 0) {
+                var parsed_l = dlp_class_from_str(to_cstr(dp_lvl_str));
+                if (parsed_l >= 0) { dp_lvl = parsed_l; }
+            }
+            var dp_nm = "custom";
+            if (dp_name != 0) { dp_nm = to_cstr(dp_name); }
+            dlp_custom_add(dp_nm, to_cstr(dp_pat), dp_lvl);
+        }
+        dpi = dpi + 1;
+    }
+
     # Parse [semantic_cache] section — embedding-similarity cache (off by default).
     var sem_secs = toml_get_sections(sections, "semantic_cache");
     if (vec_len(sem_secs) > 0) {

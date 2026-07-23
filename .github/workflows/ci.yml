@@ -98,6 +98,19 @@ jobs:
       - name: Test suite
         run: cyrius test tests/hoosh.tcyr
 
+      - name: Dependency policy
+        # CLAUDE.md lists `cyrius deny` in the cleanliness check, but CI never
+        # ran it — so a dependency that violated project policy could land.
+        run: cyrius deny src/main.cyr
+
+      - name: Symbol coverage
+        # Not line coverage: hoosh's tests are a self-contained mirror and never
+        # execute src/, so a line number would be a flat 0%. This asserts every
+        # function in src/ is at least REFERENCED by the suites — a floor
+        # against adding code nothing watches. See scripts/coverage.sh for what
+        # it does and does not prove.
+        run: ./scripts/coverage.sh 30
+
       - name: Security scan
         run: ./scripts/security-scan.sh
 
