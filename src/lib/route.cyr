@@ -2,7 +2,7 @@
 # Requires: types.cyr
 
 enum RouteField {
-    ROUTE_SIZE       = 72;
+    ROUTE_SIZE       = 80;
     ROUTE_PROVIDER   = 0;
     ROUTE_PRIORITY   = 8;
     ROUTE_PATTERNS   = 16;
@@ -12,6 +12,40 @@ enum RouteField {
     ROUTE_API_KEY    = 48;
     ROUTE_RATE_LIMIT = 56;
     ROUTE_MAX_TOKENS = 64;
+    ROUTE_HEALTH     = 72;
+}
+
+# ── Per-route health record (2.5.5) ──
+# Lives ON the route so router_select can consult it with a single load, and so
+# it survives an /v1/admin/reload the same way the route does — no separate
+# index bookkeeping to keep in sync.
+#
+#   +0  healthy         1 = serving, 0 = withdrawn from selection
+#   +8  consecutive_failures
+#   +16 last_check_ms   0 = never probed
+#   +24 last_error      cstr, or 0
+#
+# rust-old's ProviderHealthState (health.rs:16-21). Starts HEALTHY: refusing
+# traffic before the first probe would make startup a guaranteed outage.
+enum HealthField {
+    HEALTH_SIZE      = 32;
+    HEALTH_OK        = 0;
+    HEALTH_FAILS     = 8;
+    HEALTH_CHECKED   = 16;
+    HEALTH_ERR       = 24;
+}
+
+# Consecutive failures before a route is withdrawn. rust-old's
+# UNHEALTHY_THRESHOLD (health.rs:27) — one blip should not depool a backend.
+var UNHEALTHY_THRESHOLD = 3;
+
+fn _health_record_new() {
+    var h = alloc(HEALTH_SIZE);
+    store64(h + HEALTH_OK, 1);
+    store64(h + HEALTH_FAILS, 0);
+    store64(h + HEALTH_CHECKED, 0);
+    store64(h + HEALTH_ERR, 0);
+    return h;
 }
 
 fn route_new(prov, priority, base_url) {
@@ -25,6 +59,7 @@ fn route_new(prov, priority, base_url) {
     store64(r + ROUTE_API_KEY, 0);
     store64(r + ROUTE_RATE_LIMIT, 0);
     store64(r + ROUTE_MAX_TOKENS, 0);
+    store64(r + ROUTE_HEALTH, _health_record_new());
     return r;
 }
 
@@ -39,6 +74,19 @@ fn route_rate_limiter(r) { return load64(r + ROUTE_RATE_LIMIT); }
 fn route_max_tokens_limit(r) { return load64(r + ROUTE_MAX_TOKENS); }
 fn route_set_max_tokens_limit(r, v) { store64(r + ROUTE_MAX_TOKENS, v); return 0; }
 fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
+fn route_health(r) { return load64(r + ROUTE_HEALTH); }
+
+# Read WITHOUT the health lock. This is a single aligned i64 written by the one
+# prober thread and read by the pool workers, so a read sees the old or the new
+# value and nothing in between; the worst case is one request routed on a
+# reading that is milliseconds stale. Same reasoning as the lock-free `_router`
+# swap in [ADR 011] — taking a mutex on every router_select would serialize
+# selection across all 7 workers to save nothing.
+fn route_healthy(r) {
+    var h = load64(r + ROUTE_HEALTH);
+    if (h == 0) { return 1; }
+    return load64(h + HEALTH_OK);
+}
 fn route_set_rate_limit(r, rpm) {
     if (rpm > 0) {
         store64(r + ROUTE_RATE_LIMIT, ratelimit_new(rpm));

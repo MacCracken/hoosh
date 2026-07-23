@@ -7,11 +7,15 @@
 bind = "127.0.0.1"
 port = 8088
 strategy = "priority"   # priority | round-robin | lowest-latency | direct
+# Background provider health probing. A route is withdrawn from routing after 3
+# consecutive failed probes and restored on the first success. 0 disables it.
+health_check_interval_secs = 30
 
 # Per-provider knobs live on each [[providers]] block:
 #   max_tokens_limit = 4096   # clamp any request asking for more (0/omit = no cap)
 #   rate_limit       = 600    # requests per minute
 #   models           = ["llama*", "mistral*"]
+#   enabled          = false  # keep the route configured but out of selection
 
 # Bearer-token auth. A LIST — issue a token per consumer and rotate by adding
 # the new one before retiring the old. Omit this section entirely and hoosh

@@ -1244,6 +1244,57 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.5 health / circuit breaker mirrors ──
+# Mirror of the per-route health record in src/lib/route.cyr + health_record in
+# src/lib/health.cyr. `now` is injected so the state machine is exercised
+# without sleeping.
+var _T_UNHEALTHY_THRESHOLD = 3;
+
+fn _t_health_new() {
+    var h = alloc(32);
+    store64(h, 1);          # healthy — optimistic until probed
+    store64(h + 8, 0);      # consecutive_failures
+    store64(h + 16, 0);     # last_check_ms
+    store64(h + 24, 0);     # last_error
+    return h;
+}
+
+# Returns 1 when this probe flipped the circuit, else 0.
+fn _t_health_record(h, ok, now) {
+    var was = load64(h);
+    var now_ok = was;
+    if (ok == 1) {
+        store64(h + 8, 0);
+        store64(h + 24, 0);
+        now_ok = 1;
+    } else {
+        var fails = load64(h + 8) + 1;
+        store64(h + 8, fails);
+        store64(h + 24, "probe failed");
+        if (fails >= _T_UNHEALTHY_THRESHOLD) { now_ok = 0; }
+    }
+    store64(h, now_ok);
+    store64(h + 16, now);
+    if (now_ok != was) { return 1; }
+    return 0;
+}
+
+fn _t_health_ok(h) { return load64(h); }
+fn _t_health_fails(h) { return load64(h + 8); }
+
+# Mirror of health_status_str — disabled outranks unhealthy.
+fn _t_health_status(enabled, healthy) {
+    if (enabled == 0) { return "disabled"; }
+    if (healthy == 1) { return "healthy"; }
+    return "unhealthy";
+}
+
+# Mirror of the probe path choice in health.cyr: Ollama speaks its native API.
+fn _t_probe_path(prov) {
+    if (prov == 0) { return "/api/tags"; }
+    return "/v1/models";
+}
+
 # ── 2.5.3 provider correctness mirrors ──
 # Mirror of src/lib/types.cyr status_retryable — 408/429/5xx retryable.
 fn _t_status_retryable(st) {
@@ -5403,6 +5454,56 @@ fn main() {
     assert_eq(_t_sem_remove(sv, 999), 0, "sem_remove: absent key is a no-op");
     assert_eq(vec_len(sv), 2, "sem_remove: no-op leaves length alone");
     assert_eq(_t_sem_remove(0, 11), 0, "sem_remove: empty store safe");
+
+    # ── v2.5.5 health & failover ──
+    test_group("health_circuit_breaker");
+    # A route starts healthy: refusing traffic before the first probe would make
+    # every startup a guaranteed outage.
+    var hh = _t_health_new();
+    assert_eq(_t_health_ok(hh), 1, "health: starts optimistic");
+    # One or two failures must NOT depool — a single blip is not an outage.
+    assert_eq(_t_health_record(hh, 0, 1000), 0, "health: 1 failure, no flip");
+    assert_eq(_t_health_ok(hh), 1, "health: still healthy after 1");
+    assert_eq(_t_health_record(hh, 0, 2000), 0, "health: 2 failures, no flip");
+    assert_eq(_t_health_ok(hh), 1, "health: still healthy after 2");
+    # The third consecutive failure trips it, and reports the transition so the
+    # caller emits exactly one health-changed event.
+    assert_eq(_t_health_record(hh, 0, 3000), 1, "health: 3rd failure flips");
+    assert_eq(_t_health_ok(hh), 0, "health: now unhealthy");
+    assert_eq(_t_health_fails(hh), 3, "health: failure count tracked");
+    # Further failures keep it down but must NOT re-fire the event.
+    assert_eq(_t_health_record(hh, 0, 4000), 0, "health: no repeat transition");
+    assert_eq(_t_health_fails(hh), 4, "health: failures keep counting");
+    # A single success recovers immediately and resets the counter.
+    assert_eq(_t_health_record(hh, 1, 5000), 1, "health: success flips back");
+    assert_eq(_t_health_ok(hh), 1, "health: recovered");
+    assert_eq(_t_health_fails(hh), 0, "health: failure count reset");
+    assert_eq(load64(hh + 16), 5000, "health: last_check recorded");
+
+    test_group("health_failures_must_be_consecutive");
+    # Two failures, a success, then two more must NOT trip — the counter resets,
+    # so an intermittent backend is not depooled by cumulative noise.
+    var hi2 = _t_health_new();
+    _t_health_record(hi2, 0, 1000);
+    _t_health_record(hi2, 0, 2000);
+    _t_health_record(hi2, 1, 3000);
+    assert_eq(_t_health_fails(hi2), 0, "health: success clears the run");
+    _t_health_record(hi2, 0, 4000);
+    _t_health_record(hi2, 0, 5000);
+    assert_eq(_t_health_ok(hi2), 1, "health: 2+2 split does not trip");
+
+    test_group("health_status_str");
+    # Disabled outranks unhealthy — an operator-disabled route is not a fault.
+    assert_streq(_t_health_status(1, 1), "healthy", "status: enabled + up");
+    assert_streq(_t_health_status(1, 0), "unhealthy", "status: enabled + down");
+    assert_streq(_t_health_status(0, 1), "disabled", "status: disabled outranks up");
+    assert_streq(_t_health_status(0, 0), "disabled", "status: disabled outranks down");
+
+    test_group("health_probe_path");
+    # Ollama serves its native API; everything OpenAI-compatible answers /v1/models.
+    assert_streq(_t_probe_path(PROV_OLLAMA), "/api/tags", "probe: ollama native path");
+    assert_streq(_t_probe_path(PROV_LMSTUDIO), "/v1/models", "probe: openai-compat path");
+    assert_streq(_t_probe_path(PROV_ANTHROPIC), "/v1/models", "probe: default path");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

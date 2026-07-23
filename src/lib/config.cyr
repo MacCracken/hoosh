@@ -89,6 +89,10 @@ fn load_config(path) {
         # "0.0.0.0" packs to 0 (INADDR_ANY); host_addr also accepts a hostname.
         var bind_str = toml_get(srv, "bind");
         if (bind_str != 0) { _http_bind = host_addr(to_cstr(bind_str)); }
+        # 2.5.5: background health-probe cadence. 0 disables probing, which
+        # leaves every route optimistically healthy (pre-2.5.5 behavior).
+        var hci_str = toml_get(srv, "health_check_interval_secs");
+        if (hci_str != 0) { health_configure(str_to_int(hci_str)); }
     }
 
     # Parse [storage] section — opt-in patra persistence (path only)
@@ -230,6 +234,14 @@ fn load_config(path) {
             if (ppri_str != 0) { ppri = str_to_int(ppri_str); }
 
             var route = route_new(ptype, ppri, purl);
+
+            # 2.5.5: `enabled = false` takes a route out of selection without
+            # deleting it (rust-old config.rs:272). route_enabled was already
+            # honored by the router; nothing ever set it from config.
+            var pen_str = toml_get(pp, "enabled");
+            if (pen_str != 0) {
+                if (str_eq_cstr(pen_str, "false") == 1) { route_set_enabled(route, 0); }
+            }
 
             # Parse API key — "$NAME" expands from the environment so the
             # secret stays out of hoosh.cyml.

@@ -5,6 +5,57 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.5] — 2026-07-22
+
+**Health & failover — the fifth and largest band of the rust-old parity closeout arc.** A dead provider used to
+keep taking traffic indefinitely; hoosh now probes its backends and routes around the ones that are down.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Added
+- **`src/lib/health.cyr` — background provider health probing.** One bankless thread probes every enabled route
+  on `[server] health_check_interval_secs` (default 30; `0` disables) and maintains a per-route health record.
+  It probes once inline at startup so the earliest requests route on measured state rather than an assumption.
+  Port of rust-old's `health.rs`.
+- **A circuit breaker per route.** `UNHEALTHY_THRESHOLD = 3` consecutive failures withdraws a route from
+  selection; a single success restores it and resets the counter. Failures must be *consecutive* — an
+  intermittent backend is not depooled by cumulative noise. A `health_changed` event fires on each transition
+  and never on a repeat, so the bus is not spammed while a backend stays down.
+- **`[[providers]] enabled = false`** — takes a route out of selection without deleting it. `route_enabled` was
+  already honored by the router; nothing ever set it from config (rust-old `config.rs:272`).
+- **`/v1/health/providers` gained `status` (`healthy`/`unhealthy`/`disabled`), `enabled`,
+  `consecutive_failures`, `last_check_ms`, and `check_interval_secs`.** Disabled routes are now listed rather
+  than omitted.
+
+### Fixed
+- **The router never consulted health, so a dead backend kept receiving requests.** The health map was written
+  by the `/v1/health/providers` handler and read by *nobody* — purely decorative telemetry. `router_select` now
+  filters unhealthy routes out of the candidate set (rust-old `router.rs:76-96`).
+  Verified end to end with two backends: killing the priority-1 backend moved traffic to priority-2 after three
+  failed probes and emitted one `health_changed`; restarting it moved traffic back.
+- **`/v1/health/providers` ran N blocking TCP connects inline on a pool worker for every poll**, so a monitoring
+  system scraping it tied up one of the 7 workers for as long as the slowest backend took to answer — and then
+  discarded the result. It now reports the state the background prober maintains, making the endpoint a handful
+  of memory reads.
+
+### Changed
+- **Probe depth is asymmetric by design.** Local (`http://`) routes get a real HTTP GET — Ollama's `/api/tags`,
+  everyone else's `/v1/models` — which confirms the backend is actually serving rather than merely that a port
+  is open. Remote (`https://`) routes get a TCP-connect probe instead. rust-old issued the authenticated GET
+  remotely too, but that bills an API call per provider per interval and adds rate-limit pressure for a
+  liveness signal a connect already provides; it would also require a sigil crypto bank, which the bankless
+  prober thread does not own (banks 0..7 = main + the 7 pool workers).
+- **When every candidate is unhealthy, selection falls back to the unfiltered set** rather than returning 404.
+  A backend can recover between probes, so refusing traffic outright turns a provider blip into a guaranteed
+  outage — attempting and failing (502) is strictly more useful. Logged when it happens. Verified: with both
+  backends dead the request returns 502, not 404.
+- `route` grew a `ROUTE_HEALTH` field (size 72 → 80). The health record lives on the route so `router_select`
+  reads it with one load and it survives `/v1/admin/reload` the same way the route does. The `healthy` flag is
+  read **unlocked** on the hot path — a single aligned i64 written by the one prober thread, so a reader sees
+  the old or new value and nothing between; the worst case is one request routed on a reading milliseconds
+  stale. Same reasoning as the lock-free `_router` swap in [ADR 011](docs/decisions/011-multithreaded-accept-loop.md).
+
+Gates: 585 tests (was 562), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.4] — 2026-07-22
 
 **Cache expiry — the fourth band of the rust-old parity closeout arc.** `ttl_secs` has shipped in `hoosh.cyml`

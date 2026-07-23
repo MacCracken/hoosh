@@ -84,7 +84,8 @@ dispatch, and the `cmd_serve` accept loop + startup init.
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match) |
 | `config.cyr` | `hoosh.cyml` (TOML) parsing + `$ENV` key expansion |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
-| `retry.cyr` | Jittered exponential backoff |
+| `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
+| `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends |
 | `auth.cyr` | Bearer-token auth (constant-time) |
 | `logging.cyr` | Structured operational logging (sakshi) |
 

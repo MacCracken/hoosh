@@ -47,16 +47,43 @@ fn router_select(rt, model) {
     var strategy = load64(rt + ROUTER_STRATEGY);
     var cand = alloc(count * 8);
     var cn = 0;
+    # 2.5.5: health-filtered candidate set. Before this the health map was
+    # written only by the /v1/health/providers handler and read by nobody, so a
+    # dead backend kept taking traffic until an operator noticed. rust-old
+    # filtered here (router.rs:76-96).
+    var unhealthy = 0;
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
         if (route_enabled(r) == 1) {
             if (route_matches_model(r, model) == 1) {
-                store64(cand + cn * 8, r);
-                cn = cn + 1;
+                if (route_healthy(r) == 1) {
+                    store64(cand + cn * 8, r);
+                    cn = cn + 1;
+                } else {
+                    unhealthy = unhealthy + 1;
+                }
             }
         }
         i = i + 1;
+    }
+    # Every candidate is depooled: serve on the unfiltered set rather than 404.
+    # A backend can recover between probes, and refusing traffic outright turns
+    # a provider blip into a guaranteed outage — trying and failing is strictly
+    # more useful than not trying.
+    if (cn == 0 && unhealthy > 0) {
+        hlog_warn("router: all candidates unhealthy, ignoring health this pass");
+        i = 0;
+        while (i < count) {
+            var r2 = load64(routes + i * 8);
+            if (route_enabled(r2) == 1) {
+                if (route_matches_model(r2, model) == 1) {
+                    store64(cand + cn * 8, r2);
+                    cn = cn + 1;
+                }
+            }
+            i = i + 1;
+        }
     }
     if (cn == 0) { return 0; }
     if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) { return load64(cand); }

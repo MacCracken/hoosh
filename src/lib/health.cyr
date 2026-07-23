@@ -1,0 +1,160 @@
+# health.cyr — background provider health probing + circuit breaking (2.5.5).
+# Requires: types.cyr, route.cyr, router.cyr, http_client.cyr, logging.cyr,
+#           events.cyr (health-changed notifications)
+#
+# Port of rust-old/src/health.rs. A background thread probes every enabled route
+# on an interval and maintains the per-route health record that router_select
+# consults. Before 2.5.5 the port had none of this: `_health_map` was written by
+# the /v1/health/providers handler and read by nobody, so a dead backend kept
+# taking traffic until an operator polled the endpoint and intervened by hand.
+#
+# Two design points worth stating, because they differ from rust-old:
+#
+#  1. PROBE DEPTH IS ASYMMETRIC. Local (http://) routes get a real HTTP probe —
+#     Ollama's GET /api/tags, everyone else's GET /v1/models — which confirms
+#     the backend is actually serving, not merely that a port is open. Remote
+#     (https://) routes get a TCP-connect probe instead. rust-old issued the
+#     authenticated GET remotely too, but that bills an API call per provider
+#     per interval and adds rate-limit pressure for a liveness signal that a
+#     connect already gives; it would also need a sigil crypto bank, which this
+#     bankless thread does not own (banks 0..7 = main + the 7 pool workers).
+#
+#  2. THE ENDPOINT NO LONGER PROBES. /v1/health/providers used to run N blocking
+#     connects inline on a pool worker for every poll. It now reports the state
+#     this thread maintains, so the endpoint is a handful of memory reads.
+
+# Probe interval, seconds. 0 disables probing entirely (health stays optimistic
+# and router_select behaves exactly as it did pre-2.5.5).
+var _health_interval_s = 30;
+var _health_started = 0;
+
+# Guards the multi-field health-record writes below. Readers of the single
+# `healthy` flag go unlocked — see route_healthy().
+var _health_lock = 0;
+
+fn health_configure(interval_secs) {
+    _health_interval_s = interval_secs;
+    return 0;
+}
+
+fn health_interval() { return _health_interval_s; }
+
+# The liveness path for a route's provider. Ollama serves its native API, so
+# /api/tags is the honest "are you up" check; everything OpenAI-compatible
+# answers /v1/models.
+fn _health_probe_path(route) {
+    if (route_provider(route) == PROV_OLLAMA) { return "/api/tags"; }
+    return "/v1/models";
+}
+
+# Probe one route. Returns 1 when it answered, 0 otherwise.
+fn health_probe(route) {
+    var base = route_base_url(route);
+    if (base == 0) { return 0; }
+    if (route_is_remote(route) == 1) {
+        # Remote: TCP reachability only (see the header note).
+        var _sr = tcp_socket();
+        if (is_ok(_sr) == 0) { return 0; }
+        var fd = payload(_sr);
+        var ok = 0;
+        if (net_connect_nb(fd, host_addr(url_host(base)), url_port(base),
+        HTTP_CONNECT_TIMEOUT_MS) == 0) {
+            ok = 1;
+        }
+        sock_close(fd);
+        return ok;
+    }
+    # Local: a real GET. 2xx-3xx counts as serving; anything else (or no
+    # response at all) is a failure.
+    var resp = http_req_local("GET", base, _health_probe_path(route), 0, 0);
+    if (resp == 0) { return 0; }
+    var st = http_status(resp);
+    if (st >= 200 && st < 400) { return 1; }
+    return 0;
+}
+
+# Fold a probe result into a route's health record, flipping the circuit at
+# UNHEALTHY_THRESHOLD consecutive failures and emitting a health-changed event
+# on each transition (never on a repeat, so the bus is not spammed).
+fn health_record(route, ok) {
+    var h = route_health(route);
+    if (h == 0) { return 0; }
+    mutex_lock(_health_lock);
+    var was = load64(h + HEALTH_OK);
+    var now_ok = was;
+    if (ok == 1) {
+        store64(h + HEALTH_FAILS, 0);
+        store64(h + HEALTH_ERR, 0);
+        now_ok = 1;
+    } else {
+        var fails = load64(h + HEALTH_FAILS) + 1;
+        store64(h + HEALTH_FAILS, fails);
+        store64(h + HEALTH_ERR, "probe failed");
+        if (fails >= UNHEALTHY_THRESHOLD) { now_ok = 0; }
+    }
+    store64(h + HEALTH_OK, now_ok);
+    store64(h + HEALTH_CHECKED, clock_now_ms());
+    mutex_unlock(_health_lock);
+    if (now_ok != was) {
+        if (now_ok == 1) {
+            hlog_info("health: provider recovered");
+        } else {
+            hlog_warn("health: provider marked unhealthy, withdrawing from routing");
+        }
+        event_health_changed(provider_name(route_provider(route)),
+        route_base_url(route), now_ok);
+    }
+    return 0;
+}
+
+# One full sweep over the current router's enabled routes.
+fn health_sweep() {
+    if (_router == 0) { return 0; }
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            health_record(r, health_probe(r));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Background prober. Bankless (no sigil crypto bank), which is why the remote
+# probe is a bare connect rather than a TLS request — see the header.
+fn _health_thread(arg) {
+    while (1 == 1) {
+        sleep_ms(_health_interval_s * 1000);
+        # Re-read the interval each pass so a reload can change it, and re-read
+        # _router so a reload's fresh route set is probed (the swap is atomic
+        # and the bump allocator never frees, so an old pointer stays valid).
+        if (_health_interval_s > 0) { health_sweep(); }
+    }
+    return 0;
+}
+
+fn health_start() {
+    if (_health_started == 1) { return 0; }
+    if (_health_lock == 0) { _health_lock = mutex_new(); }
+    if (_health_interval_s <= 0) {
+        hlog_info("health: background probing disabled (health_check_interval_secs = 0)");
+        return 0;
+    }
+    _health_started = 1;
+    # Probe once up front so the first requests route on measured state rather
+    # than the optimistic default.
+    health_sweep();
+    thread_create(&_health_thread, 0);
+    return 0;
+}
+
+# Status string for /v1/health/providers. rust-old's ProviderHealth.status enum
+# (healthy | unhealthy | disabled).
+fn health_status_str(route) {
+    if (route_enabled(route) == 0) { return "disabled"; }
+    if (route_healthy(route) == 1) { return "healthy"; }
+    return "unhealthy";
+}

@@ -164,20 +164,41 @@ it audits what the other bands leave behind, so it closes the arc. Items marked 
 > is essentially the whole number, and it was being paid before 2.5.4 too. A cheaper
 > monotonic clock is a genuine win worth taking; filed under [2.5.11](#v2511--security--hardening-audit-sweep).
 
-### v2.5.5 — Health & failover  *(largest band)*
-- [ ] ⚠ **No health probing or circuit breaker** — `health_check`, `consecutive_fail`,
-      `unhealthy`, `circuit` match nothing in `src/lib/`. Rust ran a background prober
-      with a `UNHEALTHY_THRESHOLD = 3` state machine (`health.rs:27,123-269`).
-- [ ] ⚠ **The router never consults health** — `_health_map` is written and read only
-      inside `handle_health_providers` (`handlers.cyr:558-567`); it is telemetry for the
-      endpoint. Rust filtered unhealthy providers out of the candidate set
-      (`router.rs:76-96`). A dead provider keeps taking traffic until an operator polls
-      and intervenes.
-- [ ] **Per-provider probes** — Ollama `GET /api/tags`; OpenAI-compat authenticated
-      `GET /v1/models`; Anthropic `POST /v1/messages` with `content-length: 0`.
-- [ ] **`[server] health_check_interval_secs`** (default 30, 0 = disabled).
-- [ ] **`ProviderHealth.enabled`** — disabled routes still listed, status `"disabled"`.
-- [ ] **`[[providers]] enabled = false`** — disable a route from config (`config.rs:272`).
+### v2.5.5 — Health & failover  *(largest band)* — ✅ SHIPPED 2026-07-22
+New module [`health.cyr`](../../src/lib/health.cyr): one bankless background thread
+probes every enabled route and maintains a per-route health record that
+`router_select` consults.
+- [x] ⚠ **No health probing or circuit breaker** — now a `UNHEALTHY_THRESHOLD = 3`
+      consecutive-failure state machine per route, matching rust-old (`health.rs:27`).
+      One blip does not depool a backend; a single success recovers it and resets the
+      counter. A `health_changed` event fires on each transition, never on a repeat.
+- [x] ⚠ **The router never consults health** — `router_select` now filters unhealthy
+      routes out of the candidate set. Verified live: killing the priority-1 backend
+      moved traffic to priority-2 after 3 failed probes, and restarting it moved
+      traffic back.
+- [x] **Per-provider probes** — Ollama `GET /api/tags`, OpenAI-compatible
+      `GET /v1/models`.
+- [x] **`[server] health_check_interval_secs`** (default 30, 0 = disabled).
+- [x] **`ProviderHealth.enabled`** — disabled routes are listed with status
+      `"disabled"`; the response also carries `consecutive_failures`, `last_check_ms`
+      and the configured `check_interval_secs`.
+- [x] **`[[providers]] enabled = false`** — `route_enabled` was already honored by the
+      router; nothing ever set it from config.
+
+Three deliberate departures from rust-old, all verified:
+- **Probe depth is asymmetric.** Local (`http://`) routes get a real HTTP GET; remote
+  (`https://`) routes get a TCP-connect probe. rust-old issued the authenticated GET
+  remotely too, but that bills an API call per provider per interval and adds
+  rate-limit pressure for a liveness signal a connect already gives — and it would
+  need a sigil crypto bank the bankless prober thread does not own.
+- **All-candidates-unhealthy falls back to the unfiltered set** rather than returning
+  404. A backend can recover between probes, so refusing outright turns a blip into a
+  guaranteed outage; trying and failing (502) is strictly more useful. Logged when it
+  happens.
+- **`/v1/health/providers` no longer probes.** It used to run N blocking connects
+  inline on a pool worker for every poll — so a monitoring scrape tied up a worker for
+  as long as the slowest backend took — and threw the result away, since nothing but
+  that handler read it. It now reports the state the prober maintains.
 
 ### v2.5.6 — Cost accounting
 - [ ] ⚠ **Nothing accumulates cost per provider** — `pricing.cyr` computes per-token

@@ -57,6 +57,7 @@ include "src/lib/hardware.cyr"
 include "src/lib/handlers.cyr"
 include "src/lib/batch.cyr"
 include "src/lib/events.cyr"
+include "src/lib/health.cyr"
 include "src/lib/otlp.cyr"
 include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
@@ -417,6 +418,12 @@ fn cmd_serve(port) {
     # queue. crypto_tls_main_init() above readied the bank scratch; pool_start
     # spawns the workers, each owning a crypto bank. Batch items share this pool.
     pool_start();
+
+    # Background provider health probing (2.5.5) — one bankless thread keeps the
+    # per-route health records that router_select consults. Probes once inline
+    # first so the earliest requests route on measured state. No-op when
+    # [server] health_check_interval_secs = 0.
+    health_start();
 
     # Accept loop: accept connections and hand each to the pool. All request
     # handling (recv/route/respond/close) runs on the workers, concurrently.

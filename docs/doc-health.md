@@ -6,7 +6,15 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-22 (**v2.5.4** — cache expiry, the fourth closeout
+> **Last refresh**: 2026-07-22 (**v2.5.5** — health & failover, the fifth and
+> largest closeout band). Doc touch: CHANGELOG [2.5.5], roadmap (2.5.5 shipped +
+> three documented departures from rust-old: asymmetric probe depth,
+> all-unhealthy fallback, non-probing endpoint), hoosh.cyml
+> (`health_check_interval_secs`, per-provider `enabled`), CLAUDE.md pin.
+> **New module**: `src/lib/health.cyr`, added to the overview module map (whose
+> `retry.cyr` row also picked up the 2.5.3 retryability gate). Gates: 585 tests,
+> 17 benches, clean.
+> **Prior**: 2026-07-22 (**v2.5.4** — cache expiry, the fourth closeout
 > band). Doc touch: CHANGELOG [2.5.4], roadmap (2.5.4 shipped + a bench
 > step-change note so the CSV jump is not misread as a regression; **+a 2.5.11
 > item**: `clock_now_ms()` measured at 1.351 µs, a syscall), hoosh.cyml

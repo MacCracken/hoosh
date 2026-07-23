@@ -559,6 +559,13 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
 }
 
 # GET /v1/health/providers
+#
+# 2.5.5: reports the state the background prober maintains instead of running N
+# blocking TCP connects inline. The old version probed on every poll, so a
+# monitoring system scraping this endpoint tied up a pool worker for as long as
+# the slowest backend took to answer — and the result was thrown away, since
+# nothing but this handler ever read it. Disabled routes are listed too, with
+# status "disabled" (rust-old's ProviderHealth.enabled).
 fn handle_health_providers(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"providers\":[");
@@ -568,42 +575,45 @@ fn handle_health_providers(cfd) {
     var hi = 0;
     while (hi < rcount) {
         var r = load64(routes + hi * 8);
+        var h = route_health(r);
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"provider\":\"");
+        str_builder_add_cstr(sb, provider_name(route_provider(r)));
+        str_builder_add_cstr(sb, "\",\"base_url\":\"");
+        str_builder_add_cstr(sb, route_base_url(r));
+        str_builder_add_cstr(sb, "\",\"status\":\"");
+        str_builder_add_cstr(sb, health_status_str(r));
+        str_builder_add_cstr(sb, "\",\"enabled\":");
         if (route_enabled(r) == 1) {
-            var base = route_base_url(r);
-            var up = 0;
-            var _sr = tcp_socket();
-            if (is_ok(_sr) == 1) {
-                var fd = payload(_sr);
-                var _cr = sock_connect(fd, host_addr(url_host(base)), url_port(base));
-                if (is_ok(_cr) == 1) { up = 1; }
-                sys_close(fd);
-            }
-            # HealthChanged event on a flip (state per route base_url; stored as
-            # up+1 so 0 = never-seen). _chat_lock guards the shared _health_map —
-            # concurrent health polls run on different pool workers (v2.4.0).
-            var hkey = route_base_url(r);
-            var hcur = up + 1;
-            mutex_lock(_chat_lock);
-            var hprev = map_get(_health_map, hkey);
-            map_set(_health_map, hkey, hcur);
-            mutex_unlock(_chat_lock);
-            if (hprev != 0 && hprev != hcur) {
-                event_health_changed(provider_name(route_provider(r)), hkey, up);
-            }
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"provider\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"base_url\":\"");
-            str_builder_add_cstr(sb, route_base_url(r));
-            str_builder_add_cstr(sb, "\",\"healthy\":");
-            if (up == 1) { str_builder_add_cstr(sb, "true"); }
-            else { str_builder_add_cstr(sb, "false"); }
-            str_builder_add_cstr(sb, "}");
-            first = 0;
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
         }
+        str_builder_add_cstr(sb, ",\"healthy\":");
+        if (route_healthy(r) == 1) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"consecutive_failures\":");
+        if (h != 0) {
+            str_builder_add_int(sb, load64(h + HEALTH_FAILS));
+        } else {
+            str_builder_add_int(sb, 0);
+        }
+        str_builder_add_cstr(sb, ",\"last_check_ms\":");
+        if (h != 0) {
+            str_builder_add_int(sb, load64(h + HEALTH_CHECKED));
+        } else {
+            str_builder_add_int(sb, 0);
+        }
+        str_builder_add_cstr(sb, "}");
+        first = 0;
         hi = hi + 1;
     }
-    str_builder_add_cstr(sb, "]}");
+    str_builder_add_cstr(sb, "],\"check_interval_secs\":");
+    str_builder_add_int(sb, health_interval());
+    str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
