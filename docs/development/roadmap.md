@@ -200,14 +200,23 @@ Three deliberate departures from rust-old, all verified:
   as long as the slowest backend took — and threw the result away, since nothing but
   that handler read it. It now reports the state the prober maintains.
 
-### v2.5.6 — Cost accounting
-- [ ] ⚠ **Nothing accumulates cost per provider** — `pricing.cyr` computes per-token
-      cost correctly, but `/v1/costs` (`handlers.cyr:383`) emits global aggregates plus
-      a route listing. Rust returned `{records: [ProviderCostRecord], total_cost_usd}`
-      keyed `{provider}:{base_url}`, each with `total_input_tokens`,
-      `total_output_tokens`, `total_cost_usd`, `request_count` (`cost/mod.rs:116-127`).
-      As shipped, `/v1/costs` cannot answer "what has Anthropic cost me today".
-- [ ] **`admin.costs_reset` audit entry** at severity `warn` on `POST /v1/costs/reset`.
+### v2.5.6 — Cost accounting — ✅ SHIPPED 2026-07-23
+- [x] ⚠ **Nothing accumulates cost per provider** — a `CostTracker` now accumulates
+      per `(provider, base_url)` on the successful-inference path, and `/v1/costs`
+      returns `records` with `total_input_tokens`, `total_output_tokens`,
+      `request_count`, `total_cost_micro_usd`/`total_cost_usd` plus a grand total —
+      rust-old's `ProviderCostRecord` (`cost/mod.rs:116-127`). It replaces the old
+      `providers` array, which listed routes with no cost attached.
+- [x] **`admin.costs_reset` audit entry** at `warn` on `POST /v1/costs/reset`, plus a
+      warn log. Clearing spend history destroys billing evidence, so it belongs in the
+      chain.
+
+> **Bug found while verifying**: `pricing_lookup` checked `provider_is_local` only in
+> its *fallback*, after the model-name table. The table is keyed by model NAME and
+> hosted-model names are routinely served locally, so `llama-3.3-70b` on Ollama matched
+> the Groq row and was billed at 590/790 per million — real money for tokens generated
+> on your own GPU. Exactly the realistic cases were mispriced. The local check now runs
+> first. (The test file's mirror had it right all along; production had diverged.)
 
 ### v2.5.7 — Config-reader closeout
 Keys that exist in the Rust config surface with no Cyrius reader — each is either a

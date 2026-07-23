@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-07-23T06:44:36Z** — commit `f811c95`
+Latest: **2026-07-23T07:01:18Z** — commit `79970cd`
 
 ## hoosh
 
-| Benchmark | Baseline (`c5ba977`) | Previous (`c5ba977`) | Current (`f811c95`) |
+| Benchmark | Baseline (`c5ba977`) | Previous (`f811c95`) | Current (`79970cd`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 896 ns | 884 ns | 890 ns |
-| `route_round_robin_10` | 140 ns | 137 ns | 139 ns |
-| `pool_reserve_commit` | 40 ns | 42 ns +5% | 44 ns +10% |
+| `route_select_20_providers` | 884 ns | 890 ns | 884 ns |
+| `route_round_robin_10` | 137 ns | 139 ns | 136 ns |
+| `pool_reserve_commit` | 42 ns | 44 ns +5% | 43 ns |
 | `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 108 ns | 1.49 us +1277% | 1.52 us +1305% |
-| `cache_get_miss` | 47 ns | 46 ns | 48 ns |
-| `cache_insert` | 71 ns | 1.45 us +1938% | 1.46 us +1952% |
-| `queue_enqueue_dequeue` | 595 ns | 613 ns +3% | 555 ns **-7%** |
-| `queue_5tier_sort` | 842 ns | 771 ns **-8%** | 770 ns **-9%** |
-| `route_matches_model` | 33 ns | 31 ns **-6%** | 33 ns |
-| `estimate_tokens_per_provider` | 8 ns | 8 ns | 7 ns **-12%** |
-| `dlp_scan_clean_prompt` | 4.01 us | 4.17 us +4% | 4.01 us |
-| `mcp_tools_list` | 3.91 us | 3.92 us | 3.96 us |
-| `mcp_tools_call` | 8.60 us | 8.24 us **-4%** | 8.28 us **-4%** |
-| `batch_split_4` | 873 ns | 798 ns **-9%** | 802 ns **-8%** |
-| `latency_bucket_find` | 55 ns | 52 ns **-5%** | 55 ns |
+| `cache_get_hit` | 1.49 us | 1.52 us | 1.49 us |
+| `cache_get_miss` | 46 ns | 48 ns +4% | 48 ns +4% |
+| `cache_insert` | 1.45 us | 1.46 us | 1.45 us |
+| `queue_enqueue_dequeue` | 613 ns | 555 ns **-9%** | 573 ns **-7%** |
+| `queue_5tier_sort` | 771 ns | 770 ns | 785 ns |
+| `route_matches_model` | 31 ns | 33 ns +6% | 31 ns |
+| `estimate_tokens_per_provider` | 8 ns | 7 ns **-12%** | 7 ns **-12%** |
+| `dlp_scan_clean_prompt` | 4.17 us | 4.01 us **-4%** | 3.99 us **-4%** |
+| `mcp_tools_list` | 3.92 us | 3.96 us | 3.98 us |
+| `mcp_tools_call` | 8.24 us | 8.28 us | 8.21 us |
+| `batch_split_4` | 798 ns | 802 ns | 806 ns |
+| `latency_bucket_find` | 52 ns | 55 ns +6% | 51 ns |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
 
 ---

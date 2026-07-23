@@ -404,7 +404,28 @@ fn handle_token_pools(cfd) {
 }
 
 # GET /v1/costs
+#
+# 2.5.6: `records` carries ACCUMULATED per-provider spend (rust-old's
+# ProviderCostRecord, cost/mod.rs:116-127). It replaces the old `providers`
+# array, which listed the configured routes with no cost attached — the endpoint
+# could report how many tokens hoosh had processed in total, but not what any
+# one provider had cost. Records are keyed by (provider, base_url) and survive
+# an /v1/admin/reload.
 fn handle_costs(cfd) {
+    # _chat_lock: the record vec is appended to by _chat_assemble on the pool
+    # workers, so snapshot under the lock rather than iterating a vec that can
+    # grow (and reallocate) mid-read.
+    mutex_lock(_chat_lock);
+    var n = cost_record_count();
+    var total_micro = cost_total_micro();
+    var snap = alloc(n * 8 + 8);
+    var si = 0;
+    while (si < n) {
+        store64(snap + si * 8, cost_record_at(si));
+        si = si + 1;
+    }
+    mutex_unlock(_chat_lock);
+
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"total_requests\":");
     str_builder_add_int(sb, _met_requests);
@@ -412,22 +433,38 @@ fn handle_costs(cfd) {
     str_builder_add_int(sb, _met_prompt_tokens);
     str_builder_add_cstr(sb, ",\"total_completion_tokens\":");
     str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, ",\"providers\":[");
-    var routes = load64(_router + ROUTER_ROUTES);
-    var rcount = load64(_router + ROUTER_COUNT);
+    str_builder_add_cstr(sb, ",\"total_cost_micro_usd\":");
+    str_builder_add_int(sb, total_micro);
+    str_builder_add_cstr(sb, ",\"total_cost_usd\":\"");
+    pricing_append_usd(sb, total_micro);
+    str_builder_add_cstr(sb, "\",\"records\":[");
     var first = 1;
     var ci = 0;
-    while (ci < rcount) {
-        var r = load64(routes + ci * 8);
+    while (ci < n) {
+        var rec = load64(snap + ci * 8);
+        var prov = load64(rec);
         if (first == 0) { str_builder_add_cstr(sb, ","); }
         str_builder_add_cstr(sb, "{\"provider\":\"");
-        str_builder_add_cstr(sb, provider_name(route_provider(r)));
+        str_builder_add_cstr(sb, provider_name(prov));
         str_builder_add_cstr(sb, "\",\"base_url\":\"");
-        str_builder_add_cstr(sb, route_base_url(r));
+        str_builder_add_cstr(sb, load64(rec + 8));
         str_builder_add_cstr(sb, "\",\"is_local\":");
-        if (provider_is_local(route_provider(r)) == 1) { str_builder_add_cstr(sb, "true"); }
-        else { str_builder_add_cstr(sb, "false"); }
-        str_builder_add_cstr(sb, "}");
+        if (provider_is_local(prov) == 1) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+        str_builder_add_cstr(sb, ",\"total_input_tokens\":");
+        str_builder_add_int(sb, load64(rec + 16));
+        str_builder_add_cstr(sb, ",\"total_output_tokens\":");
+        str_builder_add_int(sb, load64(rec + 24));
+        str_builder_add_cstr(sb, ",\"request_count\":");
+        str_builder_add_int(sb, load64(rec + 40));
+        str_builder_add_cstr(sb, ",\"total_cost_micro_usd\":");
+        str_builder_add_int(sb, load64(rec + 32));
+        str_builder_add_cstr(sb, ",\"total_cost_usd\":\"");
+        pricing_append_usd(sb, load64(rec + 32));
+        str_builder_add_cstr(sb, "\"}");
         first = 0;
         ci = ci + 1;
     }
@@ -2105,6 +2142,12 @@ fn _chat_assemble(prep, result) {
     if (bpool != 0) {
         pool_commit(bpool, est_tokens, resp_ptok + resp_ctok);
     }
+
+    # 2.5.6: accumulate per-provider spend. Runs under _chat_lock (held by every
+    # caller of _chat_assemble), which is what makes the shared record vec safe
+    # across the pool workers.
+    cost_record(route_provider(route), route_base_url(route),
+    resp_ptok, resp_ctok, model_cstr);
 
     if (_audit_chain != 0) {
         audit_record(_audit_chain, "inference.request",

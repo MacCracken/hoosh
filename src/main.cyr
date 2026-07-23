@@ -184,7 +184,19 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
     # POST routes
     if (streq(path, "/v1/costs/reset") == 1) {
+        # 2.5.6: clearing spend history is an administrative act that destroys
+        # billing evidence, so it lands in the audit chain at `warn` — rust-old
+        # recorded the same `admin.costs_reset`. _chat_lock guards the record
+        # vec the pool workers append to.
+        mutex_lock(_chat_lock);
         metrics_reset();
+        cost_reset();
+        mutex_unlock(_chat_lock);
+        if (_audit_chain != 0) {
+            audit_record(_audit_chain, "admin.costs_reset",
+            "warn", "cost records cleared", "admin", "");
+        }
+        hlog_warn("admin: cost records cleared");
         var body = "{\"status\":\"reset\"}";
         return http_ok(cfd, body, strlen(body));
     }

@@ -5,6 +5,45 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.6] — 2026-07-23
+
+**Cost accounting — the sixth band of the rust-old parity closeout arc.** hoosh could price a request but never
+remembered one, so `/v1/costs` could not answer the question the endpoint exists for.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **Local providers were billed for hosted-model names.** `pricing_lookup` checked `provider_is_local` only in
+  its *fallback*, which is reached only for models absent from the price table. The table is keyed by model
+  NAME, and hosted-model names are routinely served locally — so `llama-3.3-70b` on Ollama matched the
+  Groq-hosted row and accrued 590/790 per million tokens, real money for tokens generated on your own GPU.
+  Exactly the realistic cases were mispriced. The local check now runs first, before the table.
+  Found while verifying the new accumulation (a local-only test config reported $0.0225 of spend). The test
+  suite's pricing mirror had checked local-first all along; production had diverged from it.
+- **Nothing accumulated cost.** `/v1/costs` reported global token counters plus a bare listing of configured
+  routes with no cost attached — it could say how many tokens hoosh had processed in total, but not what any
+  one provider had cost.
+
+### Added
+- **A cost tracker** (`pricing.cyr`), accumulating per `(provider, base_url)` on the successful-inference path.
+  Port of rust-old's `CostTracker` (`cost/mod.rs:116-127`). Records are matched by a linear scan over a record
+  vec rather than a keyed map: building a `provider:base_url` key string per request would allocate on the hot
+  path against an arena that never frees, and the scan is over the route count. `base_url` is compared by
+  content, so totals survive an `/v1/admin/reload`.
+- **`/v1/costs` now returns `records`** — each with `provider`, `base_url`, `is_local`, `total_input_tokens`,
+  `total_output_tokens`, `request_count`, `total_cost_micro_usd` and `total_cost_usd` — plus
+  `total_cost_micro_usd`/`total_cost_usd` grand totals. The existing `total_requests` /
+  `total_prompt_tokens` / `total_completion_tokens` aggregates are unchanged.
+- **`admin.costs_reset` audit entry at `warn`** on `POST /v1/costs/reset`, plus a warn log. Clearing spend
+  history destroys billing evidence, so it belongs in the chain. `POST /v1/costs/reset` now clears the cost
+  records as well as the metrics counters.
+
+### Changed
+- **`/v1/costs` replaced its `providers` array with `records`.** The old array listed configured routes
+  (`provider`, `base_url`, `is_local`) with no cost data; `records` carries the same identity fields plus the
+  accumulated totals, so it is a superset for any consumer that was reading it.
+
+Gates: 600 tests (was 585), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.5] — 2026-07-22
 
 **Health & failover — the fifth and largest band of the rust-old parity closeout arc.** A dead provider used to

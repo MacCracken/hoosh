@@ -74,6 +74,18 @@ fn _pricing_fallback(prov, out) {
 # 1) exact match, 2) longest-prefix match, 3) provider fallback.
 fn pricing_lookup(model, prov, out) {
     _pricing_init();
+    # Local providers are free, whatever the model is called. The table is keyed
+    # by model NAME, and plenty of hosted-model names are served locally —
+    # `llama-3.3-70b` on Ollama would otherwise match the Groq row and be billed
+    # at 590/790 per million for tokens generated on your own GPU. The fallback
+    # below already zeroed local providers; it was only reached for models
+    # absent from the table, so exactly the realistic cases were mispriced.
+    # (Found while verifying 2.5.6 accumulation: a local route reported spend.)
+    if (provider_is_local(prov) == 1) {
+        store64(out, 0);
+        store64(out + 8, 0);
+        return 0;
+    }
     var ml = strlen(model);
     var i = 0;
     while (i < _pricing_n) {
@@ -119,6 +131,92 @@ fn estimate_cost_micro(model, prov, in_tok, out_tok) {
     var in_s = load64(px);
     var out_s = load64(px + 8);
     return in_tok * in_s / 1000 + out_tok * out_s / 1000;
+}
+
+# ================================================================
+# Cost tracker (2.5.6)
+# ================================================================
+#
+# Port of rust-old's CostTracker (cost/mod.rs:116-127). The pricing table above
+# could always price a request, but nothing ACCUMULATED — `/v1/costs` reported
+# global token counters plus a bare route listing, so it could not answer "what
+# has Anthropic cost me today", which is the only question the endpoint exists
+# for.
+#
+# Records are held in a plain vec and matched by (provider, base_url) with a
+# linear scan. No map, and deliberately no composite `provider:base_url` key
+# string: building one per request would allocate on the hot path against an
+# arena that never frees. The scan is over the route count — a handful of
+# pointer compares next to a network forward.
+#
+# Record: provider(0) base_url(8) in_tokens(16) out_tokens(24)
+#         cost_micro(32) requests(40)  — 48 bytes.
+var _cost_records = 0;
+
+fn _cost_record_new(prov, base_url) {
+    var r = alloc(48);
+    store64(r, prov);
+    store64(r + 8, base_url);
+    store64(r + 16, 0);
+    store64(r + 24, 0);
+    store64(r + 32, 0);
+    store64(r + 40, 0);
+    return r;
+}
+
+# Find (or create) the record for a provider/base_url pair. base_url is compared
+# by CONTENT, not pointer, so totals survive an /v1/admin/reload — the reloaded
+# config yields an equal string at a fresh address.
+fn _cost_find(prov, base_url) {
+    if (_cost_records == 0) { _cost_records = vec_new(); }
+    var n = vec_len(_cost_records);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(_cost_records, i);
+        if (load64(r) == prov) {
+            if (streq(load64(r + 8), base_url) == 1) { return r; }
+        }
+        i = i + 1;
+    }
+    var fresh = _cost_record_new(prov, base_url);
+    vec_push(_cost_records, fresh);
+    return fresh;
+}
+
+# Accumulate one completed inference. Caller holds _chat_lock (this runs from
+# _chat_assemble, which already does) — the vec is shared across pool workers.
+fn cost_record(prov, base_url, in_tok, out_tok, model) {
+    var r = _cost_find(prov, base_url);
+    store64(r + 16, load64(r + 16) + in_tok);
+    store64(r + 24, load64(r + 24) + out_tok);
+    store64(r + 32, load64(r + 32) + estimate_cost_micro(model, prov, in_tok, out_tok));
+    store64(r + 40, load64(r + 40) + 1);
+    return 0;
+}
+
+fn cost_record_count() {
+    if (_cost_records == 0) { return 0; }
+    return vec_len(_cost_records);
+}
+
+fn cost_record_at(i) { return vec_get(_cost_records, i); }
+
+fn cost_total_micro() {
+    if (_cost_records == 0) { return 0; }
+    var total = 0;
+    var n = vec_len(_cost_records);
+    var i = 0;
+    while (i < n) {
+        total = total + load64(vec_get(_cost_records, i) + 32);
+        i = i + 1;
+    }
+    return total;
+}
+
+# Drop every accumulated record. Caller holds _chat_lock.
+fn cost_reset() {
+    _cost_records = vec_new();
+    return 0;
 }
 
 # Append a micro-USD amount as a 6-decimal USD string ("0.000450").

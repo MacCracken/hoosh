@@ -1244,6 +1244,52 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.6 cost tracker mirrors ──
+# Mirror of src/lib/pricing.cyr's record vec. Production keys by
+# (provider, base_url), NOT provider alone — two routes of the same provider
+# type at different URLs are separate lines on the bill.
+# Record: provider(0) base_url(8) in(16) out(24) cost_micro(32) reqs(40).
+fn _t_cost_find(recs, prov, base_url) {
+    var n = vec_len(recs);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(recs, i);
+        if (load64(r) == prov) {
+            if (streq(load64(r + 8), base_url) == 1) { return r; }
+        }
+        i = i + 1;
+    }
+    var fresh = alloc(48);
+    store64(fresh, prov);
+    store64(fresh + 8, base_url);
+    store64(fresh + 16, 0);
+    store64(fresh + 24, 0);
+    store64(fresh + 32, 0);
+    store64(fresh + 40, 0);
+    vec_push(recs, fresh);
+    return fresh;
+}
+
+fn _t_cost_record(recs, prov, base_url, in_tok, out_tok, model) {
+    var r = _t_cost_find(recs, prov, base_url);
+    store64(r + 16, load64(r + 16) + in_tok);
+    store64(r + 24, load64(r + 24) + out_tok);
+    store64(r + 32, load64(r + 32) + cost_calculate(model, prov, in_tok, out_tok));
+    store64(r + 40, load64(r + 40) + 1);
+    return 0;
+}
+
+fn _t_cost_total(recs) {
+    var total = 0;
+    var n = vec_len(recs);
+    var i = 0;
+    while (i < n) {
+        total = total + load64(vec_get(recs, i) + 32);
+        i = i + 1;
+    }
+    return total;
+}
+
 # ── 2.5.5 health / circuit breaker mirrors ──
 # Mirror of the per-route health record in src/lib/route.cyr + health_record in
 # src/lib/health.cyr. `now` is injected so the state machine is exercised
@@ -5504,6 +5550,49 @@ fn main() {
     assert_streq(_t_probe_path(PROV_OLLAMA), "/api/tags", "probe: ollama native path");
     assert_streq(_t_probe_path(PROV_LMSTUDIO), "/v1/models", "probe: openai-compat path");
     assert_streq(_t_probe_path(PROV_ANTHROPIC), "/v1/models", "probe: default path");
+
+    # ── v2.5.6 cost accounting ──
+    test_group("cost_local_is_free_first");
+    # The local check must come BEFORE the model-name table. The table is keyed
+    # by model NAME, and hosted-model names are routinely served locally — the
+    # production lookup checked local only in its FALLBACK, so `llama-3.3-70b`
+    # on Ollama matched the Groq row and billed real money for tokens generated
+    # on your own GPU. Exactly the realistic cases were mispriced.
+    assert_eq(cost_calculate("gpt-4o", PROV_OPENAI, 1000, 500), 7500,
+    "cost: remote gpt-4o priced");
+    assert_eq(cost_calculate("gpt-4o", PROV_LMSTUDIO, 1000, 500), 0,
+    "cost: same model name served locally is free");
+    assert_eq(cost_calculate("claude-opus-4", PROV_OLLAMA, 1000, 500), 0,
+    "cost: table-matching name on ollama is free");
+    assert_eq(cost_calculate("anything", PROV_LLAMACPP, 9999, 9999), 0,
+    "cost: unknown model on llamacpp is free");
+
+    test_group("cost_tracker_accumulate");
+    var cr = vec_new();
+    _t_cost_record(cr, PROV_OPENAI, "https://api.openai.com", 1000, 500, "gpt-4o");
+    _t_cost_record(cr, PROV_OPENAI, "https://api.openai.com", 2000, 1000, "gpt-4o");
+    assert_eq(vec_len(cr), 1, "cost: same provider+url is one record");
+    var c0 = vec_get(cr, 0);
+    assert_eq(load64(c0 + 16), 3000, "cost: input tokens accumulate");
+    assert_eq(load64(c0 + 24), 1500, "cost: output tokens accumulate");
+    assert_eq(load64(c0 + 40), 2, "cost: request count accumulates");
+    assert_eq(load64(c0 + 32), 22500, "cost: spend accumulates");
+
+    test_group("cost_tracker_keying");
+    # Same provider TYPE at a different base_url is a separate record — two
+    # OpenAI-compatible endpoints are two bills.
+    _t_cost_record(cr, PROV_OPENAI, "https://other.example.com", 1000, 0, "gpt-4o");
+    assert_eq(vec_len(cr), 2, "cost: different base_url is a new record");
+    # A different provider is likewise separate.
+    _t_cost_record(cr, PROV_ANTHROPIC, "https://api.anthropic.com", 1000, 500, "claude-opus-4");
+    assert_eq(vec_len(cr), 3, "cost: different provider is a new record");
+    # The grand total is the sum across records.
+    assert_eq(_t_cost_total(cr), 22500 + 2500 + 52500, "cost: total sums all records");
+    # A local route contributes records but no spend.
+    _t_cost_record(cr, PROV_OLLAMA, "http://localhost:11434", 5000, 5000, "llama3");
+    assert_eq(vec_len(cr), 4, "cost: local route still tracked");
+    assert_eq(_t_cost_total(cr), 22500 + 2500 + 52500, "cost: local adds no spend");
+    assert_eq(load64(vec_get(cr, 3) + 16), 5000, "cost: local tokens still counted");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
