@@ -2,9 +2,18 @@
 # See BENCHMARKS.md for performance data.
 
 [server]
+# Listen address. Defaults to 127.0.0.1 (loopback only) when omitted — set
+# "0.0.0.0" to serve other hosts, and configure [[auth]] tokens if you do.
 bind = "127.0.0.1"
 port = 8088
 strategy = "priority"   # priority | round-robin | lowest-latency | direct
+
+# Bearer-token auth. A LIST — issue a token per consumer and rotate by adding
+# the new one before retiring the old. Omit this section entirely and hoosh
+# serves unauthenticated (fine on loopback; pair with `bind` above before
+# exposing the gateway off-host).
+# [[auth]]
+# tokens = ["consumer-a-key", "consumer-b-key"]
 
 # Operational logging (stderr). Levels: fatal, error, warn, info, debug, trace.
 # Default is info. The CLI banner / `info` / `help` output stays on stdout.

@@ -1151,6 +1151,87 @@ fn _t_wq_pop() {
     return j;
 }
 
+# Mirror of src/lib/config.cyr _config_str_array — TOML string-array parse
+# into up to `max` cstrs at `out`, returning the count.
+fn _t_config_str_array(raw, out, max) {
+    var n = strlen(raw);
+    var count = 0;
+    var i = 0;
+    while (i < n && count < max) {
+        var c = load8(raw + i);
+        if (c == 91 || c == 93 || c == 44 || c == 32 || c == 34) {
+            i = i + 1;
+        } else {
+            var s = i;
+            while (i < n) {
+                c = load8(raw + i);
+                if (c == 34 || c == 44 || c == 93) { break; }
+                i = i + 1;
+            }
+            var elen = i - s;
+            if (elen > 0) {
+                var e = alloc(elen + 1);
+                memcpy(e, raw + s, elen);
+                store8(e + elen, 0);
+                store64(out + count * 8, e);
+                count = count + 1;
+            }
+        }
+    }
+    return count;
+}
+
+# Mirror of src/lib/http_server.cyr _hdr_ci_eq / req_content_length.
+fn _t_hdr_ci_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i) & 0xFF;
+        var cb = load8(b + i) & 0xFF;
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _t_req_content_length(buf, len) {
+    var i = 0;
+    while (i < len - 3) {
+        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
+            if (load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { return 0; }
+        }
+        if (i + 15 < len && _t_hdr_ci_eq(buf + i, "content-length:", 15) == 1) {
+            var j = i + 15;
+            while (j < len && load8(buf + j) == 32) { j = j + 1; }
+            var v = 0;
+            while (j < len) {
+                var c = load8(buf + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                v = v * 10 + (c - 48);
+                j = j + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mirror of src/lib/config.cyr bind_addr_str — packed network-order IPv4 to
+# dotted quad (octets are LSB-first).
+fn _t_bind_addr_str(addr) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, addr & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 8) & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 16) & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 24) & 0xFF);
+    return str_cstr(str_builder_build(sb));
+}
+
 fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
@@ -4756,6 +4837,55 @@ fn main() {
     vec_push(llv2, 15);
     vec_push(llv2, 40);
     assert_eq(_t_ll_pick(llv2), 1, "ll: lowest latency wins");
+
+    # ── v2.5.1 parity closeout: bind / body cap / multi-token auth ──
+    test_group("config_str_array");
+    # `tokens = ["a", "b", "c"]` must yield THREE tokens. Before 2.5.1 the raw
+    # scalar was pushed as one, so no configured key ever matched.
+    var csa_out = alloc(32 * 8);
+    var csa_n = _t_config_str_array("[\"alpha-key-111\", \"beta-key-222\", \"gamma-key-333\"]", csa_out, 32);
+    assert_eq(csa_n, 3, "str_array: three elements parsed");
+    assert_streq(load64(csa_out), "alpha-key-111", "str_array: first element");
+    assert_streq(load64(csa_out + 8), "beta-key-222", "str_array: second element");
+    assert_streq(load64(csa_out + 16), "gamma-key-333", "str_array: third element");
+    # A bare scalar stays a single element (single-token configs keep working).
+    var csa_n1 = _t_config_str_array("solo-token", csa_out, 32);
+    assert_eq(csa_n1, 1, "str_array: bare scalar → one element");
+    assert_streq(load64(csa_out), "solo-token", "str_array: bare scalar value");
+    # Empty array → zero elements (and must not write past `out`).
+    assert_eq(_t_config_str_array("[]", csa_out, 32), 0, "str_array: empty array → 0");
+    # Bound is enforced — the old inline models parser had 8 slots and NO
+    # check, so a 9th pattern wrote past the allocation.
+    var csa_many = "[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\"]";
+    assert_eq(_t_config_str_array(csa_many, csa_out, 4), 4, "str_array: honors max bound");
+
+    test_group("req_content_length");
+    var rcl1 = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 4096\r\n\r\nbody";
+    assert_eq(_t_req_content_length(rcl1, strlen(rcl1)), 4096, "content-length: parsed");
+    # Header names are case-insensitive on the wire.
+    var rcl2 = "POST / HTTP/1.1\r\ncontent-length: 17\r\n\r\nx";
+    assert_eq(_t_req_content_length(rcl2, strlen(rcl2)), 17, "content-length: lowercase accepted");
+    # Absent header → 0 (treated as no declared body).
+    var rcl3 = "GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n";
+    assert_eq(_t_req_content_length(rcl3, strlen(rcl3)), 0, "content-length: absent → 0");
+    # A body containing the literal header text must NOT spoof the value — the
+    # scan stops at the CRLFCRLF that ends the header block.
+    var rcl4 = "POST / HTTP/1.1\r\nHost: x\r\n\r\n{\"s\":\"content-length: 999\"}";
+    assert_eq(_t_req_content_length(rcl4, strlen(rcl4)), 0, "content-length: body cannot spoof");
+
+    test_group("request_body_cap");
+    # MAX_REQUEST_BODY = 1 MiB, matching rust-old's DefaultBodyLimit. The check
+    # is `>` so a body exactly at the cap is served, one byte over is 413.
+    var cap = 1048576;
+    assert_eq(1048575 > cap, 0, "body cap: under cap accepted");
+    assert_eq(cap > cap, 0, "body cap: exactly at cap accepted");
+    assert_eq((cap + 1) > cap, 1, "body cap: one byte over rejected");
+
+    test_group("bind_addr_str");
+    # Packed network-byte-order IPv4, octets LSB-first.
+    assert_streq(_t_bind_addr_str(0x0100007F), "127.0.0.1", "bind: loopback default");
+    assert_streq(_t_bind_addr_str(0), "0.0.0.0", "bind: INADDR_ANY");
+    assert_streq(_t_bind_addr_str(0xBA01A8C0), "192.168.1.186", "bind: LAN address");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

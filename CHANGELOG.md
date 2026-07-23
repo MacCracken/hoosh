@@ -5,6 +5,60 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.1] — 2026-07-22
+
+**Security & hard limits — the first band of the rust-old parity closeout arc.** A full behavioral diff of the
+archived Rust tree against the port (1,007 behaviors catalogued, see
+[the parity review](docs/development/rust-old-parity-review.md)) found the surface area is a superset but the
+request path is not at parity. This cut closes the three highest-severity gaps.
+
+### Security
+- **The gateway ignored `[server] bind` and listened on `0.0.0.0`.** `hoosh.cyml` has shipped
+  `bind = "127.0.0.1"` since the port, but `config.cyr` never parsed the key and `cmd_serve` bound
+  `INADDR_ANY()` unconditionally — so hoosh listened on **every interface** while its own config claimed
+  loopback. Combined with auth being optional (`auth.cyr`: no tokens configured ⇒ allow all), a stock
+  deployment was an unauthenticated LLM gateway reachable from the whole network. `bind` is now parsed
+  (via `host_addr`, so a dotted quad, a hostname, or `0.0.0.0` all work) and **defaults to loopback**,
+  matching rust-old's `ServerConfig.bind` default. The startup banner prints the address actually bound.
+- **`[auth] tokens` accepted only one token.** The parser pushed the raw TOML scalar as a single token, so
+  `tokens = ["a", "b"]` matched nothing and multi-key deployments (per-consumer keys, key rotation) were
+  inexpressible — rust-old took a list (`config.rs:166`). Now parsed as an array; `auth_check` already
+  looped the vec correctly, so this was purely parse-side.
+
+### Added
+- **A 1 MiB request body cap, answering `413 Payload Too Large`** — matching rust-old's axum
+  `DefaultBodyLimit`. `Content-Length` is checked *before* any large allocation, so an oversized request
+  costs one response rather than a megabyte of the never-freeing arena.
+
+### Fixed
+- **Requests larger than 64 KiB were silently truncated.** `_handle_conn` did a single `sock_recv` of
+  65535 bytes and never drained the rest, so any body bigger than that — or merely split across TCP
+  segments — was cut short and surfaced as a malformed-JSON 400. A legitimate 100 KiB chat request could
+  not be served at all. The read path now honors `Content-Length` and reads the full body into a
+  right-sized buffer (bounded by the new cap). Verified: 200 KB and exactly-1 MiB bodies parse and route;
+  1 MiB + 1 is refused with 413.
+- **Latent heap overflow in the `models` pattern parser.** `[[providers]] models = [...]` allocated 8
+  pointer slots and never bounds-checked the parse loop, so a 9th model pattern wrote past the
+  allocation. Both `models` and the new `tokens` array now share a bounded `_config_str_array` helper,
+  capped at 32 entries each.
+
+### Changed
+- **BREAKING — default listen address is now `127.0.0.1`, was `0.0.0.0`.** A config that omits `bind`
+  (or no config at all) now serves loopback only. Set `[server] bind = "0.0.0.0"` to restore off-host
+  access. Deployments using the shipped `hoosh.cyml` are unaffected in effect — it already said
+  `127.0.0.1`; only the actual behavior changes to match it.
+- **`BACKLOG.md` removed**; its contents are now a [Backlog section](docs/development/roadmap.md) in the
+  roadmap. Two lists had drifted — it still carried P4 (multi-threaded accept loop) as open six weeks
+  after 2.4.0 shipped it.
+
+### Docs
+- **New: `docs/development/rust-old-parity-review.md`** — the parity diff's evidence record, splitting
+  hand-verified findings from agent-reported leads.
+- **Roadmap: the v2.5.x parity-closeout arc** (10 bands), plus the missing 2.4.13 / 2.5.0 shipped rows.
+  The *Shipped* preamble's "reached parity" claim is qualified — surface area matched, request path did not.
+
+Gates: 482 tests (was 464), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.0] — 2026-07-14
 
 **Extended thinking / reasoning: `reasoning_effort` control + a `reasoning_content` stream. Toolchain + deps refresh.**

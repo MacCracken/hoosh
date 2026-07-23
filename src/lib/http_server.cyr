@@ -101,6 +101,11 @@ fn http_bad_request(cfd, msg) {
     return http_respond(cfd, "400", "Bad Request", bd, str_len(body));
 }
 
+fn http_payload_too_large(cfd) {
+    var body = "{\"error\":{\"message\":\"request body too large\",\"type\":\"invalid_request_error\"}}";
+    return http_respond(cfd, "413", "Payload Too Large", body, strlen(body));
+}
+
 fn http_error(cfd, status, status_text, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
@@ -152,4 +157,45 @@ fn req_body_len(buf, total_len) {
     var body = req_parse_body(buf, total_len);
     if (body == 0) { return 0; }
     return total_len - (body - buf);
+}
+
+# ASCII case-insensitive compare of `n` bytes. HTTP header names are
+# case-insensitive and clients send both "Content-Length" and "content-length".
+fn _hdr_ci_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i) & 0xFF;
+        var cb = load8(b + i) & 0xFF;
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Declared body length from the request headers, or 0 when absent/malformed.
+# Scans only the header block (returns at the CRLFCRLF) so a body that happens
+# to contain the literal "content-length:" cannot spoof the value.
+fn req_content_length(buf, len) {
+    var i = 0;
+    while (i < len - 3) {
+        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
+            if (load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { return 0; }
+        }
+        if (i + 15 < len && _hdr_ci_eq(buf + i, "content-length:", 15) == 1) {
+            var j = i + 15;
+            while (j < len && load8(buf + j) == 32) { j = j + 1; }
+            var v = 0;
+            while (j < len) {
+                var c = load8(buf + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                v = v * 10 + (c - 48);
+                j = j + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return 0;
 }

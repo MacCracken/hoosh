@@ -74,6 +74,12 @@ var _rate_map = 0;
 var _auth_tokens = 0;
 var _config_path = 0;
 var _http_port = 8088;
+# Listen address, packed network-byte-order IPv4. Defaults to LOOPBACK
+# (0x0100007F = 127.0.0.1), matching rust-old's ServerConfig.bind default —
+# set `[server] bind = "0.0.0.0"` to serve off-host deliberately. Before 2.5.1
+# this was hardcoded to INADDR_ANY, exposing an auth-optional gateway on every
+# interface even when hoosh.cyml said 127.0.0.1.
+var _http_bind = 0x0100007F;
 var _retry_cfg = 0;
 var _audit_chain = 0;
 var _warming = 0;
@@ -291,7 +297,7 @@ fn cmd_serve(port) {
     var sfd = payload(sfd_r);
     sock_reuse(sfd);
 
-    var br = sock_bind(sfd, INADDR_ANY(), _http_port);
+    var br = sock_bind(sfd, _http_bind, _http_port);
     if (is_err_result(br) == 1) { println("error: failed to bind"); return 1; }
 
     var lr = sock_listen(sfd, 128);
@@ -307,7 +313,10 @@ fn cmd_serve(port) {
 
     sys_write(1, "hoosh v", 7);
     sys_write(1, HOOSH_VERSION, strlen(HOOSH_VERSION));
-    sys_write(1, " listening on 0.0.0.0:", 22);
+    sys_write(1, " listening on ", 14);
+    var baddr = bind_addr_str(_http_bind);
+    sys_write(1, baddr, strlen(baddr));
+    sys_write(1, ":", 1);
     var pbuf = alloc(32);
     var plen = fmt_int_buf(_http_port, pbuf);
     sys_write(1, pbuf, plen);

@@ -6,7 +6,16 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-06-15 (**v2.4.6** — toolchain + dependency refresh;
+> **Last refresh**: 2026-07-22 (**v2.5.1** — rust-old parity review + the first
+> closeout band). Doc touch: **+`development/rust-old-parity-review.md`** (new — the
+> parity evidence record, 1,007 behaviors catalogued, 12 findings hand-verified),
+> roadmap (**+v2.5.x parity-closeout arc**, 10 bands, 2.5.1 marked shipped; parity
+> claim in *Shipped* qualified — surface area matched, request path not; missing
+> 2.4.13 + 2.5.0 rows added; **+Backlog section** absorbing the deleted root
+> `BACKLOG.md`, whose P4 had sat "open" six weeks after 2.4.0 shipped it),
+> CHANGELOG [2.5.1], hoosh.cyml (`bind` + a commented `[[auth]] tokens` example),
+> CLAUDE.md pin (version-bump). Gates: 482 tests, 17 benches, clean.
+> **Prior**: 2026-06-15 (**v2.4.6** — toolchain + dependency refresh;
 > Cyrius 6.2.11, ai-hwaccel 2.3.12, bote 2.7.6, majra 2.4.7). Doc touch:
 > CHANGELOG [2.4.6], roadmap (shipped row + bump note), state.md (version /
 > toolchain / handoff), **ADR-005** (bote 2.7.6 `tool_registry_new` rename),
@@ -65,11 +74,11 @@ type: state
 | `CHANGELOG.md` | 🟢 Canonical — current through 2.3.5 | per release |
 | `CLAUDE.md` | 🟢 Fresh — pin 6.1.29 / v2.3.5 | per release (version-bump) |
 | `CONTRIBUTING.md` | 🟢 Fresh — de-Rusted to the Cyrius workflow | 2026-06-10 sweep |
-| `BACKLOG.md` | 🟢 Fresh — reconciled vs shipped; open items → roadmap | 2026-06-10 sweep |
-| `benchmarks.md` | 🟢 Auto-generated — 16 benches, latest 2026-06-11Z | `bench-history.sh` |
-| `docs/index.md` | 🟢 Fresh — all 10 ADRs + doc-health linked | 2026-06-10 sweep |
+| `benchmarks.md` | 🟢 Auto-generated — 17 benches, latest 2026-07-23Z | `bench-history.sh` |
+| `docs/index.md` | 🟢 Fresh — all 11 ADRs + doc-health linked | 2026-06-10 sweep |
 | `docs/architecture/overview.md` | 🟢 Fresh — Cyrius module map / deps / endpoints | 2026-06-10 sweep |
-| `docs/development/roadmap.md` | 🟢 Fresh — forward-looking; shipped → CHANGELOG | 2026-06-10 sweep |
+| `docs/development/roadmap.md` | 🟢 Fresh — v2.5.x arc + absorbed Backlog section | 2026-07-22 (v2.5.1) |
+| `docs/development/rust-old-parity-review.md` | 🟢 Fresh — port parity evidence record | 2026-07-22 (new) |
 | `docs/development/performance.md` | 🟢 Fresh — bench-system guide → benchmarks.md | 2026-06-10 sweep |
 | `docs/doc-health.md` | 🟢 This file | 2026-06-10 (new) |
 

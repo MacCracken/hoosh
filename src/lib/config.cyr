@@ -21,6 +21,56 @@ fn _config_expand_env(value) {
     return value;
 }
 
+# Bounds for the TOML string arrays below. The old inline `models` parser
+# allocated 8 slots and never checked, so a 9th pattern wrote past the end.
+var MAX_MODEL_PATTERNS = 32;
+var MAX_AUTH_TOKENS = 32;
+
+# Parse a TOML string array — `["a", "b"]` — into up to `max` freshly allocated
+# cstrs at `out`; returns the count. A bare scalar (`x = "solo"`) parses as a
+# single element, so single-value configs keep working.
+fn _config_str_array(raw, out, max) {
+    var n = strlen(raw);
+    var count = 0;
+    var i = 0;
+    while (i < n && count < max) {
+        var c = load8(raw + i);
+        if (c == 91 || c == 93 || c == 44 || c == 32 || c == 34) {
+            i = i + 1;
+        } else {
+            var s = i;
+            while (i < n) {
+                c = load8(raw + i);
+                if (c == 34 || c == 44 || c == 93) { break; }
+                i = i + 1;
+            }
+            var elen = i - s;
+            if (elen > 0) {
+                var e = alloc(elen + 1);
+                memcpy(e, raw + s, elen);
+                store8(e + elen, 0);
+                store64(out + count * 8, e);
+                count = count + 1;
+            }
+        }
+    }
+    return count;
+}
+
+# Dotted-quad text for a packed network-byte-order IPv4 (0x0100007F ->
+# "127.0.0.1"), for the startup banner. Octets are LSB-first.
+fn bind_addr_str(addr) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, addr & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 8) & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 16) & 0xFF);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (addr >> 24) & 0xFF);
+    return to_cstr(str_builder_build(sb));
+}
+
 fn load_config(path) {
     var sections = toml_parse_file(path);
     if (vec_len(sections) == 0) { return 0; }
@@ -33,6 +83,12 @@ fn load_config(path) {
         if (port_str != 0) { _http_port = str_to_int(port_str); }
         var strat_str = toml_get(srv, "strategy");
         if (strat_str != 0) { _route_strategy = strategy_from_str(to_cstr(strat_str)); }
+        # Listen address. Was parsed by NO ONE before 2.5.1 — hoosh.cyml shipped
+        # `bind = "127.0.0.1"` while main.cyr bound INADDR_ANY, so the gateway
+        # listened on every interface regardless of what the config claimed.
+        # "0.0.0.0" packs to 0 (INADDR_ANY); host_addr also accepts a hostname.
+        var bind_str = toml_get(srv, "bind");
+        if (bind_str != 0) { _http_bind = host_addr(to_cstr(bind_str)); }
     }
 
     # Parse [storage] section — opt-in patra persistence (path only)
@@ -188,32 +244,8 @@ fn load_config(path) {
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = toml_get(pp, "models");
             if (models_str != 0) {
-                var ms = to_cstr(models_str);
-                var ms_len = strlen(ms);
-                var pats = alloc(64);
-                var pat_count = 0;
-                var pi = 0;
-                while (pi < ms_len) {
-                    var mc = load8(ms + pi);
-                    if (mc == 91 || mc == 93 || mc == 44 || mc == 32 || mc == 34) {
-                        pi = pi + 1;
-                    } else {
-                        var ps = pi;
-                        while (pi < ms_len) {
-                            mc = load8(ms + pi);
-                            if (mc == 34 || mc == 44 || mc == 93) { break; }
-                            pi = pi + 1;
-                        }
-                        var plen = pi - ps;
-                        if (plen > 0) {
-                            var pat = alloc(plen + 1);
-                            memcpy(pat, ms + ps, plen);
-                            store8(pat + plen, 0);
-                            store64(pats + pat_count * 8, pat);
-                            pat_count = pat_count + 1;
-                        }
-                    }
-                }
+                var pats = alloc(MAX_MODEL_PATTERNS * 8);
+                var pat_count = _config_str_array(to_cstr(models_str), pats, MAX_MODEL_PATTERNS);
                 if (pat_count > 0) {
                     route_set_patterns(route, pats, pat_count);
                 }
@@ -257,13 +289,22 @@ fn load_config(path) {
         _retry_cfg = retry_config_new(mr, bd, md);
     }
 
-    # Parse [[auth]] section
+    # Parse [[auth]] section. `tokens` is a LIST — rust-old took
+    # `tokens = ["a", "b"]` (config.rs:166); the port used to push the raw
+    # scalar, so only a single-token deployment worked and key rotation /
+    # per-consumer keys were inexpressible. auth_check already loops the vec.
     var auth_secs = toml_get_sections(sections, "auth");
     if (vec_len(auth_secs) > 0) {
         var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
         var tok_str = toml_get(auth_p, "tokens");
         if (tok_str != 0) {
-            vec_push(_auth_tokens, to_cstr(tok_str));
+            var toks = alloc(MAX_AUTH_TOKENS * 8);
+            var tcount = _config_str_array(to_cstr(tok_str), toks, MAX_AUTH_TOKENS);
+            var tj = 0;
+            while (tj < tcount) {
+                vec_push(_auth_tokens, load64(toks + tj * 8));
+                tj = tj + 1;
+            }
         }
     }
 

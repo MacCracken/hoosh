@@ -17,6 +17,13 @@ var JOB_CONN = 0;
 var JOB_BATCH_ITEM = 1;
 var JOB_OTLP_EXPORT = 2;
 
+# Request read sizing. REQ_READ_CHUNK is the first (and, for almost every
+# request, only) recv; MAX_REQUEST_BODY caps the declared Content-Length and
+# matches rust-old's axum DefaultBodyLimit(1 MiB). Bodies between the two are
+# read into a right-sized buffer — see _handle_conn.
+var REQ_READ_CHUNK = 65535;
+var MAX_REQUEST_BODY = 1048576;
+
 # ── Work queue: a bounded ring of job pointers + mutex. wq_pop is non-blocking
 # (returns 0 when empty) so workers + the sync-batch barrier can work-steal. ──
 var WQ_MAX = 8192;
@@ -96,13 +103,51 @@ fn job_otlp_export(doc_ptr, doc_len) {
 
 # Read one full HTTP request off the connection, route it, close. Runs on a
 # worker thread (its crypto bank already set).
+#
+# Body cap (v2.5.1): rust-old enforced axum's DefaultBodyLimit(1 MiB) and
+# answered 413. The port had no cap at all — just one 64 KiB recv, which
+# SILENTLY TRUNCATED anything bigger (and anything split across TCP segments),
+# so a large request surfaced as a malformed-JSON 400 instead of an honest 413
+# and a legitimate 100 KiB request could not be served at all. Content-Length is
+# checked BEFORE any large allocation, so an oversized request costs one
+# response, not a megabyte of the never-freeing arena.
 fn _handle_conn(cfd) {
-    var req_buf = alloc(65536);
-    var recv_r = sock_recv(cfd, req_buf, 65535);
+    var req_buf = alloc(REQ_READ_CHUNK + 1);
+    var recv_r = sock_recv(cfd, req_buf, REQ_READ_CHUNK);
     if (is_err_result(recv_r) == 1) { sock_close(cfd); return 0; }
     var req_len = payload(recv_r);
     if (req_len > 0) {
         store8(req_buf + req_len, 0);
+
+        var clen = req_content_length(req_buf, req_len);
+        if (clen > MAX_REQUEST_BODY) {
+            http_payload_too_large(cfd);
+            sock_close(cfd);
+            return 0;
+        }
+
+        # Drain the rest of a body that arrived across several segments. Grow
+        # only when the declared length genuinely exceeds the first chunk.
+        var body = req_parse_body(req_buf, req_len);
+        if (body != 0 && clen > 0) {
+            var want = (body - req_buf) + clen;
+            if (want > req_len) {
+                if (want > REQ_READ_CHUNK) {
+                    var big = alloc(want + 1);
+                    memcpy(big, req_buf, req_len);
+                    req_buf = big;
+                }
+                while (req_len < want) {
+                    var more = sock_recv(cfd, req_buf + req_len, want - req_len);
+                    if (is_err_result(more) == 1) { break; }
+                    var n = payload(more);
+                    if (n <= 0) { break; }
+                    req_len = req_len + n;
+                }
+                store8(req_buf + req_len, 0);
+            }
+        }
+
         var method = http_parse_method(req_buf, req_len);
         var path = http_parse_path(req_buf, req_len);
         if (path != 0) {
