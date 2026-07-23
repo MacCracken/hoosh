@@ -1188,6 +1188,15 @@ fn _range_err(field, milli, lo, hi) {
     return to_cstr(str_builder_build(sb));
 }
 
+# "Token pool 'staging' does not exist"
+fn _pool_err(name) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "Token pool '");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "' does not exist");
+    return to_cstr(str_builder_build(sb));
+}
+
 # "Too many messages: 300 (max 256)"
 fn _count_err(label, got, max) {
     var sb = str_builder_new();
@@ -2029,13 +2038,20 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     store64(out + 104, genopts_new(
     _req_reasoning_effort(body_ptr, body_len), g_maxt, g_temp, g_topp));
     var bpool = budget_get_pool(_budget, pool_name);
-    if (bpool != 0) {
-        if (pool_available(bpool) < est_tokens) {
-            store64(out + 8, _resp_err("429", "Too Many Requests", "token budget exceeded", "server_error"));
-            return out;
-        }
-        pool_reserve(bpool, est_tokens);
+    # 2.5.8: an unknown pool is a 400, not a silent pass. Previously a request
+    # naming a pool that does not exist got bpool == 0 and skipped budgeting
+    # entirely — so `"pool": "typo"` was a way to bypass the token budget, and a
+    # renamed pool silently stopped being enforced instead of failing loudly.
+    if (bpool == 0) {
+        store64(out + 8, _resp_err("400", "Bad Request",
+        _pool_err(pool_name), "invalid_request_error"));
+        return out;
     }
+    if (pool_available(bpool) < est_tokens) {
+        store64(out + 8, _resp_err("429", "Too Many Requests", "token budget exceeded", "server_error"));
+        return out;
+    }
+    pool_reserve(bpool, est_tokens);
 
     # Extract messages + optional compression + compaction
     var msgs = _extract_messages(body_ptr, body_len);

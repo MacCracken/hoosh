@@ -30,7 +30,18 @@ var WQ_MAX = 8192;
 var _wq_ring = 0;
 var _wq_head = 0;       # pop cursor
 var _wq_count = 0;
+var _wq_busy = 0;      # jobs popped and currently being served (2.5.8)
 var _wq_lock = 0;
+
+# Outstanding work: still queued PLUS already popped and being served. The
+# shutdown drain (2.5.8) waits on this — queue depth alone misses every request
+# a worker is currently answering.
+fn wq_outstanding() {
+    mutex_lock(_wq_lock);
+    var n = _wq_count + _wq_busy;
+    mutex_unlock(_wq_lock);
+    return n;
+}
 
 fn wq_init() {
     _wq_ring = alloc(WQ_MAX * 8);
@@ -65,8 +76,20 @@ fn wq_pop() {
     var job = load64(_wq_ring + (_wq_head % WQ_MAX) * 8);
     _wq_head = (_wq_head + 1) % WQ_MAX;
     _wq_count = _wq_count - 1;
+    # Hand off from "queued" to "in flight" under the SAME lock acquisition, so
+    # the pair is atomic and the hot path pays no extra lock. wq_done() clears
+    # it when the job finishes.
+    _wq_busy = _wq_busy + 1;
     mutex_unlock(_wq_lock);
     return job;
+}
+
+# Mark a popped job finished. Pairs with the increment inside wq_pop.
+fn wq_done() {
+    mutex_lock(_wq_lock);
+    _wq_busy = _wq_busy - 1;
+    mutex_unlock(_wq_lock);
+    return 0;
 }
 
 # ── Job constructors ──
@@ -190,7 +213,16 @@ fn _pool_worker(arg) {
     crypto_bank_set(arg);
     while (1 == 1) {
         var job = wq_pop();
-        if (job == 0) { sleep_ms(1); } else { job_process(job); }
+        if (job == 0) {
+            sleep_ms(1);
+        } else {
+            # wq_pop already counted this job as in-flight. The shutdown drain
+            # waits on queued + in-flight: a request that has already been popped
+            # is invisible to the queue depth, so draining on depth alone
+            # returned instantly and cut live requests off mid-answer.
+            job_process(job);
+            wq_done();
+        }
     }
     return 0;
 }

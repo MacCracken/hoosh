@@ -1244,6 +1244,56 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.8 CLI flag-parser mirrors ──
+# Mirror of src/main.cyr _flag_val / _flag_set / _positional. argv is modelled
+# as a vec of cstrs so the parsing rules can be exercised without a real argv.
+fn _t_flag_val(args, name, short) {
+    var n = vec_len(args);
+    var nlen = strlen(name);
+    var i = 1;
+    while (i < n) {
+        var a = vec_get(args, i);
+        if (streq(a, name) == 1) {
+            if (i + 1 < n) { return vec_get(args, i + 1); }
+            return 0;
+        }
+        if (short != 0 && streq(a, short) == 1) {
+            if (i + 1 < n) { return vec_get(args, i + 1); }
+            return 0;
+        }
+        if (memeq(a, name, nlen) == 1) {
+            if (load8(a + nlen) == 61) { return a + nlen + 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _t_positional(args, k) {
+    var n = vec_len(args);
+    var seen = 0;
+    var i = 2;
+    while (i < n) {
+        var a = vec_get(args, i);
+        if (load8(a) == 45) {
+            if (streq(a, "--stream") == 0) {
+                var has_eq = 0;
+                var j = 0;
+                while (load8(a + j) != 0) {
+                    if (load8(a + j) == 61) { has_eq = 1; }
+                    j = j + 1;
+                }
+                if (has_eq == 0) { i = i + 1; }
+            }
+        } else {
+            if (seen == k) { return a; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ── 2.5.7 [hardware] mirrors ──
 # Mirror of src/lib/hardware.cyr's builder-mask and available-VRAM arithmetic.
 var _T_BACKEND_COUNT = 17;
@@ -5716,6 +5766,51 @@ fn main() {
     assert_eq(200000 * 80 / 100, 160000, "context: 200k window at 0.8");
     assert_eq(8192 * 80 / 100, 6553, "context: 8k window at 0.8");
     assert_eq(128000 * 50 / 100, 64000, "context: threshold is configurable");
+
+    test_group("cli_flag_parsing");
+    # `hoosh serve --port 9000 --bind 0.0.0.0`
+    var fa = vec_new();
+    vec_push(fa, "hoosh"); vec_push(fa, "serve");
+    vec_push(fa, "--port"); vec_push(fa, "9000");
+    vec_push(fa, "--bind"); vec_push(fa, "0.0.0.0");
+    assert_streq(_t_flag_val(fa, "--port", "-p"), "9000", "flag: --port value");
+    assert_streq(_t_flag_val(fa, "--bind", 0), "0.0.0.0", "flag: --bind value");
+    assert_eq(_t_flag_val(fa, "--config", "-c"), 0, "flag: absent flag -> 0");
+    # Short form.
+    var fs = vec_new();
+    vec_push(fs, "hoosh"); vec_push(fs, "serve"); vec_push(fs, "-p"); vec_push(fs, "8080");
+    assert_streq(_t_flag_val(fs, "--port", "-p"), "8080", "flag: short -p value");
+    # --name=value form.
+    var fe = vec_new();
+    vec_push(fe, "hoosh"); vec_push(fe, "serve"); vec_push(fe, "--port=7000");
+    assert_streq(_t_flag_val(fe, "--port", "-p"), "7000", "flag: --port=value form");
+    # A flag at the very end with no value must not read past argv.
+    var ft = vec_new();
+    vec_push(ft, "hoosh"); vec_push(ft, "serve"); vec_push(ft, "--port");
+    assert_eq(_t_flag_val(ft, "--port", "-p"), 0, "flag: dangling flag -> 0");
+
+    test_group("cli_positionals");
+    # `hoosh infer --server URL --stream MODEL PROMPT` — positionals must skip
+    # both the flag AND its value, but --stream takes no value.
+    var pa = vec_new();
+    vec_push(pa, "hoosh"); vec_push(pa, "infer");
+    vec_push(pa, "--server"); vec_push(pa, "http://h:8088");
+    vec_push(pa, "--stream");
+    vec_push(pa, "llama3"); vec_push(pa, "hello world");
+    assert_streq(_t_positional(pa, 0), "llama3", "pos: model after flags");
+    assert_streq(_t_positional(pa, 1), "hello world", "pos: prompt after flags");
+    assert_eq(_t_positional(pa, 2), 0, "pos: third positional absent");
+    assert_streq(_t_flag_val(pa, "--server", 0), "http://h:8088", "pos: --server still parsed");
+    # A bare positional port keeps working (`hoosh serve 8088`, pre-2.5.8 form).
+    var pb = vec_new();
+    vec_push(pb, "hoosh"); vec_push(pb, "serve"); vec_push(pb, "8088");
+    assert_streq(_t_positional(pb, 0), "8088", "pos: bare positional port");
+    # --name=value must NOT swallow the next argument as its value.
+    var pc = vec_new();
+    vec_push(pc, "hoosh"); vec_push(pc, "infer"); vec_push(pc, "--server=http://h");
+    vec_push(pc, "m"); vec_push(pc, "p");
+    assert_streq(_t_positional(pc, 0), "m", "pos: --name=value does not eat a positional");
+    assert_streq(_t_positional(pc, 1), "p", "pos: second positional intact");
 
     test_group("hardware_disabled_backends");
     # disabled_backends clears one bit per named backend; everything else keeps

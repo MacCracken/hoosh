@@ -6,7 +6,13 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-23 (**v2.5.7** — config-reader closeout, the seventh
+> **Last refresh**: 2026-07-23 (**v2.5.8** — CLI & process lifecycle, the eighth
+> closeout band). Doc touch: CHANGELOG [2.5.8], roadmap (2.5.8 shipped + notes on
+> the two latent crashes found: thread-vs-process `sys_exit`, and
+> `crypto_tls_main_init` being trapped inside `cmd_serve`), CLAUDE.md pin.
+> README (Quick start rewritten for the flag-based CLI, `--server` remote mode,
+> signals and `HOOSH_LOG`). Gates: 644 tests, 17 benches, clean.
+> **Prior**: 2026-07-23 (**v2.5.7** — config-reader closeout, the seventh
 > band — **all** config sections, `[hardware]` included). Doc touch:
 > CHANGELOG [2.5.7], roadmap (2.5.7 shipped; notes on the hardcoded audit key,
 > the unlinked chain verify, and the compaction system-prompt drop; 2.5.9's

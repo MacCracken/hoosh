@@ -5,6 +5,60 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.8] — 2026-07-23
+
+**CLI & process lifecycle — the eighth band of the rust-old parity closeout arc.** hoosh can now be stopped
+cleanly, reloaded in place, pointed at a running gateway, and configured from the command line.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **`sys_exit` is thread exit, not process exit — a clean shutdown left hoosh running.** The stdlib's
+  `sys_exit` issues `SYS_EXIT` (60), which retires only the *calling thread* despite its "terminate process"
+  comment. With 7 pool workers plus the health/OTLP/signal threads alive, returning from `main` left a
+  process that had logged "shutdown: complete" and then sat there. It was invisible before 2.5.8 because the
+  accept loop never returned. hoosh now calls `exit_group` via a local `hoosh_exit_process` — the single place
+  a bare syscall appears, pending an upstream `sys_exit_group` wrapper.
+- **`crypto_tls_main_init()` was inside `cmd_serve`, so every other command ran with no thread-local block.**
+  Anything reaching `trace_current_or_new()` — which every outgoing request header builder does — dereferenced
+  an uninstalled TLS block and **segfaulted**. Latent until this release gave the CLI a reason to make HTTP
+  requests; `models --server` crashed with SIGSEGV on the first successful connect. Hoisted into `main` (it is
+  CAS-guarded upstream, so `cmd_serve` calling it again is a no-op).
+- **An unknown token pool silently skipped budgeting.** A request naming a pool that does not exist got a null
+  pool and fell straight through, so `"pool": "typo"` was a way to bypass the token budget entirely, and a
+  renamed pool stopped being enforced instead of failing loudly. Now `400 Token pool 'X' does not exist`.
+- **A config that exists but fails to parse is now fatal.** Falling back to defaults meant a typo'd config
+  started a gateway with no providers, no auth and no budgets — looking healthy while serving nothing the
+  operator asked for. A *missing* config is still fine.
+
+### Added
+- **Graceful shutdown on SIGINT/SIGTERM.** The listener closes, then in-flight work is allowed to finish
+  (bounded by a 5 s drain) before the process exits. Implemented with **signalfd** rather than a signal
+  handler: a handler would need an SA_RESTORER trampoline on Linux x86-64 and could only safely set a flag,
+  whereas config reload must take `_chat_lock`, which is not async-signal-safe. Blocking the signals
+  process-wide and reading them from a dedicated thread turns delivery into an ordinary blocking read, so the
+  work runs in normal thread context. If `signalfd` is unavailable the mask is **unblocked** again — leaving
+  signals blocked with no reader would make hoosh unkillable by anything but SIGKILL.
+  Verified: a request mid-flight against a deliberately slow backend completes during the drain.
+- **SIGHUP reloads the config** in place (rust-old `server/mod.rs:390-401`). A failed reload keeps the running
+  config and logs a warning rather than leaving the gateway half-configured.
+- **CLI flags** — `serve -p/--port <n>`, `--bind <addr>`, `-c/--config <path>`. Supports `--name value`,
+  `--name=value` and short forms; the pre-2.5.8 bare positional port still works.
+- **`--server <url>` on `models` / `health` / `infer`** — query a running gateway over HTTP instead of
+  re-reading local config, which is what rust-old's CLI did. `health --server` exits non-zero if any provider
+  is unhealthy. **`infer --stream`** prints SSE deltas as they arrive.
+- **`HOOSH_LOG`** sets the log level (`fatal|error|warn|info|debug|trace`) — the `RUST_LOG` equivalent. Read
+  before config load so config problems are logged at the requested level.
+
+### Changed
+- The work queue tracks **in-flight** jobs, not just queued ones. The shutdown drain waits on queued +
+  in-flight; queue depth alone is zero the moment a worker picks a request up, so draining on depth cut live
+  requests off mid-answer. The counter is incremented inside `wq_pop` under the lock it already holds, so the
+  hot path pays no extra locking; the batch work-stealing barrier calls `wq_done()` too, or the count would
+  leak and every later drain would hit its timeout.
+
+Gates: 644 tests (was 631), 17 benchmarks; fmt/lint/vet/deny clean. (`estimate_tokens_per_provider` oscillates
+7↔8 ns run to run — 1 ns of timer quantization on an 8 ns benchmark, not a regression.)
+
 ## [2.5.7] — 2026-07-23
 
 **Config-reader closeout — the seventh band of the rust-old parity closeout arc.** Config keys that existed

@@ -264,18 +264,32 @@ Three deliberate departures from rust-old, all verified:
       Config load also moved **before** `hw_init()` — `disabled_backends` has to be
       known before detection runs, or the backends it names get probed once anyway.
 
-### v2.5.8 — CLI & process lifecycle
-- [ ] **`serve --bind <addr>` / `-c|--config <path>`** — `main.cyr:623` takes a bare
-      positional port only.
-- [ ] **`--server <url>` on `models` / `infer` / `health`**; **`infer --stream`**
-      (token-by-token stdout with flush).
-- [ ] **Graceful shutdown on SIGINT** (`with_graceful_shutdown`) and **SIGHUP config
-      reload** (`server/mod.rs:390-401`).
-- [ ] **Log level from the environment** — the `RUST_LOG`/EnvFilter equivalent.
-- [ ] **Fatal config-load failure** — Rust exited 1 when a present config failed to parse.
-- [ ] **Unknown token pool → 400** `"Token pool 'X' does not exist"` — the port reportedly
-      falls through silently (`server/handlers.rs:167-175`); budget must not be skippable
-      by naming a nonexistent pool.
+### v2.5.8 — CLI & process lifecycle — ✅ SHIPPED 2026-07-23
+- [x] **`serve -p/--port`, `--bind <addr>`, `-c/--config <path>`** — a real flag parser
+      (`--name value`, `--name=value`, short `-p`). The bare positional port still works.
+- [x] **`--server <url>` on `models` / `health` / `infer`** — query a RUNNING gateway
+      over HTTP instead of re-reading local config. `health --server` exits non-zero
+      when any provider is unhealthy, so scripts can gate on it.
+- [x] **`infer --stream`** — prints SSE deltas as they arrive.
+- [x] **Graceful shutdown on SIGINT/SIGTERM** and **SIGHUP config reload**. Implemented
+      with **signalfd**, not a handler: a handler would need an SA_RESTORER trampoline
+      and could only safely set a flag, whereas reload must take `_chat_lock` (not
+      async-signal-safe). Blocking the signals process-wide and reading them from a
+      dedicated thread makes delivery an ordinary blocking read.
+- [x] **`HOOSH_LOG`** — the `RUST_LOG` equivalent (`fatal|error|warn|info|debug|trace`).
+- [x] **Fatal config-load failure** — a config that exists but fails to parse now exits
+      1 instead of silently falling back to defaults.
+- [x] **Unknown token pool → 400** `"Token pool 'X' does not exist"` — it *did* fall
+      through silently, so `"pool": "typo"` was a way to bypass the token budget.
+
+> ⚠ **Two latent crashes surfaced here.**
+> (1) `sys_exit` is `SYS_EXIT` (thread exit), not `exit_group`, despite its "terminate
+> process" doc comment — so returning from `main` retired one thread and left the
+> process alive with 7 workers running. Invisible until 2.5.8 gave the accept loop a
+> way to return. hoosh now has a local `hoosh_exit_process`.
+> (2) `crypto_tls_main_init()` lived **inside `cmd_serve`**, so every non-serve path ran
+> with no thread-local block; anything reaching `trace_current_or_new()` — which every
+> outgoing request header builder does — segfaulted. Hoisted into `main`.
 
 <a id="v259--hardware-planning-closeout"></a>
 

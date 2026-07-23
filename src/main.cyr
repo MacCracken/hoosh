@@ -73,7 +73,7 @@ var _cache = 0;
 var _health_map = 0;
 var _rate_map = 0;
 var _auth_tokens = 0;
-var _config_path = 0;
+var _config_path = "hoosh.cyml";   # overridable with -c/--config (2.5.8)
 var _http_port = 8088;
 # Listen address, packed network-byte-order IPv4. Defaults to LOOPBACK
 # (0x0100007F = 127.0.0.1), matching rust-old's ServerConfig.bind default —
@@ -206,7 +206,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
         # fresh pointer (atomic swap; lock-free forwarders read old-or-new, both
         # valid — the bump allocator never frees). See [ADR 011].
         mutex_lock(_chat_lock);
-        load_config("hoosh.cyml");
+        load_config(_config_path);
         mutex_unlock(_chat_lock);
         hlog_info("config reloaded from hoosh.cyml");
         var body = "{\"status\":\"reloaded\"}";
@@ -426,6 +426,11 @@ fn cmd_serve(port) {
     # [[telemetry]] otlp_endpoint is configured (no-op otherwise).
     otlp_init();
 
+    # Signals (2.5.8) — MUST precede pool_start so every worker inherits the
+    # blocked mask; an unblocked SIGINT delivered to a worker would take the
+    # default action and kill the process mid-request.
+    signals_init();
+
     # Unified worker pool (v2.4.0): WORKER_COUNT banked threads drain the work
     # queue. crypto_tls_main_init() above readied the bank scratch; pool_start
     # spawns the workers, each owning a crypto bank. Batch items share this pool.
@@ -443,11 +448,33 @@ fn cmd_serve(port) {
 
     # Accept loop: accept connections and hand each to the pool. All request
     # handling (recv/route/respond/close) runs on the workers, concurrently.
-    while (1 == 1) {
+    while (shutdown_requested() == 0) {
         var client = sock_accept(sfd);
         if (is_err_result(client) == 1) { continue; }
+        if (shutdown_requested() == 1) {
+            # Woken by the self-connect from _sig_thread, or raced with it.
+            sock_close(payload(client));
+            break;
+        }
         wq_push(_job_conn(payload(client)));
     }
+
+    # Graceful shutdown (2.5.8): stop accepting, then let the workers finish
+    # what they already took. Requests in flight get to answer instead of having
+    # their sockets yanked mid-response.
+    sock_close(sfd);
+    hlog_info("shutdown: listener closed, draining in-flight requests");
+    var waited = 0;
+    while (wq_outstanding() > 0 && waited < SHUTDOWN_DRAIN_MS) {
+        sleep_ms(10);
+        waited = waited + 10;
+    }
+    if (wq_outstanding() > 0) {
+        hlog_warn("shutdown: drain timed out with work still queued");
+    }
+    hlog_info("shutdown: complete");
+    println("");
+    println("hoosh: shutdown complete");
     return 0;
 }
 
@@ -599,19 +626,332 @@ fn cmd_infer(model, prompt) {
     return 0;
 }
 
+# ================================================================
+# Remote CLI mode — --server <url> (2.5.8)
+# ================================================================
+#
+# rust-old's models/health/infer talked to a RUNNING gateway over HTTP; the port
+# only ever read the local config, so there was no way to ask a deployed hoosh
+# what it was actually serving. These use the plaintext local client, so
+# --server targets an http:// gateway (the usual case: a sidecar or a box on the
+# LAN). An https:// gateway would need a crypto bank on this thread.
+
+fn _cli_server_get(url, path) {
+    var resp = http_req_local("GET", url, path, 0, 0);
+    if (resp == 0) {
+        println("error: could not reach the hoosh server");
+        return 0;
+    }
+    if (http_status(resp) < 200 || http_status(resp) >= 300) {
+        println("error: server returned a non-2xx status");
+        return 0;
+    }
+    return resp;
+}
+
+fn cmd_models_remote(url) {
+    var resp = _cli_server_get(url, "/v1/models");
+    if (resp == 0) { return 1; }
+    sys_write(1, http_body(resp), http_body_len(resp));
+    println("");
+    return 0;
+}
+
+fn cmd_health_remote(url) {
+    var resp = _cli_server_get(url, "/v1/health/providers");
+    if (resp == 0) { return 1; }
+    var b = http_body(resp);
+    var bl = http_body_len(resp);
+    sys_write(1, b, bl);
+    println("");
+    # Exit non-zero if any provider is unhealthy, so shell scripts can gate on it.
+    var i = 0;
+    while (i + 20 < bl) {
+        if (memeq(b + i, "\"status\":\"unhealthy\"", 20) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _cli_infer_body(model, prompt, stream) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"stream\":");
+    if (stream == 1) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, ",\"messages\":[{\"role\":\"user\",\"content\":\"");
+    _json_emit_escaped(sb, prompt);
+    str_builder_add_cstr(sb, "\"}]}");
+    return to_cstr(str_builder_build(sb));
+}
+
+fn cmd_infer_remote(url, model, prompt, stream) {
+    var body = _cli_infer_body(model, prompt, stream);
+    var blen = strlen(body);
+    if (stream == 0) {
+        var resp = http_post_local(url, "/v1/chat/completions", body, blen);
+        if (resp == 0) {
+            println("error: could not reach the hoosh server");
+            return 1;
+        }
+        var rb = http_body(resp);
+        var rbl = http_body_len(resp);
+        if (http_status(resp) < 200 || http_status(resp) >= 300) {
+            sys_write(1, rb, rbl);
+            println("");
+            return 1;
+        }
+        var text = ollama_extract_text(rb, rbl);
+        println(text);
+        return 0;
+    }
+    # Streaming: read SSE frames and print each delta as it lands, so the CLI
+    # shows tokens progressively rather than after the whole answer.
+    var fd = http_post_stream(url, "/v1/chat/completions", body, blen);
+    if (fd < 0) {
+        println("error: could not reach the hoosh server");
+        return 1;
+    }
+    var hdr = alloc(4096);
+    if (stream_skip_headers(fd, hdr, 4096) < 0) {
+        sock_close(fd);
+        println("error: malformed streaming response");
+        return 1;
+    }
+    var buf = alloc(65536);
+    var acc = 0;
+    while (1 == 1) {
+        var n = sys_read(fd, buf + acc, 65536 - acc - 1);
+        if (n <= 0) { break; }
+        store8(buf + acc + n, 0);
+        var scan = acc;
+        acc = acc + n;
+        # Emit the content of each complete `data: {...}` line.
+        var i = scan;
+        while (i + 6 < acc) {
+            if (memeq(buf + i, "data: ", 6) == 1) {
+                var j = i + 6;
+                var start = j;
+                while (j < acc && load8(buf + j) != 10) { j = j + 1; }
+                if (j >= acc) { break; }
+                var flen = j - start;
+                if (flen > 0 && memeq(buf + start, "[DONE]", 6) == 0) {
+                    var piece = ollama_extract_text(buf + start, flen);
+                    if (strlen(piece) > 0) { sys_write(1, piece, strlen(piece)); }
+                }
+                i = j;
+            }
+            i = i + 1;
+        }
+        # Keep the buffer from filling on a long answer: once consumed, reset.
+        if (acc > 60000) { acc = 0; }
+    }
+    sock_close(fd);
+    println("");
+    return 0;
+}
+
 fn cmd_help() {
     println("hoosh — AI inference gateway");
     println("");
-    println("Usage: hoosh <command> [args]");
+    println("Usage: hoosh <command> [options] [args]");
     println("");
     println("Commands:");
     println("  serve [port]       start the gateway server (default: 8088)");
-    println("  models             list configured providers");
+    println("    -p, --port <n>     listen port");
+    println("        --bind <addr>  listen address (default: 127.0.0.1)");
+    println("    -c, --config <f>   config file (default: hoosh.cyml)");
+    println("  models             list models");
     println("  health             check provider connectivity");
     println("  infer <model> <p>  one-shot inference");
+    println("        --stream       stream tokens to stdout as they arrive");
     println("  info               show system information");
     println("  help               show this help");
     println("  version            show version");
+    println("");
+    println("Options for models / health / infer:");
+    println("    --server <url>     query a RUNNING hoosh over HTTP instead of");
+    println("                       reading the local config (e.g. http://host:8088)");
+    println("");
+    println("Environment:");
+    println("  HOOSH_LOG            log level: fatal|error|warn|info|debug|trace");
+    return 0;
+}
+
+# ================================================================
+# Process lifecycle — signals (2.5.8)
+# ================================================================
+#
+# SIGINT/SIGTERM shut the gateway down cleanly and SIGHUP reloads the config
+# (rust-old server/mod.rs:390-401). Neither existed before: Ctrl-C killed hoosh
+# mid-request with the listener still bound, and reloading meant a restart.
+#
+# Implemented with signalfd rather than a signal HANDLER. A handler would need
+# an SA_RESTORER trampoline on Linux x86-64 and could only safely set a flag —
+# whereas config reload has to take _chat_lock, which is not async-signal-safe.
+# Blocking the signals process-wide and reading them off an fd from a dedicated
+# thread turns delivery into an ordinary blocking read, so the work runs in
+# normal thread context with locks available. sys_sigprocmask / sys_signalfd are
+# the sanctioned wrappers; no raw syscall numbers.
+var _shutdown = 0;
+var _sigfd = 0 - 1;
+
+# Terminate the whole PROCESS, not just this thread.
+#
+# The stdlib's sys_exit is SYS_EXIT (60), which on Linux exits only the CALLING
+# THREAD despite its "terminate process" comment — with the 7 pool workers plus
+# the health/OTLP/signal threads running, returning from main left hoosh alive
+# and unkillable-looking after a clean shutdown. It never showed before 2.5.8
+# because the accept loop simply never returned. exit_group is the correct call;
+# the stdlib has the SYS_EXIT_GROUP constant but no wrapper, so this is hoosh's
+# local one — the single place a bare syscall appears, pending an upstream
+# sys_exit_group.
+fn hoosh_exit_process(code) {
+    syscall(SYS_EXIT_GROUP, code);
+    return 0;
+}
+# How long to let queued work finish after the listener closes. Long enough for
+# an in-flight inference to answer, short enough that Ctrl-C still feels prompt.
+var SHUTDOWN_DRAIN_MS = 5000;
+
+fn shutdown_requested() { return _shutdown; }
+
+fn _sig_thread(arg) {
+    # signalfd_siginfo is 128 bytes; ssi_signo is the first u32.
+    var buf = alloc(128);
+    while (1 == 1) {
+        var n = sys_read(_sigfd, buf, 128);
+        if (n <= 0) { return 0; }
+        var signo = load32(buf);
+        if (signo == SIGHUP) {
+            hlog_info("signal: SIGHUP — reloading config");
+            mutex_lock(_chat_lock);
+            var ok = load_config(_config_path);
+            mutex_unlock(_chat_lock);
+            if (ok == 1) {
+                hlog_info("signal: config reloaded");
+            } else {
+                hlog_warn("signal: config reload failed, keeping the running config");
+            }
+        } else {
+            hlog_info("signal: shutdown requested, draining");
+            _shutdown = 1;
+            # Nudge the accept loop out of its blocking accept() by connecting to
+            # ourselves; it re-checks _shutdown on wake.
+            var sfd_r = tcp_socket();
+            if (is_ok(sfd_r) == 1) {
+                var s = payload(sfd_r);
+                net_connect_nb(s, 0x0100007F, _http_port, 500);
+                sock_close(s);
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+# Block SIGINT/SIGTERM/SIGHUP and route them to a signalfd read by _sig_thread.
+# Must run BEFORE the worker pool spawns so every thread inherits the block —
+# an unblocked signal delivered to a worker would take the default action and
+# kill the process, which is the behavior being replaced.
+fn signals_init() {
+    #ifdef CYRIUS_TARGET_LINUX
+    var mask = alloc(8);
+    store64(mask, (1 << (SIGINT - 1)) | (1 << (SIGTERM - 1)) | (1 << (SIGHUP - 1)));
+    if (sys_sigprocmask(SIG_BLOCK, mask, 0) != 0) {
+        hlog_warn("signal: could not block signals; Ctrl-C will terminate abruptly");
+        return 0;
+    }
+    _sigfd = sys_signalfd(0 - 1, mask, 0);
+    if (_sigfd < 0) {
+        # CRITICAL: the signals are blocked but nothing can read them, which
+        # would make hoosh ignore SIGINT/SIGTERM entirely — unkillable short of
+        # SIGKILL. Unblock and fall back to the default disposition (abrupt
+        # termination), which is worse than a clean shutdown but far better than
+        # a gateway that cannot be stopped.
+        sys_sigprocmask(SIG_UNBLOCK, mask, 0);
+        hlog_warn("signal: signalfd unavailable; Ctrl-C will terminate abruptly");
+        return 0;
+    }
+    thread_create(&_sig_thread, 0);
+    #endif
+    return 0;
+}
+
+# ================================================================
+# CLI flag parsing (2.5.8)
+# ================================================================
+#
+# Before this, `serve` took a bare positional port and nothing else accepted a
+# flag — so bind address, config path, and the `--server` target rust-old
+# supported were all unreachable from the command line. Supports
+# `--name value`, `--name=value` and short `-p value`.
+
+# Value for `--name` / `-short`, or 0 when absent. `short` may be 0.
+fn _flag_val(name, short) {
+    var ac = argc();
+    var nlen = strlen(name);
+    var i = 1;
+    while (i < ac) {
+        var a = argv(i);
+        if (streq(a, name) == 1) {
+            if (i + 1 < ac) { return argv(i + 1); }
+            return 0;
+        }
+        if (short != 0 && streq(a, short) == 1) {
+            if (i + 1 < ac) { return argv(i + 1); }
+            return 0;
+        }
+        # --name=value
+        if (memeq(a, name, nlen) == 1) {
+            if (load8(a + nlen) == 61) { return a + nlen + 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Whether a valueless flag is present.
+fn _flag_set(name) {
+    var ac = argc();
+    var i = 1;
+    while (i < ac) {
+        if (streq(argv(i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Nth positional argument after the subcommand (0-based), skipping flags and
+# their values. Returns 0 when absent.
+fn _positional(n) {
+    var ac = argc();
+    var seen = 0;
+    var i = 2;
+    while (i < ac) {
+        var a = argv(i);
+        if (load8(a) == 45) {
+            # A flag. Skip its value too unless it used --name=value form or is
+            # one of the known valueless flags.
+            if (streq(a, "--stream") == 0) {
+                var has_eq = 0;
+                var j = 0;
+                while (load8(a + j) != 0) {
+                    if (load8(a + j) == 61) { has_eq = 1; }
+                    j = j + 1;
+                }
+                if (has_eq == 0) { i = i + 1; }
+            }
+        } else {
+            if (seen == n) { return a; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -661,9 +1001,43 @@ fn main() {
     _router = router_new(default_routes, 1, STRAT_PRIORITY);
     _met_providers = 1;
 
+    # Log level from the environment (2.5.8) — the RUST_LOG equivalent. Read
+    # before load_config so config-parse problems are logged at the level asked
+    # for; [[logging]] level in the file still wins if it sets one.
+    var envlvl = getenv("HOOSH_LOG");
+    if (envlvl != 0) {
+        var lv = hlog_level_from_str(envlvl);
+        if (lv >= 0) { sakshi_set_level(lv); }
+    }
+
+    # -c/--config (2.5.8): an alternate config file.
+    var cfgv = _flag_val("--config", "-c");
+    if (cfgv != 0) { _config_path = cfgv; }
+
+    # Install THIS thread's thread-local block (slot 0 = sigil crypto bank,
+    # slot 1 = traceparent) before anything can touch it. It used to live inside
+    # cmd_serve, so every non-serve path ran with no TLS block — and any code
+    # reaching trace_current_or_new() (which every outgoing request header
+    # builder does) dereferenced an uninstalled block and SEGFAULTED. That was
+    # latent until 2.5.8 gave the CLI a reason to make HTTP requests.
+    # CAS-guarded upstream, so cmd_serve calling it again is a no-op.
+    crypto_tls_main_init();
+
     # Load config FIRST (2.5.7): [hardware] disabled_backends has to be known
     # before detection runs, or the backends it names get probed once anyway.
-    load_config("hoosh.cyml");
+    #
+    # 2.5.8: a config that EXISTS but fails to parse is now fatal. Silently
+    # falling back to defaults meant a typo'd config started a gateway with no
+    # providers, no auth and no budgets — looking healthy while serving nothing
+    # the operator asked for. A missing file is still fine (defaults apply).
+    if (file_exists(_config_path) == 1) {
+        if (load_config(_config_path) != 1) {
+            sys_write(2, "error: failed to parse ", 23);
+            sys_write(2, _config_path, strlen(_config_path));
+            println("");
+            return 1;
+        }
+    }
 
     # Detect hardware accelerators, honoring [hardware].
     hw_init();
@@ -700,15 +1074,29 @@ fn main() {
 
     var cmd = argv(1);
     if (streq(cmd, "serve") == 1) {
+        # --port/-p, else a bare positional port (the pre-2.5.8 form), else config.
         var port = _http_port;
-        if (ac >= 3) {
-            port = atoi(argv(2));
-            if (port <= 0) { port = 8088; }
+        var pv = _flag_val("--port", "-p");
+        if (pv == 0) { pv = _positional(0); }
+        if (pv != 0) {
+            var pnum = atoi(pv);
+            if (pnum > 0) { port = pnum; }
         }
+        # --bind overrides [server] bind.
+        var bv = _flag_val("--bind", 0);
+        if (bv != 0) { _http_bind = host_addr(bv); }
         return cmd_serve(port);
     }
-    if (streq(cmd, "models") == 1) { return cmd_models(); }
-    if (streq(cmd, "health") == 1) { return cmd_health(); }
+    if (streq(cmd, "models") == 1) {
+        var msrv = _flag_val("--server", 0);
+        if (msrv != 0) { return cmd_models_remote(msrv); }
+        return cmd_models();
+    }
+    if (streq(cmd, "health") == 1) {
+        var hsrv = _flag_val("--server", 0);
+        if (hsrv != 0) { return cmd_health_remote(hsrv); }
+        return cmd_health();
+    }
     if (streq(cmd, "bench") == 1) {
         if (ac < 3) { println("Usage: hoosh bench <url> [count]"); return 1; }
         var bn = 2000;
@@ -716,11 +1104,17 @@ fn main() {
         return cmd_bench_connect(argv(2), bn);
     }
     if (streq(cmd, "infer") == 1) {
-        if (ac < 4) {
-            println("Usage: hoosh infer <model> <prompt>");
+        var im = _positional(0);
+        var ip = _positional(1);
+        if (im == 0 || ip == 0) {
+            println("Usage: hoosh infer [--server <url>] [--stream] <model> <prompt>");
             return 1;
         }
-        return cmd_infer(argv(2), argv(3));
+        var isrv = _flag_val("--server", 0);
+        if (isrv != 0) {
+            return cmd_infer_remote(isrv, im, ip, _flag_set("--stream"));
+        }
+        return cmd_infer(im, ip);
     }
     if (streq(cmd, "info") == 1) { return cmd_info(); }
     if (streq(cmd, "help") == 1) { return cmd_help(); }
@@ -739,4 +1133,6 @@ fn main() {
 }
 
 var r = main();
-sys_exit(r);
+# exit_group, not sys_exit: hoosh is multi-threaded, and SYS_EXIT would retire
+# only this thread and leave the process running. See hoosh_exit_process.
+hoosh_exit_process(r);

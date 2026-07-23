@@ -418,9 +418,17 @@ fn handle_batch(cfd, body_ptr, body_len) {
         k = k + 1;
     }
     # Barrier with work-stealing — process queued jobs until this batch is done.
+    # wq_done() is required: wq_pop counts the job as in-flight, and the
+    # shutdown drain (2.5.8) waits on that count. Stealing without clearing it
+    # would leak the counter upward and make every later drain hit its timeout.
     while (load64(completed) < n) {
         var job = wq_pop();
-        if (job == 0) { sleep_ms(1); } else { job_process(job); }
+        if (job == 0) {
+            sleep_ms(1);
+        } else {
+            job_process(job);
+            wq_done();
+        }
     }
 
     # Assemble {"results":[{"index":i,"status":<n>,"body":<raw>}, ...]}.

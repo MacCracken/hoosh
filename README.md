@@ -88,18 +88,27 @@ Local backends            Remote APIs
 # Build
 cyrius build src/main.cyr build/hoosh
 
-# Start the gateway (default port 8088)
+# Start the gateway (default port 8088, bound to 127.0.0.1)
 ./build/hoosh serve
 
-# Custom port
-./build/hoosh serve 9000
+# Custom port / bind address / config file
+./build/hoosh serve --port 9000
+./build/hoosh serve --bind 0.0.0.0 --config /etc/hoosh/prod.cyml
 
-# System info
+# Talk to a RUNNING gateway instead of reading the local config
+./build/hoosh models --server http://gateway:8088
+./build/hoosh health --server http://gateway:8088    # non-zero exit if degraded
+./build/hoosh infer  --server http://gateway:8088 --stream llama3 "hello"
+
+# System info / version
 ./build/hoosh info
-
-# Version
 ./build/hoosh version
 ```
+
+`hoosh serve` binds **loopback only** unless you set `[server] bind` (or `--bind`).
+It shuts down gracefully on `SIGINT`/`SIGTERM` — the listener closes and in-flight
+requests are allowed to finish — and reloads its config on `SIGHUP`. Set
+`HOOSH_LOG=debug` for verbose logging.
 
 ### OpenAI-compatible API
 
