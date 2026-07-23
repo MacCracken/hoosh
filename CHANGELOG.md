@@ -5,6 +5,49 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.4] — 2026-07-22
+
+**Cache expiry — the fourth band of the rust-old parity closeout arc.** `ttl_secs` has shipped in `hoosh.cyml`
+since the Cyrius port with nothing reading it; cached responses never expired.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **`[cache] ttl_secs` was inert — stale responses were served forever.** The config key shipped in `hoosh.cyml`
+  since the port, but nothing parsed it and the cache had no notion of age: the entry carried only an LRU
+  recency stamp, rewritten on every read, so there was nothing to measure a lifetime against. Eviction was
+  capacity-only, meaning a cached answer could be returned indefinitely. Entries now carry a `created_ms` stamp
+  and are checked on read. rust-old had `CacheEntry.ttl` + `is_expired` (`cache/mod.rs:40-44`).
+  Verified live: with `ttl_secs = 3`, a repeated query hits the cache, then re-fetches after the deadline —
+  the backend saw exactly 2 calls across 4 requests.
+- **An expired entry left its embedding behind.** `semantic_remove(key)` is new; the response cache calls it on
+  expiry and on sweep. Without it the semantic index outlives the response it points at, so `semantic_find`
+  keeps returning a key that resolves to nothing — a wasted lookup per query, and the dead embedding still
+  competes for `max_search`.
+
+### Added
+- **`cache_evict_expired`** — a full sweep, run on capacity pressure (reclaiming dead entries *before* evicting
+  a live one) and before `/v1/cache/stats` reports, so `entries` counts what is actually servable. rust-old's
+  `evict_expired` (`cache/mod.rs:207-214`). hoosh has no background timer, so these are the two natural points.
+- **`/v1/cache/stats` gained `max_entries`, `hit_rate`, `ttl_secs`, `enabled`** — previously only `entries`,
+  `hits`, `misses`, `evictions`.
+- Expiry-on-read counts **both** an eviction and a miss, matching rust-old's accounting: the two answer
+  different questions, and `hit_rate` is only honest if the miss is recorded.
+
+### Changed
+- `cache_new` takes a third argument, `ttl_secs`; `0` (or negative) disables expiry explicitly — the pre-2.5.4
+  behavior, now something you opt into rather than get by accident.
+
+### Benchmarks — a step change that is NOT a regression
+`cache_get_hit` 108 ns → 1487 ns and `cache_insert` 71 ns → 1447 ns in `bench-history.csv`. The code did not get
+14× slower; the **benchmark got honest**. The bench mirror was a bare map lookup — it now models the real entry
+struct and the `clock_now_ms()` call that `cache_get` has *always* made for its LRU touch. Measured in
+isolation: `clock_now_ms()` alone is **1.351 µs** (a real syscall, not vDSO), the entry alloc is 19 ns. So the
+clock is essentially the entire number, and it was being paid before this release too — the old bench simply
+did not measure it. Filed as a real optimization target under 2.5.11. (While hoisting, `cache_get` also stopped
+taking a *second* clock reading on the hit path.)
+
+Gates: 562 tests (was 535), 17 benchmarks; fmt/lint/vet/deny clean.
+
 ## [2.5.3] — 2026-07-22
 
 **Provider correctness — the third band of the rust-old parity closeout arc.** Four defects that made hoosh

@@ -201,7 +201,13 @@ fn load_config(path) {
         if (enabled_str != 0) {
             if (str_eq_cstr(enabled_str, "false") == 1) { enabled = 0; }
         }
-        _cache = cache_new(max_e, enabled);
+        # 2.5.4: ttl_secs is finally READ. hoosh.cyml has shipped `ttl_secs =
+        # 300` since the port while nothing parsed it, so cached responses never
+        # expired. 0 (or a negative) disables expiry explicitly.
+        var ttl_secs = 300;
+        var ttl_str = toml_get(cache_p, "ttl_secs");
+        if (ttl_str != 0) { ttl_secs = str_to_int(ttl_str); }
+        _cache = cache_new(max_e, enabled, ttl_secs);
     }
 
     # Parse [[providers]] sections

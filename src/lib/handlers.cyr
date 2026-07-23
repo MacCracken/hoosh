@@ -329,20 +329,44 @@ fn handle_cache_stats(cfd) {
     # cache_insert/evict (map_set/map_delete → rehash) on the pool workers
     # (v2.4.0). Snapshot the four values under the lock, then build unlocked.
     mutex_lock(_chat_lock);
+    # 2.5.4: sweep expired entries before reporting, so `entries` reflects what
+    # is actually servable rather than counting corpses the TTL has already
+    # retired. Bounded by the map size and this path is not hot.
+    cache_evict_expired(_cache);
     var entries = map_count(load64(_cache + CACHE_ENTRIES));
     var hits = load64(_cache + CACHE_HITS);
     var misses = load64(_cache + CACHE_MISSES);
     var evictions = load64(_cache + CACHE_EVICTIONS);
+    var max_entries = cache_max_entries(_cache);
+    var enabled = cache_enabled(_cache);
+    var ttl_ms = cache_ttl_ms(_cache);
     mutex_unlock(_chat_lock);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"entries\":");
     str_builder_add_int(sb, entries);
+    str_builder_add_cstr(sb, ",\"max_entries\":");
+    str_builder_add_int(sb, max_entries);
     str_builder_add_cstr(sb, ",\"hits\":");
     str_builder_add_int(sb, hits);
     str_builder_add_cstr(sb, ",\"misses\":");
     str_builder_add_int(sb, misses);
     str_builder_add_cstr(sb, ",\"evictions\":");
     str_builder_add_int(sb, evictions);
+    # hit_rate as a 0..1 fraction, x1000-scaled internally then rendered — the
+    # same no-floats trick the sampling params use.
+    str_builder_add_cstr(sb, ",\"hit_rate\":");
+    var total = hits + misses;
+    var rate = 0;
+    if (total > 0) { rate = hits * 1000 / total; }
+    _sb_add_milli(sb, rate);
+    str_builder_add_cstr(sb, ",\"ttl_secs\":");
+    str_builder_add_int(sb, ttl_ms / 1000);
+    str_builder_add_cstr(sb, ",\"enabled\":");
+    if (enabled == 1) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
 }

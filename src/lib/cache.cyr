@@ -1,23 +1,32 @@
-# cache.cyr — response cache with LRU eviction and stats
-# Each entry stores value + access timestamp for eviction ordering.
+# cache.cyr — response cache with TTL expiry, LRU eviction and stats
+# Each entry stores value + access timestamp (LRU) + creation timestamp (TTL).
 
 enum CacheField {
-    CACHE_SIZE = 48; CACHE_ENTRIES = 0; CACHE_MAX = 8;
+    CACHE_SIZE = 56; CACHE_ENTRIES = 0; CACHE_MAX = 8;
     CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32;
-    CACHE_ENABLED = 40;
+    CACHE_ENABLED = 40; CACHE_TTL_MS = 48;
 }
 
-# Entry layout: 0=value(8), 8=last_access_ms(8)
-var CACHE_ENTRY_SIZE = 16;
+# Entry layout: 0=value(8), 8=last_access_ms(8), 16=created_ms(8)
+#
+# 2.5.4: `created_ms` is new. Before it, the entry carried only the LRU recency
+# stamp — rewritten on every read — so there was nothing to measure an age
+# against and `[cache] ttl_secs` (shipped in hoosh.cyml since the port) was
+# silently ignored. A cached response was served as a hit forever; eviction was
+# capacity-only. rust-old had CacheEntry.ttl + is_expired (cache/mod.rs:40-44).
+var CACHE_ENTRY_SIZE = 24;
 
 fn _cache_entry_new(value) {
     var e = alloc(CACHE_ENTRY_SIZE);
+    var now = clock_now_ms();
     store64(e, value);
-    store64(e + 8, clock_now_ms());
+    store64(e + 8, now);
+    store64(e + 16, now);
     return e;
 }
 
-fn cache_new(max_entries, enabled) {
+# ttl_secs <= 0 disables expiry (entries live until evicted for capacity).
+fn cache_new(max_entries, enabled, ttl_secs) {
     var c = alloc(CACHE_SIZE);
     store64(c + CACHE_ENTRIES, map_new());
     store64(c + CACHE_MAX, max_entries);
@@ -25,7 +34,22 @@ fn cache_new(max_entries, enabled) {
     store64(c + CACHE_MISSES, 0);
     store64(c + CACHE_EVICTIONS, 0);
     store64(c + CACHE_ENABLED, enabled);
+    var ttl_ms = 0;
+    if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
+    store64(c + CACHE_TTL_MS, ttl_ms);
     return c;
+}
+
+fn cache_ttl_ms(c) { return load64(c + CACHE_TTL_MS); }
+fn cache_max_entries(c) { return load64(c + CACHE_MAX); }
+fn cache_enabled(c) { return load64(c + CACHE_ENABLED); }
+
+# Age of `entry` exceeds the configured TTL. Always 0 when TTL is off.
+fn _cache_expired(c, entry, now) {
+    var ttl = load64(c + CACHE_TTL_MS);
+    if (ttl <= 0) { return 0; }
+    if (now - load64(entry + 16) >= ttl) { return 1; }
+    return 0;
 }
 
 fn cache_get(c, key) {
@@ -36,8 +60,25 @@ fn cache_get(c, key) {
         store64(c + CACHE_MISSES, m + 1);
         return 0;
     }
-    # Update access timestamp (LRU touch)
-    store64(entry + 8, clock_now_ms());
+    # Expired-on-read: drop the entry and count it BOTH ways — an eviction
+    # (the entry left the cache) and a miss (the caller got nothing). That is
+    # rust-old's accounting (cache/mod.rs:123-129), and the two counters answer
+    # different questions: hit_rate stays honest, evictions shows TTL churn.
+    var now = clock_now_ms();
+    if (_cache_expired(c, entry, now) == 1) {
+        map_delete(load64(c + CACHE_ENTRIES), key);
+        # Keep the semantic index consistent — otherwise semantic_find keeps
+        # returning a key whose response is gone, costing a lookup per query.
+        semantic_remove(key);
+        var ev = load64(c + CACHE_EVICTIONS);
+        store64(c + CACHE_EVICTIONS, ev + 1);
+        var m2 = load64(c + CACHE_MISSES);
+        store64(c + CACHE_MISSES, m2 + 1);
+        return 0;
+    }
+    # Update access timestamp (LRU touch) — reuses the `now` already read for
+    # the expiry check rather than taking a second clock reading on the hot path.
+    store64(entry + 8, now);
     var h = load64(c + CACHE_HITS);
     store64(c + CACHE_HITS, h + 1);
     return load64(entry);
@@ -72,13 +113,49 @@ fn _cache_evict_lru(c) {
     return 0;
 }
 
+# Sweep every expired entry. Returns how many were removed. rust-old's
+# evict_expired (cache/mod.rs:207-214). hoosh has no background timer, so this
+# runs on capacity pressure (below) — reclaiming dead entries before evicting a
+# live one — and can be called directly by an operator path.
+fn cache_evict_expired(c) {
+    var ttl = load64(c + CACHE_TTL_MS);
+    if (ttl <= 0) { return 0; }
+    var m = load64(c + CACHE_ENTRIES);
+    var keys = map_keys(m);
+    var n = vec_len(keys);
+    var now = clock_now_ms();
+    var removed = 0;
+    var i = 0;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var entry = map_get(m, k);
+        if (entry != 0) {
+            if (_cache_expired(c, entry, now) == 1) {
+                map_delete(m, k);
+                semantic_remove(k);
+                removed = removed + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (removed > 0) {
+        var ev = load64(c + CACHE_EVICTIONS);
+        store64(c + CACHE_EVICTIONS, ev + removed);
+    }
+    return removed;
+}
+
 fn cache_insert(c, key, value) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
     var m = load64(c + CACHE_ENTRIES);
-    var count = map_count(m);
     var max = load64(c + CACHE_MAX);
-    if (count >= max) {
-        _cache_evict_lru(c);
+    if (map_count(m) >= max) {
+        # Reclaim expired entries first — evicting a live entry while dead ones
+        # sit in the map would throw away a usable response for no reason.
+        cache_evict_expired(c);
+        if (map_count(m) >= max) {
+            _cache_evict_lru(c);
+        }
     }
     map_set(m, key, _cache_entry_new(value));
     return 0;

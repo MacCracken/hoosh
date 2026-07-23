@@ -2827,6 +2827,151 @@ fn cache_misses(c) { return load64(c + CACHE_MISSES); }
 fn cache_evictions(c) { return load64(c + CACHE_EVICTIONS); }
 
 # ================================================================
+# 2.5.4 TTL cache — faithful mirror of src/lib/cache.cyr
+# ================================================================
+#
+# The simplified cache above predates TTL and models neither the entry struct
+# nor expiry; rather than churn the three groups that depend on its 2-arg shape,
+# this is a parallel mirror of the real thing. `now` is INJECTED so expiry is
+# exercised deterministically — the production code reads clock_now_ms(), but
+# the logic under test (age comparison + the dual counter bump) is identical.
+enum TtlCacheField {
+    TC_SIZE = 56; TC_ENTRIES = 0; TC_MAX = 8; TC_HITS = 16;
+    TC_MISSES = 24; TC_EVICTIONS = 32; TC_ENABLED = 40; TC_TTL_MS = 48;
+}
+var TC_ENTRY_SIZE = 24;
+
+fn _t_tc_new(max_entries, enabled, ttl_secs) {
+    var c = alloc(TC_SIZE);
+    store64(c + TC_ENTRIES, map_new());
+    store64(c + TC_MAX, max_entries);
+    store64(c + TC_HITS, 0);
+    store64(c + TC_MISSES, 0);
+    store64(c + TC_EVICTIONS, 0);
+    store64(c + TC_ENABLED, enabled);
+    var ttl_ms = 0;
+    if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
+    store64(c + TC_TTL_MS, ttl_ms);
+    return c;
+}
+
+fn _t_tc_entry_new(value, now) {
+    var e = alloc(TC_ENTRY_SIZE);
+    store64(e, value);
+    store64(e + 8, now);
+    store64(e + 16, now);
+    return e;
+}
+
+fn _t_tc_expired(c, entry, now) {
+    var ttl = load64(c + TC_TTL_MS);
+    if (ttl <= 0) { return 0; }
+    if (now - load64(entry + 16) >= ttl) { return 1; }
+    return 0;
+}
+
+fn _t_tc_get(c, key, now) {
+    if (load64(c + TC_ENABLED) == 0) { return 0; }
+    var entry = map_get(load64(c + TC_ENTRIES), key);
+    if (entry == 0) {
+        store64(c + TC_MISSES, load64(c + TC_MISSES) + 1);
+        return 0;
+    }
+    if (_t_tc_expired(c, entry, now) == 1) {
+        map_delete(load64(c + TC_ENTRIES), key);
+        store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + 1);
+        store64(c + TC_MISSES, load64(c + TC_MISSES) + 1);
+        return 0;
+    }
+    store64(entry + 8, now);
+    store64(c + TC_HITS, load64(c + TC_HITS) + 1);
+    return load64(entry);
+}
+
+fn _t_tc_evict_expired(c, now) {
+    var ttl = load64(c + TC_TTL_MS);
+    if (ttl <= 0) { return 0; }
+    var m = load64(c + TC_ENTRIES);
+    var keys = map_keys(m);
+    var n = vec_len(keys);
+    var removed = 0;
+    var i = 0;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var entry = map_get(m, k);
+        if (entry != 0) {
+            if (_t_tc_expired(c, entry, now) == 1) {
+                map_delete(m, k);
+                removed = removed + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (removed > 0) {
+        store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + removed);
+    }
+    return removed;
+}
+
+fn _t_tc_len(c) { return map_count(load64(c + TC_ENTRIES)); }
+
+fn _t_tc_insert(c, key, value, now) {
+    if (load64(c + TC_ENABLED) == 0) { return 0; }
+    var m = load64(c + TC_ENTRIES);
+    var max = load64(c + TC_MAX);
+    if (map_count(m) >= max) {
+        _t_tc_evict_expired(c, now);
+        if (map_count(m) >= max) {
+            # LRU: drop the oldest last-access stamp.
+            var keys = map_keys(m);
+            var kn = vec_len(keys);
+            var oldest_key = 0;
+            var oldest = 0x7FFFFFFFFFFFFFFF;
+            var i = 0;
+            while (i < kn) {
+                var k = vec_get(keys, i);
+                var e = map_get(m, k);
+                if (e != 0) {
+                    if (load64(e + 8) < oldest) {
+                        oldest = load64(e + 8);
+                        oldest_key = k;
+                    }
+                }
+                i = i + 1;
+            }
+            if (oldest_key != 0) {
+                map_delete(m, oldest_key);
+                store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + 1);
+            }
+        }
+    }
+    map_set(m, key, _t_tc_entry_new(value, now));
+    return 0;
+}
+
+# Mirror of src/lib/semantic.cyr semantic_remove — compact the entry out of the
+# vec so a stale embedding stops competing for max_search.
+fn _t_sem_remove(entries, key) {
+    if (entries == 0) { return 0; }
+    var count = vec_len(entries);
+    var i = 0;
+    while (i < count) {
+        var e = vec_get(entries, i);
+        if (load64(e) == key) {
+            var j = i;
+            while (j + 1 < count) {
+                vec_set(entries, j, vec_get(entries, j + 1));
+                j = j + 1;
+            }
+            vec_pop(entries);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # Cost tracker — pricing lookup + accumulation
 # ================================================================
 
@@ -5178,6 +5323,86 @@ fn main() {
     # temperature 0 must still emit for Ollama.
     assert_streq(_t_sampling_str(0, 0, _T_GEN_UNSET, 1),
     ",\"options\":{\"temperature\":0}", "ollama: temperature 0 emitted");
+
+    # ── v2.5.4 cache expiry ──
+    test_group("cache_ttl_expiry");
+    # `[cache] ttl_secs = 300` shipped in hoosh.cyml since the port with nothing
+    # reading it, so a cached response was served as a hit FOREVER. Times are
+    # injected here (ms), so no sleeps.
+    var x_tc = _t_tc_new(100, 1, 3);          # 3 s TTL
+    _t_tc_insert(x_tc, "k", 42, 1000);
+    assert_eq(_t_tc_get(x_tc, "k", 1500), 42, "ttl: fresh entry hits");
+    assert_eq(load64(x_tc + TC_HITS), 1, "ttl: hit counted");
+    # Just under the deadline is still live; at/after it is gone.
+    assert_eq(_t_tc_get(x_tc, "k", 3999), 42, "ttl: 2999ms old still live");
+    assert_eq(_t_tc_get(x_tc, "k", 4000), 0, "ttl: exactly at TTL expires");
+    # Expiry counts BOTH ways — an eviction (it left the cache) and a miss (the
+    # caller got nothing). rust-old's accounting; the two answer different
+    # questions, and hit_rate stays honest only if the miss is recorded.
+    assert_eq(load64(x_tc + TC_EVICTIONS), 1, "ttl: expiry counted as eviction");
+    assert_eq(load64(x_tc + TC_MISSES), 1, "ttl: expiry counted as miss");
+    assert_eq(_t_tc_len(x_tc), 0, "ttl: expired entry removed from the map");
+    # A re-insert after expiry starts a fresh lifetime.
+    _t_tc_insert(x_tc, "k", 99, 5000);
+    assert_eq(_t_tc_get(x_tc, "k", 5500), 99, "ttl: re-inserted entry live again");
+
+    test_group("cache_ttl_disabled");
+    # ttl_secs = 0 means never expire — the pre-2.5.4 behavior, now explicit.
+    var x_tz = _t_tc_new(100, 1, 0);
+    _t_tc_insert(x_tz, "k", 7, 1000);
+    assert_eq(_t_tc_get(x_tz, "k", 999999999), 7, "ttl 0: entry never expires");
+    assert_eq(load64(x_tz + TC_EVICTIONS), 0, "ttl 0: no evictions");
+    # A read must NOT extend the lifetime: TTL measures age from insert, not
+    # from last access (that stamp is the separate LRU key).
+    var x_tr = _t_tc_new(100, 1, 3);
+    _t_tc_insert(x_tr, "k", 1, 1000);
+    _t_tc_get(x_tr, "k", 2000);               # touch — moves last_access only
+    _t_tc_get(x_tr, "k", 3000);               # touch again
+    assert_eq(_t_tc_get(x_tr, "k", 4000), 0, "ttl: reads do not extend lifetime");
+
+    test_group("cache_evict_expired_sweep");
+    var x_ts = _t_tc_new(100, 1, 3);
+    _t_tc_insert(x_ts, "old1", 1, 1000);
+    _t_tc_insert(x_ts, "old2", 2, 1000);
+    _t_tc_insert(x_ts, "new1", 3, 6000);
+    assert_eq(_t_tc_len(x_ts), 3, "sweep: three entries stored");
+    assert_eq(_t_tc_evict_expired(x_ts, 7000), 2, "sweep: two expired removed");
+    assert_eq(_t_tc_len(x_ts), 1, "sweep: the fresh entry survives");
+    assert_eq(load64(x_ts + TC_EVICTIONS), 2, "sweep: evictions credited");
+    # A sweep with nothing expired is a no-op.
+    assert_eq(_t_tc_evict_expired(x_ts, 7001), 0, "sweep: idempotent");
+    # TTL off -> the sweep does nothing at all.
+    var x_tn = _t_tc_new(100, 1, 0);
+    _t_tc_insert(x_tn, "a", 1, 1000);
+    assert_eq(_t_tc_evict_expired(x_tn, 999999999), 0, "sweep: no-op when TTL off");
+
+    test_group("cache_capacity_prefers_expired");
+    # At capacity, expired entries are reclaimed BEFORE evicting a live one —
+    # otherwise a usable response is thrown away while corpses hold slots.
+    var x_tp = _t_tc_new(2, 1, 3);
+    _t_tc_insert(x_tp, "stale", 1, 1000);
+    _t_tc_insert(x_tp, "live", 2, 6000);
+    _t_tc_insert(x_tp, "new", 3, 6500);       # at capacity: "stale" is expired
+    assert_eq(_t_tc_len(x_tp), 2, "capacity: still two entries");
+    assert_eq(_t_tc_get(x_tp, "live", 6600), 2, "capacity: live entry retained");
+    assert_eq(_t_tc_get(x_tp, "new", 6600), 3, "capacity: new entry stored");
+
+    test_group("semantic_remove");
+    # An expired response must take its embedding with it, or semantic_find
+    # keeps returning a key that resolves to nothing.
+    var sv = vec_new();
+    var se1 = alloc(24); store64(se1, 11); store64(se1 + 8, 0); store64(se1 + 16, 4);
+    var se2 = alloc(24); store64(se2, 22); store64(se2 + 8, 0); store64(se2 + 16, 4);
+    var se3 = alloc(24); store64(se3, 33); store64(se3 + 8, 0); store64(se3 + 16, 4);
+    vec_push(sv, se1); vec_push(sv, se2); vec_push(sv, se3);
+    assert_eq(_t_sem_remove(sv, 22), 1, "sem_remove: middle entry removed");
+    assert_eq(vec_len(sv), 2, "sem_remove: length shrank");
+    # Order of the survivors is preserved by the compaction.
+    assert_eq(load64(vec_get(sv, 0)), 11, "sem_remove: first survivor kept");
+    assert_eq(load64(vec_get(sv, 1)), 33, "sem_remove: tail shifted down");
+    assert_eq(_t_sem_remove(sv, 999), 0, "sem_remove: absent key is a no-op");
+    assert_eq(vec_len(sv), 2, "sem_remove: no-op leaves length alone");
+    assert_eq(_t_sem_remove(0, 11), 0, "sem_remove: empty store safe");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

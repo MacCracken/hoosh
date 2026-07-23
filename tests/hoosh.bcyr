@@ -624,29 +624,53 @@ fn pool_commit(p, reserved, actual) {
     return 0;
 }
 
-# Cache
-fn cache_new(max, enabled) {
-    var c = alloc(48);
+# Cache — mirrors src/lib/cache.cyr including the 2.5.4 TTL check. The entry is
+# a struct (value / last_access_ms / created_ms), and cache_get compares the
+# entry's age against the TTL before serving. Modelling that matters: the old
+# bench mirror was a bare map lookup, so cache_get_hit measured something the
+# gateway does not actually run.
+# Layout: entries(0) max(8) hits(16) misses(24) evictions(32) enabled(40) ttl_ms(48)
+fn cache_new(max, enabled, ttl_secs) {
+    var c = alloc(56);
     store64(c, map_new());
     store64(c + 8, max);
     store64(c + 16, 0);
     store64(c + 24, 0);
     store64(c + 32, 0);
     store64(c + 40, enabled);
+    var ttl_ms = 0;
+    if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
+    store64(c + 48, ttl_ms);
     return c;
 }
 
 fn cache_get(c, key) {
     if (load64(c + 40) == 0) { return 0; }
-    var val = map_get(load64(c), key);
-    if (val == 0) { store64(c + 24, load64(c + 24) + 1); return 0; }
+    var entry = map_get(load64(c), key);
+    if (entry == 0) { store64(c + 24, load64(c + 24) + 1); return 0; }
+    var now = clock_now_ms();
+    var ttl = load64(c + 48);
+    if (ttl > 0) {
+        if (now - load64(entry + 16) >= ttl) {
+            map_delete(load64(c), key);
+            store64(c + 32, load64(c + 32) + 1);
+            store64(c + 24, load64(c + 24) + 1);
+            return 0;
+        }
+    }
+    store64(entry + 8, now);
     store64(c + 16, load64(c + 16) + 1);
-    return val;
+    return load64(entry);
 }
 
 fn cache_insert(c, key, val) {
     if (load64(c + 40) == 0) { return 0; }
-    map_set(load64(c), key, val);
+    var e = alloc(24);
+    var now = clock_now_ms();
+    store64(e, val);
+    store64(e + 8, now);
+    store64(e + 16, now);
+    map_set(load64(c), key, e);
     return 0;
 }
 
@@ -771,7 +795,7 @@ fn main() {
     bench_report(b);
 
     # ── Benchmark: cache_get_hit ──────────────────────────────────
-    _b_cache = cache_new(10000, 1);
+    _b_cache = cache_new(10000, 1, 300);
     cache_insert(_b_cache, "prompt-hash-1", 42);
 
     b = bench_new("cache_get_hit");
@@ -797,7 +821,7 @@ fn main() {
 
     # ── Benchmark: cache_insert ───────────────────────────────────
     b = bench_new("cache_insert");
-    var ci_cache = cache_new(100000, 1);
+    var ci_cache = cache_new(100000, 1, 300);
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {

@@ -44,7 +44,7 @@ level = "info"
 
 [cache]
 max_entries = 1000
-ttl_secs = 300
+ttl_secs = 300     # entry lifetime; 0 disables expiry (entries live until evicted)
 enabled = true
 
 # Prompt compression — collapse whitespace in message content before sending,

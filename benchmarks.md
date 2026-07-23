@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-07-23T06:04:27Z** — commit `45dc7bb`
+Latest: **2026-07-23T06:33:08Z** — commit `c5ba977`
 
 ## hoosh
 
-| Benchmark | Baseline (`7799e9b`) | Previous (`3c03177`) | Current (`45dc7bb`) |
+| Benchmark | Baseline (`45dc7bb`) | Previous (`c5ba977`) | Current (`c5ba977`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 892 ns | 908 ns | 858 ns **-4%** |
-| `route_round_robin_10` | 138 ns | 137 ns | 134 ns |
-| `pool_reserve_commit` | 44 ns | 42 ns **-5%** | 41 ns **-7%** |
+| `route_select_20_providers` | 858 ns | 896 ns +4% | 884 ns +3% |
+| `route_round_robin_10` | 134 ns | 140 ns +4% | 137 ns |
+| `pool_reserve_commit` | 41 ns | 40 ns | 42 ns |
 | `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 109 ns | 107 ns | 108 ns |
-| `cache_get_miss` | 49 ns | 48 ns | 48 ns |
-| `cache_insert` | 71 ns | 69 ns | 68 ns **-4%** |
-| `queue_enqueue_dequeue` | 644 ns | 633 ns | 609 ns **-5%** |
-| `queue_5tier_sort` | 831 ns | 815 ns | 844 ns |
-| `route_matches_model` | 34 ns | 32 ns **-6%** | 33 ns |
+| `cache_get_hit` | 108 ns | 108 ns | 1.49 us +1277% |
+| `cache_get_miss` | 48 ns | 47 ns | 46 ns **-4%** |
+| `cache_insert` | 68 ns | 71 ns +4% | 1.45 us +2028% |
+| `queue_enqueue_dequeue` | 609 ns | 595 ns | 613 ns |
+| `queue_5tier_sort` | 844 ns | 842 ns | 771 ns **-9%** |
+| `route_matches_model` | 33 ns | 33 ns | 31 ns **-6%** |
 | `estimate_tokens_per_provider` | 8 ns | 8 ns | 8 ns |
-| `dlp_scan_clean_prompt` | 4.18 us | 4.03 us **-4%** | 4.20 us |
-| `mcp_tools_list` | 4.17 us | 3.88 us **-7%** | 4.26 us |
-| `mcp_tools_call` | 8.44 us | 8.34 us | 8.53 us |
-| `batch_split_4` | 821 ns | 807 ns | 847 ns +3% |
-| `latency_bucket_find` | 53 ns | 54 ns | 54 ns |
+| `dlp_scan_clean_prompt` | 4.20 us | 4.01 us **-5%** | 4.17 us |
+| `mcp_tools_list` | 4.26 us | 3.91 us **-8%** | 3.92 us **-8%** |
+| `mcp_tools_call` | 8.53 us | 8.60 us | 8.24 us **-3%** |
+| `batch_split_4` | 847 ns | 873 ns +3% | 798 ns **-6%** |
+| `latency_bucket_find` | 54 ns | 55 ns | 52 ns **-4%** |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
 
 ---

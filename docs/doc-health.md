@@ -6,7 +6,12 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-22 (**v2.5.3** — provider correctness, the third
+> **Last refresh**: 2026-07-22 (**v2.5.4** — cache expiry, the fourth closeout
+> band). Doc touch: CHANGELOG [2.5.4], roadmap (2.5.4 shipped + a bench
+> step-change note so the CSV jump is not misread as a regression; **+a 2.5.11
+> item**: `clock_now_ms()` measured at 1.351 µs, a syscall), hoosh.cyml
+> (`ttl_secs` comment), CLAUDE.md pin. Gates: 562 tests, 17 benches, clean.
+> **Prior**: 2026-07-22 (**v2.5.3** — provider correctness, the third
 > closeout band). Doc touch: CHANGELOG [2.5.3], roadmap (2.5.3 marked shipped +
 > an embeddings-normalization gap deferred to 2.5.7), CLAUDE.md pin. Gates: 535
 > tests, 17 benches, clean.

@@ -140,16 +140,29 @@ it audits what the other bands leave behind, so it closes the arc. Items marked 
 > [the review](rust-old-parity-review.md)'s note that the handler also passes a port
 > where a base-url cstr is expected.
 
-### v2.5.4 — Cache expiry
-- [ ] ⚠ **`[cache] ttl_secs` is inert** — `hoosh.cyml:33` ships `ttl_secs = 300`;
-      `ttl` appears zero times in `cache.cyr`/`config.cyr`. The entry layout is
-      `{value, last_access_ms}` and that stamp is an LRU recency key, never a deadline,
-      so a cached response is served as a hit **indefinitely**. Rust had
-      `CacheEntry.ttl`, `is_expired()`, expired-on-get removal bumping *both* evictions
-      and misses, and an `evict_expired()` sweep (`cache/mod.rs:40-44,123-129,207-214`).
-      Either implement it or drop the key — shipping an inert knob is worse than neither.
-- [ ] **`/v1/cache/stats` fields** — `max_entries`, `hit_rate`, `enabled`.
-- [ ] **`SemanticCache::remove(cache_key)`**.
+### v2.5.4 — Cache expiry — ✅ SHIPPED 2026-07-22
+- [x] ⚠ **`[cache] ttl_secs` is inert** — now read, and enforced. The entry grew a
+      `created_ms` stamp (the existing one is the LRU recency key, rewritten on every
+      read, so nothing could measure age against it). Expiry is checked on read —
+      removing the entry and counting it **both** as an eviction and a miss, rust-old's
+      accounting — plus a `cache_evict_expired` sweep that runs on capacity pressure
+      and before `/v1/cache/stats` reports. `ttl_secs = 0` disables expiry explicitly.
+      Verified live: with `ttl_secs = 3`, a repeat query hits, then re-fetches after
+      the deadline; the backend saw exactly 2 calls for 4 requests.
+- [x] **`/v1/cache/stats` fields** — `max_entries`, `hit_rate`, `enabled`, `ttl_secs`.
+- [x] **`semantic_remove(key)`** — an expired or evicted response now takes its
+      embedding with it. Without it the index outlives the response it points at, so
+      `semantic_find` keeps returning a key that resolves to nothing and the dead
+      embedding still competes for `max_search`.
+
+> **Benchmark step change (not a regression).** `cache_get_hit` 108 ns → 1487 ns and
+> `cache_insert` 71 ns → 1447 ns in `bench-history.csv`. The *code* did not get
+> ~14× slower — the **benchmark got honest**. The bench mirror was a bare map lookup;
+> it now models the real entry struct and the `clock_now_ms()` call that `cache_get`
+> has always made for the LRU touch. Measured in isolation, `clock_now_ms()` alone is
+> **1.351 µs** (a real syscall, not vDSO) and the entry alloc is 19 ns — so the clock
+> is essentially the whole number, and it was being paid before 2.5.4 too. A cheaper
+> monotonic clock is a genuine win worth taking; filed under [2.5.11](#v2511--security--hardening-audit-sweep).
 
 ### v2.5.5 — Health & failover  *(largest band)*
 - [ ] ⚠ **No health probing or circuit breaker** — `health_check`, `consecutive_fail`,
@@ -261,6 +274,11 @@ bound it:
 - [ ] **Duplicate `ratelimit_new` / `ratelimit_check`** — the build warns
       "last definition wins". Silent shadowing in the rate-limit path is exactly the
       kind of thing an audit exists to catch; resolve or rename.
+- [ ] **`clock_now_ms()` costs 1.351 µs — it is a syscall, not vDSO.** Measured during
+      2.5.4. It is called on every cache read and twice per insert, and it dominates
+      those paths entirely (the surrounding work is ~20 ns). Anywhere hoosh timestamps
+      per-request work pays it. A vDSO/coarse-clock path, or reusing one reading per
+      request, is a large and cheap win.
 - [ ] **Build-surface hygiene** — 13 MB of static data and ~2,700 unreachable functions
       (`CYRIUS_DCE=1`), plus the pinned-vs-installed toolchain drift the compiler warns
       about on every build. Decide the intended posture and make the build quiet, so a

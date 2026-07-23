@@ -624,7 +624,7 @@ fn main() {
     # Initialize state
     _budget = budget_new();
     budget_add_pool(_budget, pool_new("default", 10000000));
-    _cache = cache_new(10000, 1);
+    _cache = cache_new(10000, 1, 300);   # 300 s TTL default, matching hoosh.cyml
     _health_map = map_new();
     _rate_map = map_new();
     _auth_tokens = vec_new();
