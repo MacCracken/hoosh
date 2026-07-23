@@ -56,6 +56,52 @@ fn audit_chain_new(key, key_len, max_entries) {
 
 fn audit_count(c) { return load64(c + 40); }
 
+# ── [audit] configuration (2.5.7) ──
+# Off by default, matching rust-old. Before this the chain was always on and
+# signed with a key COMPILED INTO THE BINARY ("hoosh-audit-key"), which anyone
+# holding the binary could use to forge or re-sign entries — the signature
+# proved nothing. The key now comes from `[audit] signing_key` (which is
+# "$NAME"-expandable so the secret lives in the environment); when unset, a
+# random 32-byte per-process key is generated. A random key still detects
+# tampering within a process lifetime, which is what the in-memory chain is
+# for; persisting a chain across restarts needs a configured key.
+var _audit_enabled = 0;
+var _audit_key = 0;
+var _audit_key_len = 0;
+var _audit_max_entries = 10000;
+
+fn audit_configure(enabled, key, max_entries) {
+    _audit_enabled = enabled;
+    if (key != 0) {
+        _audit_key = key;
+        _audit_key_len = strlen(key);
+    }
+    if (max_entries > 0) { _audit_max_entries = max_entries; }
+    return 0;
+}
+
+fn audit_is_enabled() { return _audit_enabled; }
+
+# 32 random bytes, hex-encoded. Used when no signing_key is configured.
+fn _audit_random_key() {
+    var raw = alloc(32);
+    sys_getrandom(raw, 32, 0);
+    return hex_encode(raw, 32);
+}
+
+# Build the chain from the configured settings, or 0 when auditing is off.
+fn audit_chain_from_config() {
+    if (_audit_enabled == 0) { return 0; }
+    var key = _audit_key;
+    var klen = _audit_key_len;
+    if (key == 0) {
+        key = _audit_random_key();
+        klen = strlen(key);
+        hlog_warn("audit: no signing_key configured, using a random per-process key");
+    }
+    return audit_chain_new(key, klen, _audit_max_entries);
+}
+
 # Compute SHA256 hex of the entry data fields
 fn _audit_entry_hash(id, ts, event, level, message, provider, model) {
     var sb = str_builder_new();
@@ -147,10 +193,19 @@ fn audit_record(chain, event, level, message, provider, model) {
 }
 
 # Verify chain integrity. Returns 1 if valid, 0 if tampered.
+#
+# 2.5.7: this now walks the LINKAGE as well as each entry. Previously it checked
+# only that every entry's own hash and HMAC were self-consistent — which an
+# excised entry does not disturb, because the surviving entries are individually
+# untouched. Deleting a record from the middle left a chain that verified
+# clean, defeating the point of chaining. Each entry's `previous_hash` must now
+# equal the prior entry's hash, and the first must be GENESIS
+# (rust-old audit.rs:186-195).
 fn audit_verify(chain) {
     var key = load64(chain);
     var key_len = load64(chain + 8);
     var e = load64(chain + 24);
+    var expect_prev = GENESIS_HASH;
     while (e != 0) {
         var id = load64(e);
         var ts = load64(e + 8);
@@ -168,6 +223,10 @@ fn audit_verify(chain) {
         id, ts, event, level, message, provider, model);
         if (streq(check, ehash) != 1) { return 0; }
 
+        # Chain linkage: this entry must point at the previous entry's hash.
+        # This is the check that catches an excised or reordered record.
+        if (streq(prev, expect_prev) != 1) { return 0; }
+
         # Verify HMAC signature
         var sig_sb = str_builder_new();
         str_builder_add_cstr(sig_sb, ehash);
@@ -178,6 +237,7 @@ fn audit_verify(chain) {
         var expected = _hmac_hex(key, key_len, sig_data, str_len(sig_s));
         if (streq(sig, expected) != 1) { return 0; }
 
+        expect_prev = ehash;
         e = load64(e + 80);
     }
     return 1;

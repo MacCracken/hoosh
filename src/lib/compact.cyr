@@ -41,11 +41,76 @@ fn estimate_tokens(messages, msg_len, cpt_x10) {
     return msg_len * 10 / ratio;
 }
 
+# ── [context] configuration (2.5.7) ──
+# These three keys existed in rust-old's config surface with no Cyrius reader.
+#   enabled              — compaction on/off (default on)
+#   compaction_threshold — fraction of the model's context window to target,
+#                          carried x100 (80 = 0.8) since there are no floats
+#   keep_last_messages   — floor on retained recent messages, so compaction
+#                          cannot strip a conversation down to nothing
+var _ctx_enabled = 1;
+var _ctx_threshold_x100 = 80;
+var _ctx_keep_last = 10;
+
+fn context_configure(enabled, threshold_x100, keep_last) {
+    _ctx_enabled = enabled;
+    if (threshold_x100 > 0) { _ctx_threshold_x100 = threshold_x100; }
+    if (keep_last >= 0) { _ctx_keep_last = keep_last; }
+    return 0;
+}
+
+fn context_is_enabled() { return _ctx_enabled; }
+fn context_keep_last() { return _ctx_keep_last; }
+
+# Token budget for a model, from its context window and the configured
+# threshold. 0 when the window is unknown — the caller then falls back to its
+# own heuristic rather than inventing a limit.
+fn context_token_limit(ctx_window) {
+    if (ctx_window <= 0) { return 0; }
+    return ctx_window * _ctx_threshold_x100 / 100;
+}
+
+# Skip JSON whitespace from `j`, returning the first non-space index.
+fn _cmp_ws(p, len, j) {
+    while (j < len) {
+        var c = load8(p + j);
+        if (c != 32 && c != 9 && c != 10 && c != 13) { return j; }
+        j = j + 1;
+    }
+    return j;
+}
+
+# Match `"role"` <ws> `:` <ws> `"<want>"` starting at `i`.
+#
+# 2.5.7: whitespace-tolerant, and it has to be. The old needle was the compact
+# literal `"role":"system"`, but virtually every JSON encoder emits
+# `"role": "system"` with a space (Python's json.dumps does by default), so the
+# system message was NOT DETECTED for ordinary clients — compaction then dropped
+# the system prompt like any other message instead of preserving it. Same class
+# of bug the response extractors fixed in 2.2.0; it survived here because
+# nothing exercised compaction with realistically-encoded input.
+fn _msg_role_is(p, len, i, want, want_len) {
+    if (i + 6 > len) { return 0; }
+    if (memeq(p + i, "\"role\"", 6) == 0) { return 0; }
+    var j = _cmp_ws(p, len, i + 6);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 58) { return 0; }
+    j = _cmp_ws(p, len, j + 1);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 34) { return 0; }
+    j = j + 1;
+    if (j + want_len >= len) { return 0; }
+    if (memeq(p + j, want, want_len) == 0) { return 0; }
+    if (load8(p + j + want_len) != 34) { return 0; }
+    return 1;
+}
+
 # Compact a messages array to fit within max_tokens.
 # Returns new (ptr, len) packed in a 16-byte struct,
 # or the original if already fits.
 # Strategy: find system message (keep it), then keep
-# as many recent messages as fit in the budget.
+# as many recent messages as fit in the budget — but never fewer than
+# keep_last_messages, and never zero (see the clamp below).
 fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
     var ratio = cpt_x10;
     if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
@@ -64,7 +129,7 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
     var has_system = 0;
     var i = 0;
     while (i < msg_len - 8) {
-        if (memeq(msg_ptr + i, "\"role\":\"system\"", 15) == 1) {
+        if (_msg_role_is(msg_ptr, msg_len, i, "system", 6) == 1) {
             # Walk backwards to find the { for this message
             var j = i;
             while (j > 0) {
@@ -72,7 +137,7 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
                 j = j - 1;
             }
             # Walk forward to find the } for this message
-            j = i + 15;
+            j = i + 6;
             var depth = 0;
             while (j < msg_len) {
                 if (load8(msg_ptr + j) == 123) { depth = depth + 1; }
@@ -111,7 +176,10 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
     while (i < msg_len - 6) {
         if (load8(msg_ptr + i) == 123) {
             if (i + 10 < msg_len) {
-                if (memeq(msg_ptr + i + 1, "\"role\"", 6) == 1) {
+                # Whitespace-tolerant for the same reason as _msg_role_is above:
+                # an indented `{\n  "role"` is a message boundary too.
+                var bj = _cmp_ws(msg_ptr, msg_len, i + 1);
+                if (bj + 6 <= msg_len && memeq(msg_ptr + bj, "\"role\"", 6) == 1) {
                     store64(offsets + msg_count * 8, i);
                     msg_count = msg_count + 1;
                 }
@@ -142,6 +210,18 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
         chars_used = chars_used + mchars;
         keep_from = keep_from - 1;
     }
+
+    # 2.5.7: floor the retained tail. The budget loop above can stop at
+    # keep_from == msg_count when even a single recent message exceeds the
+    # remaining chars, which would forward the system prompt alone (or an empty
+    # array) — a request the provider rejects, or worse, answers without any of
+    # the conversation. Keep at least keep_last_messages, and unconditionally at
+    # least one non-system message. Overshooting the char budget slightly beats
+    # sending a turn with no content.
+    var floor_from = msg_count - _ctx_keep_last;
+    if (_ctx_keep_last <= 0) { floor_from = msg_count - 1; }
+    if (floor_from < 0) { floor_from = 0; }
+    if (keep_from > floor_from) { keep_from = floor_from; }
 
     # Build compacted array: [system_msg, ...recent_msgs]
     var sb = str_builder_new();

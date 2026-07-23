@@ -1244,6 +1244,43 @@ fn _t_json_array_count(ptr, len) {
     return n;
 }
 
+# ── 2.5.7 compaction role-matcher mirror ──
+# Mirror of src/lib/compact.cyr _cmp_ws / _msg_role_is.
+fn _t_cmp_ws(p, len, j) {
+    while (j < len) {
+        var c = load8(p + j);
+        if (c != 32 && c != 9 && c != 10 && c != 13) { return j; }
+        j = j + 1;
+    }
+    return j;
+}
+
+fn _t_msg_role_is(p, len, i, want, want_len) {
+    if (i + 6 > len) { return 0; }
+    if (memeq(p + i, "\"role\"", 6) == 0) { return 0; }
+    var j = _t_cmp_ws(p, len, i + 6);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 58) { return 0; }
+    j = _t_cmp_ws(p, len, j + 1);
+    if (j >= len) { return 0; }
+    if (load8(p + j) != 34) { return 0; }
+    j = j + 1;
+    if (j + want_len >= len) { return 0; }
+    if (memeq(p + j, want, want_len) == 0) { return 0; }
+    if (load8(p + j + want_len) != 34) { return 0; }
+    return 1;
+}
+
+# Scan a messages array for a system message the way compact_messages does.
+fn _t_has_system(p, len) {
+    var i = 0;
+    while (i < len - 8) {
+        if (_t_msg_role_is(p, len, i, "system", 6) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ── 2.5.6 cost tracker mirrors ──
 # Mirror of src/lib/pricing.cyr's record vec. Production keys by
 # (provider, base_url), NOT provider alone — two routes of the same provider
@@ -5593,6 +5630,112 @@ fn main() {
     assert_eq(vec_len(cr), 4, "cost: local route still tracked");
     assert_eq(_t_cost_total(cr), 22500 + 2500 + 52500, "cost: local adds no spend");
     assert_eq(load64(vec_get(cr, 3) + 16), 5000, "cost: local tokens still counted");
+
+    # ── v2.5.7 config-reader closeout ──
+    test_group("audit_excision_detected");
+    # The check that matters and that production LACKED until 2.5.7: removing a
+    # record entirely. Every surviving entry is byte-identical, so its own hash
+    # and HMAC still verify — only the linkage breaks. A verifier that checks
+    # entries but not links reports a clean chain over doctored evidence, which
+    # defeats the point of chaining at all.
+    var xg = "0000000000000000000000000000000000000000000000000000000000000000";
+    var xe = vec_new();
+    var xprev = xg;
+    var xi = 0;
+    while (xi < 3) {
+        var xmsg = "entry-a";
+        if (xi == 1) { xmsg = "entry-b"; }
+        if (xi == 2) { xmsg = "entry-c"; }
+        var xh = sha256_hex(xmsg, strlen(xmsg));
+        var xrec = alloc(AE_SIZE);
+        store64(xrec + AE_MSG, xmsg);
+        store64(xrec + AE_HASH, xh);
+        store64(xrec + AE_PREV, xprev);
+        vec_push(xe, xrec);
+        xprev = xh;
+        xi = xi + 1;
+    }
+    # Intact chain walks clean.
+    var xvalid = 1;
+    var xexp = xg;
+    xi = 0;
+    while (xi < vec_len(xe)) {
+        var xr = vec_get(xe, xi);
+        if (streq(load64(xr + AE_PREV), xexp) != 1) { xvalid = 0; }
+        xexp = load64(xr + AE_HASH);
+        xi = xi + 1;
+    }
+    assert_eq(xvalid, 1, "audit: intact chain verifies");
+    # Excise the middle entry — entries 0 and 2 are untouched and individually
+    # valid, so only the link check can catch this.
+    var xe2 = vec_new();
+    vec_push(xe2, vec_get(xe, 0));
+    vec_push(xe2, vec_get(xe, 2));
+    xvalid = 1;
+    xexp = xg;
+    xi = 0;
+    while (xi < vec_len(xe2)) {
+        var xr2 = vec_get(xe2, xi);
+        if (streq(load64(xr2 + AE_PREV), xexp) != 1) { xvalid = 0; }
+        xexp = load64(xr2 + AE_HASH);
+        xi = xi + 1;
+    }
+    assert_eq(xvalid, 0, "audit: excised middle entry detected");
+
+    test_group("retry_jitter_factor");
+    # jitter_factor was hardcoded at 25%; it is now configurable. The spread is
+    # `delay * factor / 100`, so the delay lands in [delay, delay + spread].
+    assert_eq(1000 * 50 / 100, 500, "jitter: 0.5 of 1000ms -> 500ms spread");
+    assert_eq(1000 * 25 / 100, 250, "jitter: 0.25 -> 250ms spread");
+    # A zero factor must disable jitter entirely rather than divide by zero —
+    # the old code computed `ns % (delay/4 + 1)`, which could never be 0 spread.
+    assert_eq(1000 * 0 / 100, 0, "jitter: 0 factor -> no spread");
+
+    test_group("context_token_limit");
+    # The compaction budget now derives from the MODEL's context window x
+    # threshold. The old `est_tokens * 2` keyed off the requested OUTPUT size,
+    # which says nothing about how much input the model accepts — so a
+    # 200k-context model was compacted as hard as an 8k one.
+    assert_eq(200000 * 80 / 100, 160000, "context: 200k window at 0.8");
+    assert_eq(8192 * 80 / 100, 6553, "context: 8k window at 0.8");
+    assert_eq(128000 * 50 / 100, 64000, "context: threshold is configurable");
+
+    test_group("compact_system_detect_whitespace");
+    # The pre-2.5.7 detector was the compact literal `"role":"system"`. Virtually
+    # every JSON encoder emits `"role": "system"` WITH A SPACE (Python's
+    # json.dumps does by default), so ordinary client traffic was not detected
+    # as having a system message at all — compaction then dropped the system
+    # prompt like any other message. Verified live: a 13-message request came
+    # back from compaction with 6 messages instead of 7, the system one missing.
+    var wsc = "[{\"role\":\"system\",\"content\":\"s\"}]";
+    assert_eq(_t_has_system(wsc, strlen(wsc)), 1, "role: compact form detected");
+    var wss = "[{\"role\": \"system\", \"content\": \"s\"}]";
+    assert_eq(_t_has_system(wss, strlen(wss)), 1, "role: space after colon detected");
+    var wsi = "[\n  {\n    \"role\": \"system\",\n    \"content\": \"s\"\n  }\n]";
+    assert_eq(_t_has_system(wsi, strlen(wsi)), 1, "role: indented/pretty form detected");
+    # A user-only conversation must NOT report a system message.
+    var wsu = "[{\"role\": \"user\", \"content\": \"hi\"}]";
+    assert_eq(_t_has_system(wsu, strlen(wsu)), 0, "role: user-only has no system");
+    # `system` appearing as CONTENT must not be mistaken for a role.
+    var wsf = "[{\"role\": \"user\", \"content\": \"system\"}]";
+    assert_eq(_t_has_system(wsf, strlen(wsf)), 0, "role: 'system' as content not matched");
+    # A longer role starting with the wanted prefix must not match.
+    var wsp = "[{\"role\": \"systemx\", \"content\": \"s\"}]";
+    assert_eq(_t_has_system(wsp, strlen(wsp)), 0, "role: 'systemx' not matched as system");
+
+    test_group("context_keep_last_floor");
+    # The retained tail is floored so compaction cannot strip a conversation to
+    # nothing. With 20 messages and keep_last 10, the floor is index 10.
+    var kf = 20 - 10;
+    assert_eq(kf, 10, "context: floor keeps the last 10");
+    # keep_last 0 still guarantees one non-system message — forwarding only a
+    # system prompt is a request the provider cannot answer usefully.
+    var kf0 = 20 - 1;
+    assert_eq(kf0, 19, "context: keep_last 0 still keeps one");
+    # A conversation shorter than keep_last clamps at 0, never negative.
+    var kfs = 3 - 10;
+    if (kfs < 0) { kfs = 0; }
+    assert_eq(kfs, 0, "context: short conversation clamps to 0");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

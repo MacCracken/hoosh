@@ -218,18 +218,38 @@ Three deliberate departures from rust-old, all verified:
 > on your own GPU. Exactly the realistic cases were mispriced. The local check now runs
 > first. (The test file's mirror had it right all along; production had diverged.)
 
-### v2.5.7 — Config-reader closeout
-Keys that exist in the Rust config surface with no Cyrius reader — each is either a
-silent no-op today or an unavailable capability:
-- [ ] **`[context]`** — `compaction_threshold` (0.8), `keep_last_messages` (10), `enabled`.
-- [ ] **`[hardware]`** — `cache_ttl_secs`, `disabled_backends`, `vram_reserve_bytes`,
-      `refresh_interval_secs`.
-- [ ] **`[audit]`** — `enabled` (default false), `signing_key` (`$ENV`-expandable,
-      random 32-byte fallback), `max_entries` (`config.rs:57-72`, `server/mod.rs:154-169`).
-- [ ] **`[retry] jitter_factor`** (default 0.5).
-- [ ] **Audit chain-link verification** — `entry.previous_hash == prior.hash`
-      (`audit.rs:186-195`); the port signs the chain but never validates it end-to-end.
-- [ ] **`inference.error` audit entry** on the failure path.
+### v2.5.7 — Config-reader closeout — ✅ SHIPPED 2026-07-23
+- [x] **`[context]`** — `enabled`, `compaction_threshold` (0.8), `keep_last_messages`
+      (10). The compaction budget now derives from the **model's context window** ×
+      threshold; it was `est_tokens * 2`, keyed off the requested *output* size, which
+      says nothing about how much input a model accepts — a 200k-context model was
+      compacted as hard as an 8k one. `keep_last_messages` floors the retained tail so
+      compaction cannot strip a conversation to nothing.
+- [x] **`[audit]`** — `enabled` (default false), `signing_key` (`$ENV`-expandable,
+      random 32-byte fallback), `max_entries`.
+- [x] **`[retry] jitter_factor`** (default 0.5) — was hardcoded at 25%.
+- [x] ⚠ **Audit chain-link verification** — `audit_verify` now checks that each entry's
+      `previous_hash` equals the prior entry's hash, and that the first is GENESIS.
+- [x] **`inference.error` audit entry** on the failure path.
+
+> ⚠ **The audit signing key was compiled into the binary** (`"hoosh-audit-key"`), so
+> anyone holding the binary could forge or re-sign entries — the signature proved
+> nothing. Now sourced from `[audit] signing_key`, with a random per-process key and a
+> startup warning when unset.
+>
+> ⚠ **Two bugs found while verifying.** (1) `audit_verify` checked each entry's own
+> hash and HMAC but never the *linkage*, so deleting a record from the middle left a
+> chain that verified clean — the surviving entries are individually untouched.
+> (2) The compaction system-message detector used the compact literal
+> `"role":"system"`, but virtually every JSON encoder emits `"role": "system"` with a
+> space (Python's `json.dumps` does by default), so **ordinary client traffic had its
+> system prompt dropped during compaction**. Both are fixed and covered.
+
+**Deferred to [2.5.9](#v259--hardware-planning-closeout): `[hardware]`**
+(`cache_ttl_secs`, `disabled_backends`, `vram_reserve_bytes`, `refresh_interval_secs`).
+Their consumers — `detect_selective`, `available_vram(reserved)`, periodic
+re-detection — are 2.5.9 items. Adding readers for keys nothing acts on would recreate
+exactly the inert-knob problem this band exists to fix (see `ttl_secs`, 2.5.4).
 
 ### v2.5.8 — CLI & process lifecycle
 - [ ] **`serve --bind <addr>` / `-c|--config <path>`** — `main.cyr:623` takes a bare
@@ -244,7 +264,13 @@ silent no-op today or an unavailable capability:
       falls through silently (`server/handlers.rs:167-175`); budget must not be skippable
       by naming a nonexistent pool.
 
+<a id="v259--hardware-planning-closeout"></a>
+
 ### v2.5.9 — Hardware planning closeout
+- [ ] **`[hardware]` config keys** (deferred here from 2.5.7, so each lands with the
+      code that acts on it): `disabled_backends` → `detect_selective`,
+      `vram_reserve_bytes` → `available_vram(reserved)`, `refresh_interval_secs` +
+      `cache_ttl_secs` → periodic re-detection.
 - [ ] **`POST /v1/hardware/simulate`** — what-if add/remove/replace devices, re-run
       sharding, return `{original, simulated}`; validated (`model_params > 0`, ≤ 64
       devices, non-zero `memory_bytes`). Never ported and never deferred

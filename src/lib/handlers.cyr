@@ -2052,9 +2052,21 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
             msg_raw = load64(pruned);
             msg_raw_len = load64(pruned + 8);
         }
-        if (msg_raw_len > 0) {
+        if (msg_raw_len > 0 && context_is_enabled() == 1) {
             var cpt_x10 = chars_per_token_x10(route_provider(route));
-            var compacted = compact_messages(msg_raw, msg_raw_len, est_tokens * 2, cpt_x10);
+            # 2.5.7: the compaction budget now derives from the MODEL's context
+            # window x [context] compaction_threshold, which is what the knob is
+            # for. The old `est_tokens * 2` was a heuristic off the requested
+            # output size — unrelated to how much input the model can accept, so
+            # a large-context model was compacted as aggressively as a small one.
+            # Unknown models keep the old heuristic rather than an invented limit.
+            var mmeta = alloc(40);
+            var token_limit = est_tokens * 2;
+            if (metadata_lookup(model_cstr, mmeta) == 1) {
+                var derived = context_token_limit(load64(mmeta));
+                if (derived > 0) { token_limit = derived; }
+            }
+            var compacted = compact_messages(msg_raw, msg_raw_len, token_limit, cpt_x10);
             msg_raw = load64(compacted);
             msg_raw_len = load64(compacted + 8);
         }
@@ -2129,6 +2141,14 @@ fn _chat_assemble(prep, result) {
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
         hlog_error("chat: provider backend unreachable after retries");
+        # 2.5.7: failures belong in the audit chain too. Recording only the
+        # successes made the chain a record of what worked, which is the less
+        # interesting half when reconstructing an incident.
+        if (_audit_chain != 0) {
+            audit_record(_audit_chain, "inference.error",
+            "error", "provider backend unreachable",
+            provider_name(route_provider(route)), model_cstr);
+        }
         event_inference_failed(provider_name(route_provider(route)), model_cstr, "backend unreachable");
         otlp_enqueue_inference_span(provider_name(route_provider(route)), model_cstr, 0, 0, 0);
         return _resp_err("502", "Bad Gateway", "provider backend unreachable", "server_error");

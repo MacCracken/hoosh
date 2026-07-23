@@ -17,6 +17,33 @@ health_check_interval_secs = 30
 #   models           = ["llama*", "mistral*"]
 #   enabled          = false  # keep the route configured but out of selection
 
+# Provider retry with jittered exponential backoff. Permanent failures (a 4xx
+# other than 408/429) are not retried. jitter_factor spreads a thundering herd:
+# the delay lands in [delay, delay + delay*jitter_factor].
+# [[retry]]
+# max_retries = 3
+# base_delay_ms = 500
+# max_delay_ms = 30000
+# jitter_factor = 0.5
+
+# Context compaction — trim history to fit the model's context window.
+# The budget is (model context window x compaction_threshold); keep_last_messages
+# floors the retained tail so a conversation is never stripped to nothing. The
+# system message is always preserved.
+# [context]
+# enabled = true
+# compaction_threshold = 0.8
+# keep_last_messages = 10
+
+# Cryptographic audit chain (HMAC-SHA256 over a hash chain). OFF by default.
+# signing_key is "$NAME"-expandable so the secret stays in the environment; with
+# no key hoosh generates a random per-process one and warns — fine for detecting
+# tampering within a run, but a chain persisted across restarts needs a real key.
+# [audit]
+# enabled = true
+# signing_key = "$HOOSH_AUDIT_KEY"
+# max_entries = 10000
+
 # Bearer-token auth. A LIST — issue a token per consumer and rotate by adding
 # the new one before retiring the old. Omit this section entirely and hoosh
 # serves unauthenticated (fine on loopback; pair with `bind` above before

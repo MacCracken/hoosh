@@ -6,7 +6,13 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-23 (**v2.5.6** — cost accounting, the sixth closeout
+> **Last refresh**: 2026-07-23 (**v2.5.7** — config-reader closeout, the seventh
+> band). Doc touch: CHANGELOG [2.5.7], roadmap (2.5.7 shipped; `[hardware]` keys
+> deferred to 2.5.9 so each lands with its consumer; notes on the hardcoded
+> audit key, the unlinked chain verify, and the compaction system-prompt drop),
+> hoosh.cyml (**+`[[retry]]`, `[context]`, `[audit]`** examples), CLAUDE.md pin.
+> Gates: 617 tests, 17 benches, clean.
+> **Prior**: 2026-07-23 (**v2.5.6** — cost accounting, the sixth closeout
 > band). Doc touch: CHANGELOG [2.5.6], roadmap (2.5.6 shipped + a note on the
 > local-provider mispricing bug found while verifying), CLAUDE.md pin. Gates:
 > 600 tests, 17 benches, clean.

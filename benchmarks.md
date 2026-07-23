@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-07-23T07:01:18Z** — commit `79970cd`
+Latest: **2026-07-23T07:19:02Z** — commit `0fd614b`
 
 ## hoosh
 
-| Benchmark | Baseline (`c5ba977`) | Previous (`f811c95`) | Current (`79970cd`) |
+| Benchmark | Baseline (`f811c95`) | Previous (`79970cd`) | Current (`0fd614b`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 884 ns | 890 ns | 884 ns |
-| `route_round_robin_10` | 137 ns | 139 ns | 136 ns |
-| `pool_reserve_commit` | 42 ns | 44 ns +5% | 43 ns |
+| `route_select_20_providers` | 890 ns | 884 ns | 916 ns |
+| `route_round_robin_10` | 139 ns | 136 ns | 139 ns |
+| `pool_reserve_commit` | 44 ns | 43 ns | 42 ns **-5%** |
 | `pool_available` | 4 ns | 4 ns | 4 ns |
-| `cache_get_hit` | 1.49 us | 1.52 us | 1.49 us |
-| `cache_get_miss` | 46 ns | 48 ns +4% | 48 ns +4% |
-| `cache_insert` | 1.45 us | 1.46 us | 1.45 us |
-| `queue_enqueue_dequeue` | 613 ns | 555 ns **-9%** | 573 ns **-7%** |
-| `queue_5tier_sort` | 771 ns | 770 ns | 785 ns |
-| `route_matches_model` | 31 ns | 33 ns +6% | 31 ns |
-| `estimate_tokens_per_provider` | 8 ns | 7 ns **-12%** | 7 ns **-12%** |
-| `dlp_scan_clean_prompt` | 4.17 us | 4.01 us **-4%** | 3.99 us **-4%** |
-| `mcp_tools_list` | 3.92 us | 3.96 us | 3.98 us |
-| `mcp_tools_call` | 8.24 us | 8.28 us | 8.21 us |
-| `batch_split_4` | 798 ns | 802 ns | 806 ns |
-| `latency_bucket_find` | 52 ns | 55 ns +6% | 51 ns |
+| `cache_get_hit` | 1.52 us | 1.49 us | 1.53 us |
+| `cache_get_miss` | 48 ns | 48 ns | 49 ns |
+| `cache_insert` | 1.46 us | 1.45 us | 1.45 us |
+| `queue_enqueue_dequeue` | 555 ns | 573 ns +3% | 617 ns +11% |
+| `queue_5tier_sort` | 770 ns | 785 ns | 838 ns +9% |
+| `route_matches_model` | 33 ns | 31 ns **-6%** | 34 ns +3% |
+| `estimate_tokens_per_provider` | 7 ns | 7 ns | 8 ns +14% |
+| `dlp_scan_clean_prompt` | 4.01 us | 3.99 us | 4.38 us +9% |
+| `mcp_tools_list` | 3.96 us | 3.98 us | 4.43 us +12% |
+| `mcp_tools_call` | 8.28 us | 8.21 us | 8.99 us +9% |
+| `batch_split_4` | 802 ns | 806 ns | 879 ns +10% |
+| `latency_bucket_find` | 55 ns | 51 ns **-7%** | 56 ns |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
 
 ---

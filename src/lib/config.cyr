@@ -311,7 +311,58 @@ fn load_config(path) {
         if (mr_str != 0) { mr = str_to_int(mr_str); }
         if (bd_str != 0) { bd = str_to_int(bd_str); }
         if (md_str != 0) { md = str_to_int(md_str); }
-        _retry_cfg = retry_config_new(mr, bd, md);
+        # 2.5.7: jitter_factor, written as a fraction ("0.5") and carried x100.
+        var jf = 50;
+        var jf_str = toml_get(rp, "jitter_factor");
+        if (jf_str != 0) {
+            var js = to_cstr(jf_str);
+            var jr = _sem_parse_num(js, 0, strlen(js));
+            jf = load64(jr) / 100;
+            if (jf < 0) { jf = 0; }
+        }
+        _retry_cfg = retry_config_new_x(mr, bd, md, jf);
+    }
+
+    # Parse [context] section — compaction knobs (2.5.7).
+    var ctx_secs = toml_get_sections(sections, "context");
+    if (vec_len(ctx_secs) > 0) {
+        var cp = toml_section_pairs(vec_get(ctx_secs, 0));
+        var cen = 1;
+        var cen_str = toml_get(cp, "enabled");
+        if (cen_str != 0) {
+            if (str_eq_cstr(cen_str, "false") == 1) { cen = 0; }
+        }
+        var cthr = 80;
+        var cthr_str = toml_get(cp, "compaction_threshold");
+        if (cthr_str != 0) {
+            var ts2 = to_cstr(cthr_str);
+            var tr2 = _sem_parse_num(ts2, 0, strlen(ts2));
+            cthr = load64(tr2) / 100;
+        }
+        var ckeep = 10;
+        var ckeep_str = toml_get(cp, "keep_last_messages");
+        if (ckeep_str != 0) { ckeep = str_to_int(ckeep_str); }
+        context_configure(cen, cthr, ckeep);
+    }
+
+    # Parse [audit] section — the HMAC chain (2.5.7). Off by default, matching
+    # rust-old. The signing key is "$NAME"-expandable so it stays out of the
+    # config file; when unset, a random per-process key is generated.
+    var aud_secs = toml_get_sections(sections, "audit");
+    if (vec_len(aud_secs) > 0) {
+        var ap = toml_section_pairs(vec_get(aud_secs, 0));
+        var aen = 0;
+        var aen_str = toml_get(ap, "enabled");
+        if (aen_str != 0) {
+            if (str_eq_cstr(aen_str, "true") == 1) { aen = 1; }
+        }
+        var amax = 10000;
+        var amax_str = toml_get(ap, "max_entries");
+        if (amax_str != 0) { amax = str_to_int(amax_str); }
+        var akey = 0;
+        var akey_str = toml_get(ap, "signing_key");
+        if (akey_str != 0) { akey = _config_expand_env(to_cstr(akey_str)); }
+        audit_configure(aen, akey, amax);
     }
 
     # Parse [[auth]] section. `tokens` is a LIST — rust-old took

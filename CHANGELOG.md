@@ -5,6 +5,59 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.7] — 2026-07-23
+
+**Config-reader closeout — the seventh band of the rust-old parity closeout arc.** Config keys that existed
+with no reader now have one, and two security/correctness bugs surfaced while verifying them.
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Security
+- **The audit signing key was compiled into the binary.** The HMAC chain was created unconditionally with the
+  literal key `"hoosh-audit-key"`, so anyone holding a hoosh binary could forge entries or re-sign a doctored
+  chain — the signature proved nothing about provenance. The key now comes from `[audit] signing_key`, which is
+  `$NAME`-expandable so the secret lives in the environment; when unset, a random 32-byte per-process key is
+  generated and a startup warning is logged. Auditing is now **off by default**, matching rust-old.
+- **`audit_verify` could not detect a deleted record.** It recomputed each entry's own hash and HMAC — both of
+  which an excised entry leaves undisturbed, because the surviving entries are byte-identical. Removing a
+  record from the middle produced a chain that verified clean, which defeats the purpose of chaining. It now
+  walks the linkage: each entry's `previous_hash` must equal the prior entry's hash, and the first must be
+  GENESIS (rust-old `audit.rs:186-195`).
+
+### Fixed
+- **Compaction dropped the system prompt for ordinary clients.** The system-message detector matched the
+  compact literal `"role":"system"`, but virtually every JSON encoder emits `"role": "system"` **with a space**
+  — Python's `json.dumps` does by default. So for realistically-encoded requests no system message was detected
+  and compaction discarded it like any other message. The matcher is now whitespace-tolerant, as are the
+  message-boundary scans. Same class of bug the response extractors fixed in 2.2.0; it survived here because
+  nothing exercised compaction with realistic input. Verified: a 13-message request that came back with 6
+  messages (system missing) now returns 7.
+- **Compaction could strip a conversation to nothing.** If a single recent message exceeded the remaining
+  budget, the retention loop kept zero messages and forwarded the system prompt alone — or an empty array.
+  The retained tail is now floored at `keep_last_messages`, and unconditionally at one non-system message.
+
+### Added
+- **`[context]`** — `enabled`, `compaction_threshold` (default 0.8), `keep_last_messages` (default 10).
+- **`[audit]`** — `enabled` (default false), `signing_key`, `max_entries`.
+- **`[retry] jitter_factor`** (default 0.5) — the retry jitter spread was hardcoded at 25%.
+- **`inference.error` audit entry** on the provider-failure path. Recording only successes made the chain a
+  record of what worked, which is the less useful half when reconstructing an incident.
+
+### Changed
+- **The compaction budget now derives from the model's context window × `compaction_threshold`.** It was
+  `est_tokens * 2` — a heuristic off the requested *output* size, which is unrelated to how much input the
+  model accepts, so a 200k-context model was compacted as aggressively as an 8k one. Models absent from the
+  catalog keep the old heuristic rather than an invented limit.
+
+### Deferred
+- **`[hardware]`** (`cache_ttl_secs`, `disabled_backends`, `vram_reserve_bytes`, `refresh_interval_secs`) moves
+  to **2.5.9**, where its consumers land (`detect_selective`, `available_vram(reserved)`, periodic
+  re-detection). Adding readers for keys nothing acts on would recreate the inert-knob problem this band exists
+  to fix — see `ttl_secs` in 2.5.4.
+
+Gates: 617 tests (was 600), 17 benchmarks; fmt/lint/vet/deny clean. (`mcp_tools_list` and
+`estimate_tokens_per_provider` show >10% swings in the CSV; both are untouched by this release and sit within
+run-to-run variance — `mcp_tools_list` measured 4.40–4.73 µs across three consecutive repeats.)
+
 ## [2.5.6] — 2026-07-23
 
 **Cost accounting — the sixth band of the rust-old parity closeout arc.** hoosh could price a request but never

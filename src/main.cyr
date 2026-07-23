@@ -648,7 +648,8 @@ fn main() {
     _rate_map = map_new();
     _auth_tokens = vec_new();
     _retry_cfg = retry_config_default();
-    _audit_chain = audit_chain_new("hoosh-audit-key", 15, 10000);
+    # _audit_chain is built AFTER load_config below, from [audit]. It used to be
+    # created here with a key compiled into the binary.
 
     # Default router: single ollama route
     var default_routes = alloc(8);
@@ -661,6 +662,10 @@ fn main() {
 
     # Load config
     load_config("hoosh.cyml");
+
+    # Audit chain (2.5.7) — built from [audit] now that config is parsed. 0 when
+    # auditing is off, which every audit_record call site already tolerates.
+    _audit_chain = audit_chain_from_config();
 
     # Open persistence (opt-in via [[storage]] path) and restore prior state.
     if (_storage_path != 0) {

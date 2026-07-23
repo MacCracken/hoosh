@@ -2,17 +2,26 @@
 # Jittered delay: base_ms * 2^attempt, capped at max_ms
 # Jitter from nanosecond clock low bits to prevent thundering herd
 
-# Retry config layout (24 bytes):
+# Retry config layout (32 bytes):
 #   0: max_retries (i64)
 #   8: base_delay_ms (i64)
 #  16: max_delay_ms (i64)
+#  24: jitter_x100 (i64) — jitter spread as a percentage of the delay
+#
+# 2.5.7: jitter was hardcoded at 25% of the computed delay; rust-old exposed it
+# as `[retry] jitter_factor` (default 0.5). Carried x100 — no floats here.
 
-fn retry_config_new(max_retries, base_ms, max_ms) {
-    var c = alloc(24);
+fn retry_config_new_x(max_retries, base_ms, max_ms, jitter_x100) {
+    var c = alloc(32);
     store64(c, max_retries);
     store64(c + 8, base_ms);
     store64(c + 16, max_ms);
+    store64(c + 24, jitter_x100);
     return c;
+}
+
+fn retry_config_new(max_retries, base_ms, max_ms) {
+    return retry_config_new_x(max_retries, base_ms, max_ms, 50);
 }
 
 fn retry_config_default() {
@@ -22,6 +31,7 @@ fn retry_config_default() {
 fn retry_max(c) { return load64(c); }
 fn retry_base(c) { return load64(c + 8); }
 fn retry_cap(c) { return load64(c + 16); }
+fn retry_jitter(c) { return load64(c + 24); }
 
 # Compute delay for attempt N (0-based)
 # delay = min(base * 2^attempt, max) + jitter
@@ -36,10 +46,12 @@ fn retry_delay_ms(cfg, attempt) {
         i = i + 1;
     }
     if (delay > cap) { delay = cap; }
-    # Jitter: add 0-25% from nanosecond clock low bits
+    # Jitter: add 0..jitter_factor of the delay, from nanosecond clock low bits.
+    # Spreads a thundering herd of retries that would otherwise fire in lockstep.
+    var spread = delay * retry_jitter(cfg) / 100;
+    if (spread <= 0) { return delay; }
     var ns = clock_now_ns();
-    var jitter = (ns % (delay / 4 + 1));
-    return delay + jitter;
+    return delay + (ns % (spread + 1));
 }
 
 # Retry provider_forward with backoff.
