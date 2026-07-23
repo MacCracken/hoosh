@@ -88,15 +88,41 @@ fn hw_init() {
     if (THREAD_STACK_SIZE < 1048576) { THREAD_STACK_SIZE = 1048576; }
     #endif
     if (_hw_lock == 0) { _hw_lock = mutex_new(); }
-    # 2.5.7: honor [hardware] disabled_backends. -1 means the key was absent,
-    # in which case every backend is probed exactly as before.
-    if (_hw_builder_mask == 0 - 1) {
-        _hw_registry = registry_detect_threaded();
-    } else {
-        _hw_registry = registry_detect_threaded_with(_hw_builder_mask);
-    }
+    _hw_registry = _hw_detect();
     _hw_last_detect_ms = clock_now_ms();
     return _hw_registry;
+}
+
+# Run detection, honoring [hardware] disabled_backends (2.5.7).
+#
+# 2.5.9: this uses the SERIAL detector, not registry_detect_threaded.
+#
+# ai-hwaccel's threaded path calls its post-passes with the wrong argument —
+# `detect_interconnects(r, …)`, `detect_storage(r)`, `detect_environment(r)`
+# pass the REGISTRY where a `system_io` is expected. The two structs overlap
+# but do not match:
+#     struct reg { profiles@0, warnings@8, system_io@16, schema@24 }
+#     struct sio { interconnects@0, storage@8, environment@16 }
+# so on the threaded path storage devices are pushed into `reg.warnings`,
+# `reg.system_io` is overwritten with a runtime_env, and — on a box that
+# actually has NVLink/InfiniBand — detected interconnects are pushed into
+# `reg.profiles`, i.e. the DEVICE LIST. That last one corrupts
+# hw_device_count() and reg_total_accel_memory(), which reads
+# profile_memory_bytes() off whatever is in the vec: exactly the multi-GPU
+# machines where placement matters most would get wrong VRAM totals.
+#
+# Measured here: serial 34 ms vs threaded 20 ms, and threaded reports 10
+# "warnings" where serial reports 8 — the two extra are storage structs. 14 ms
+# of startup is not worth a corrupt device list, and the serial registry is
+# also the only one whose reg_system_io() is a real system_io, which the
+# topology accessors below need.
+#
+# 2.4.2 adopted the threaded detector as "verified byte-identical to serial";
+# that check compared profile counts on a machine with no interconnects, so it
+# could not see this. Filed upstream; revert to threaded once fixed.
+fn _hw_detect() {
+    if (_hw_builder_mask == 0 - 1) { return registry_detect(); }
+    return registry_detect_with(_hw_builder_mask);
 }
 
 # Re-probe and swap in a fresh registry. Skips when the current snapshot is
@@ -106,13 +132,7 @@ fn hw_init() {
 fn hw_refresh() {
     var age = clock_now_ms() - _hw_last_detect_ms;
     if (_hw_cache_ttl_s > 0 && age < _hw_cache_ttl_s * 1000) { return 0; }
-    var mask = _hw_builder_mask;
-    var fresh = 0;
-    if (mask == 0 - 1) {
-        fresh = registry_detect_threaded();
-    } else {
-        fresh = registry_detect_threaded_with(mask);
-    }
+    var fresh = _hw_detect();
     if (fresh == 0) { return 0; }
     # Pointer swap under the lock; readers hold it for the duration of a read.
     # The bump allocator never frees, so the old registry stays valid for any
@@ -161,7 +181,12 @@ fn hw_available_vram() {
         var p = vec_get(profs, i);
         if (profile_accel_type(p) != ACCEL_CPU) {
             if (profile_available(p) == 1) {
-                used = used + profile_mem_used(p);
+                # ai-hwaccel reports -1 for "unknown" (the driver did not tell
+                # us). Subtracting that ADDS a byte; treat unknown as 0, which
+                # errs toward assuming the card is free — the same assumption
+                # the pre-2.5.7 code made for every card.
+                var mu = profile_mem_used(p);
+                if (mu > 0) { used = used + mu; }
             }
         }
         i = i + 1;
@@ -174,6 +199,94 @@ fn hw_available_vram() {
 # Whether a model of `needed` bytes fits the AVAILABLE (not total) VRAM.
 fn hw_fits_available(needed) {
     if (needed <= hw_available_vram()) { return 1; }
+    return 0;
+}
+
+# ── Topology / telemetry (2.5.9) ──
+# rust-old exposed system_io(), has_fast_interconnect(), gpu_telemetry() and
+# runtime_environment(); none were reachable from the port. They matter for
+# sharding decisions: a 70B split across two cards behaves very differently
+# over NVLink than over PCIe, and "am I in a container with a GPU limit"
+# changes what is actually schedulable.
+
+fn hw_system_io() {
+    if (_hw_registry == 0) { return 0; }
+    return reg_system_io(_hw_registry);
+}
+
+# NVLink / NVSwitch / ICI present — the high-bandwidth fabrics that make
+# multi-device sharding cheap. InfiniBand shows up as a generic interconnect.
+fn hw_has_fast_interconnect() {
+    var sio = hw_system_io();
+    if (sio == 0) { return 0; }
+    if (sio_has_nvswitch(sio) == 1) { return 1; }
+    if (sio_has_nvlink(sio) == 1) { return 1; }
+    if (sio_has_ici(sio) == 1) { return 1; }
+    return 0;
+}
+
+fn hw_max_interconnect_bw_x1000() {
+    var sio = hw_system_io();
+    if (sio == 0) { return 0; }
+    return sio_max_ic_bw_x1000(sio);
+}
+
+fn hw_runtime_env() {
+    var sio = hw_system_io();
+    if (sio == 0) { return 0; }
+    return sio_environment(sio);
+}
+
+# Live per-device telemetry into a JSON array: utilization, memory in use and
+# free, temperature. Reads the CURRENT registry, so with
+# [hardware] refresh_interval_secs set these track the machine over time.
+# Emit an optional integer: null when ai-hwaccel reports its -1 "unknown".
+fn _hw_opt_int(sb, v) {
+    if (v < 0) {
+        str_builder_add_cstr(sb, "null");
+    } else {
+        str_builder_add_int(sb, v);
+    }
+    return 0;
+}
+
+fn hw_telemetry_json(sb) {
+    str_builder_add_cstr(sb, "[");
+    if (_hw_registry == 0) {
+        str_builder_add_cstr(sb, "]");
+        return 0;
+    }
+    var profs = reg_profiles(_hw_registry);
+    var n = vec_len(profs);
+    var first = 1;
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(profs, i);
+        if (profile_accel_type(p) != ACCEL_CPU) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"device\":\"");
+            str_builder_add_cstr(sb, accel_name(profile_accel_type(p)));
+            str_builder_add_cstr(sb, "\",\"device_id\":");
+            str_builder_add_int(sb, profile_device_id(p));
+            str_builder_add_cstr(sb, ",\"memory_bytes\":");
+            str_builder_add_int(sb, profile_memory_bytes(p));
+            # -1 is ai-hwaccel's "driver did not report this". Emit null rather
+            # than -1 so a consumer graphing utilization does not plot a spike
+            # at minus one.
+            str_builder_add_cstr(sb, ",\"memory_used_bytes\":");
+            _hw_opt_int(sb, profile_mem_used(p));
+            str_builder_add_cstr(sb, ",\"memory_free_bytes\":");
+            _hw_opt_int(sb, profile_mem_free(p));
+            str_builder_add_cstr(sb, ",\"utilization_percent\":");
+            _hw_opt_int(sb, profile_gpu_util(p));
+            str_builder_add_cstr(sb, ",\"temperature_c\":");
+            _hw_opt_int(sb, profile_temp_c(p));
+            str_builder_add_cstr(sb, "}");
+            first = 0;
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
     return 0;
 }
 
@@ -329,6 +442,153 @@ fn hw_placement_json(sb, model_params, quant) {
     str_builder_add_cstr(sb, ",\"suggested_quant\":\"");
     str_builder_add_cstr(sb, quant_name(hw_suggest_quant(model_params)));
     str_builder_add_cstr(sb, "\"}");
+    return 0;
+}
+
+# ── What-if capacity planning (2.5.9) ──
+# Port of rust-old's POST /v1/hardware/simulate (handlers.rs:1099-1183,
+# hardware.rs:389-415). Answers "what would placement look like if I added two
+# more cards / pulled one out" without touching the real registry — the
+# question you ask before buying hardware or draining a node.
+var SIM_MAX_DEVICES = 64;
+
+# Sharding summary for a hypothetical device set: how many devices the model
+# would span and the memory involved.
+fn _sim_snapshot(sb, profiles, model_params, quant) {
+    var devices = vec_len(profiles);
+    var accel_mem = 0;
+    var sys_mem = 0;
+    var accel = 0;
+    var i = 0;
+    while (i < devices) {
+        var p = vec_get(profiles, i);
+        if (profile_accel_type(p) == ACCEL_CPU) {
+            sys_mem = sys_mem + profile_memory_bytes(p);
+        } else {
+            accel_mem = accel_mem + profile_memory_bytes(p);
+            accel = accel + 1;
+        }
+        i = i + 1;
+    }
+    var needed = reg_estimate_memory(model_params, quant);
+
+    str_builder_add_cstr(sb, "{\"device_count\":");
+    str_builder_add_int(sb, devices);
+    str_builder_add_cstr(sb, ",\"accelerator_count\":");
+    str_builder_add_int(sb, accel);
+    # `fits` is an ACCELERATOR question — system RAM is reported separately
+    # rather than folded into the total. Summing both made a 70B model "fit" a
+    # box with 7 GB of VRAM and 64 GB of RAM, which is not what the caller of a
+    # GPU-placement simulator is asking.
+    str_builder_add_cstr(sb, ",\"accelerator_memory_bytes\":");
+    str_builder_add_int(sb, accel_mem);
+    str_builder_add_cstr(sb, ",\"system_memory_bytes\":");
+    str_builder_add_int(sb, sys_mem);
+    str_builder_add_cstr(sb, ",\"memory_required_bytes\":");
+    str_builder_add_int(sb, needed);
+    str_builder_add_cstr(sb, ",\"fits\":");
+    if (needed <= accel_mem) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+
+    # Devices the model would span, LARGEST FIRST — a planner packs into the
+    # biggest cards, so counting in registry order overstated the span (four
+    # devices when the two new 24 GB cards alone would do). 0 = does not fit.
+    var shards = 0;
+    if (needed > 0 && accel > 0 && needed <= accel_mem) {
+        var remaining = needed;
+        var used = alloc(devices * 8 + 8);
+        var u = 0;
+        while (u < devices) { store64(used + u * 8, 0); u = u + 1; }
+        while (remaining > 0) {
+            var best = 0 - 1;
+            var best_mem = 0;
+            var j = 0;
+            while (j < devices) {
+                if (load64(used + j * 8) == 0) {
+                    var pj = vec_get(profiles, j);
+                    if (profile_accel_type(pj) != ACCEL_CPU) {
+                        if (profile_memory_bytes(pj) > best_mem) {
+                            best_mem = profile_memory_bytes(pj);
+                            best = j;
+                        }
+                    }
+                }
+                j = j + 1;
+            }
+            if (best < 0) { break; }
+            store64(used + best * 8, 1);
+            remaining = remaining - best_mem;
+            shards = shards + 1;
+        }
+        if (remaining > 0) { shards = 0; }
+    }
+    str_builder_add_cstr(sb, ",\"shards_required\":");
+    str_builder_add_int(sb, shards);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# Build the hypothetical profile list: the current accelerators, minus
+# `remove_count` of them, plus each device in `add_mem` (a vec of byte sizes).
+fn _sim_profiles(remove_count, add_mem) {
+    var out = vec_new();
+    var kept = 0;
+    var removed = 0;
+    if (_hw_registry != 0) {
+        var profs = reg_profiles(_hw_registry);
+        var n = vec_len(profs);
+        var i = 0;
+        while (i < n) {
+            var p = vec_get(profs, i);
+            if (profile_accel_type(p) == ACCEL_CPU) {
+                vec_push(out, p);
+            } else {
+                # Remove accelerators first — you drain GPUs, not the CPU.
+                if (removed < remove_count) {
+                    removed = removed + 1;
+                } else {
+                    vec_push(out, p);
+                    kept = kept + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    var k = 0;
+    while (k < vec_len(add_mem)) {
+        vec_push(out, profile_cuda(100 + k, vec_get(add_mem, k)));
+        k = k + 1;
+    }
+    return out;
+}
+
+# Emit {"original":{…},"simulated":{…}} for a what-if.
+fn hw_simulate_json(sb, model_params, quant, remove_count, add_mem) {
+    str_builder_add_cstr(sb, "{\"model_params\":");
+    str_builder_add_int(sb, model_params);
+    str_builder_add_cstr(sb, ",\"quantization\":\"");
+    str_builder_add_cstr(sb, quant_name(quant));
+    str_builder_add_cstr(sb, "\",\"removed_devices\":");
+    str_builder_add_int(sb, remove_count);
+    str_builder_add_cstr(sb, ",\"added_devices\":");
+    str_builder_add_int(sb, vec_len(add_mem));
+    str_builder_add_cstr(sb, ",\"original\":");
+    var orig = vec_new();
+    if (_hw_registry != 0) {
+        var op = reg_profiles(_hw_registry);
+        var oi = 0;
+        while (oi < vec_len(op)) {
+            vec_push(orig, vec_get(op, oi));
+            oi = oi + 1;
+        }
+    }
+    _sim_snapshot(sb, orig, model_params, quant);
+    str_builder_add_cstr(sb, ",\"simulated\":");
+    _sim_snapshot(sb, _sim_profiles(remove_count, add_mem), model_params, quant);
+    str_builder_add_cstr(sb, "}");
     return 0;
 }
 

@@ -104,6 +104,7 @@ fn _requires_post(path) {
     if (streq(path, "/v1/hardware/training-estimate") == 1) { return 1; }
     if (streq(path, "/v1/hardware/model-format") == 1) { return 1; }
     if (streq(path, "/v1/hardware/requirement-match") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/simulate") == 1) { return 1; }
     if (streq(path, "/v1/models/pull") == 1) { return 1; }
     if (streq(path, "/v1/models/delete") == 1) { return 1; }
     if (streq(path, "/v1/training/status") == 1) { return 1; }
@@ -180,6 +181,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
     if (streq(path, "/v1/hardware/models") == 1) { return handle_hw_models(cfd); }
     if (streq(path, "/v1/hardware/compatible-models") == 1) { return handle_hw_compatible(cfd); }
+    if (streq(path, "/v1/hardware/telemetry") == 1) { return handle_hw_telemetry(cfd); }
     if (streq(path, "/metrics") == 1) { return handle_metrics(cfd); }
 
     # POST routes
@@ -243,6 +245,10 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/hardware/requirement-match") == 1) {
         var rmb = req_parse_body(buf, buf_len);
         return handle_hw_requirement_match(cfd, rmb, req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/hardware/simulate") == 1) {
+        var smb = req_parse_body(buf, buf_len);
+        return handle_hw_simulate(cfd, smb, req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/embeddings") == 1) {
         var eb = req_parse_body(buf, buf_len);

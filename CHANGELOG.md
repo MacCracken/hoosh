@@ -5,6 +5,58 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.9] — 2026-07-23
+
+**Hardware planning closeout — the ninth band of the rust-old parity closeout arc.**
+See [the parity review](docs/development/rust-old-parity-review.md).
+
+### Fixed
+- **ai-hwaccel's threaded detector corrupts the registry — hoosh now uses the serial one.**
+  `registry_detect_threaded` calls its post-passes with the wrong argument: `detect_interconnects(r, …)`,
+  `detect_storage(r)` and `detect_environment(r)` pass the **registry** where a `system_io` is expected. The
+  two layouts overlap but differ — `reg {profiles@0, warnings@8, system_io@16, schema@24}` vs
+  `sio {interconnects@0, storage@8, environment@16}` — so storage devices get pushed into `reg.warnings`,
+  `reg.system_io` is overwritten with a `runtime_env`, and on a machine with NVLink or InfiniBand the detected
+  interconnects are pushed into **`reg.profiles`, the device list** — corrupting `hw_device_count()` and
+  `reg_total_accel_memory()`, which reads `profile_memory_bytes()` off whatever is in that vec. That is
+  precisely the multi-GPU case where placement decisions matter. Measured here: threaded reports 10 "warnings"
+  where serial reports 8 (the extra two are storage structs). Serial costs 34 ms vs 20 ms — not a trade worth
+  making — and is the only path whose `reg_system_io()` the new topology accessors can read.
+  **This is an upstream ai-hwaccel bug; revert to the threaded detector once it is fixed.** 2.4.2 adopted the
+  threaded detector as "verified byte-identical to serial", but that check compared profile counts on a machine
+  with no interconnects and could not see it.
+- **`-1` ("driver did not report") was being treated as a value.** `profile_mem_used` returns `-1` for unknown;
+  subtracting it from a VRAM total *added* a byte, and emitting it as JSON would make a consumer graph a spike
+  at minus one. Unknown now contributes 0 to arithmetic and serializes as `null`.
+
+### Added
+- **`POST /v1/hardware/simulate`** — what-if capacity planning: add or remove devices and see how placement
+  changes, without touching the real registry. Returns `{original, simulated}` with accelerator memory, system
+  memory, required memory, fit, and the device span. Validated (`model_params > 0`, ≤ 64 added devices,
+  non-zero `memory_bytes`), matching rust-old (`handlers.rs:1099-1183`). Never ported and never deferred.
+- **`GET /v1/hardware/telemetry`** — per-device utilization, memory used/free and temperature, plus
+  interconnect topology (`has_fast_interconnect`, max bandwidth, full `system_io`) and available VRAM. With
+  `[hardware] refresh_interval_secs` set, these track the machine over time instead of being frozen at startup.
+  Exposes rust-old's `system_io()`, `has_fast_interconnect()`, `gpu_telemetry()` and `runtime_environment()`.
+- **Hardware-aware routing** (`router_select_hw`, rust-old `Router::select_with_hardware`). When a model's size
+  is readable from its name and it does not fit the VRAM actually free, local routes are deprioritized in
+  favour of a remote provider that can serve it — instead of routing to a backend that will OOM. Unknown-size
+  models and undetected hardware fall through to plain selection; if nothing remote can serve the model the
+  local route is still tried, since a real attempt beats a guess.
+
+### Changed
+- **`/v1/hardware/simulate`'s `fits` is an accelerator question.** System RAM is reported separately as
+  `system_memory_bytes` rather than folded into the total — summing both made a 70B model "fit" a box with
+  7.5 GB of VRAM and 64 GB of RAM, which is not what a GPU-placement simulator is being asked.
+- **Shard span is counted largest-device-first.** Counting in registry order overstated it: a 70B model on a
+  3 GiB + 4 GiB + 24 GiB + 24 GiB set reported 4 devices when the two 24 GiB cards alone suffice. Now 2.
+- **Breaking URL change, documented late**: rust-old's `POST /v1/hardware/format` became
+  `POST /v1/hardware/model-format` in **2.4.1**, and the payload changed from a file path to raw model bytes.
+  The redesign is the safer one (no server-side path traversal) and stands, but it was never announced —
+  recording it here for anyone porting from the Rust-era API.
+
+Gates: 652 tests (was 644), 17 benchmarks, no regressions; fmt/lint/vet/deny clean.
+
 ## [2.5.8] — 2026-07-23
 
 **CLI & process lifecycle — the eighth band of the rust-old parity closeout arc.** hoosh can now be stopped

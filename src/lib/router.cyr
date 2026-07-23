@@ -115,6 +115,78 @@ fn router_select(rt, model) {
     return load64(cand);
 }
 
+# Hardware-aware selection (2.5.9) — rust-old's Router::select_with_hardware
+# (router.rs:218-295).
+#
+# A local backend can only serve a model it can actually load. When the model
+# does not fit the VRAM that is genuinely free (total − in-use − the configured
+# reserve, see hw_available_vram), routing to a local provider produces a slow
+# failure or an OOM at the backend; a remote provider answers. So on a miss the
+# local routes are DEPRIORITIZED — dropped from the candidate set if any remote
+# route can serve the model, and kept only if nothing else can.
+#
+# `model_params` of 0 means "unknown size": no VRAM claim can be made, so this
+# degrades to plain router_select rather than guessing.
+fn router_select_hw(rt, model, model_params) {
+    if (model_params <= 0) { return router_select(rt, model); }
+    if (hw_ready() == 0) { return router_select(rt, model); }
+
+    var needed = reg_estimate_memory(model_params, hw_suggest_quant(model_params));
+    if (hw_fits_available(needed) == 1) { return router_select(rt, model); }
+
+    # Model does not fit what is free. Prefer any remote route that serves it.
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var remote_ok = 0;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && route_healthy(r) == 1) {
+            if (provider_is_local(route_provider(r)) == 0) {
+                if (route_matches_model(r, model) == 1) { remote_ok = 1; }
+            }
+        }
+        i = i + 1;
+    }
+    if (remote_ok == 0) {
+        # Nothing remote can serve it — fall back to the normal path rather than
+        # refusing. The local backend may still manage it (swap, unified memory,
+        # a quantization we did not assume), and a real attempt beats a guess.
+        return router_select(rt, model);
+    }
+    hlog_info("router: model exceeds available VRAM, preferring a remote provider");
+    return _router_select_remote(rt, model);
+}
+
+# Selection restricted to remote routes, honoring the configured strategy.
+fn _router_select_remote(rt, model) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var strategy = load64(rt + ROUTER_STRATEGY);
+    var cand = alloc(count * 8);
+    var cn = 0;
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && route_healthy(r) == 1) {
+            if (provider_is_local(route_provider(r)) == 0) {
+                if (route_matches_model(r, model) == 1) {
+                    store64(cand + cn * 8, r);
+                    cn = cn + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (cn == 0) { return 0; }
+    if (strategy == STRAT_ROUND_ROBIN) {
+        var idx = load64(rt + ROUTER_RR_IDX);
+        store64(rt + ROUTER_RR_IDX, idx + 1);
+        return load64(cand + (idx % cn) * 8);
+    }
+    return load64(cand);
+}
+
 # Select among local providers only — used for DLP-confidential content that
 # must not leave the machine. Same strategy/priority order as router_select,
 # but candidates are filtered to local backends. Returns 0 if none serve model.

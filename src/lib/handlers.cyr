@@ -797,6 +797,96 @@ fn handle_hardware(cfd) {
 }
 
 # POST /v1/hardware/placement
+# POST /v1/hardware/simulate (2.5.9)
+# {model_params, quantization?, remove_count?, add_devices:[{memory_bytes}]}
+# rust-old handlers.rs:1099-1183. Validation mirrors it: model_params must be
+# positive, at most 64 added devices, and every added device needs a non-zero
+# size — a 0-byte device would otherwise silently contribute nothing and make
+# the simulation quietly wrong rather than obviously rejected.
+fn handle_hw_simulate(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var pairs = json_parse(str_new(body_ptr, body_len));
+    if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+
+    var mp = 0;
+    var mp_str = json_get(pairs, str_from("model_params"));
+    if (mp_str != 0) { mp = str_to_int(mp_str); }
+    if (mp <= 0) {
+        return http_bad_request(cfd, "model_params must be greater than 0");
+    }
+
+    var quant = 0;
+    var q_str = json_get(pairs, str_from("quantization"));
+    if (q_str != 0) { quant = quant_from_str(to_cstr(q_str)); }
+    if (quant == 0) { quant = hw_suggest_quant(mp); }
+
+    var rm = 0;
+    var rm_str = json_get(pairs, str_from("remove_count"));
+    if (rm_str != 0) { rm = str_to_int(rm_str); }
+    if (rm < 0) { return http_bad_request(cfd, "remove_count must not be negative"); }
+
+    # add_devices is a raw array scan: json_parse is flat and cannot reach into
+    # the nested objects (same constraint the sampling params hit in 2.5.2).
+    var add_mem = vec_new();
+    var i = 0;
+    while (i + 15 < body_len) {
+        if (memeq(body_ptr + i, "\"memory_bytes\":", 15) == 1) {
+            var j = i + 15;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            var v = 0;
+            var digits = 0;
+            while (j < body_len) {
+                var c = load8(body_ptr + j) & 0xFF;
+                if (c < 48 || c > 57) { break; }
+                v = v * 10 + (c - 48);
+                digits = digits + 1;
+                j = j + 1;
+            }
+            if (digits == 0 || v == 0) {
+                return http_bad_request(cfd, "device memory_bytes must be greater than 0");
+            }
+            if (vec_len(add_mem) >= SIM_MAX_DEVICES) {
+                return http_bad_request(cfd, "add_devices limited to 64 entries");
+            }
+            vec_push(add_mem, v);
+            i = j;
+        }
+        i = i + 1;
+    }
+
+    var sb = str_builder_new();
+    hw_simulate_json(sb, mp, quant, rm, add_mem);
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# GET /v1/hardware/telemetry (2.5.9) — live per-device utilization/memory/temp
+# plus interconnect topology. With [hardware] refresh_interval_secs set these
+# track the machine over time instead of being frozen at startup.
+fn handle_hw_telemetry(cfd) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"devices\":");
+    hw_telemetry_json(sb);
+    str_builder_add_cstr(sb, ",\"has_fast_interconnect\":");
+    if (hw_has_fast_interconnect() == 1) {
+        str_builder_add_cstr(sb, "true");
+    } else {
+        str_builder_add_cstr(sb, "false");
+    }
+    str_builder_add_cstr(sb, ",\"max_interconnect_gbps_x1000\":");
+    str_builder_add_int(sb, hw_max_interconnect_bw_x1000());
+    str_builder_add_cstr(sb, ",\"system_io\":");
+    var sio = hw_system_io();
+    if (sio != 0) {
+        system_io_to_json(sb, sio);
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"available_vram_bytes\":");
+    str_builder_add_int(sb, hw_available_vram());
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 fn handle_hw_placement(cfd, body_ptr, body_len) {
     if (body_len == 0) {
         return http_bad_request(cfd, "empty body");
@@ -1942,7 +2032,11 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
 
     var model = json_get(pairs, str_from("model"));
     var model_cstr = to_cstr(model);
-    var route = router_select(_router, model_cstr);
+    # 2.5.9: hardware-aware selection. When the model's size can be read from
+    # its name and it does not fit the VRAM actually free, prefer a remote
+    # provider over a local one that would OOM. Unknown-size models and
+    # undetected hardware fall through to plain router_select.
+    var route = router_select_hw(_router, model_cstr, _hoosh_parse_model_params(model_cstr));
     if (route == 0) {
         hlog_warn("chat: no provider for requested model");
         store64(out + 8, _resp_err("404", "Not Found", "no provider for model", "server_error"));

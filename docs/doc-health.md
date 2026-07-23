@@ -6,7 +6,15 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-23 (**v2.5.8** — CLI & process lifecycle, the eighth
+> **Last refresh**: 2026-07-23 (**v2.5.9** — hardware planning closeout, the
+> ninth band). Doc touch: CHANGELOG [2.5.9], roadmap (2.5.9 shipped + an
+> **upstream ai-hwaccel bug report**: the threaded detector passes the registry
+> where a `system_io` is expected, corrupting warnings/system_io and — on
+> NVLink/IB boxes — the device list; hoosh switched to the serial detector),
+> overview (+2 endpoints). Gates: 652 tests, 17 benches, clean.
+> **Open**: the ai-hwaccel threaded-detector bug needs filing upstream; revert
+> `_hw_detect` to `registry_detect_threaded` once fixed.
+> **Prior**: 2026-07-23 (**v2.5.8** — CLI & process lifecycle, the eighth
 > closeout band). Doc touch: CHANGELOG [2.5.8], roadmap (2.5.8 shipped + notes on
 > the two latent crashes found: thread-vs-process `sys_exit`, and
 > `crypto_tls_main_init` being trapped inside `cmd_serve`), CLAUDE.md pin.

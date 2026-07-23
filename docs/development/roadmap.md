@@ -293,23 +293,45 @@ Three deliberate departures from rust-old, all verified:
 
 <a id="v259--hardware-planning-closeout"></a>
 
-### v2.5.9 — Hardware planning closeout
+### v2.5.9 — Hardware planning closeout — ✅ SHIPPED 2026-07-23
 > `available_vram(reserved)`, `detect_selective` (as a builder mask) and periodic
 > re-detection landed early in **2.5.7** with the `[hardware]` config keys that drive
-> them. What remains below is the placement/simulation surface.
-- [ ] **`POST /v1/hardware/simulate`** — what-if add/remove/replace devices, re-run
-      sharding, return `{original, simulated}`; validated (`model_params > 0`, ≤ 64
-      devices, non-zero `memory_bytes`). Never ported and never deferred
-      (`handlers.rs:1099-1183`, `hardware.rs:389-415`).
+> them.
+- [x] **`POST /v1/hardware/simulate`** — what-if add/remove devices, returns
+      `{original, simulated}` with accelerator memory, fit and shard span; validated
+      (`model_params > 0`, ≤ 64 devices, non-zero `memory_bytes`).
 - [x] ⚠ **`available_vram(reserved)` / `fits_model`** — landed in **2.5.7**.
-- [ ] **`Router::select_with_hardware`** — deprioritize local providers when the model
-      won't fit available VRAM (`router.rs:218-295`).
-- [ ] **Topology / telemetry accessors** — `system_io()`, `has_fast_interconnect()`,
-      `gpu_telemetry()`, `runtime_environment()`, `detect_selective(&disabled)`, and
-      periodic re-detection at `refresh_interval_secs`.
-- [ ] **Document the `/v1/hardware/format` → `/v1/hardware/model-format` rename** — the
-      2.4.1 redesign (path arg → raw bytes) is the safer design, but it is an
-      unannounced breaking URL change for rust-era consumers.
+- [x] **`Router::select_with_hardware`** — `router_select_hw` deprioritizes local
+      routes when the model does not fit available VRAM and a remote route can serve
+      it. Unknown-size models and undetected hardware fall through to plain selection;
+      if nothing remote can serve it, the local route is still tried rather than
+      refused.
+- [x] **Topology / telemetry accessors** — `hw_system_io`, `hw_has_fast_interconnect`,
+      `hw_max_interconnect_bw_x1000`, `hw_runtime_env`, `hw_telemetry_json`, exposed as
+      **`GET /v1/hardware/telemetry`** (per-device utilization/memory/temperature +
+      interconnect topology + available VRAM).
+- [x] **Document the `/v1/hardware/format` → `/v1/hardware/model-format` rename** —
+      recorded in the CHANGELOG as a breaking URL change for rust-era consumers; the
+      2.4.1 redesign (path arg → raw bytes) is the safer design and stands.
+
+> ⚠ **Upstream bug found — ai-hwaccel's threaded detector corrupts the registry.**
+> `registry_detect_threaded` calls its post-passes with the wrong argument:
+> `detect_interconnects(r, …)`, `detect_storage(r)` and `detect_environment(r)` pass
+> the **registry** where a `system_io` is expected. The layouts overlap but differ —
+> `reg {profiles@0, warnings@8, system_io@16, schema@24}` vs
+> `sio {interconnects@0, storage@8, environment@16}` — so storage devices are pushed
+> into `reg.warnings`, `reg.system_io` is overwritten with a `runtime_env`, and on a
+> box with NVLink/InfiniBand the detected interconnects are pushed into
+> **`reg.profiles`, the device list**, corrupting `hw_device_count()` and
+> `reg_total_accel_memory()` on exactly the multi-GPU machines where placement matters.
+>
+> Measured locally: threaded reports 10 "warnings" where serial reports 8 (the extra
+> two are storage structs), and `reg_system_io()` is unusable. hoosh has switched to
+> the **serial** detector — 34 ms vs 20 ms, which is not a trade worth making for a
+> corrupt device list, and it is the only path whose `reg_system_io()` the new
+> topology accessors can read. 2.4.2 adopted the threaded detector as "verified
+> byte-identical to serial"; that check compared profile counts on a machine with no
+> interconnects, so it could not see this. **Report upstream and revert once fixed.**
 
 ### v2.5.10 — Scaffolding parity
 - [ ] **`cyrius deny` in CI** — CLAUDE.md lists it in the cleanliness check but
