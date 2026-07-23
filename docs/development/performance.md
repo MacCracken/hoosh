@@ -38,7 +38,7 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-16 CPU microbenchmarks over the per-request hot paths (no live backend — inference
+25 CPU microbenchmarks over the per-request hot paths (no live backend — inference
 latency is backend-bound and not meaningful to micro-measure here):
 
 - **Routing** — `route_select_20_providers`, `route_round_robin_10`,
@@ -48,10 +48,38 @@ latency is backend-bound and not meaningful to micro-measure here):
 - **Queue** — `queue_enqueue_dequeue`, `queue_5tier_sort`
 - **Tokens / DLP** — `estimate_tokens_per_provider`, `dlp_scan_clean_prompt`
 - **MCP** — `mcp_tools_list`, `mcp_tools_call`
-- **Batch / Observability** — `batch_split_4`, `latency_bucket_find`
+- **Batch / Observability** — `batch_split_4`, `latency_bucket_find`,
+  `work_queue_push_pop`, `event_publish_ring`
+- **Security / accounting** (the work every request pays for) —
+  `auth_verify_token`, `auth_verify_wrong_late`, `auth_verify_wrong_early`,
+  `rate_limit_check`, `cost_record_known_model`, `cost_record_local_free`,
+  `audit_record_sign`
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up.
+
+### Reading the auth benchmarks
+
+The three `auth_verify_*` cases use **equal-length** tokens on purpose. A
+constant-time compare short-circuits on a length mismatch — that is unavoidable
+and the length is not secret — so benching a 25-byte token against a 24-byte one
+measures the early exit, not the property that matters. What must not vary is a
+same-length token differing **early** versus **late**: if a first-byte mismatch is
+cheaper than a last-byte one, the compare leaks a prefix oracle and a token can be
+recovered byte by byte. All three currently land at 100–101 ns.
+
+### Live / end-to-end
+
+`scripts/bench-live.sh` (opt-in, not in CI) measures a running gateway end to end.
+It needs a live hoosh and backend, so it measures a machine and a model rather
+than the code — and each iteration forks a `curl`, so its ~5 ms floor is the
+harness. Use it for relative comparisons only.
+
+### Nanosecond-scale noise
+
+`estimate_tokens_per_provider` and `pool_available` sit at 4–9 ns, where 1 ns of
+timer quantization reads as a >10% swing. Check a flagged result across repeated
+runs before treating it as a regression.
 
 ---
 

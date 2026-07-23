@@ -370,6 +370,18 @@ fn cmd_serve(port) {
     # (rt_sigaction SIGPIPE→SIG_IGN) once here so a dead peer yields an EPIPE write error instead of a crash.
     _sandhi_server_ignore_sigpipe();
 
+    # 2.5.11: auth is fail-open by design — no configured tokens means allow all
+    # (rust-old behaved the same, and it is the right default for a loopback
+    # sidecar). It stops being right the moment the listener is reachable from
+    # off-box, so say so loudly instead of leaving it to be discovered.
+    if (_http_bind != 0x0100007F) {
+        if (vec_len(_auth_tokens) == 0) {
+            hlog_warn("SECURITY: listening off-loopback with NO auth tokens — every caller is allowed");
+            sys_write(2, "WARNING: bound to a non-loopback address with no [[auth]] tokens.\n", 65);
+            sys_write(2, "         Every client on the network can use this gateway.\n", 59);
+        }
+    }
+
     sys_write(1, "hoosh v", 7);
     sys_write(1, HOOSH_VERSION, strlen(HOOSH_VERSION));
     sys_write(1, " listening on ", 14);
@@ -425,6 +437,19 @@ fn cmd_serve(port) {
     # bank, slot 1 = traceparent). Idempotent + shared with the batch path.
     crypto_tls_main_init();
 
+    # Signals — MUST come before EVERY thread_create below.
+    #
+    # sigprocmask masks only the CALLING thread; threads inherit the mask as it
+    # stands when they are created. So any thread spawned before this line does
+    # NOT block SIGINT/SIGTERM, the kernel is free to deliver the signal to it,
+    # and it takes the default action — killing the process before _sig_thread
+    # can run the graceful shutdown. 2.5.8 got this right for the worker pool and
+    # said so; 2.5.11 then inserted the coarse-clock ticker ABOVE it and silently
+    # broke shutdown (SIGTERM killed the process with no drain, no logs). The
+    # OTLP exporter thread had the same exposure whenever telemetry was enabled.
+    # Nothing that creates a thread may be moved above this call.
+    signals_init();
+
     # Provider event bus (majra pubsub) + recent-events ring (GET /v1/events/recent).
     events_init();
 
@@ -432,10 +457,10 @@ fn cmd_serve(port) {
     # [[telemetry]] otlp_endpoint is configured (no-op otherwise).
     otlp_init();
 
-    # Signals (2.5.8) — MUST precede pool_start so every worker inherits the
-    # blocked mask; an unblocked SIGINT delivered to a worker would take the
-    # default action and kill the process mid-request.
-    signals_init();
+    # Coarse clock (2.5.11) — a ticker thread so the cache and rate limiter read
+    # a global instead of a 1.35 us syscall per request. Start before the pool
+    # so workers never see the fallback path.
+    coarse_clock_start();
 
     # Unified worker pool (v2.4.0): WORKER_COUNT banked threads drain the work
     # queue. crypto_tls_main_init() above readied the bank scratch; pool_start

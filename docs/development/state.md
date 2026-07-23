@@ -9,52 +9,58 @@
 
 | | |
 |---|---|
-| **Version** | **2.5.0** (extended thinking: `reasoning_effort` → Anthropic adaptive thinking + `output_config.effort`; a `reasoning_content` stream via `thinking_delta` translation — inert on Opus 4.8, which keeps reasoning internal; toolchain + deps refresh; see [CHANGELOG.md](../../CHANGELOG.md)) |
+| **Version** | **2.5.11** (security & hardening sweep — closes the rust-old parity arc) |
 | **Toolchain** | Cyrius pin **6.4.62** (`cyrius.cyml`); `ai-hwaccel` **2.3.14** |
-| **Binary** (x86_64 static ELF) | ~2.04 MB (`CYRIUS_DCE=1` build) |
-| **Source** | ~7,900 lines / 31 files (`src/main.cyr` + 30 `src/lib/*.cyr`) + 2 vendored distlib bundles (~5,150 lines) |
-| **Tests** | 459 assertions · 103 groups (`tests/hoosh.tcyr`) |
-| **Benchmarks** | 17 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
-| **Fuzz** | `fuzz/*.fcyr` (parser harnesses) |
+| **Binary** (x86_64 static ELF) | ~15 MB default build; smaller under `CYRIUS_DCE=1` |
+| **Source** | ~11,070 lines / 32 files (`src/main.cyr` + 31 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 663 assertions · 141 groups (`tests/hoosh.tcyr`) |
+| **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
+| **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
+| **Coverage** | symbol coverage 32% (`scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
 | **ADRs** | 11 (`docs/decisions/`) |
 | **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
 
-## Active cycle — v2.4.x arc
+## Active cycle — v2.5.x arc: COMPLETE
 
-Shipped: 2.4.0 (multi-threaded accept loop), 2.4.1 (hardware planning endpoints),
-2.4.2 (threaded hw detection), 2.4.3 (OTLP remote/https + scaffolding),
-2.4.4 (new backends — vLLM / TensorRT-LLM / ONNX), **2.4.5 (hardening review)** —
-**arc complete**.
+The rust-old parity closeout arc (**2.5.1 – 2.5.11**) is done. It began with a
+full behavioral diff of the archived Rust tree (1,007 behaviors catalogued; see
+[rust-old-parity-review.md](rust-old-parity-review.md)) which found the port
+matched rust-old's *surface area* but not its *request path*.
 
-Open (post-arc): OTLP nested spans; **upstream-gated** — OTLP/protobuf (cyrius
-protobuf lib), cert pinning + connection pooling (sandhi TLS-policy threading),
-szál MCP tools; tests/bench split (only if the suite grows).
+Ten bands closed that gap and an eleventh hardened the result. The more useful
+list is what the arc found that the review did not — the defects only visible
+once the code was actually exercised:
 
-> **Handoff (2026-07-03):** 2.4.12 fixes the tool-continuation 502 that blocked
-> agentic loops on the Anthropic backend. `_build_anthropic_body_x`
-> (`src/lib/provider.cyr`) copied OpenAI messages verbatim, so a follow-up turn
-> carrying an assistant `tool_calls` message + a `role:"tool"` result was rejected
-> by Anthropic (400), surfaced as a misclassified `502 provider backend
-> unreachable`. It now translates those into `tool_use` / `tool_result` content
-> blocks (the `arguments` STRING is unescaped into the `input` OBJECT via new
-> `_json_unesc_span`; `tool_use.id` carries the OpenAI call id). Verified against
-> the filed repro (200), streaming, a two-tool-call continuation, and the full
-> thoth→hoosh→daimon→bote vertical (loop completes). Regression fixtures added to
-> the `tool_calling` group's body-shaping mirror (459 assertions). Surfaced by the
-> earlier vertical bring-up; see the (now-removed) roadmap known-bug entry.
->
-> **Handoff (2026-06-15):** 2.4.6 is a toolchain + dependency refresh — pin →
-> Cyrius **6.2.11**, ai-hwaccel 2.3.9 → 2.3.12, bote 2.7.3 → 2.7.6, majra
-> 2.4.5 → 2.4.7. bote renamed its registry constructor `registry_new` →
-> `tool_registry_new`; updated `src/lib/mcp.cyr` + the test/bench harnesses to
-> call it explicitly (ai-hwaccel also defines `registry_new`, so the rename
-> averted a silent wrong-binding). 6.2.11 made duplicate same-scope `var`s a
-> hard error → renamed three test vars. All 457 tests green, 17 benchmarks
-> recorded. No source/feature changes.
->
-> **Handoff (2026-06-10):** 2.4.5 is a hardening review — fixed two unlocked
-> shared-map iterations from the v2.4.0 sync pass (`cache_stats`/`tokens_pools`,
-> crash-risk), made the routing strategy configurable + un-deaded a working
-> lowest-latency (explore/exploit, `_lat_lock`), removed dead `_cost_map`, pin →
-> 6.1.31. Crypto-bank ceiling (8: main + 7 workers) remains the concurrency cap.
+| | |
+|---|---|
+| **2.5.1** | `[server] bind` was never read: the gateway listened on `0.0.0.0` while its own config said loopback, with auth optional |
+| **2.5.2** | `max_tokens` was invisible to `json_get` when it followed `messages`, so the budget silently used its 2048 default on real client traffic |
+| **2.5.3** | No socket timeouts at all — a wedged backend pinned a worker forever; 7 such calls hang the gateway |
+| **2.5.4** | `clock_now_ms` measured at 1.351 µs, a syscall with no vDSO path — the finding that drove 2.5.11 |
+| **2.5.6** | Local providers were billed at hosted-model prices (`llama-3.3-70b` on Ollama matched the Groq row) |
+| **2.5.7** | Compaction dropped the system prompt for any client whose JSON encoder emits `"role": "system"` with a space — i.e. essentially all of them |
+| **2.5.7** | The audit signing key was compiled into the binary; `audit_verify` could not detect a deleted record |
+| **2.5.8** | `sys_exit` is thread-exit, so a clean shutdown left the process alive; `crypto_tls_main_init` was trapped inside `cmd_serve`, segfaulting every non-serve path that made an HTTP request |
+| **2.5.9** | ai-hwaccel's threaded detector corrupts the registry (filed upstream; hoosh uses the serial one) |
+| **2.5.11** | RSS grew 64 KiB per request served — an OOM proportional to traffic handled |
+
+Twice the self-contained test mirror was **correct** while `src/` had drifted
+(2.5.6 pricing, 2.5.7 audit linkage) and the suite stayed green. That failure mode
+is unguarded and is the top structural item in the roadmap.
+
+## Open
+
+See [roadmap.md](roadmap.md). Headline: the **per-request arena** — 2.5.11 removed
+the 64 KiB-per-request leak (~128 MB → 2.0 MB over 2000 requests) but ~1 KiB per
+request still accumulates in response building, and the allocator never frees.
+
+> **Handoff (2026-07-23):** 2.5.11 closes the arc. Two hot-path wins worth
+> knowing: a coarse clock ticker replaced `clock_now_ms` in the cache and rate
+> limiter (`cache_get_hit` 1487→113 ns, `rate_limit_check` 1409→8 ns), and the
+> per-connection 64 KiB allocation became a per-thread reused buffer. Buffer reuse
+> is only safe because `batch_submit` deep-copies async batch items
+> (`src/lib/batch.cyr`) — **verify that copy still exists** before touching
+> `_handle_conn`'s buffer lifetime. Also: hoosh's rate limiter is now
+> `hoosh_ratelimit_*` because the vendored majra exports the same names with
+> different arities and resolution was by include order.

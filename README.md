@@ -15,12 +15,13 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | Metric | Value |
 |--------|-------|
-| **Language** | Cyrius (pin 6.1.29) |
-| **Source** | ~7,750 lines / 30 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~2.0 MB (static ELF, x86_64) |
+| **Language** | Cyrius (pin 6.4.62) |
+| **Source** | ~11,070 lines / 32 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~15 MB (static ELF, x86_64) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 427 assertions, 100 groups, 0 failures |
-| **Benchmarks** | 16 operations |
+| **Tests** | 663 assertions, 141 groups, 0 failures |
+| **Benchmarks** | 25 operations |
+| **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
 
@@ -28,9 +29,12 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | | Rust | Cyrius | Ratio |
 |---|------|--------|-------|
-| Source | 22,956 lines / 58 files | ~7,750 lines / 30 files | **~3x fewer** |
-| Binary | ~5.1 MB | ~2.0 MB | **~2.5x smaller** |
+| Source | 22,956 lines / 58 files | ~11,070 lines / 32 files | **~2x fewer** |
 | Dependencies | 40+ crates | 0 third-party | **Zero third-party** |
+
+The Cyrius binary is larger (~15 MB vs ~5.1 MB) — it statically links the whole
+stdlib plus three vendored AGNOS distlibs with no dead-code elimination in the
+default build. `CYRIUS_DCE=1` reclaims a chunk of it.
 
 ---
 
@@ -48,13 +52,16 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 | **Tool calling** | Forwards `tools` (OpenAI/Anthropic/Gemini native formats), surfaces unified OpenAI `tool_calls` |
 | **Authentication** | Bearer token auth with constant-time comparison (HMAC-SHA256 via sigil) |
 | **Rate limiting** | Per-provider RPM limits |
+| **Sampling controls** | `temperature`, `top_p`, `max_tokens` forwarded and range-validated; per-provider `max_tokens_limit` clamp |
+| **Hardware planning** | ai-hwaccel placement, available-VRAM accounting, what-if `POST /v1/hardware/simulate`, live `GET /v1/hardware/telemetry` |
+| **Graceful lifecycle** | Clean shutdown on `SIGINT`/`SIGTERM` with in-flight drain; loopback-only bind by default |
 | **Token budgets** | Per-agent named pools with reserve/commit lifecycle |
-| **Data Loss Prevention** | PII/secret scanning (8 built-ins) with privacy-aware routing — Restricted blocked, Confidential forced local (opt-in `[dlp]`) |
-| **Cost tracking** | Per-provider cost accumulation, reset endpoint |
+| **Data Loss Prevention** | PII/secret scanning (8 built-ins + `[[dlp_pattern]]` custom literals) with privacy-aware routing — Restricted blocked, Confidential forced local (opt-in `[dlp]`) |
+| **Cost tracking** | Per-`(provider, base_url)` accumulation with token and request counts; `GET /v1/costs`, audited reset |
 | **Observability** | Prometheus `/metrics` (incl. per-provider latency histograms), majra event bus + `GET /v1/events/recent`, W3C `traceparent` propagation, opt-in OpenTelemetry OTLP/JSON span export, HMAC-SHA256 audit chain |
-| **Health checks** | Per-provider TCP probe via `/v1/health/providers` |
-| **Response caching** | Exact-key LRU cache (eviction stats) + opt-in semantic cache (embedding cosine similarity) + startup warming |
-| **Hot-reload** | `POST /v1/admin/reload` — re-reads `hoosh.cyml` |
+| **Health checks & failover** | Background prober with a 3-strike circuit breaker; `router_select` routes around unhealthy backends. `GET /v1/health/providers` reports tracked state |
+| **Response caching** | Exact-key LRU cache with TTL expiry + opt-in semantic cache (embedding cosine similarity) + startup warming |
+| **Hot-reload** | `POST /v1/admin/reload` or `SIGHUP` — re-reads the config in place |
 | **Local-first** | Prefers on-device inference; remote APIs as fallback |
 
 ---
@@ -148,8 +155,8 @@ Response:
 |--------|------|-------------|
 | GET | `/` | Gateway info |
 | GET | `/v1/health` | Health check (probes first provider) |
-| GET | `/v1/health/providers` | Per-provider health status |
-| GET | `/v1/models` | List configured providers |
+| GET | `/v1/health/providers` | Per-provider health, failure counts, probe interval |
+| GET | `/v1/models` | List models across configured providers |
 | GET | `/api/tags` | List models, native Ollama-compatible shape |
 | POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
 | POST | `/v1/batch` | Concurrent batch inference — `{"requests":[…]}` → `{"results":[…]}`; add `"async":true` for a job id |
@@ -165,13 +172,21 @@ Response:
 | POST | `/v1/costs/reset` | Reset cost counters |
 | POST | `/v1/cost/estimate` | Estimate per-token cost for a model + token profile |
 | POST | `/v1/cost/recommend` | Cheapest *capable* model for a request profile (tier/vision/tools/context-aware) |
-| GET | `/v1/cache/stats` | Cache hit/miss/eviction stats |
+| GET | `/v1/cache/stats` | Cache entries, hit rate, TTL, evictions |
 | GET | `/v1/events/recent` | Recent provider events (health/inference/errors/rate-limit) |
 | GET | `/v1/tools/list` | List registered MCP tools (JSON-RPC 2.0, via bote) |
 | POST | `/v1/tools/call` | Invoke an MCP tool by name (MCP JSON-RPC body, via bote) |
 | GET | `/v1/queue/status` | Request queue status |
+| GET | `/v1/hardware` | Detected accelerators |
+| GET | `/v1/hardware/telemetry` | Live per-device utilization/memory/temp + interconnect topology |
+| POST | `/v1/hardware/placement` | Model placement plan (fit, quantization, available VRAM) |
+| POST | `/v1/hardware/simulate` | What-if: add/remove devices, re-plan |
+| POST | `/v1/hardware/model-format` | Detect SafeTensors/GGUF/ONNX/PyTorch from raw bytes |
+| POST | `/v1/hardware/requirement-match` | Scheduler requirement matching |
+| POST | `/v1/hardware/cost` | Cloud instance cost for a placement |
+| GET | `/v1/audit` | Audit chain (opt-in `[audit]`) with verification status |
 | GET | `/metrics` | Prometheus metrics (text format) |
-| POST | `/v1/admin/reload` | Hot-reload config from `hoosh.cyml` |
+| POST | `/v1/admin/reload` | Hot-reload config (also on `SIGHUP`) |
 | OPTIONS | `*` | CORS preflight |
 
 ---
@@ -247,7 +262,7 @@ observability (latency buckets, traceparent extraction, OTLP path/attribute JSON
 
 ## Rust reference
 
-The original Rust implementation (v1.3.0, 22,956 lines) is preserved in `rust-old/` for reference during the port. It includes the full test suite (605 tests), Criterion benchmarks, and all 15 provider implementations.
+The original Rust implementation (v1.3.0, 22,956 lines) is preserved in `rust-old/` as the reference the port was measured against. The parity closeout arc (v2.5.1–v2.5.11) worked through a full behavioral diff of that tree; see [the parity review](docs/development/rust-old-parity-review.md) for what was found and [CHANGELOG.md](CHANGELOG.md) for what shipped.
 
 ---
 

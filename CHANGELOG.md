@@ -5,6 +5,72 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.11] — 2026-07-23
+
+**Security & hardening sweep — closes the rust-old parity arc.** A P(-1) pass over the whole gateway now that
+the parity bands have settled. Two of these are the kind of defect that only shows up in production: a memory
+leak proportional to requests served, and a syscall that dominated every hot path.
+
+### Fixed
+- **RSS grew 64 KiB for every request served.** `_handle_conn` called `alloc(64 KiB)` per connection against an
+  arena that **never frees**, so a gateway's memory grew with total requests handled — ~128 MB per 2000
+  requests, and an eventual OOM on any long-running deployment regardless of load shape. Nothing was wrong with
+  the code except that it treated a bump allocator like `malloc`. Now one buffer per thread, allocated on that
+  thread's first request and reused. Measured over 2000 requests: **2.0 MB of growth, down from ~128 MB (62×)**.
+  Reuse is safe because the buffer's contents do not outlive the call — the sync-batch path blocks in its
+  work-stealing barrier inside `_handle_conn`, and the async path deep-copies every item in `batch_submit`
+  precisely so its slices own their bytes.
+- **`clock_now_ms()` is a 1.351 µs syscall and it dominated the hot paths.** Cyrius has no vDSO route, so it
+  bottoms out at raw `syscall(228)`. It was ~98% of a cache hit and ~96% of a rate-limit check, and hoosh calls
+  it on every cache read, twice per insert, and once per rate-limit decision. A ticker thread now refreshes a
+  global every 5 ms and the cache and rate limiter read that instead:
+
+  | benchmark | before | after | |
+  |---|---|---|---|
+  | `cache_get_hit` | 1487 ns | **113 ns** | 13× |
+  | `cache_insert` | 1447 ns | **95 ns** | 15× |
+  | `rate_limit_check` | 1409 ns | **8 ns** | 176× |
+
+  Accuracy becomes ±5 ms, which is ample for cache TTL (300 s), LRU ordering and per-minute rate limiting.
+  Deliberately **not** used for audit timestamps, per-forward latency, or trace ids — those keep the real clock.
+- **An abandoned SSE stream kept draining the provider.** 2.4.13 stopped a disconnected client from *killing*
+  the gateway, and flagged the follow-up: with SIGPIPE ignored, writes to a dead socket merely return EPIPE and
+  the stream loop carried on pulling the whole remaining response from the backend. That spends a worker and
+  real provider tokens on a client that already left, and an unauthenticated caller can trigger it in a loop.
+  `http_sse_event` now reports the failed write and the local streaming loop stops reading upstream.
+- **`ratelimit_new`/`ratelimit_check` collided with the vendored majra distlib**, which exports the same names
+  with different arities. hoosh included later so hoosh won, and every build printed "duplicate fn (last
+  definition wins)". Harmless in practice — majra never calls its own — but a shadow resolved by include order
+  is a trap, and the noise masked any real duplicate warning. hoosh's are now `hoosh_ratelimit_*`; the build is
+  clean.
+- **`make_crlf()` allocated 3 bytes on every call**, several times per response, forever. Now a
+  process-lifetime constant.
+
+- **Signal setup now precedes every `thread_create`.** `sigprocmask` masks only the *calling* thread, and threads
+  inherit the mask as it stands when they are created — so any thread spawned before `signals_init()` does not
+  block SIGINT/SIGTERM, the kernel may deliver the signal there, and it takes the default action: the process
+  dies with no drain and no shutdown logs. 2.5.8 got this right for the worker pool and documented why; this
+  release then inserted the coarse-clock ticker *above* that call and broke graceful shutdown, which the
+  end-to-end regression check caught before release. The OTLP exporter thread had the same exposure whenever
+  telemetry was enabled — a latent bug since 2.5.8. `signals_init()` is now the first thing in the init
+  sequence, with a comment stating that nothing creating a thread may move above it.
+
+### Added
+- **A startup security warning when the gateway is reachable off-box with no auth.** Auth is fail-open by
+  design when no tokens are configured — correct for a loopback sidecar, and what rust-old did — but it stops
+  being correct the moment the listener is not on loopback. Binding a non-loopback address with an empty
+  `[[auth]]` token set now warns on both the log and stderr rather than leaving it to be discovered.
+
+### Known, not fixed
+- **~1 KiB per request still accumulates.** After the 64 KiB fix, growth is ~1 KiB/request — response string
+  building (`str_builder`, `to_cstr`, path parsing) against the same never-freeing arena. At 100 req/s that is
+  still ~360 MB/hour. Point fixes will not close it; it needs a per-request arena with mark/release, and
+  `alloc_reset` cannot simply be called per request because the response cache, audit chain, cost records,
+  routes and health records all live in the same arena and must survive. Filed as the next piece of work rather
+  than patched over. The measurement above (2.0 MB / 2000 requests) is the honest current number.
+
+Gates: 663 tests, 25 benchmarks, 4 fuzz targets; fmt/lint/vet/deny clean and now genuinely warning-free.
+
 ## [2.5.10] — 2026-07-23
 
 **Scaffolding parity — the tenth and final feature band of the rust-old parity closeout arc.** The gates,

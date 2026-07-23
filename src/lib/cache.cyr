@@ -18,7 +18,7 @@ var CACHE_ENTRY_SIZE = 24;
 
 fn _cache_entry_new(value) {
     var e = alloc(CACHE_ENTRY_SIZE);
-    var now = clock_now_ms();
+    var now = hoosh_now_ms();
     store64(e, value);
     store64(e + 8, now);
     store64(e + 16, now);
@@ -64,7 +64,7 @@ fn cache_get(c, key) {
     # (the entry left the cache) and a miss (the caller got nothing). That is
     # rust-old's accounting (cache/mod.rs:123-129), and the two counters answer
     # different questions: hit_rate stays honest, evictions shows TTL churn.
-    var now = clock_now_ms();
+    var now = hoosh_now_ms();
     if (_cache_expired(c, entry, now) == 1) {
         map_delete(load64(c + CACHE_ENTRIES), key);
         # Keep the semantic index consistent — otherwise semantic_find keeps
@@ -123,7 +123,7 @@ fn cache_evict_expired(c) {
     var m = load64(c + CACHE_ENTRIES);
     var keys = map_keys(m);
     var n = vec_len(keys);
-    var now = clock_now_ms();
+    var now = hoosh_now_ms();
     var removed = 0;
     var i = 0;
     while (i < n) {

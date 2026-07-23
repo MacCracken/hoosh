@@ -1,11 +1,19 @@
 # http_server.cyr — HTTP response helpers, request parsing, CRLF handling
 
+# CRLF as a process-lifetime constant. 2.5.11: this used to alloc(3) on every
+# call and it is called several times per response, against an arena that never
+# frees — a few bytes each time, but per request forever.
+var _CRLF = 0;
+
 fn make_crlf() {
-    var buf = alloc(3);
-    store8(buf, 13);
-    store8(buf + 1, 10);
-    store8(buf + 2, 0);
-    return buf;
+    if (_CRLF == 0) {
+        var buf = alloc(3);
+        store8(buf, 13);
+        store8(buf + 1, 10);
+        store8(buf + 2, 0);
+        _CRLF = buf;
+    }
+    return _CRLF;
 }
 
 fn to_cstr(s) {
@@ -62,11 +70,19 @@ fn http_sse_begin(cfd) {
     return 0;
 }
 
-# Send one SSE data event
+# Send one SSE data event. Returns 0 normally, -1 once the peer is gone.
+#
+# 2.5.11: the return value is new, and callers must honor it. 2.4.13 installed
+# the SIGPIPE guard so a disconnected client stopped KILLING the gateway, and
+# noted the follow-up: with the signal ignored, writes to a dead socket just
+# return EPIPE and the stream loop kept going — hoosh would pull the entire
+# remaining response from the provider and write it into a closed socket. That
+# burns a worker and real provider tokens for a client that already left, and an
+# unauthenticated caller can trigger it in a loop.
 fn http_sse_event(cfd, data, data_len) {
-    sys_write(cfd, "data: ", 6);
-    sys_write(cfd, data, data_len);
-    sys_write(cfd, "\n\n", 2);
+    if (sys_write(cfd, "data: ", 6) < 0) { return 0 - 1; }
+    if (sys_write(cfd, data, data_len) < 0) { return 0 - 1; }
+    if (sys_write(cfd, "\n\n", 2) < 0) { return 0 - 1; }
     return 0;
 }
 

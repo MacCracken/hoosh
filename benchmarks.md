@@ -1,36 +1,36 @@
 # Benchmarks
 
-Latest: **2026-07-23T08:27:09Z** — commit `03d648c`
+Latest: **2026-07-23T08:49:25Z** — commit `7dd1742`
 
 ## hoosh
 
-| Benchmark | Baseline (`bf66a35`) | Previous (`c0b1f5c`) | Current (`03d648c`) |
+| Benchmark | Baseline (`03d648c`) | Previous (`7dd1742`) | Current (`7dd1742`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 914 ns | 892 ns | 904 ns |
-| `route_round_robin_10` | 139 ns | 136 ns | 157 ns +13% |
-| `pool_reserve_commit` | 42 ns | 42 ns | 43 ns |
-| `pool_available` | 4 ns | 4 ns | 5 ns +25% |
-| `cache_get_hit` | 1.52 us | 1.48 us | 1.51 us |
-| `cache_get_miss` | 48 ns | 47 ns | 49 ns |
-| `cache_insert` | 1.47 us | 1.44 us | 1.45 us |
-| `queue_enqueue_dequeue` | 614 ns | 623 ns | 631 ns |
-| `queue_5tier_sort` | 836 ns | 820 ns | 830 ns |
-| `route_matches_model` | 34 ns | 33 ns | 33 ns |
+| `route_select_20_providers` | 904 ns | 892 ns | 921 ns |
+| `route_round_robin_10` | 157 ns | 139 ns **-11%** | 138 ns **-12%** |
+| `pool_reserve_commit` | 43 ns | 42 ns | 42 ns |
+| `pool_available` | 5 ns | 4 ns **-20%** | 4 ns **-20%** |
+| `cache_get_hit` | 1.51 us | 113 ns **-93%** | 114 ns **-92%** |
+| `cache_get_miss` | 49 ns | 49 ns | 49 ns |
+| `cache_insert` | 1.45 us | 95 ns **-93%** | 95 ns **-93%** |
+| `queue_enqueue_dequeue` | 631 ns | 649 ns | 607 ns **-4%** |
+| `queue_5tier_sort` | 830 ns | 821 ns | 819 ns |
+| `route_matches_model` | 33 ns | 33 ns | 33 ns |
 | `estimate_tokens_per_provider` | 8 ns | 8 ns | 8 ns |
-| `dlp_scan_clean_prompt` | 4.25 us | 4.29 us | 4.25 us |
-| `mcp_tools_list` | 4.17 us | 4.18 us | 4.30 us +3% |
-| `mcp_tools_call` | 8.66 us | 8.64 us | 8.69 us |
-| `batch_split_4` | 849 ns | 857 ns | 851 ns |
-| `latency_bucket_find` | 55 ns | 56 ns | 55 ns |
+| `dlp_scan_clean_prompt` | 4.25 us | 4.24 us | 4.24 us |
+| `mcp_tools_list` | 4.30 us | 4.19 us | 4.24 us |
+| `mcp_tools_call` | 8.69 us | 8.58 us | 8.65 us |
+| `batch_split_4` | 851 ns | 846 ns | 916 ns +8% |
+| `latency_bucket_find` | 55 ns | 57 ns +4% | 54 ns |
 | `work_queue_push_pop` | 8 ns | 8 ns | 8 ns |
-| `auth_verify_token` | — | — | 100 ns |
-| `auth_verify_wrong_late` | — | — | 100 ns |
-| `auth_verify_wrong_early` | — | — | 100 ns |
-| `rate_limit_check` | — | — | 1.41 us |
-| `cost_record_known_model` | — | — | 178 ns |
-| `cost_record_local_free` | — | — | 110 ns |
-| `audit_record_sign` | — | — | 3.71 us |
-| `event_publish_ring` | — | — | 4 ns |
+| `auth_verify_token` | 100 ns | 100 ns | 100 ns |
+| `auth_verify_wrong_late` | 100 ns | 100 ns | 101 ns |
+| `auth_verify_wrong_early` | 100 ns | 100 ns | 100 ns |
+| `rate_limit_check` | 1.41 us | 8 ns **-99%** | 8 ns **-99%** |
+| `cost_record_known_model` | 178 ns | 180 ns | 180 ns |
+| `cost_record_local_free` | 110 ns | 111 ns | 111 ns |
+| `audit_record_sign` | 3.71 us | 3.70 us | 3.72 us |
+| `event_publish_ring` | 4 ns | 4 ns | 4 ns |
 
 ---
 

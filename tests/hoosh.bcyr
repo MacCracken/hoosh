@@ -626,6 +626,14 @@ fn pool_commit(p, reserved, actual) {
     return 0;
 }
 
+# 2.5.11: the bench mirrors now read a COARSE clock, matching production. The
+# real clock_now_ms is a 1.351 us syscall (no vDSO in cyrius) and was ~98% of a
+# cache hit and ~96% of a rate-limit check. A ticker refreshes a global in the
+# gateway; here a single reading stands in, which is what makes these numbers
+# comparable to the new production path rather than to the old syscall cost.
+var _b_coarse_ms = 0;
+fn _bench_now_ms() { return _b_coarse_ms; }
+
 # ── 2.5.10 mirrors: rate limit / cost / audit / events ──
 
 # Mirror of src/lib/ratelimit.cyr — token bucket, refilled from the clock.
@@ -634,14 +642,14 @@ fn _bench_rl_new(rpm) {
     var r = alloc(24);
     store64(r, rpm);
     store64(r + 8, rpm * 1000);
-    store64(r + 16, clock_now_ms());
+    store64(r + 16, _bench_now_ms());
     return r;
 }
 
 fn _bench_rl_check(r) {
     var rpm = load64(r);
     if (rpm <= 0) { return 1; }
-    var now = clock_now_ms();
+    var now = _bench_now_ms();
     var elapsed = now - load64(r + 16);
     var cur = load64(r + 8) + elapsed * rpm / 60;
     var maxt = rpm * 1000;
@@ -754,7 +762,7 @@ fn cache_get(c, key) {
     if (load64(c + 40) == 0) { return 0; }
     var entry = map_get(load64(c), key);
     if (entry == 0) { store64(c + 24, load64(c + 24) + 1); return 0; }
-    var now = clock_now_ms();
+    var now = _bench_now_ms();
     var ttl = load64(c + 48);
     if (ttl > 0) {
         if (now - load64(entry + 16) >= ttl) {
@@ -772,7 +780,7 @@ fn cache_get(c, key) {
 fn cache_insert(c, key, val) {
     if (load64(c + 40) == 0) { return 0; }
     var e = alloc(24);
-    var now = clock_now_ms();
+    var now = _bench_now_ms();
     store64(e, val);
     store64(e + 8, now);
     store64(e + 16, now);

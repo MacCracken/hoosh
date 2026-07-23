@@ -11,9 +11,10 @@
 
 ## Development
 
-- [Roadmap](development/roadmap.md) — shipped summary + open/planned work
+- [Roadmap](development/roadmap.md) — open and planned work (shipped history lives in the CHANGELOG)
 - [Current State](development/state.md) — volatile state snapshot (version, sizes, counts), per release
 - [Performance & Benchmarks](development/performance.md) — the bench system + how to run it
+- [rust-old Parity Review](development/rust-old-parity-review.md) — the 2026-07-22 behavioral diff of the archived Rust tree that drove the v2.5.x arc
 - [Doc Health](doc-health.md) — documentation currency tracker
 
 ## Decisions

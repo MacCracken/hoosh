@@ -1,3 +1,46 @@
+# ── Coarse monotonic clock (2.5.11) ──
+#
+# clock_now_ms() bottoms out at raw syscall(228) — Cyrius has no vDSO path — and
+# MEASURES 1.351 us. That is not a rounding error: it is ~98% of a cache hit
+# (1.487 us total) and ~96% of a rate-limit check (1.409 us). The gateway calls
+# it on every cache read, twice per cache insert, once per rate-limit decision.
+#
+# A ticker thread refreshes a plain global every COARSE_TICK_MS; readers do a
+# single load instead of a syscall. Accuracy becomes +/- one tick, which is
+# ample for what actually consumes it: cache TTL (300 s), LRU recency ordering,
+# and per-minute rate limiting.
+#
+# Deliberately NOT used for: audit timestamps (want real wall-clock precision),
+# per-forward latency measurement (_fwd_t0 needs true ns), or trace ids. Those
+# keep calling the real clock — this is a cheap clock for coarse questions, not
+# a replacement.
+var COARSE_TICK_MS = 5;
+var _coarse_now_ms = 0;
+var _coarse_started = 0;
+
+# Cheap "now". Falls back to the real clock until the ticker has started, so
+# CLI paths and early startup still get a correct (if costly) answer.
+fn hoosh_now_ms() {
+    if (_coarse_started == 0) { return clock_now_ms(); }
+    return _coarse_now_ms;
+}
+
+fn _coarse_clock_thread(arg) {
+    while (1 == 1) {
+        _coarse_now_ms = clock_now_ms();
+        sleep_ms(COARSE_TICK_MS);
+    }
+    return 0;
+}
+
+fn coarse_clock_start() {
+    if (_coarse_started == 1) { return 0; }
+    _coarse_now_ms = clock_now_ms();
+    _coarse_started = 1;
+    thread_create(&_coarse_clock_thread, 0);
+    return 0;
+}
+
 # logging.cyr — operational logging via sakshi (stderr by default).
 #
 # The CLI surface (serve banner, `info`, `help`, `version`) stays on

@@ -89,7 +89,7 @@ fn route_healthy(r) {
 }
 fn route_set_rate_limit(r, rpm) {
     if (rpm > 0) {
-        store64(r + ROUTE_RATE_LIMIT, ratelimit_new(rpm));
+        store64(r + ROUTE_RATE_LIMIT, hoosh_ratelimit_new(rpm));
     }
     return 0;
 }

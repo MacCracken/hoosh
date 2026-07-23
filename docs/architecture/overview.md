@@ -32,7 +32,10 @@ Accept loop (accept + enqueue) → unified 7-worker pool ── main.cyr / pool.
     ├─ Trace context (traceparent, thread-local) ── trace.cyr
     ▼
 Router (priority │ round-robin │ lowest-latency │ direct) ── router.cyr / route.cyr
+    │  health-filtered: unhealthy routes withdrawn ── health.cyr
+    │  hardware-aware: local deprioritized when the model exceeds free VRAM
     │
+    ├─ Request validation + sampling params (temperature/top_p/max_tokens)
     ├─ DLP scan + privacy routing ── dlp.cyr
     ├─ Response cache (exact LRU + semantic) ── cache.cyr / semantic.cyr
     ├─ Rate limiter (per-provider RPM) ── ratelimit.cyr
@@ -40,14 +43,18 @@ Router (priority │ round-robin │ lowest-latency │ direct) ── router.cy
     ├─ Compaction + compression ── compact.cyr / compression.cyr
     ▼
 Provider forward ── provider.cyr
-    ├─ Local: raw socket → 127.0.0.1 (Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX)
+    ├─ Local: raw socket → host:port, bounded connect/IO timeouts (Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX)
     └─ Remote: sandhi HTTPS → (OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter)
     │
     ▼
 Audit chain (HMAC-SHA256) │ Metrics (Prometheus) │ Events (majra) │ OTLP spans
     ── audit.cyr            ── metrics.cyr          ── events.cyr   ── otlp.cyr
+Cost accumulation per (provider, base_url) ── pricing.cyr
 
-ai-hwaccel: hardware detection for model-placement / cost endpoints
+Background threads: health prober │ hardware re-detect │ coarse clock │ OTLP
+                    export │ signal handler (SIGINT/SIGTERM/SIGHUP)
+
+ai-hwaccel: hardware detection for placement / simulate / telemetry / cost
 ```
 
 (Whisper STT is present as a provider but its audio pipeline is migrating to
@@ -57,8 +64,9 @@ ai-hwaccel: hardware detection for model-placement / cost endpoints
 
 ## Module Structure (`src/`)
 
-`main.cyr` — CLI (`serve`/`models`/`health`/`infer`/`info`/`version`), HTTP route
-dispatch, and the `cmd_serve` accept loop + startup init.
+`main.cyr` — CLI (`serve`/`models`/`health`/`infer`/`info`/`version`, with flags and
+`--server` remote mode), HTTP route dispatch, signal handling (SIGINT/SIGTERM
+shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 
 | Module | Role |
 |--------|------|
@@ -74,20 +82,20 @@ dispatch, and the `cmd_serve` accept loop + startup init.
 | `otlp.cyr` | OpenTelemetry OTLP/JSON span export (opt-in) — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms |
-| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache + semantic (embedding cosine) cache |
+| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry + semantic (embedding cosine) cache |
 | `budget.cyr` | Named token pools (reserve → commit/release) |
-| `ratelimit.cyr` | Per-provider RPM token bucket |
+| `ratelimit.cyr` | Per-provider RPM token bucket (`hoosh_ratelimit_*` — majra exports colliding names) |
 | `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |
 | `dlp.cyr` | PII/secret scanner + privacy-aware routing |
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
-| `pricing.cyr` / `metadata.cyr` | Cost optimizer (cheapest capable model) |
+| `pricing.cyr` / `metadata.cyr` | Pricing table, per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), 34-entry model catalog |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) parsing + `$ENV` key expansion |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
 | `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
 | `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends |
 | `auth.cyr` | Bearer-token auth (constant-time) |
-| `logging.cyr` | Structured operational logging (sakshi) |
+| `logging.cyr` | Structured operational logging (sakshi) + the coarse clock ticker (`hoosh_now_ms`) |
 
 `src/vendor/` — committed single-file distlib bundles: `bote-core.cyr` (MCP
 JSON-RPC core) and `majra.cyr` (pub/sub). Vendored rather than `[deps]` because
@@ -127,15 +135,17 @@ distlibs:
 | `/api/tags` | GET | List models (native Ollama-compatible shape) |
 | `/v1/models/pull` / `/v1/models/delete` | POST | Pull / delete a model (Ollama) |
 | `/v1/training/status` / `/v1/catalog/sync` | POST | Synapse training status / catalog sync |
-| `/v1/health` / `/v1/health/providers` | GET | Gateway / per-provider health |
+| `/v1/health` / `/v1/health/providers` | GET | Gateway / per-provider health, failure counts |
 | `/v1/tokens/check` / `reserve` / `report` | POST | Token budget lifecycle |
 | `/v1/tokens/pools` | GET | List token pools |
 | `/v1/cost/estimate` / `/v1/cost/recommend` | POST | Per-token cost / cheapest capable model |
 | `/v1/cache/stats` | GET | Cache hit/miss/eviction stats |
 | `/v1/tools/list` / `/v1/tools/call` | GET / POST | MCP tool server (bote) |
-| `/v1/hardware*` | GET / POST | Hardware detection / placement / cost |
+| `/v1/costs` / `/v1/costs/reset` | GET / POST | Per-provider spend; audited reset |
+| `/v1/audit` | GET | Audit chain + verification status (opt-in `[audit]`) |
+| `/v1/hardware*` | GET / POST | Detection, placement, simulate, telemetry, cost, model-format |
 | `/metrics` | GET | Prometheus metrics (+ per-provider latency histograms) |
-| `/v1/admin/reload` | POST | Hot-reload `hoosh.cyml` |
+| `/v1/admin/reload` | POST | Hot-reload config (also on `SIGHUP`) |
 
 ---
 

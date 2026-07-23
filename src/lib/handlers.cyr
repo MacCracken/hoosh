@@ -1474,8 +1474,8 @@ fn _sse_chunk(cfd, model, content, content_len) {
     memcpy(buf + plen, content, content_len);
     memcpy(buf + plen + content_len, suffix, slen);
     store8(buf + total, 0);
-    http_sse_event(cfd, buf, total);
-    return 0;
+    # Propagate a dead peer so the caller can stop pulling from the provider.
+    return http_sse_event(cfd, buf, total);
 }
 
 # Stream one SSE chunk carrying an extended-thinking delta (2.5.0) as `delta.reasoning_content` — the de-facto
@@ -1500,8 +1500,8 @@ fn _sse_reasoning_chunk(cfd, model, content, content_len) {
     memcpy(buf + plen, content, content_len);
     memcpy(buf + plen + content_len, suffix, slen);
     store8(buf + total, 0);
-    http_sse_event(cfd, buf, total);
-    return 0;
+    # Propagate a dead peer so the caller can stop pulling from the provider.
+    return http_sse_event(cfd, buf, total);
 }
 
 # Stream one SSE chunk wrapping a tool_calls delta (passed through verbatim).
@@ -1517,8 +1517,7 @@ fn _sse_tool_chunk(cfd, model, tool_calls) {
     str_builder_add_cstr(sb, "},\"finish_reason\":null}]}");
     var s = str_builder_build(sb);
     var d = to_cstr(s);
-    http_sse_event(cfd, d, str_len(s));
-    return 0;
+    return http_sse_event(cfd, d, str_len(s));
 }
 
 # Send the final SSE stop chunk
@@ -1743,6 +1742,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
 
     var rbuf = alloc(4096);
     var done = 0;
+    # 2.5.11: `done` is now also set when a chunk write fails, i.e. the client
+    # hung up. Before, hoosh drained the WHOLE upstream response into a closed
+    # socket — a worker and real provider tokens spent on a request that had
+    # already left, and something an unauthenticated caller could do in a loop.
     while (done == 0) {
         var n = sys_read(bfd, rbuf, 4096);
         if (n <= 0) { done = 1; break; }
@@ -1757,8 +1760,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                         # Ollama NDJSON: extract "content"
                         var txt = ollama_extract_text(lbuf, lpos);
                         if (strlen(txt) > 0) {
-                            _sse_chunk(cfd, model,
-                            txt, strlen(txt));
+                            if (_sse_chunk(cfd, model,
+                            txt, strlen(txt)) < 0) { done = 1; }
                             token_count = token_count + 1;
                         }
                     } else {
@@ -1773,8 +1776,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                     var txt = ollama_extract_text(
                                     dptr, dlen);
                                     if (strlen(txt) > 0) {
-                                        _sse_chunk(cfd, model,
-                                        txt, strlen(txt));
+                                        if (_sse_chunk(cfd, model,
+                                        txt, strlen(txt)) < 0) { done = 1; }
                                         token_count = token_count + 1;
                                     }
                                 }
@@ -2101,7 +2104,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
 
     # Rate limit
     var rl = route_rate_limiter(route);
-    if (ratelimit_check(rl) == 0) {
+    if (hoosh_ratelimit_check(rl) == 0) {
         event_rate_limited(provider_name(route_provider(route)));
         store64(out + 8, _resp_err("429", "Too Many Requests", "provider rate limit exceeded", "server_error"));
         return out;

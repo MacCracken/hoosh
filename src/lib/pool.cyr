@@ -134,8 +134,34 @@ fn job_otlp_export(doc_ptr, doc_len) {
 # and a legitimate 100 KiB request could not be served at all. Content-Length is
 # checked BEFORE any large allocation, so an oversized request costs one
 # response, not a megabyte of the never-freeing arena.
+# Per-thread request buffer (2.5.11).
+#
+# _handle_conn used to alloc(64 KiB) per connection against an arena that NEVER
+# FREES, so a long-running gateway's RSS grew by 64 KiB per request served —
+# ~230 MB per hour at 1 req/s, and an OOM on any busy deployment. Nothing was
+# wrong with the code except that it treated a bump allocator like malloc.
+#
+# One buffer per thread, allocated on that thread's first request and reused
+# forever. Reuse is safe because the buffer's contents do not outlive the call:
+# the sync-batch path blocks in its work-stealing barrier inside _handle_conn,
+# and the ASYNC batch path deep-copies every item in batch_submit (batch.cyr
+# :174-178) precisely so its slices own their bytes. Verify that copy still
+# exists before assuming this is safe.
+#
+# Slot 2 — slot 0 is sigil's crypto bank, slot 1 is the traceparent (trace.cyr).
+var REQBUF_SLOT = 2;
+
+fn _req_buf() {
+    var b = thread_local_get(REQBUF_SLOT);
+    if (b == 0) {
+        b = alloc(REQ_READ_CHUNK + 1);
+        thread_local_set(REQBUF_SLOT, b);
+    }
+    return b;
+}
+
 fn _handle_conn(cfd) {
-    var req_buf = alloc(REQ_READ_CHUNK + 1);
+    var req_buf = _req_buf();
     var recv_r = sock_recv(cfd, req_buf, REQ_READ_CHUNK);
     if (is_err_result(recv_r) == 1) { sock_close(cfd); return 0; }
     var req_len = payload(recv_r);
