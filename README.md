@@ -142,10 +142,29 @@ Response:
   "usage": {
     "prompt_tokens": 26,
     "completion_tokens": 8,
-    "total_tokens": 34
+    "total_tokens": 34,
+    "cost_micro_usd": 12,
+    "provider": "openai"
   }
 }
 ```
+
+`cost_micro_usd` (since 2.5.12) is integer micro-USD — the same figure hoosh accumulates into
+`/v1/costs`, returned by the same call, so summing per-response costs reconciles exactly.
+`provider` is the **real serving route**, which can differ from what the model name suggests when
+DLP re-routes a confidential request to a local provider.
+
+Every chat response also carries a cache header:
+
+| `X-Hoosh-Cache` | Meaning |
+|-----------------|---------|
+| `HIT` | Served from the exact-key response cache — no provider call, no spend |
+| `SEMANTIC` | Served from the semantic (embedding-similarity) cache |
+| `MISS` | Forwarded to a provider |
+
+**Bill on the header, not the body.** A cached response replays the original call's `usage` block
+verbatim, `cost_micro_usd` included — that is what the *cached inference* cost, not what your
+request cost. A `HIT` costs nothing.
 
 ---
 

@@ -50,6 +50,9 @@ Provider forward ── provider.cyr
 Audit chain (HMAC-SHA256) │ Metrics (Prometheus) │ Events (majra) │ OTLP spans
     ── audit.cyr            ── metrics.cyr          ── events.cyr   ── otlp.cyr
 Cost accumulation per (provider, base_url) ── pricing.cyr
+   └─ 2.5.12: cost_record returns the micro-USD it accumulated; the chat
+      response reports that same value as usage.cost_micro_usd, so a client's
+      per-response sum reconciles with /v1/costs by construction
 
 Background threads: health prober │ hardware re-detect │ coarse clock │ OTLP
                     export │ signal handler (SIGINT/SIGTERM/SIGHUP)

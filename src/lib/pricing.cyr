@@ -185,13 +185,21 @@ fn _cost_find(prov, base_url) {
 
 # Accumulate one completed inference. Caller holds _chat_lock (this runs from
 # _chat_assemble, which already does) — the vec is shared across pool workers.
+# Accumulate one request's spend against its (provider, base_url) record.
+#
+# 2.5.12: returns the micro-USD it just added, instead of 0. The response body
+# reports the same figure, and returning it makes the two the SAME VALUE by
+# construction rather than the same function called twice — so a client summing
+# per-response costs reconciles with /v1/costs exactly, and cannot drift if the
+# pricing table ever changes between the two calls.
 fn cost_record(prov, base_url, in_tok, out_tok, model) {
     var r = _cost_find(prov, base_url);
+    var cost_micro = estimate_cost_micro(model, prov, in_tok, out_tok);
     store64(r + 16, load64(r + 16) + in_tok);
     store64(r + 24, load64(r + 24) + out_tok);
-    store64(r + 32, load64(r + 32) + estimate_cost_micro(model, prov, in_tok, out_tok));
+    store64(r + 32, load64(r + 32) + cost_micro);
     store64(r + 40, load64(r + 40) + 1);
-    return 0;
+    return cost_micro;
 }
 
 fn cost_record_count() {

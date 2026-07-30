@@ -5,6 +5,56 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.5.12] — 2026-07-30
+
+**A response now says what happened to it.** Until this release a client could not tell a cache hit
+from a fresh inference — the two were byte-identical, `"id"` included — and the cost hoosh had
+already computed never left the process. Reported by agnosai while porting its orchestrator to
+Cyrius: it had to re-implement hoosh's pricing table just to attribute per-request spend, and it
+re-billed every server-side cache hit because nothing on the wire said otherwise. Both facts were
+sitting one function call away from the response builder. Plus the toolchain and dependency refresh.
+
+### Added
+- **`X-Hoosh-Cache` response header on `/v1/chat/completions`** — `HIT` (exact-key), `SEMANTIC`
+  (similarity), or `MISS` (a real forward). A header rather than a body field so the payload stays
+  OpenAI-compatible. `http_respond_h` carries one optional extra header; the ten existing
+  `http_respond` call sites are untouched and byte-identical, which a test pins.
+- **`usage.cost_micro_usd` and `usage.provider`** on chat completions. Integer micro-USD, the same
+  unit `estimate_cost_micro` returns, so a consumer never converts and never rounds. `provider` is
+  the **real serving route** — which matters because a model-name guess is wrong whenever DLP
+  re-routes a confidential request to a local provider, and hoosh bills $0 for that while the
+  consumer prices it as remote. Both fields are additive inside the existing `usage` object; an
+  OpenAI-shaped client ignores unknown fields.
+- Cache-warming entries are priced the same way, so a hit on a warmed entry is indistinguishable
+  from a hit on a normally-served one.
+
+### Changed
+- **`cost_record` returns the micro-USD it accumulated** instead of 0. The response body reports
+  that same value rather than a second call to `estimate_cost_micro` that merely ought to agree —
+  so a client summing per-response costs reconciles with `/v1/costs` **by construction**, and cannot
+  drift if the pricing table changes between the two calls.
+- **Toolchain: cyrius `6.4.62` → `6.5.2`.** No source changes were needed. The jump removes
+  `bayan_json_v_parse_str`/`json_v_parse_str` (renamed `_parse_buf`, because `X_str` is a reserved
+  overload slot) and the whole `regex_*` surface; hoosh uses none of them, verified by diffing every
+  public symbol across the two lib trees before compiling.
+- **Dependencies:** ai-hwaccel `2.3.14` → `2.3.15`, vendored bote-core `2.7.7` → `3.1.4`, vendored
+  majra `2.5.0` → `2.5.3`. bote 3.x's breaking change is in the `bote-streamable` binary's session
+  lifecycle; the `[lib.core]` bundle hoosh consumes grew additively on the 2.0 handler ABI.
+- `data/models.json` re-synced from ai-hwaccel 2.3.15 (26 models). Note it ships as a
+  `{"models":[…]}` wrapper upstream and must be **unwrapped to a top-level array** here — the
+  `hardware_data_files` test caught the wrapped form immediately.
+
+### Tests
+- 663 → **679 assertions**. The `X-Hoosh-Cache` path is tested against the **real**
+  `http_respond_h` over a pipe rather than a mirror, including that the no-extra-header form differs
+  from the labelled one by exactly that header line plus its CRLF and nothing else.
+
+### Performance
+- No regressions across the toolchain jump — 25 benchmarks compared before and after, all within
+  noise, with the cache path slightly improved (`cache_get_miss` −20%, `cache_insert` −14%).
+- The per-response cost costs nothing: `cost_record` already computed it, and now returns it instead
+  of recomputing.
+
 ## [2.5.11] — 2026-07-23
 
 **Security & hardening sweep — closes the rust-old parity arc.** A P(-1) pass over the whole gateway now that

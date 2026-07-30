@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.62"
+cyrius = "6.5.2"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -23,7 +23,7 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.3.14"
+tag = "2.3.15"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers

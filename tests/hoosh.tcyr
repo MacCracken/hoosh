@@ -27,6 +27,10 @@ include "lib/assert.cyr"
 include "lib/sakshi.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/lib/logging.cyr"
+# 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
+# needs only sys_write), so the response-header path is tested against the REAL
+# implementation rather than a mirror.
+include "src/lib/http_server.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -1408,9 +1412,11 @@ fn _t_cost_record(recs, prov, base_url, in_tok, out_tok, model) {
     var r = _t_cost_find(recs, prov, base_url);
     store64(r + 16, load64(r + 16) + in_tok);
     store64(r + 24, load64(r + 24) + out_tok);
-    store64(r + 32, load64(r + 32) + cost_calculate(model, prov, in_tok, out_tok));
+    var cost_micro = cost_calculate(model, prov, in_tok, out_tok);
+    store64(r + 32, load64(r + 32) + cost_micro);
     store64(r + 40, load64(r + 40) + 1);
-    return 0;
+    # 2.5.12: mirrors cost_record returning what it accumulated.
+    return cost_micro;
 }
 
 fn _t_cost_total(recs) {
@@ -3401,6 +3407,48 @@ fn _req_reasoning_effort(body_ptr, body_len) {
 # ================================================================
 # TESTS
 # ================================================================
+
+# ── 2.5.12: X-Hoosh-Cache header + usage cost fields ──────────────
+#
+# Drive the real http_respond_h through a pipe and read back what it wrote.
+# Returns the response text as a Str.
+fn _t_respond_capture(status, status_text, body, extra_hdr) {
+    var fds = alloc(8);
+    if (sys_pipe(fds) < 0) { return str_from(""); }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    http_respond_h(wfd, status, status_text, body, strlen(body), extra_hdr);
+    sys_close(wfd);
+    var buf = alloc(4096);
+    var n = sys_read(rfd, buf, 4095);
+    sys_close(rfd);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    return str_new(buf, n);
+}
+
+# The 2.5.12 usage block, mirroring handlers.cyr _chat_completion_body's tail.
+# MIRROR — the suite's established convention for handlers.cyr, which cannot be
+# included here (it pulls the whole server). Kept adjacent to the real thing in
+# review; the header-path test above is against real code.
+fn _t_usage_block(ptok, ctok, cost_micro, provider) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok + ctok);
+    str_builder_add_cstr(sb, ",\"cost_micro_usd\":");
+    str_builder_add_int(sb, cost_micro);
+    if (provider != 0) {
+        str_builder_add_cstr(sb, ",\"provider\":\"");
+        str_builder_add_cstr(sb, provider);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
 
 fn main() {
     alloc_init();
@@ -6005,6 +6053,75 @@ fn main() {
     assert_eq(_t_dlp_custom_max(1, 2), 2, "dlp: order-independent");
     # A custom pattern can reach restricted, same as a built-in.
     assert_eq(CLASS_RESTRICTED > CLASS_CONFIDENTIAL, 1, "dlp: restricted outranks confidential");
+
+    # ── 2.5.12: the cache signal and the per-response cost ────────
+    # Before this, a cache hit was byte-indistinguishable from a fresh
+    # inference, so a caching consumer re-billed every hit; and the cost hoosh
+    # had already computed never reached the client, forcing consumers to
+    # re-implement the pricing table.
+
+    var hit = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: HIT");
+    assert_eq(str_contains(hit, str_from("X-Hoosh-Cache: HIT")) , 1,
+    "cache: an exact hit is labelled HIT");
+    assert_eq(str_contains(hit, str_from("Content-Length: 2")), 1,
+    "cache: the extra header does not disturb Content-Length");
+    assert_eq(str_contains(hit, str_from("\r\n\r\n")), 1,
+    "cache: the header block still terminates with a blank line");
+
+    var sem = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: SEMANTIC");
+    assert_eq(str_contains(sem, str_from("X-Hoosh-Cache: SEMANTIC")), 1,
+    "cache: a semantic hit is labelled SEMANTIC, distinct from an exact hit");
+
+    var miss = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: MISS");
+    assert_eq(str_contains(miss, str_from("X-Hoosh-Cache: MISS")), 1,
+    "cache: a real forward is labelled MISS");
+
+    # The pre-2.5.12 entry point must be byte-identical to what it always was —
+    # ten call sites still use it.
+    var plain = _t_respond_capture("200", "OK", "{}", 0);
+    assert_eq(str_contains(plain, str_from("X-Hoosh-Cache")), 0,
+    "cache: http_respond with no extra header emits none");
+    assert_eq(str_contains(plain, str_from("Content-Type: application/json")), 1,
+    "cache: and keeps the standard header set");
+    assert_eq(str_len(plain) + strlen("X-Hoosh-Cache: MISS") + 2, str_len(miss),
+    "cache: the ONLY difference is that header line plus its CRLF — nothing else in the \
+    response changed shape");
+
+    # usage now carries the cost hoosh already computed, in the same integer
+    # micro-USD unit estimate_cost_micro returns — no conversion, no rounding.
+    var u = _t_usage_block(1000, 500, 450, "openai");
+    assert_eq(str_contains(u, str_from("\"cost_micro_usd\":450")), 1,
+    "usage: carries the integer micro-USD cost");
+    assert_eq(str_contains(u, str_from("\"provider\":\"openai\"")), 1,
+    "usage: and the REAL serving provider, which a model-name guess gets wrong \
+    whenever DLP re-routes a confidential request to a local one");
+    assert_eq(str_contains(u, str_from("\"total_tokens\":1500")), 1,
+    "usage: the pre-existing fields are unchanged");
+
+    # cost_record now RETURNS what it accumulated, so the response body reports
+    # the same value rather than a second computation that merely ought to agree.
+    var cr_ret_recs = vec_new();
+    var cr_returned = _t_cost_record(cr_ret_recs, PROV_OPENAI, "https://api.openai.com",
+    1000, 500, "gpt-4o-mini");
+    assert_eq(cr_returned, 450, "usage: cost_record returns the micro-USD it just recorded");
+    assert_eq(cr_returned, _t_cost_total(cr_ret_recs),
+    "usage: and it equals what landed in the record — same value by construction, so a client \
+    summing per-response costs cannot drift from /v1/costs");
+
+    # The figure is exactly what cost_record accumulates — same function, same
+    # arguments — so a per-response sum reconciles with /v1/costs.
+    assert_eq(estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500), 450,
+    "usage: the response cost IS estimate_cost_micro, so it reconciles with /v1/costs");
+
+    # A local provider is free, and that has to survive into the response.
+    var ul = _t_usage_block(1000, 1000, estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000),
+    "ollama");
+    assert_eq(str_contains(ul, str_from("\"cost_micro_usd\":0")), 1,
+    "usage: a local model reports zero cost rather than omitting the field");
+
+    # provider is optional in the builder; omitting it must not emit an empty key.
+    assert_eq(str_contains(_t_usage_block(1, 1, 0, 0), str_from("provider")), 0,
+    "usage: an absent provider omits the field entirely");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
