@@ -5,7 +5,7 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
-## [2.5.12] — 2026-07-30
+## [2.6.0] — 2026-07-30
 
 **A response now says what happened to it.** Until this release a client could not tell a cache hit
 from a fresh inference — the two were byte-identical, `"id"` included — and the cost hoosh had
@@ -13,6 +13,9 @@ already computed never left the process. Reported by agnosai while porting its o
 Cyrius: it had to re-implement hoosh's pricing table just to attribute per-request spend, and it
 re-billed every server-side cache hit because nothing on the wire said otherwise. Both facts were
 sitting one function call away from the response builder. Plus the toolchain and dependency refresh.
+
+**Minor, not patch:** the fix is additive public API — a new response header and two new `usage`
+fields — so SemVer puts it at 2.6.0 even though it resolves a defect report.
 
 ### Added
 - **`X-Hoosh-Cache` response header on `/v1/chat/completions`** — `HIT` (exact-key), `SEMANTIC`
@@ -37,8 +40,11 @@ sitting one function call away from the response builder. Plus the toolchain and
   `bayan_json_v_parse_str`/`json_v_parse_str` (renamed `_parse_buf`, because `X_str` is a reserved
   overload slot) and the whole `regex_*` surface; hoosh uses none of them, verified by diffing every
   public symbol across the two lib trees before compiling.
-- **Dependencies:** ai-hwaccel `2.3.14` → `2.3.15`, vendored bote-core `2.7.7` → `3.1.4`, vendored
-  majra `2.5.0` → `2.5.3`. bote 3.x's breaking change is in the `bote-streamable` binary's session
+- **Dependencies:** ai-hwaccel `2.3.14` → `2.3.16`, vendored bote-core `2.7.7` → `3.1.4`, vendored
+  majra `2.5.0` → `2.5.3`. ai-hwaccel 2.3.16 fixes a `json_v_parse_str` call that bayan 1.3.0
+  removed — found while doing this update, filed upstream, and fixed there. It was harmless in this
+  binary (the function has no callers here, so the symbol was dead), but it meant the build carried
+  a permanent `warning: undefined function`. **The build is now warning-free.** bote 3.x's breaking change is in the `bote-streamable` binary's session
   lifecycle; the `[lib.core]` bundle hoosh consumes grew additively on the 2.0 handler ABI.
 - `data/models.json` re-synced from ai-hwaccel 2.3.15 (26 models). Note it ships as a
   `{"models":[…]}` wrapper upstream and must be **unwrapped to a top-level array** here — the
