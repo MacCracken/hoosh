@@ -78,12 +78,14 @@ fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_l
 
 # Retry streaming forward with backoff.
 # Returns backend fd or -1.
-fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, gen) {
+# 2.6.1: `tools_raw/tools_len` added and threaded to provider_forward_stream — the local
+# streaming path had no tools parameter at all (see provider_forward_stream's note).
+fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var max = retry_max(cfg);
     var attempt = 0;
     while (attempt <= max) {
         var fd = provider_forward_stream(
-        route, model, msg_raw, msg_len, gen);
+        route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
         if (fd >= 0) { return fd; }
         if (attempt >= max) { return 0 - 1; }
         var delay = retry_delay_ms(cfg, attempt);

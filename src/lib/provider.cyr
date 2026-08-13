@@ -26,12 +26,131 @@ fn _sb_add_span(sb, ptr, len) {
     return 0;
 }
 
+# OpenAI tool-continuation messages → Ollama-shaped messages (cstr array), or 0 when nothing
+# needs rewriting (caller then forwards the raw span unchanged).
+#
+# 2.6.1 — the OUTBOUND mirror of _ollama_tool_calls. Having converted Ollama's response into the
+# OpenAI shape, hoosh must convert the client's next request back, or the agentic loop cannot
+# close: the client echoes the assistant turn it was given, whose `arguments` is now a JSON
+# **string**, and Ollama's native /api/chat rejects that outright —
+#   {"error":"Value looks like object, but can't find closing '}' symbol"}
+# — so the second round returns nothing and the caller reports an empty completion. Measured
+# against qwen3.5:9b: identical continuation with `arguments` as an object answers normally.
+#
+# Only assistant turns carrying `tool_calls` are rewritten, and only their `arguments` (string →
+# object, via _json_unesc_span). `role:"tool"` results already match Ollama's shape and pass
+# through, as does everything else — copied span-verbatim, so nothing outside a tool_calls array
+# is reinterpreted. This is the same translation _build_anthropic_body_x has always done for
+# Anthropic; Ollama was the provider it was never done for.
+fn _ollama_messages_convert(messages_raw, messages_len) {
+    var sb = str_builder_new();
+    str_builder_putc(sb, '[');
+    var any = 0;
+    var first = 1;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32 || ch == 44 || ch == 10 || ch == 13 || ch == 9) {
+            i = i + 1;
+            continue;
+        }
+        if (ch != 123) { break; }
+        var obj_start = i;
+        var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
+        var obj_len = obj_end - obj_start;
+        var mp = messages_raw + obj_start;
+        var tcspan = _json_arr_span(mp, obj_len, "tool_calls", 10);
+        if (first == 0) { str_builder_putc(sb, ','); }
+        if (tcspan == 0) {
+            str_builder_add(sb, str_new(mp, obj_len));       # verbatim — nothing to translate
+        } else {
+            any = 1;
+            str_builder_add_cstr(sb, "{\"role\":\"assistant\",\"content\":\"");
+            var cf = _json_obj_str_field(mp, obj_len, "content", 7);
+            if (cf != 0) { str_builder_add(sb, str_new(load64(cf), load64(cf + 8))); }
+            str_builder_add_cstr(sb, "\",\"tool_calls\":[");
+            var tcp = load64(tcspan);
+            var tcl = load64(tcspan + 8);
+            var bf = 1;
+            var k = 1;
+            while (k < tcl) {
+                if (load8(tcp + k) == 123) {
+                    var toe = _json_span_end(tcp, tcl, k);
+                    var tol = toe - k;
+                    var fspan = _json_obj_obj_span(tcp + k, tol, "function", 8);
+                    if (fspan != 0) {
+                        var fp = load64(fspan);
+                        var fl = load64(fspan + 8);
+                        var nmf = _json_obj_str_field(fp, fl, "name", 4);
+                        if (nmf != 0) {
+                            if (bf == 0) { str_builder_putc(sb, ','); }
+                            var idf = _json_obj_str_field(tcp + k, tol, "id", 2);
+                            str_builder_add_cstr(sb, "{\"id\":\"");
+                            if (idf != 0) { str_builder_add(sb, str_new(load64(idf), load64(idf + 8))); }
+                            str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
+                            str_builder_add(sb, str_new(load64(nmf), load64(nmf + 8)));
+                            str_builder_add_cstr(sb, "\",\"arguments\":");
+                            # arguments: STRING -> unescape to the OBJECT Ollama requires. Already
+                            # an object (a client that never round-tripped through us) -> verbatim.
+                            var argf = _json_obj_str_field(fp, fl, "arguments", 9);
+                            if (argf != 0) {
+                                if (load64(argf + 8) > 0) {
+                                    _json_unesc_span(sb, load64(argf), load64(argf + 8));
+                                } else {
+                                    str_builder_add_cstr(sb, "{}");
+                                }
+                            } else {
+                                var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
+                                if (argo != 0) {
+                                    str_builder_add(sb, str_new(load64(argo), load64(argo + 8)));
+                                } else {
+                                    str_builder_add_cstr(sb, "{}");
+                                }
+                            }
+                            str_builder_add_cstr(sb, "}}");
+                            bf = 0;
+                        }
+                    }
+                    k = toe;
+                } else {
+                    k = k + 1;
+                }
+            }
+            str_builder_add_cstr(sb, "]}");
+        }
+        first = 0;
+        i = obj_end;
+    }
+    str_builder_putc(sb, ']');
+    if (any == 0) { return 0; }
+    return to_cstr(str_builder_build(sb));
+}
+
+# Append the messages array, translating OpenAI tool-continuation shapes for Ollama (2.6.1).
+# Non-Ollama providers and Ollama requests with no tool_calls both forward the raw span.
+fn _sb_add_messages(sb, messages_raw, messages_len, ollama) {
+    if (ollama == 1) {
+        var conv = _ollama_messages_convert(messages_raw, messages_len);
+        if (conv != 0) {
+            str_builder_add_cstr(sb, conv);
+            return 0;
+        }
+    }
+    _sb_add_span(sb, messages_raw, messages_len);
+    return 0;
+}
+
 fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
-    _sb_add_span(sb, messages_raw, messages_len);
+    _sb_add_messages(sb, messages_raw, messages_len, ollama);
     if (tools_raw != 0 && tools_len > 0) {
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
@@ -47,7 +166,7 @@ fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, too
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"stream\":true,\"messages\":");
-    _sb_add_span(sb, messages_raw, messages_len);
+    _sb_add_messages(sb, messages_raw, messages_len, ollama);
     if (tools_raw != 0 && tools_len > 0) {
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
@@ -879,6 +998,21 @@ fn _emit_tool_call(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
     return 0;
 }
 
+# Same envelope as _emit_tool_call, but `args_p/args_l` is the raw span of an ALREADY-ENCODED
+# JSON string value (i.e. its `"` and `\` are escaped in the source bytes). Emitted verbatim —
+# running it through _json_esc_span would escape the escapes and double-encode the arguments.
+# 2.6.1: used by _ollama_tool_calls for builds that already send the OpenAI string form.
+fn _emit_tool_call_encoded(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add(sb, str_new(id_p, id_l));
+    str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
+    str_builder_add(sb, str_new(nm_p, nm_l));
+    str_builder_add_cstr(sb, "\",\"arguments\":\"");
+    if (args_l > 0) { str_builder_add(sb, str_new(args_p, args_l)); } else { str_builder_add_cstr(sb, "{}"); }
+    str_builder_add_cstr(sb, "\"}}");
+    return 0;
+}
+
 # Anthropic content[] tool_use blocks → OpenAI tool_calls array (cstr), or 0.
 fn _anthropic_tool_calls(rb, rbl) {
     var cspan = _json_arr_span(rb, rbl, "content", 7);
@@ -955,6 +1089,87 @@ fn _gemini_tool_calls(rb, rbl) {
             } else {
                 i = i + 1;
             }
+        } else {
+            i = i + 1;
+        }
+    }
+    str_builder_putc(sb, ']');
+    if (first == 1) { return 0; }
+    return to_cstr(str_builder_build(sb));
+}
+
+# Ollama native /api/chat tool_calls → OpenAI tool_calls (cstr), or 0.
+#
+# 2.6.1 — Ollama's shape is close enough to OpenAI's to look identical at a glance, and it is
+# not. It nests `{"function":{"index":0,"name":…,"arguments":{…}}}` where OpenAI specifies
+# `{"id":…,"type":"function","function":{"name":…,"arguments":"<JSON string>"}}`. Two real
+# differences: `arguments` is a JSON **object**, not a JSON-encoded string, and there is a
+# non-standard `index` field (older builds also omit `id`). Passing that through verbatim — which
+# is what routing Ollama into `_extract_openai_tool_calls` did — hands every OpenAI-compatible
+# client an object where the spec promises a string. thoth's `agent_tc_args` read it as a string,
+# got nothing, and silently dropped EVERY argument: optional-arg tools appeared to work while
+# required-arg ones (read_file/edit/shell) failed on every round. Anthropic and Google were
+# already converted here; Ollama was the one provider left raw.
+#
+# Tolerant on input: `arguments` is taken as an object span when it is one, and as an
+# already-encoded string when it is one (some builds/proxies do send the OpenAI form) — the
+# string case is emitted verbatim, since re-escaping an escaped string double-encodes it.
+fn _ollama_tool_calls(rb, rbl) {
+    var span = _json_arr_span(rb, rbl, "tool_calls", 10);
+    if (span == 0) { return 0; }
+    var cp = load64(span);
+    var cl = load64(span + 8);
+    var sb = str_builder_new();
+    str_builder_putc(sb, '[');
+    var first = 1;
+    var idx = 0;
+    var i = 1;
+    while (i < cl) {
+        var ch = load8(cp + i);
+        if (ch == 123) {
+            var oe = _json_span_end(cp, cl, i);
+            var ol = oe - i;
+            var fnspan = _json_obj_obj_span(cp + i, ol, "function", 8);
+            if (fnspan != 0) {
+                var fp = load64(fnspan);
+                var fl = load64(fnspan + 8);
+                var nmf = _json_obj_str_field(fp, fl, "name", 4);
+                if (nmf != 0) {
+                    # id: use the model's when present, else synthesise a stable one (mirrors the
+                    # Gemini converter, which has no upstream id either).
+                    var idf = _json_obj_str_field(cp + i, ol, "id", 2);
+                    var idp = 0;
+                    var idl = 0;
+                    if (idf != 0) {
+                        idp = load64(idf);
+                        idl = load64(idf + 8);
+                    } else {
+                        var idb = str_builder_new();
+                        str_builder_add_cstr(idb, "call_");
+                        str_builder_add_int(idb, idx);
+                        var idc = to_cstr(str_builder_build(idb));
+                        idp = idc;
+                        idl = strlen(idc);
+                    }
+                    if (first == 0) { str_builder_putc(sb, ','); }
+                    var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
+                    if (argo != 0) {
+                        _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8),
+                        load64(argo), load64(argo + 8));
+                    } else {
+                        var args = _json_obj_str_field(fp, fl, "arguments", 9);
+                        if (args != 0) {
+                            _emit_tool_call_encoded(sb, idp, idl, load64(nmf), load64(nmf + 8),
+                            load64(args), load64(args + 8));
+                        } else {
+                            _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8), 0, 0);
+                        }
+                    }
+                    first = 0;
+                    idx = idx + 1;
+                }
+            }
+            i = oe;
         } else {
             i = i + 1;
         }
@@ -1128,7 +1343,14 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         if (is_google == 1) {
             tool_calls = _gemini_tool_calls(rb, rbl);
         } else {
-            tool_calls = _extract_openai_tool_calls(rb, rbl);
+            # 2.6.1: Ollama's native shape needs converting too — it was the one provider whose
+            # tool_calls were forwarded raw, handing clients an OBJECT `arguments` where the
+            # OpenAI contract promises a JSON-encoded string.
+            if (route_provider(route) == PROV_OLLAMA) {
+                tool_calls = _ollama_tool_calls(rb, rbl);
+            } else {
+                tool_calls = _extract_openai_tool_calls(rb, rbl);
+            }
         }
     }
 
@@ -1144,14 +1366,21 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
 # Open a streaming connection to provider.
 # Returns backend fd (caller reads chunks + closes).
 # Returns -1 on connection failure.
-fn provider_forward_stream(route, model, messages_raw, messages_len, gen) {
+# 2.6.1: `tools_raw/tools_len` were added. They had never existed on this path — the local
+# streaming body was built with a hardcoded `0, 0`, so a locally-served model was asked WITHOUT
+# the caller's tools and answered, correctly, that it had none. Remote providers were unaffected
+# (handle_chat_stream's remote branch forwards them via _remote_stream_body), which is why the
+# symptom read as "only cloud models can use tools". Since `[hoosh].stream` defaults on in
+# clients, this was the default local experience.
+fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, tools_len, gen) {
     # Local-only fast path: raw fd + sys_read can't decrypt TLS. Remote
     # providers stream incrementally via sandhi_http_stream in the handler
     # (handle_chat_stream's remote branch) and never reach here.
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
-    model, messages_raw, messages_len, 0, 0, gen, (route_provider(route) == PROV_OLLAMA));
+    model, messages_raw, messages_len, tools_raw, tools_len, gen,
+    (route_provider(route) == PROV_OLLAMA));
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

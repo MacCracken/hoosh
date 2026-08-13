@@ -5,6 +5,103 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.1] — 2026-08-13
+
+**Locally-served models can use tools.** They never could: on the streaming path hoosh dropped the
+caller's `tools` array before it reached the backend, so a local model was asked with no tools and
+answered — correctly — that it had none. Reported by thoth, whose users read it as "only a few models
+can actually use tools, the rest just write code about them". Remote providers were never affected,
+which is exactly why it looked like a model-quality problem rather than a gateway one.
+
+**Patch, not minor:** no API is added or changed. Two internal signatures grow a parameter, and one
+provider's request and response shapes are now translated the way the other three already were;
+every externally visible contract is the one that was already documented.
+
+### Fixed
+
+- **The local streaming path forwards `tools`.** `handle_chat_stream`'s remote branch has always
+  passed `tools_raw/tools_len` to `_remote_stream_body`; the local branch called
+  `retry_forward_stream(cfg, route, model, msg_raw, msg_len, gen)` — a signature with **no tools
+  parameter** — and `provider_forward_stream` hardcoded `0, 0` into `_build_chat_body_raw_stream`.
+  Both signatures now carry `tools_raw/tools_len` and the handler passes them. Since clients stream
+  by default (thoth's `[hoosh].stream` defaults on), this was the **default** local experience.
+  Proven by holding one request constant and flipping only `stream`: blocking returned a clean
+  `list_dir` tool call, streaming returned a ```` ```json ```` code block describing one.
+
+- **Ollama's tool-call shape is converted, not forwarded raw** (`_ollama_tool_calls`). Ollama nests
+  `{"function":{"index":0,"name":…,"arguments":{…}}}`, where OpenAI specifies
+  `{"id":…,"type":"function","function":{"name":…,"arguments":"<JSON string>"}}`. Three differences:
+  `arguments` is a JSON **object** rather than a JSON-encoded string, `index` is not an OpenAI field,
+  and older builds omit `id`. Anthropic and Google were already converted here (`_anthropic_tool_calls`,
+  `_gemini_tool_calls`); Ollama was routed through `_extract_openai_tool_calls`, which is a **raw span
+  copy** — so it was the one provider whose non-conforming shape reached clients untouched. A client
+  reading `arguments` as the spec's string got nothing and silently dropped every argument: tools whose
+  parameters are optional appeared to work, while required-argument tools failed on every round. The
+  converter is tolerant on input — an already-encoded string is emitted verbatim rather than escaped a
+  second time, and a missing `id` is synthesised as `call_<n>`, mirroring the Gemini converter.
+
+- **The local streaming reader emits tool-call deltas.** It only ever extracted `content`
+  (`ollama_extract_text`), so a locally streamed tool call was parsed off the wire and discarded —
+  fixing the two items above without this one would have forwarded the tools and then swallowed the
+  answer. Ollama chunks convert through `_ollama_tool_calls`; a local OpenAI-compatible backend's
+  deltas go through `_extract_openai_tool_calls`, the same decode the remote branch already does.
+
+- **Tool-continuation requests are converted back to Ollama's shape** (`_ollama_messages_convert`,
+  applied by `_sb_add_messages` on both the blocking and streaming builders). This is the outbound
+  mirror of the item above, and without it the first three fixes still leave the agentic loop
+  **unable to close**: the client echoes back the assistant turn hoosh handed it, whose `arguments`
+  is now a JSON string, and Ollama's `/api/chat` rejects that outright —
+  `{"error":"Value looks like object, but can't find closing '}' symbol"}` — so round two returns
+  nothing and the caller reports an empty completion. Only assistant turns carrying `tool_calls` are
+  rewritten, and only their `arguments` (string → object); `role:"tool"` results already match
+  Ollama's shape, and every other message is copied span-verbatim. When no message carries
+  `tool_calls` the converter returns 0 and the raw span is forwarded untouched, so ordinary
+  conversations are not re-serialised. `_build_anthropic_body_x` has always done this translation
+  for Anthropic; Ollama was the provider it was never done for.
+
+### Added
+
+- **`_emit_tool_call_encoded`** — the `_emit_tool_call` envelope for an argument span that is already
+  an encoded JSON string. Running those bytes through `_json_esc_span` would escape the escapes and
+  double-encode the arguments.
+- **10 assertions** (`tests/hoosh.tcyr`, 679 → 689). Inbound: object arguments → encoded string with
+  `type:"function"` added and `index` dropped; empty `{}` arguments preserved rather than dropping the
+  call; missing `id` synthesised; already-encoded string arguments passed through undamaged; two calls
+  in one round converted in order; a content-only chunk yielding 0 so the streaming reader emits
+  nothing. Outbound: `arguments` string unescaped to an object with user and `role:"tool"` turns left
+  verbatim; no `tool_calls` → 0; an empty argument string → `{}`; an argument that is already an object
+  passed through. The object payload is captured verbatim from `qwen3.5:9b` through hoosh.
+
+### Verified rather than assumed
+
+- **The agentic loop closes on a local model, end to end.** `thoth 0.38.5 → hoosh 2.6.1 →
+  qwen3.5:9b` on a Jetson Orin, streaming (the default), listing a real directory: round one calls
+  `list_dir {"path":"."}` and gets 241 bytes back, round two answers with the actual contents. Before
+  this release the same run reported `no completion returned`. `llama3.1:8b` likewise answers from a
+  real listing. `nemotron-3-nano:4b` also completes both rounds, though it passes `{"path":"/"}` —
+  an absolute path the caller's jail refuses — and then reports that refusal accurately; the
+  transport is doing its job there and the argument choice is the model's.
+- **No benchmark regression.** The two rows that cross the +20% watch threshold against the 2.6.0
+  baseline are sub-100ns timers whose **absolute** deltas are 3ns and 11ns
+  (`estimate_tokens_per_provider` 8 → 11, `latency_bucket_find` 51 → 62), and same-build variance was
+  measured **larger than the threshold itself**: two consecutive runs of one unchanged binary moved
+  `route_select_20_providers` 1108 → 906 ns (−18.2%) and `estimate_tokens_per_provider` 10 → 8 ns
+  (−20.0%). Nothing this release touches is on a benchmarked path — the conversions run only on the
+  Ollama request/response boundary. 25 benchmarks recorded.
+- **The suite's mirrored copies match their sources byte-for-byte.** `tests/hoosh.tcyr` cannot include
+  `provider.cyr`, so it mirrors the pure functions; `_ollama_tool_calls` and `_emit_tool_call_encoded`
+  were diffed against the real definitions rather than eyeballed.
+- Clean at the gates: `cyrius fmt --check`, `cyrius lint` (0 warn lines), `cyrius vet` (34 deps, 0
+  untrusted, 0 missing), `cyrius deny` (0 violations). 685 + 1 tests passing.
+
+### Known issues
+
+- **`_extract_tools` matches the first `"tools":` byte-run in the request body**, including one that
+  appears inside a message string (JSON-escaped `\"tools\":` still contains the needle at the quote).
+  A conversation that quotes that exact text ahead of the real key yields a bogus span. Pre-existing,
+  not introduced here, and unrelated to the tool-forwarding fix — a caller would have to quote
+  `"tools":` verbatim in a message to trigger it.
+
 ## [2.6.0] — 2026-07-30
 
 **A response now says what happened to it.** Until this release a client could not tell a cache hit

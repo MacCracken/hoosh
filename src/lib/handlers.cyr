@@ -1730,8 +1730,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         return 0;
     }
 
+    # 2.6.1: forward the caller's tools here too. This branch used to drop them on the floor —
+    # the remote branch above has always passed them to _remote_stream_body.
     var bfd = retry_forward_stream(
-    _retry_cfg, route, model, msg_raw, msg_len, gen);
+    _retry_cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
     if (bfd < 0) {
         return http_error(cfd, "502", "Bad Gateway",
         "provider backend unreachable");
@@ -1769,6 +1771,15 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                             txt, strlen(txt)) < 0) { done = 1; }
                             token_count = token_count + 1;
                         }
+                        # 2.6.1: …and its tool calls. Reading only "content" meant a locally
+                        # streamed tool call was parsed off the wire and then thrown away, so
+                        # even once tools are forwarded (above) the caller would see an empty
+                        # reply instead of the call. Converted out of Ollama's native shape,
+                        # exactly as the non-streaming path does.
+                        var otc = _ollama_tool_calls(lbuf, lpos);
+                        if (otc != 0) {
+                            if (_sse_tool_chunk(cfd, model, otc) < 0) { done = 1; }
+                        }
                     } else {
                         # OpenAI SSE: lines start with "data: "
                         if (lpos > 6) {
@@ -1784,6 +1795,15 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                         if (_sse_chunk(cfd, model,
                                         txt, strlen(txt)) < 0) { done = 1; }
                                         token_count = token_count + 1;
+                                    }
+                                    # 2.6.1: a LOCAL OpenAI-compatible backend streams
+                                    # tool_call deltas in the same shape the remote branch
+                                    # already decodes; they were dropped here for the same
+                                    # reason Ollama's were.
+                                    var ltc = _extract_openai_tool_calls(dptr, dlen);
+                                    if (ltc != 0) {
+                                        if (_sse_tool_chunk(cfd, model,
+                                        ltc) < 0) { done = 1; }
                                     }
                                 }
                             }
