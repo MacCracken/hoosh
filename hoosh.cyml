@@ -150,12 +150,16 @@ capacity = 500
 # --- Local providers ---
 
 [[providers]]
-type = "Ollama"
-base_url = "http://192.168.1.186:11434"  # default
-priority = 1
-models = ["llama*", "mistral*", "qwen*", "phi*", "gemma*"]
+#type = "Ollama"
+#base_url = "http://192.168.1.186:11434"  # default
+#priority = 1
+#models = ["llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*", "deepseek*"]
 
-# [[providers]]
+type = "Ollama"
+base_url = "http://192.168.1.186:11434"
+priority = 1
+models = ["llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*", "deepseek*"]
+
 # type = "LlamaCpp"
 # base_url = "http://localhost:8080"
 # priority = 2
