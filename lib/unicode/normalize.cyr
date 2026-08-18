@@ -1,0 +1,511 @@
+# lib/unicode/normalize.cyr — Unicode 17.0.0 normalization
+# (NFC / NFD / NFKC / NFKD).
+#
+# Public API:
+#   NormalForm enum                  — NFC=0, NFD=1, NFKC=2, NFKD=3.
+#                                      K-forms (compatibility
+#                                      normalization) shipped at v5.8.60
+#                                      after v5.8.59 raised the
+#                                      str_data heap cap from 256 KB to
+#                                      2 MB to fit the ~445 KB compat-
+#                                      decomposition table.
+#   unicode_canonical_combining_class(cp)
+#                                    → int 0..255. Returns 0 (default
+#                                      "starter") if cp not in the CCC
+#                                      table.
+#   unicode_canonical_decomp(cp, out_buf, cap)
+#                                    → int (count, 1..3). Writes the
+#                                      canonical 1-step decomposition
+#                                      to out_buf as i64 slots; returns
+#                                      the number of cps written. If cp
+#                                      has no canonical decomp, returns
+#                                      1 with out_buf[0] = cp. Hangul
+#                                      handled algorithmically (returns
+#                                      2 for LV, 3 for LVT — UAX #15 §5
+#                                      documented exception to the
+#                                      "≤2 cps" canonical-decomp rule).
+#   unicode_compat_decomp(cp, out_buf, cap)
+#                                    → int (count, 1..18). Writes the
+#                                      compatibility 1-step
+#                                      decomposition to out_buf. Falls
+#                                      back to canonical decomp if cp
+#                                      has no compat mapping. Max 18
+#                                      cps for U+FDFA (Arabic ligature
+#                                      "salaam alayhi wa-sallam").
+#   unicode_compose(cp1, cp2)        → int (cp_composed) or 0 if no
+#                                      composition. Includes Hangul
+#                                      L+V→LV and LV+T→LVT algorithms.
+#                                      Same composition pass for NFC
+#                                      and NFKC per UAX #15 §1.3.
+#   str_normalize(s, form)           → Str. Full algorithm:
+#                                      1. Recursively decompose every
+#                                         cp (canonical for NFC/NFD,
+#                                         compat for NFKC/NFKD).
+#                                      2. Apply canonical reordering
+#                                         (sort consecutive non-starters
+#                                         by CCC).
+#                                      3. If form is NFC or NFKC:
+#                                         re-compose pairs greedily.
+#                                      4. Re-encode to UTF-8.
+#   str_eq_normalized(a, b, form)    → 1 if normalize(a) == normalize(b)
+#                                      byte-for-byte, else 0. Useful for
+#                                      filename compare on macOS (NFD
+#                                      on disk vs NFC in source).
+
+include "lib/unicode/_decode.cyr"
+include "lib/unicode/_normalize_data.cyr"
+
+# NormalForm enum — passed to str_normalize / str_eq_normalized.
+# K-forms shipped at v5.8.60 once str_data cap was raised at .59.
+enum NormalForm {
+    NFC = 0;
+    NFD = 1;
+    NFKC = 2;
+    NFKD = 3;
+}
+
+# Compat decomposition uses a 2-table split (IDX + DATA) to keep size
+# at ~87 KB instead of 445 KB fixed-width-padded. Generator-side detail
+# in programs/gen_unicode_data.cyr; runtime lookup is binary search on
+# the sorted IDX → indirect read into the variable-width DATA blob.
+# IDX record stride = 6 (cp u24) + 6 (data_off u24) = 12 hex chars.
+# Max compat decomp length = 18 cps (U+FDFA Arabic ligature).
+var _UC_COMPAT_IDX_REC_CHARS = 12;
+var _UC_COMPAT_MAX_CPS = 18;
+
+# Hangul algorithm constants (UAX #15 §10).
+# Hangul syllables compose deterministically — L (initial consonant) +
+# V (medial vowel) + optional T (final consonant) → S (precomposed
+# syllable). No table needed; the math below covers all 11172 syllables.
+var _UC_HANGUL_LBASE = 0x1100;
+var _UC_HANGUL_VBASE = 0x1161;
+var _UC_HANGUL_TBASE = 0x11A7;
+var _UC_HANGUL_LCOUNT = 19;
+var _UC_HANGUL_VCOUNT = 21;
+var _UC_HANGUL_TCOUNT = 28;
+var _UC_HANGUL_NCOUNT = 588;       # VCOUNT * TCOUNT
+var _UC_HANGUL_SBASE = 0xAC00;
+var _UC_HANGUL_SCOUNT = 11172;     # LCOUNT * NCOUNT
+
+# ── Piece dispatchers ─────────────────────────────────────────────────
+
+fn _uc_ccc_piece(idx) {
+    if (idx == 0) { return _UNICODE_CCC_PIECE_0; }
+    if (idx == 1) { return _UNICODE_CCC_PIECE_1; }
+    return 0;
+}
+
+fn _uc_canon_piece(idx) {
+    if (idx == 0) { return _UNICODE_CANON_PIECE_0; }
+    if (idx == 1) { return _UNICODE_CANON_PIECE_1; }
+    if (idx == 2) { return _UNICODE_CANON_PIECE_2; }
+    if (idx == 3) { return _UNICODE_CANON_PIECE_3; }
+    if (idx == 4) { return _UNICODE_CANON_PIECE_4; }
+    if (idx == 5) { return _UNICODE_CANON_PIECE_5; }
+    return 0;
+}
+
+fn _uc_compose_piece(idx) {
+    if (idx == 0) { return _UNICODE_COMPOSE_PIECE_0; }
+    if (idx == 1) { return _UNICODE_COMPOSE_PIECE_1; }
+    if (idx == 2) { return _UNICODE_COMPOSE_PIECE_2; }
+    return 0;
+}
+
+fn _uc_compat_idx_piece(idx) {
+    if (idx == 0) { return _UNICODE_COMPAT_IDX_PIECE_0; }
+    if (idx == 1) { return _UNICODE_COMPAT_IDX_PIECE_1; }
+    if (idx == 2) { return _UNICODE_COMPAT_IDX_PIECE_2; }
+    if (idx == 3) { return _UNICODE_COMPAT_IDX_PIECE_3; }
+    if (idx == 4) { return _UNICODE_COMPAT_IDX_PIECE_4; }
+    return 0;
+}
+
+# ── Public lookups ────────────────────────────────────────────────────
+
+# Canonical Combining Class — 0 (starter) by default; lookup miss → 0.
+fn unicode_canonical_combining_class(cp) {
+    if (cp < 0) { return 0; }
+    if (cp > 1114111) { return 0; }
+    var lo = 0;
+    var hi = _UNICODE_CCC_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_CCC_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_CCC_RECORDS_PER_PIECE) * 8;
+        var piece = _uc_ccc_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else { return _uc_hex2(piece, p_off + 6); }
+        }
+    }
+    return 0;
+}
+
+# Hangul decompose — returns 2 (LV) or 3 (LVT) and writes to out_buf.
+# Caller must have verified cp is in [SBASE, SBASE+SCOUNT) before calling.
+fn _uc_hangul_decompose(cp, out_buf, cap) {
+    var s_index = cp - _UC_HANGUL_SBASE;
+    var l = _UC_HANGUL_LBASE + s_index / _UC_HANGUL_NCOUNT;
+    var v = _UC_HANGUL_VBASE + (s_index - (s_index / _UC_HANGUL_NCOUNT) * _UC_HANGUL_NCOUNT) / _UC_HANGUL_TCOUNT;
+    var t_index = s_index - (s_index / _UC_HANGUL_TCOUNT) * _UC_HANGUL_TCOUNT;
+    store64(out_buf, l);
+    store64(out_buf + 8, v);
+    if (t_index == 0) {
+        return 2;
+    }
+    if (cap < 3) { return 0; }
+    store64(out_buf + 16, _UC_HANGUL_TBASE + t_index);
+    return 3;
+}
+
+# Canonical 1-step decomposition (NFD building block).
+fn unicode_canonical_decomp(cp, out_buf, cap) {
+    if (cap < 2) { return 0; }
+    if (cp < 0 || cp > 1114111) {
+        store64(out_buf, cp);
+        return 1;
+    }
+    # Hangul: algorithmic.
+    if (cp >= _UC_HANGUL_SBASE) {
+        if (cp < _UC_HANGUL_SBASE + _UC_HANGUL_SCOUNT) {
+            return _uc_hangul_decompose(cp, out_buf, cap);
+        }
+    }
+    # General: binary search canon table.
+    var lo = 0;
+    var hi = _UNICODE_CANON_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_CANON_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_CANON_RECORDS_PER_PIECE) * 20;
+        var piece = _uc_canon_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else {
+                var n = _uc_hex2(piece, p_off + 6);
+                store64(out_buf, _uc_u24(piece, p_off + 8));
+                if (n >= 2) { store64(out_buf + 8, _uc_u24(piece, p_off + 14)); }
+                return n;
+            }
+        }
+    }
+    # No decomp — identity.
+    store64(out_buf, cp);
+    return 1;
+}
+
+# Compatibility 1-step decomposition (NFKD building block).
+# Falls back to canonical decomp if cp has no compat mapping (UAX #15
+# semantics: compat decomp = compat-or-canonical for any given cp).
+# Hangul handled algorithmically (same as canonical).
+#
+# Lookup is two-step: binary search the sorted IDX (cp u24, data_off
+# u24) for cp, then index into the DATA blob at the returned offset to
+# read count + cps. The IDX/DATA split saves ~360 KB vs the fixed-width
+# 116-char-per-record encoding (compat distribution is heavily 1-cp,
+# 2685 / 3833 records — fixed-width pads 100+ chars of zeros each).
+fn unicode_compat_decomp(cp, out_buf, cap) {
+    if (cap < 2) { return 0; }
+    if (cp < 0 || cp > 1114111) {
+        store64(out_buf, cp);
+        return 1;
+    }
+    # Hangul: algorithmic — compat fold reuses canonical decomp.
+    if (cp >= _UC_HANGUL_SBASE) {
+        if (cp < _UC_HANGUL_SBASE + _UC_HANGUL_SCOUNT) {
+            return _uc_hangul_decompose(cp, out_buf, cap);
+        }
+    }
+    # IDX binary search.
+    var lo = 0;
+    var hi = _UNICODE_COMPAT_IDX_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_COMPAT_IDX_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_COMPAT_IDX_RECORDS_PER_PIECE) * _UC_COMPAT_IDX_REC_CHARS;
+        var piece = _uc_compat_idx_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else {
+                # Hit — read data_off, then DATA[data_off] = count + cps.
+                var data_off = _uc_u24(piece, p_off + 6);
+                var n = _uc_hex2(_UNICODE_COMPAT_DATA, data_off);
+                if (cap < n) { return 0; }
+                var i = 0;
+                while (i < n) {
+                    store64(out_buf + i * 8,
+                            _uc_u24(_UNICODE_COMPAT_DATA, data_off + 2 + i * 6));
+                    i = i + 1;
+                }
+                return n;
+            }
+        }
+    }
+    # No compat mapping → canonical fallback.
+    return unicode_canonical_decomp(cp, out_buf, cap);
+}
+
+# Composition lookup — Hangul algorithmic + general table.
+fn unicode_compose(cp1, cp2) {
+    # Hangul L + V → LV
+    if (cp1 >= _UC_HANGUL_LBASE) {
+        if (cp1 < _UC_HANGUL_LBASE + _UC_HANGUL_LCOUNT) {
+            if (cp2 >= _UC_HANGUL_VBASE) {
+                if (cp2 < _UC_HANGUL_VBASE + _UC_HANGUL_VCOUNT) {
+                    var l_idx = cp1 - _UC_HANGUL_LBASE;
+                    var v_idx = cp2 - _UC_HANGUL_VBASE;
+                    return _UC_HANGUL_SBASE + (l_idx * _UC_HANGUL_VCOUNT + v_idx) * _UC_HANGUL_TCOUNT;
+                }
+            }
+        }
+    }
+    # Hangul LV + T → LVT
+    if (cp1 >= _UC_HANGUL_SBASE) {
+        if (cp1 < _UC_HANGUL_SBASE + _UC_HANGUL_SCOUNT) {
+            var s_idx = cp1 - _UC_HANGUL_SBASE;
+            # LV (i.e. T-less) has s_idx % TCOUNT == 0
+            if (s_idx - (s_idx / _UC_HANGUL_TCOUNT) * _UC_HANGUL_TCOUNT == 0) {
+                if (cp2 > _UC_HANGUL_TBASE) {
+                    if (cp2 < _UC_HANGUL_TBASE + _UC_HANGUL_TCOUNT) {
+                        return cp1 + (cp2 - _UC_HANGUL_TBASE);
+                    }
+                }
+            }
+        }
+    }
+    # General table — binary search by cp1 (primary key); within the run
+    # of records sharing cp1, linear-scan for cp2.
+    var lo = 0;
+    var hi = _UNICODE_COMPOSE_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_COMPOSE_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_COMPOSE_RECORDS_PER_PIECE) * 18;
+        var piece = _uc_compose_piece(p_idx);
+        var c1 = _uc_u24(piece, p_off);
+        if (cp1 < c1) { hi = mid - 1; }
+        else {
+            if (cp1 > c1) { lo = mid + 1; }
+            else {
+                # Found matching cp1; scan backward to find run start.
+                var run_start = mid;
+                while (run_start > 0) {
+                    var pp_idx = (run_start - 1) / _UNICODE_COMPOSE_RECORDS_PER_PIECE;
+                    var pp_off = ((run_start - 1) - pp_idx * _UNICODE_COMPOSE_RECORDS_PER_PIECE) * 18;
+                    var pp = _uc_compose_piece(pp_idx);
+                    if (_uc_u24(pp, pp_off) != cp1) { break; }
+                    run_start = run_start - 1;
+                }
+                # Linear scan for cp2 in the run.
+                var i = run_start;
+                while (i < _UNICODE_COMPOSE_RECORD_COUNT) {
+                    var ip_idx = i / _UNICODE_COMPOSE_RECORDS_PER_PIECE;
+                    var ip_off = (i - ip_idx * _UNICODE_COMPOSE_RECORDS_PER_PIECE) * 18;
+                    var ip = _uc_compose_piece(ip_idx);
+                    if (_uc_u24(ip, ip_off) != cp1) { break; }
+                    if (_uc_u24(ip, ip_off + 6) == cp2) {
+                        return _uc_u24(ip, ip_off + 12);
+                    }
+                    i = i + 1;
+                }
+                return 0;   # cp1 found but no cp2 match
+            }
+        }
+    }
+    return 0;
+}
+
+# UTF-8 codec helpers `_uc_emit_utf8` + `_uc_decode_utf8` live in the
+# included `lib/unicode/_decode.cyr`. v5.8.55 lifted both fns out of
+# the per-module duplicates that previously lived here (with the
+# `_uc_nz_*` synthetic-collision-dodge prefix) and in casefold.cyr —
+# the prior copies were byte-identical modulo whitespace.
+
+# ── Recursive decomposition ───────────────────────────────────────────
+# Walk s, decomposing each cp recursively until no further expansion.
+# Writes the expanded cp sequence to buf as i64 slots; returns count.
+# Canonical only (NFC/NFD); NFKC/NFKD compat path deferred to a later
+# slot per file header.
+
+fn _uc_decompose_cp_recursive(cp, buf, off, cap) {
+    var step_buf = alloc(32);    # max 3 cps × 8 bytes (Hangul LVT)
+    var n = unicode_canonical_decomp(cp, step_buf, 3);
+    if (n == 1) {
+        if (load64(step_buf) == cp) {
+            # Fixed point — write cp itself.
+            if (off >= cap) { return off; }
+            store64(buf + off * 8, cp);
+            return off + 1;
+        }
+    }
+    # Recursively decompose each piece.
+    var i = 0;
+    while (i < n) {
+        var sub_cp = load64(step_buf + i * 8);
+        off = _uc_decompose_cp_recursive(sub_cp, buf, off, cap);
+        i = i + 1;
+    }
+    return off;
+}
+
+# K-form recursive decomposition. Step uses unicode_compat_decomp (which
+# falls back to canonical when compat mapping is absent), so a single
+# walk handles both compat and canonical equivalents in one pass per
+# UAX #15 §1.3 ("compatibility decomposition" includes the canonical
+# decomposition for any character that has only a canonical mapping).
+fn _uc_decompose_cp_recursive_compat(cp, buf, off, cap) {
+    var step_buf = alloc(_UC_COMPAT_MAX_CPS * 8);
+    var n = unicode_compat_decomp(cp, step_buf, _UC_COMPAT_MAX_CPS);
+    if (n == 1) {
+        if (load64(step_buf) == cp) {
+            if (off >= cap) { return off; }
+            store64(buf + off * 8, cp);
+            return off + 1;
+        }
+    }
+    var i = 0;
+    while (i < n) {
+        var sub_cp = load64(step_buf + i * 8);
+        off = _uc_decompose_cp_recursive_compat(sub_cp, buf, off, cap);
+        i = i + 1;
+    }
+    return off;
+}
+
+# ── Canonical reordering ──────────────────────────────────────────────
+# Bubble sort consecutive non-starter (CCC > 0) cps by CCC.
+# Starters (CCC == 0) act as fence posts — they don't move and stop runs.
+
+fn _uc_canonical_reorder(buf, n) {
+    var i = 1;
+    while (i < n) {
+        var prev = load64(buf + (i - 1) * 8);
+        var curr = load64(buf + i * 8);
+        var prev_ccc = unicode_canonical_combining_class(prev);
+        var curr_ccc = unicode_canonical_combining_class(curr);
+        if (prev_ccc > curr_ccc) {
+            if (curr_ccc > 0) {
+                # Swap and back up.
+                store64(buf + (i - 1) * 8, curr);
+                store64(buf + i * 8, prev);
+                if (i > 1) { i = i - 1; }
+                else { i = i + 1; }
+                continue;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+# ── Composition pass (NFC / NFKC) ─────────────────────────────────────
+# Walk the reordered buffer greedily composing pairs. UAX #15 §10.
+# Writes the composed sequence in place; returns new length.
+
+fn _uc_compose_pass(buf, n) {
+    if (n == 0) { return 0; }
+    var starter_pos = 0;          # slot offset of current starter in buf
+    var starter = load64(buf);
+    var write_pos = 1;
+    var last_ccc = 0;             # CCC of last non-starter written after starter
+    var i = 1;
+    while (i < n) {
+        var cp = load64(buf + i * 8);
+        var cp_ccc = unicode_canonical_combining_class(cp);
+        # Composition is blocked when a prior non-starter with CCC >= cp's
+        # CCC sits between starter and cp (UAX #15 §4 "Canonical Ordering
+        # Behavior" + the compose-blocking rule).
+        var blocked = 0;
+        if (last_ccc >= cp_ccc) {
+            if (last_ccc > 0) { blocked = 1; }
+        }
+        if (blocked == 0) {
+            var composed = unicode_compose(starter, cp);
+            if (composed != 0) {
+                # Replace the starter slot in-place; cp is consumed.
+                starter = composed;
+                store64(buf + starter_pos * 8, starter);
+                i = i + 1;
+                continue;
+            }
+        }
+        # Not composing — keep cp at write_pos.
+        store64(buf + write_pos * 8, cp);
+        if (cp_ccc == 0) {
+            # cp is a new starter — anchor for subsequent compositions.
+            starter_pos = write_pos;
+            starter = cp;
+            last_ccc = 0;
+        } else {
+            last_ccc = cp_ccc;
+        }
+        write_pos = write_pos + 1;
+        i = i + 1;
+    }
+    return write_pos;
+}
+
+# ── Public Str-level normalization ────────────────────────────────────
+
+fn str_normalize(s, form) {
+    var src = str_data(s);
+    var src_len = str_len(s);
+    # Worst-case decomposition expansion. Canonical only (NFC/NFD): 3x
+    # (Hangul LVT). Compat (NFKC/NFKD): 18x (U+FDFA Arabic ligature).
+    # Caller's input is bounded by str_len; per-UTF-8 byte gives ≤ 1 cp,
+    # so the per-cp expansion factor is the only multiplier. Use 18x
+    # whenever the form is K-flavored.
+    var per_cp_factor = 3;
+    if (form == NFKC) { per_cp_factor = _UC_COMPAT_MAX_CPS; }
+    if (form == NFKD) { per_cp_factor = _UC_COMPAT_MAX_CPS; }
+    var max_cps = src_len * per_cp_factor + 4;
+    var dec_buf = alloc(max_cps * 8);
+    # 1. Decompose (canonical for NFC/NFD, compat for NFKC/NFKD).
+    var use_compat = 0;
+    if (form == NFKC) { use_compat = 1; }
+    if (form == NFKD) { use_compat = 1; }
+    var i = 0;
+    var dec_len = 0;
+    var cp_slot = alloc(8);
+    while (i < src_len) {
+        var consumed = _uc_decode_utf8(src, i, src_len, cp_slot);
+        var cp = load64(cp_slot);
+        if (use_compat == 1) {
+            dec_len = _uc_decompose_cp_recursive_compat(cp, dec_buf, dec_len, max_cps);
+        } else {
+            dec_len = _uc_decompose_cp_recursive(cp, dec_buf, dec_len, max_cps);
+        }
+        i = i + consumed;
+    }
+    # 2. Canonical reorder (UAX #15: shared between NFC/NFD and NFKC/NFKD).
+    _uc_canonical_reorder(dec_buf, dec_len);
+    # 3. Compose if NFC or NFKC. Composition pass is canonical-only;
+    # NFKC = compat-decompose then canonical-compose per UAX #15 §1.3.
+    if (form == NFC) {
+        dec_len = _uc_compose_pass(dec_buf, dec_len);
+    }
+    if (form == NFKC) {
+        dec_len = _uc_compose_pass(dec_buf, dec_len);
+    }
+    # 4. Re-encode to UTF-8.
+    var out_buf = alloc(dec_len * 4 + 4);
+    var oi = 0;
+    var k = 0;
+    while (k < dec_len) {
+        oi = oi + _uc_emit_utf8(out_buf + oi, load64(dec_buf + k * 8));
+        k = k + 1;
+    }
+    return str_new(out_buf, oi);
+}
+
+fn str_eq_normalized(a, b, form) {
+    var na = str_normalize(a, form);
+    var nb = str_normalize(b, form);
+    return str_eq(na, nb);
+}

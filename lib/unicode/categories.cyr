@@ -1,0 +1,104 @@
+# lib/unicode/categories.cyr — Unicode 17.0.0 GeneralCategory lookup.
+#
+# Public API:
+#   unicode_category(cp)       → int, 0..29 (GeneralCategory enum value).
+#                                Returns Cn (29 = Unassigned) if cp is not
+#                                in any defined range. cp is the Unicode
+#                                codepoint as int (0x0000..0x10FFFF).
+#
+# Data source: Unicode 17.0.0 DerivedGeneralCategory.txt, fold-merged into
+# 4144 sorted ranges. Encoded as 14-hex-char records (u24 BE start,
+# u24 BE end inclusive, u8 category index) split across 9 string-literal
+# pieces of 500 ranges each in lib/unicode/_categories_data.cyr.
+#
+# Lookup is binary search across the 4144-range index; ~12 iterations max.
+
+include "lib/unicode/_decode.cyr"
+include "lib/unicode/_categories_data.cyr"
+
+# GeneralCategory leaf categories, indexed 0..29.
+#
+# Aggregate categories (L = Letter, M = Mark, N = Number, P = Punctuation,
+# S = Symbol, Z = Separator, C = Other) are NOT enumerated — consumers
+# should test membership via boolean helpers (see below) so they remain
+# decoupled from the leaf-set composition.
+enum GeneralCategory {
+    GC_LU = 0;     # Lu — Letter, uppercase
+    GC_LL = 1;     # Ll — Letter, lowercase
+    GC_LT = 2;     # Lt — Letter, titlecase
+    GC_LM = 3;     # Lm — Letter, modifier
+    GC_LO = 4;     # Lo — Letter, other
+    GC_MN = 5;     # Mn — Mark, nonspacing
+    GC_MC = 6;     # Mc — Mark, spacing combining
+    GC_ME = 7;     # Me — Mark, enclosing
+    GC_ND = 8;     # Nd — Number, decimal digit
+    GC_NL = 9;     # Nl — Number, letter
+    GC_NO = 10;    # No — Number, other
+    GC_PC = 11;    # Pc — Punctuation, connector
+    GC_PD = 12;    # Pd — Punctuation, dash
+    GC_PS = 13;    # Ps — Punctuation, open
+    GC_PE = 14;    # Pe — Punctuation, close
+    GC_PI = 15;    # Pi — Punctuation, initial quote
+    GC_PF = 16;    # Pf — Punctuation, final quote
+    GC_PO = 17;    # Po — Punctuation, other
+    GC_SM = 18;    # Sm — Symbol, math
+    GC_SC = 19;    # Sc — Symbol, currency
+    GC_SK = 20;    # Sk — Symbol, modifier
+    GC_SO = 21;    # So — Symbol, other
+    GC_ZS = 22;    # Zs — Separator, space
+    GC_ZL = 23;    # Zl — Separator, line
+    GC_ZP = 24;    # Zp — Separator, paragraph
+    GC_CC = 25;    # Cc — Other, control
+    GC_CF = 26;    # Cf — Other, format
+    GC_CS = 27;    # Cs — Other, surrogate
+    GC_CO = 28;    # Co — Other, private use
+    GC_CN = 29;    # Cn — Other, unassigned
+}
+
+# Hex-pair decoders (`_uc_hex1`, `_uc_hex2`, `_uc_u24`) live in
+# lib/unicode/_decode.cyr — shared with lib/unicode/casefold.cyr and
+# any later unicode/* module that bakes UCD data the same way.
+
+# Return the string-literal pointer for piece index 0..8.
+# Hand-dispatched because cyrius doesn't currently support indexed-by-int
+# access into a parallel array of distinct gvar names.
+fn _uc_piece(idx) {
+    if (idx == 0) { return _UNICODE_CAT_PIECE_0; }
+    if (idx == 1) { return _UNICODE_CAT_PIECE_1; }
+    if (idx == 2) { return _UNICODE_CAT_PIECE_2; }
+    if (idx == 3) { return _UNICODE_CAT_PIECE_3; }
+    if (idx == 4) { return _UNICODE_CAT_PIECE_4; }
+    if (idx == 5) { return _UNICODE_CAT_PIECE_5; }
+    if (idx == 6) { return _UNICODE_CAT_PIECE_6; }
+    if (idx == 7) { return _UNICODE_CAT_PIECE_7; }
+    if (idx == 8) { return _UNICODE_CAT_PIECE_8; }
+    return 0;
+}
+
+# Look up the GeneralCategory enum value for codepoint cp.
+# Returns GC_CN (29) for unassigned codepoints (not in any range).
+fn unicode_category(cp) {
+    if (cp < 0) { return 29; }
+    if (cp > 1114111) { return 29; }   # 0x10FFFF — Unicode max codepoint
+
+    var lo = 0;
+    var hi = _UNICODE_CAT_RANGE_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / 500;
+        var p_off = (mid - p_idx * 500) * 14;
+        var piece = _uc_piece(p_idx);
+        var rs = _uc_u24(piece, p_off);
+        var re = _uc_u24(piece, p_off + 6);
+        if (cp < rs) {
+            hi = mid - 1;
+        } else {
+            if (cp > re) {
+                lo = mid + 1;
+            } else {
+                return _uc_hex2(piece, p_off + 12);
+            }
+        }
+    }
+    return 29;   # Cn — unassigned
+}

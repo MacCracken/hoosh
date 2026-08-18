@@ -1,0 +1,228 @@
+# lib/unicode/casefold.cyr — Unicode 17.0.0 simple + full case folding.
+#
+# Public API:
+#   unicode_to_upper(cp)             → int (codepoint), simple 1:1 uppercase
+#                                      mapping. Returns cp unchanged if no
+#                                      mapping defined.
+#   unicode_to_lower(cp)             → int, simple 1:1 lowercase mapping.
+#   unicode_to_title(cp)             → int, simple 1:1 titlecase mapping.
+#   unicode_fold(cp, out_buf, cap)   → int (count of codepoints written
+#                                      to out_buf; 1..3). Full case folding
+#                                      per UCD CaseFolding.txt status C+F:
+#                                      handles one-to-many expansions
+#                                      (e.g. ß → "ss", İ → "i̇").
+#                                      Returns 1 with cp unchanged if no
+#                                      fold defined. Returns 0 if cap < 3.
+#   str_lower_unicode(s)             → Str (newly allocated), each
+#                                      codepoint of s simple-lowercased.
+#                                      Output may be different byte-length
+#                                      than input (e.g. İ → i = 1 byte).
+#   str_upper_unicode(s)             → Str (newly allocated), simple-
+#                                      uppercased.
+#
+# Notes:
+#   * Simple vs. full: simple mappings are 1:1 codepoint-to-codepoint.
+#     Full case fold can expand one cp into 2-3 cps. The `unicode_fold`
+#     call is the only way to get full-fold semantics; the
+#     `unicode_to_lower` / `str_lower_unicode` simple variants do NOT
+#     handle e.g. ß → "ss".
+#   * Aggregate categories (L, M, N, …) and Turkish-locale (`T` status
+#     in CaseFolding.txt) are NOT folded — consistent with non-Turkish
+#     locales most consumers want.
+#   * The str_*_unicode wrappers live in this file (not lib/str.cyr)
+#     so that lib/str.cyr-only consumers don't transitively pull in
+#     ~100 KB of Unicode data tables. Consumers wanting Str-level case
+#     fold include BOTH `lib/str.cyr` + this file.
+
+include "lib/unicode/_decode.cyr"
+include "lib/unicode/_casefold_data.cyr"
+
+# ── Simple-table piece dispatchers (4 tables × N pieces each) ─────────
+# Hand-dispatched because cyrius doesn't currently support indexed-by-int
+# access into a parallel array of distinct gvar names. Each table has a
+# small fixed piece count (3..7), so the linear if-cascade is tolerable.
+
+fn _uc_upper_piece(idx) {
+    if (idx == 0) { return _UNICODE_UPPER_PIECE_0; }
+    if (idx == 1) { return _UNICODE_UPPER_PIECE_1; }
+    if (idx == 2) { return _UNICODE_UPPER_PIECE_2; }
+    if (idx == 3) { return _UNICODE_UPPER_PIECE_3; }
+    return 0;
+}
+
+fn _uc_lower_piece(idx) {
+    if (idx == 0) { return _UNICODE_LOWER_PIECE_0; }
+    if (idx == 1) { return _UNICODE_LOWER_PIECE_1; }
+    if (idx == 2) { return _UNICODE_LOWER_PIECE_2; }
+    return 0;
+}
+
+fn _uc_title_piece(idx) {
+    if (idx == 0) { return _UNICODE_TITLE_PIECE_0; }
+    if (idx == 1) { return _UNICODE_TITLE_PIECE_1; }
+    if (idx == 2) { return _UNICODE_TITLE_PIECE_2; }
+    if (idx == 3) { return _UNICODE_TITLE_PIECE_3; }
+    return 0;
+}
+
+fn _uc_fold_piece(idx) {
+    if (idx == 0) { return _UNICODE_FOLD_PIECE_0; }
+    if (idx == 1) { return _UNICODE_FOLD_PIECE_1; }
+    if (idx == 2) { return _UNICODE_FOLD_PIECE_2; }
+    if (idx == 3) { return _UNICODE_FOLD_PIECE_3; }
+    if (idx == 4) { return _UNICODE_FOLD_PIECE_4; }
+    if (idx == 5) { return _UNICODE_FOLD_PIECE_5; }
+    if (idx == 6) { return _UNICODE_FOLD_PIECE_6; }
+    return 0;
+}
+
+# ── Simple-mapping binary search (12 hex chars per record) ────────────
+# Records are <src u24 BE, 6 chars><dst u24 BE, 6 chars>. Sorted by src.
+# Returns the dst codepoint or `cp` unchanged on miss.
+
+fn unicode_to_upper(cp) {
+    if (cp < 0) { return cp; }
+    if (cp > 1114111) { return cp; }
+    var lo = 0;
+    var hi = _UNICODE_UPPER_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_UPPER_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_UPPER_RECORDS_PER_PIECE) * 12;
+        var piece = _uc_upper_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else { return _uc_u24(piece, p_off + 6); }
+        }
+    }
+    return cp;
+}
+
+fn unicode_to_lower(cp) {
+    if (cp < 0) { return cp; }
+    if (cp > 1114111) { return cp; }
+    var lo = 0;
+    var hi = _UNICODE_LOWER_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_LOWER_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_LOWER_RECORDS_PER_PIECE) * 12;
+        var piece = _uc_lower_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else { return _uc_u24(piece, p_off + 6); }
+        }
+    }
+    return cp;
+}
+
+fn unicode_to_title(cp) {
+    if (cp < 0) { return cp; }
+    if (cp > 1114111) { return cp; }
+    var lo = 0;
+    var hi = _UNICODE_TITLE_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_TITLE_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_TITLE_RECORDS_PER_PIECE) * 12;
+        var piece = _uc_title_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else { return _uc_u24(piece, p_off + 6); }
+        }
+    }
+    return cp;
+}
+
+# ── Full fold (26 hex chars per record) ────────────────────────────────
+# Records are <src u24, 6><count u8, 2><cp1 u24, 6><cp2 u24, 6><cp3 u24, 6>.
+# `count` is 1..3; cp2 / cp3 are 0 when count < 3 / 2.
+#
+# Writes the folded codepoints (1..3 ints, each 4 bytes via store32-style
+# semantics — we use 8-byte stores via store64 to be cyrius-idiomatic;
+# callers should index out_buf as i64 slots: out_buf[0], out_buf[8],
+# out_buf[16]).
+fn unicode_fold(cp, out_buf, cap) {
+    if (cap < 3) { return 0; }
+    if (cp < 0 || cp > 1114111) {
+        store64(out_buf, cp);
+        return 1;
+    }
+    var lo = 0;
+    var hi = _UNICODE_FOLD_RECORD_COUNT - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var p_idx = mid / _UNICODE_FOLD_RECORDS_PER_PIECE;
+        var p_off = (mid - p_idx * _UNICODE_FOLD_RECORDS_PER_PIECE) * 26;
+        var piece = _uc_fold_piece(p_idx);
+        var src = _uc_u24(piece, p_off);
+        if (cp < src) { hi = mid - 1; }
+        else {
+            if (cp > src) { lo = mid + 1; }
+            else {
+                var n = _uc_hex2(piece, p_off + 6);
+                store64(out_buf, _uc_u24(piece, p_off + 8));
+                if (n >= 2) { store64(out_buf + 8, _uc_u24(piece, p_off + 14)); }
+                if (n >= 3) { store64(out_buf + 16, _uc_u24(piece, p_off + 20)); }
+                return n;
+            }
+        }
+    }
+    # Not in fold table → identity fold
+    store64(out_buf, cp);
+    return 1;
+}
+
+# UTF-8 codec helpers `_uc_emit_utf8` + `_uc_decode_utf8` are provided
+# by the included `lib/unicode/_decode.cyr`. v5.8.55 lifted both fns
+# out of the per-module copies that lived here and in normalize.cyr —
+# the prior duplicates were byte-identical modulo whitespace and the
+# normalize.cyr copies had a synthetic `_nz_` prefix to dodge a
+# name-collision that disappears once the shared module owns them.
+
+# ── Str-level wrappers (simple case fold, codepoint-by-codepoint) ─────
+
+# Allocate a new Str whose contents are s with each codepoint
+# simple-lowercased. Output byte length may differ from input
+# (different cps can encode to different UTF-8 lengths).
+fn str_lower_unicode(s) {
+    var src = str_data(s);
+    var src_len = str_len(s);
+    # Worst case: every cp grows by 1 byte (rare but possible for
+    # specific cp pairs). 2x is a generous upper bound; we trim after.
+    var buf = alloc(src_len * 2 + 8);
+    var oi = 0;
+    var i = 0;
+    var cp_out = alloc(8);
+    while (i < src_len) {
+        var consumed = _uc_decode_utf8(src, i, src_len, cp_out);
+        var cp = load64(cp_out);
+        var folded = unicode_to_lower(cp);
+        oi = oi + _uc_emit_utf8(buf + oi, folded);
+        i = i + consumed;
+    }
+    return str_new(buf, oi);
+}
+
+fn str_upper_unicode(s) {
+    var src = str_data(s);
+    var src_len = str_len(s);
+    var buf = alloc(src_len * 2 + 8);
+    var oi = 0;
+    var i = 0;
+    var cp_out = alloc(8);
+    while (i < src_len) {
+        var consumed = _uc_decode_utf8(src, i, src_len, cp_out);
+        var cp = load64(cp_out);
+        var folded = unicode_to_upper(cp);
+        oi = oi + _uc_emit_utf8(buf + oi, folded);
+        i = i + consumed;
+    }
+    return str_new(buf, oi);
+}

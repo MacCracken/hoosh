@@ -5,6 +5,15 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.2] — 2026-08-17
+
+### Changed
+
+- **Cyrius pin `6.5.2` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Suite green at the new pin, identical to the pre-bump baseline.
+
 ## [2.6.1] — 2026-08-13
 
 **Locally-served models can use tools.** They never could: on the streaming path hoosh dropped the
@@ -928,8 +937,6 @@ include-order fix the new stdlib requires.
   leaving `sys_getrandom` undefined at that point. Dropped the explicit syscalls
   include from both harnesses (it auto-injects at its array position, before
   `tls`); `sys_*` wrappers stay in scope. All 457 tests pass, benchmarks intact.
-
-## [Unreleased]
 
 ## [2.4.6] — 2026-06-15
 

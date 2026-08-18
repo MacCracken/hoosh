@@ -1,0 +1,136 @@
+# lib/unicode/_decode.cyr — shared hex-pair decoders for the Unicode
+# stdlib data tables. Both lib/unicode/categories.cyr (v5.8.49) and
+# lib/unicode/casefold.cyr (v5.8.50) bake their UCD data as hex-pair
+# encoded string literals (3 bytes u24 BE start + 3 bytes u24 BE end +
+# 1 byte payload, expanded as 14 ASCII hex chars per record). These
+# helpers decode that encoding; lifting them to a private shared
+# module avoids duplicating the logic across each unicode/*.cyr file.
+#
+# Naming: leading-underscore + `_uc_` prefix marks these as
+# unicode-internal. Consumers should call the public APIs in
+# categories.cyr / casefold.cyr / etc., not these.
+
+# Decode a single hex digit (ASCII) → 0..15.
+fn _uc_hex1(c) {
+    if (c >= 48) {
+        if (c <= 57) { return c - 48; }   # '0'..'9'
+    }
+    if (c >= 97) {
+        if (c <= 102) { return c - 87; }  # 'a'..'f'
+    }
+    if (c >= 65) {
+        if (c <= 70) { return c - 55; }   # 'A'..'F' (defensive — generators emit lowercase)
+    }
+    return 0;
+}
+
+# Decode 2 hex chars at offset → byte (0..255).
+fn _uc_hex2(s, off) {
+    var hi = _uc_hex1(load8(s + off));
+    var lo = _uc_hex1(load8(s + off + 1));
+    return (hi << 4) | lo;
+}
+
+# Decode 6 hex chars (BE u24) at offset → int (0..0xFFFFFF).
+fn _uc_u24(s, off) {
+    var b0 = _uc_hex2(s, off);
+    var b1 = _uc_hex2(s, off + 2);
+    var b2 = _uc_hex2(s, off + 4);
+    return (b0 << 16) | (b1 << 8) | b2;
+}
+
+# ── UTF-8 codec (v5.8.55: lifted here from per-module duplicates) ─────
+#
+# Pre-v5.8.55 each unicode/* module that needed UTF-8 codec helpers
+# inlined its own copy:
+#   - lib/unicode/casefold.cyr: `_uc_emit_utf8` + `_uc_decode_utf8`
+#   - lib/unicode/normalize.cyr: `_uc_nz_emit_utf8` + `_uc_nz_decode_utf8`
+# The `_nz_` prefix on the normalize.cyr copies was a name-collision
+# workaround (both files would have defined the same `_uc_*` symbol if
+# included in the same compilation unit). Bodies were byte-identical
+# modulo whitespace. Lifting both to a single canonical pair here
+# (which casefold.cyr + normalize.cyr both already include) deletes
+# ~80 lines of dup and removes the synthetic naming asymmetry.
+#
+# Test-local copies in tests/tcyr/text/unicode_normconf.tcyr +
+# unicode_casefold.tcyr (v5.8.52) intentionally retained — those are
+# test fixtures and isolation from stdlib internals is a feature, not
+# duplication-to-fix. If a future slot wants to fold those too, the
+# test files just need to drop their `_ncf_*` / `_eq_*` codec wrappers
+# and call `_uc_emit_utf8` / `_uc_decode_utf8` directly (after adding
+# the include).
+
+# Encode codepoint cp as UTF-8 into dst; return bytes written (1..4).
+fn _uc_emit_utf8(dst, cp) {
+    if (cp < 128) {
+        store8(dst, cp);
+        return 1;
+    }
+    if (cp < 2048) {
+        store8(dst, 192 | (cp >> 6));
+        store8(dst + 1, 128 | (cp & 63));
+        return 2;
+    }
+    if (cp < 65536) {
+        store8(dst, 224 | (cp >> 12));
+        store8(dst + 1, 128 | ((cp >> 6) & 63));
+        store8(dst + 2, 128 | (cp & 63));
+        return 3;
+    }
+    store8(dst, 240 | (cp >> 18));
+    store8(dst + 1, 128 | ((cp >> 12) & 63));
+    store8(dst + 2, 128 | ((cp >> 6) & 63));
+    store8(dst + 3, 128 | (cp & 63));
+    return 4;
+}
+
+# Decode UTF-8 from src+offset; on success store cp into cp_out (i64
+# slot) and return bytes consumed (1..4). On invalid sequence, store
+# 0xFFFD (replacement) and return 1 (skip the bad byte). Caller bounds-
+# checks src_len.
+fn _uc_decode_utf8(src, off, src_len, cp_out) {
+    if (off >= src_len) { store64(cp_out, 0xFFFD); return 1; }
+    var b0 = load8(src + off);
+    if (b0 < 128) {
+        store64(cp_out, b0);
+        return 1;
+    }
+    if (b0 < 192) {
+        # Continuation byte at start of cp — invalid.
+        store64(cp_out, 0xFFFD);
+        return 1;
+    }
+    if (b0 < 224) {
+        # 2-byte: 110xxxxx 10xxxxxx
+        if (off + 1 >= src_len) { store64(cp_out, 0xFFFD); return 1; }
+        var b1 = load8(src + off + 1);
+        if ((b1 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        store64(cp_out, ((b0 & 31) << 6) | (b1 & 63));
+        return 2;
+    }
+    if (b0 < 240) {
+        # 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+        if (off + 2 >= src_len) { store64(cp_out, 0xFFFD); return 1; }
+        var c1 = load8(src + off + 1);
+        var c2 = load8(src + off + 2);
+        if ((c1 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        if ((c2 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        store64(cp_out, ((b0 & 15) << 12) | ((c1 & 63) << 6) | (c2 & 63));
+        return 3;
+    }
+    if (b0 < 248) {
+        # 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        if (off + 3 >= src_len) { store64(cp_out, 0xFFFD); return 1; }
+        var d1 = load8(src + off + 1);
+        var d2 = load8(src + off + 2);
+        var d3 = load8(src + off + 3);
+        if ((d1 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        if ((d2 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        if ((d3 & 192) != 128) { store64(cp_out, 0xFFFD); return 1; }
+        store64(cp_out, ((b0 & 7) << 18) | ((d1 & 63) << 12) | ((d2 & 63) << 6) | (d3 & 63));
+        return 4;
+    }
+    # Invalid leading byte (>= 0xF8)
+    store64(cp_out, 0xFFFD);
+    return 1;
+}
