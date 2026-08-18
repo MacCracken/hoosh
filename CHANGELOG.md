@@ -5,6 +5,14 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.3] — 2026-08-18
+
+### Changed
+
+- **`[deps.ai-hwaccel]` `2.3.16` -> `2.3.17`.** Held back from the 2.6.2 cut because ai-hwaccel
+  2.3.17 was not published yet; picked up now. Verified the bump took — vendored
+  `lib/ai-hwaccel.cyr` moved to `2.3.17`. Suite **689/689**, unchanged.
+
 ## [2.6.2] — 2026-08-17
 
 ### Changed

@@ -23,7 +23,7 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.3.16"
+tag = "2.3.17"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
