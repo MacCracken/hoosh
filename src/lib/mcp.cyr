@@ -41,8 +41,8 @@ fn mcp_init() {
     # Empty object schema — bote_echo accepts any arguments.
     var schema = schema_new("object", vec_new(), vec_new());
     var td = tool_def_new("bote_echo",
-    "Echo the provided arguments back as text content",
-    schema);
+      "Echo the provided arguments back as text content",
+      schema);
     dispatcher_register_tool(disp, td, &_hoosh_tool_echo);
     _mcp_dispatcher = disp;
     return disp;

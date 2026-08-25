@@ -33,7 +33,9 @@ fn hardware_cache_ttl() { return _hw_cache_ttl_s; }
 # Map a backend name to its Backend enum value, or -1 when unrecognized.
 fn _hw_backend_from_name(name) {
     var b = 0;
-    while (b < BACKEND_COUNT) {
+    # ai-hwaccel namespaced its constants at 2.3.18/19 (BACKEND_COUNT -> AIHW_BACKEND_COUNT),
+    # per the first-party rule that a library's public symbols carry its prefix.
+    while (b < AIHW_BACKEND_COUNT) {
         if (streq(name, backend_name(b)) == 1) { return b; }
         b = b + 1;
     }

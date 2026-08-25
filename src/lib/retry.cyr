@@ -61,7 +61,7 @@ fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_l
     var attempt = 0;
     while (attempt <= max) {
         var result = provider_forward(
-        route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, gen);
+          route, model, prompt, msg_raw, msg_len, tools_raw, tools_len, gen);
         # 2.5.3: a permanent failure (4xx that is not 408/429) is returned as
         # FWD_PERMANENT and ends the loop immediately — retrying a 400/401/404
         # cannot change the answer, and the old unconditional loop spent the
@@ -85,7 +85,7 @@ fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, tools_raw, tools_le
     var attempt = 0;
     while (attempt <= max) {
         var fd = provider_forward_stream(
-        route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
+          route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
         if (fd >= 0) { return fd; }
         if (attempt >= max) { return 0 - 1; }
         var delay = retry_delay_ms(cfg, attempt);

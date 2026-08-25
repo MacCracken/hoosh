@@ -401,7 +401,7 @@ fn _json_obj_obj_span(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;
@@ -968,7 +968,7 @@ fn _json_arr_span(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;
@@ -1040,7 +1040,7 @@ fn _anthropic_tool_calls(rb, rbl) {
                         var al = 0;
                         if (inf != 0) { ap = load64(inf); al = load64(inf + 8); }
                         _emit_tool_call(sb, load64(idf), load64(idf + 8),
-                        load64(nmf), load64(nmf + 8), ap, al);
+                          load64(nmf), load64(nmf + 8), ap, al);
                         first = 0;
                     }
                 }
@@ -1081,7 +1081,7 @@ fn _gemini_tool_calls(rb, rbl) {
                     var al = 0;
                     if (argf != 0) { ap = load64(argf); al = load64(argf + 8); }
                     _emit_tool_call(sb, idc, strlen(idc),
-                    load64(nmf), load64(nmf + 8), ap, al);
+                      load64(nmf), load64(nmf + 8), ap, al);
                     first = 0;
                     idx = idx + 1;
                 }
@@ -1155,12 +1155,12 @@ fn _ollama_tool_calls(rb, rbl) {
                     var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
                     if (argo != 0) {
                         _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8),
-                        load64(argo), load64(argo + 8));
+                          load64(argo), load64(argo + 8));
                     } else {
                         var args = _json_obj_str_field(fp, fl, "arguments", 9);
                         if (args != 0) {
                             _emit_tool_call_encoded(sb, idp, idl, load64(nmf), load64(nmf + 8),
-                            load64(args), load64(args + 8));
+                              load64(args), load64(args + 8));
                         } else {
                             _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8), 0, 0);
                         }
@@ -1229,7 +1229,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
     if (is_anthropic == 1) {
         if (messages_raw != 0) {
             body = _build_anthropic_body(model, messages_raw, messages_len,
-            tools_raw, tools_len, gen);
+              tools_raw, tools_len, gen);
         } else {
             body = _build_anthropic_body_prompt(model, prompt);
         }
@@ -1237,7 +1237,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         if (is_google == 1) {
             if (messages_raw != 0) {
                 body = _build_gemini_body(messages_raw, messages_len,
-                tools_raw, tools_len);
+                  tools_raw, tools_len);
             } else {
                 body = _build_gemini_body_prompt(prompt);
             }
@@ -1245,7 +1245,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             if (messages_raw != 0) {
                 # Ollama's native /api/chat nests sampling under `options`.
                 body = _build_chat_body_raw(model, messages_raw, messages_len,
-                tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA));
+                  tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA));
             } else {
                 body = _build_chat_body(model, prompt);
             }
@@ -1379,8 +1379,8 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
-    model, messages_raw, messages_len, tools_raw, tools_len, gen,
-    (route_provider(route) == PROV_OLLAMA));
+      model, messages_raw, messages_len, tools_raw, tools_len, gen,
+      (route_provider(route) == PROV_OLLAMA));
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

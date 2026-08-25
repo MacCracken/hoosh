@@ -196,7 +196,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
         mutex_unlock(_chat_lock);
         if (_audit_chain != 0) {
             audit_record(_audit_chain, "admin.costs_reset",
-            "warn", "cost records cleared", "admin", "");
+              "warn", "cost records cleared", "admin", "");
         }
         hlog_warn("admin: cost records cleared");
         var body = "{\"status\":\"reset\"}";

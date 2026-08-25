@@ -159,7 +159,7 @@ fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;

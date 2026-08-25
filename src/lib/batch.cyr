@@ -139,7 +139,7 @@ fn _async_batch_run(bs) {
     while (idx < total) {
         if (load64(bs + BS_CANCEL) == 1) { idx = total; } else {
             wq_push(job_batch_item(load64(reqs + idx * 16), load64(reqs + idx * 16 + 8),
-            results + idx * 8, bs + BS_COMPLETED, bs + BS_FAILED));
+                results + idx * 8, bs + BS_COMPLETED, bs + BS_FAILED));
             launched = launched + 1;
             idx = idx + 1;
         }

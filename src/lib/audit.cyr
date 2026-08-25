@@ -135,7 +135,7 @@ fn audit_record(chain, event, level, message, provider, model) {
 
     # Compute entry hash
     var ehash = _audit_entry_hash(
-    id, ts, event, level, message, provider, model);
+      id, ts, event, level, message, provider, model);
 
     # Sign: HMAC(entry_hash:prev_hash, key)
     var prev_hash = load64(chain + 16);
@@ -220,7 +220,7 @@ fn audit_verify(chain) {
 
         # Recompute entry hash
         var check = _audit_entry_hash(
-        id, ts, event, level, message, provider, model);
+          id, ts, event, level, message, provider, model);
         if (streq(check, ehash) != 1) { return 0; }
 
         # Chain linkage: this entry must point at the previous entry's hash.

@@ -58,7 +58,7 @@ fn health_probe(route) {
         var fd = payload(_sr);
         var ok = 0;
         if (net_connect_nb(fd, host_addr(url_host(base)), url_port(base),
-        HTTP_CONNECT_TIMEOUT_MS) == 0) {
+            HTTP_CONNECT_TIMEOUT_MS) == 0) {
             ok = 1;
         }
         sock_close(fd);
@@ -102,7 +102,7 @@ fn health_record(route, ok) {
             hlog_warn("health: provider marked unhealthy, withdrawing from routing");
         }
         event_health_changed(provider_name(route_provider(route)),
-        route_base_url(route), now_ok);
+          route_base_url(route), now_ok);
     }
     return 0;
 }

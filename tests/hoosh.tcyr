@@ -1637,7 +1637,7 @@ fn _cmp_str_field(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;
@@ -2338,7 +2338,7 @@ fn _json_obj_obj_span(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;
@@ -2360,7 +2360,7 @@ fn _json_arr_span(p, len, key, keylen) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-        && load8(p + i + 1 + keylen) == 34) {
+          && load8(p + i + 1 + keylen) == 34) {
             var j = i + 2 + keylen;
             while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
                 j = j + 1;
@@ -2454,12 +2454,12 @@ fn _ollama_tool_calls(rb, rbl) {
                     var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
                     if (argo != 0) {
                         _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8),
-                        load64(argo), load64(argo + 8));
+                          load64(argo), load64(argo + 8));
                     } else {
                         var args = _json_obj_str_field(fp, fl, "arguments", 9);
                         if (args != 0) {
                             _emit_tool_call_encoded(sb, idp, idl, load64(nmf), load64(nmf + 8),
-                            load64(args), load64(args + 8));
+                              load64(args), load64(args + 8));
                         } else {
                             _emit_tool_call(sb, idp, idl, load64(nmf), load64(nmf + 8), 0, 0);
                         }
@@ -2658,7 +2658,7 @@ fn _anthropic_tool_calls(rb, rbl) {
                         var al = 0;
                         if (inf != 0) { ap = load64(inf); al = load64(inf + 8); }
                         _emit_tool_call(sb, load64(idf), load64(idf + 8),
-                        load64(nmf), load64(nmf + 8), ap, al);
+                          load64(nmf), load64(nmf + 8), ap, al);
                         first = 0;
                     }
                 }
@@ -4894,19 +4894,19 @@ fn main() {
     test_group("cosine_similarity");
     # Identical → 1.0 (×1000).
     assert_eq(cosine_x1000(_vec2(3000, 4000), _vec2(3000, 4000), 2), 1000,
-    "cosine: identical = 1000");
+      "cosine: identical = 1000");
     # Orthogonal → 0.
     assert_eq(cosine_x1000(_vec2(1000, 0), _vec2(0, 1000), 2), 0,
-    "cosine: orthogonal = 0");
+      "cosine: orthogonal = 0");
     # Opposite → -1.0 (×1000).
     assert_eq(cosine_x1000(_vec2(1000, 0), _vec2(0 - 1000, 0), 2), 0 - 1000,
-    "cosine: opposite = -1000");
+      "cosine: opposite = -1000");
     # Collinear (same direction, different magnitude) → 1.0.
     assert_eq(cosine_x1000(_vec2(2000, 4000), _vec2(1000, 2000), 2), 1000,
-    "cosine: collinear = 1000");
+      "cosine: collinear = 1000");
     # Zero vector → 0.
     assert_eq(cosine_x1000(_vec2(0, 0), _vec2(1000, 1000), 2), 0,
-    "cosine: zero vector = 0");
+      "cosine: zero vector = 0");
     # Integer sqrt.
     assert_eq(_isqrt(25), 5, "isqrt: 25 = 5");
     assert_eq(_isqrt(26), 5, "isqrt: 26 = 5 (floor)");
@@ -4918,10 +4918,10 @@ fn main() {
     semantic_insert("key-dog", _vec2(0, 10000), 2);
     # Query [9000,1000] ≈ 6° from key-cat (cosine ≈ 0.99 > 0.85) → key-cat.
     assert_eq(streq(semantic_find(_vec2(9000, 1000), 2), "key-cat"), 1,
-    "semantic: nearest neighbour returned");
+      "semantic: nearest neighbour returned");
     # Query [7071,7071] ≈ 45° from both (cosine ≈ 0.707 < 0.85) → no match.
     assert_eq(semantic_find(_vec2(7071, 7071), 2), 0,
-    "semantic: below threshold = no match");
+      "semantic: below threshold = no match");
     # Dimension mismatch is skipped (no crash, no match for a 3-vec query).
     var q3 = alloc(24);
     store64(q3, 10000);
@@ -5013,13 +5013,13 @@ fn main() {
     assert_eq(route_is_remote(rt_local), 0, "http://localhost is not remote");
     assert_eq(route_is_remote(rt_remote), 1, "https://api.openai.com is remote");
     assert_streq(_provider_path(rt_local), "/api/chat",
-    "ollama path = /api/chat");
+      "ollama path = /api/chat");
     assert_streq(_provider_path(rt_remote), "/v1/chat/completions",
-    "non-ollama path = /v1/chat/completions");
+      "non-ollama path = /v1/chat/completions");
     assert_streq(_provider_url("https://api.openai.com", "/v1/chat/completions"),
-    "https://api.openai.com/v1/chat/completions", "url join base+path");
+      "https://api.openai.com/v1/chat/completions", "url join base+path");
     assert_streq(_bearer_value("sk-test123"), "Bearer sk-test123",
-    "bearer header value");
+      "bearer header value");
 
     # OpenAI usage-object token extraction
     var usage = "{\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":17,\"total_tokens\":59}}";
@@ -5036,7 +5036,7 @@ fn main() {
     var rt_anthropic = route_new(PROV_ANTHROPIC, 1, "https://api.anthropic.com");
     assert_eq(route_is_remote(rt_anthropic), 1, "anthropic is remote");
     assert_streq(_provider_path(rt_anthropic), "/v1/messages",
-    "anthropic path = /v1/messages");
+      "anthropic path = /v1/messages");
 
     var amsg = "{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hi there\"}],\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}";
     var alen = strlen(amsg);
@@ -5053,22 +5053,22 @@ fn main() {
     var hm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"}]";
     var hb1 = _build_anthropic_body("claude", hm1, strlen(hm1));
     assert_streq(hb1,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
-    "anthropic hoist: system lifted, user kept");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      "anthropic hoist: system lifted, user kept");
 
     # No system turn → no "system" field, messages pass straight through.
     var hm2 = "[{\"role\":\"user\",\"content\":\"hi\"}]";
     var hb2 = _build_anthropic_body("claude", hm2, strlen(hm2));
     assert_streq(hb2,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
-    "anthropic hoist: no system, passthrough");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      "anthropic hoist: no system, passthrough");
 
     # Multiple system turns join with \n in declaration order.
     var hm3 = "[{\"role\":\"system\",\"content\":\"A\"},{\"role\":\"system\",\"content\":\"B\"},{\"role\":\"user\",\"content\":\"hi\"}]";
     var hb3 = _build_anthropic_body("claude", hm3, strlen(hm3));
     assert_streq(hb3,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"A\\nB\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
-    "anthropic hoist: two system turns joined with newline");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"system\":\"A\\nB\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      "anthropic hoist: two system turns joined with newline");
 
     # Tool-continuation translation (regression guard for the 2.4.12 fix): an
     # OpenAI assistant `tool_calls` message + a `role:"tool"` result become
@@ -5079,35 +5079,35 @@ fn main() {
     var tm1 = "[{\"role\":\"user\",\"content\":\"read probe.txt\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"fs_read\",\"arguments\":\"{\\\"path\\\":\\\"probe.txt\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"hello\"}]";
     var tb1 = _build_anthropic_body("claude", tm1, strlen(tm1));
     assert_streq(tb1,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"read probe.txt\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"fs_read\",\"input\":{\"path\":\"probe.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"hello\"}]}]}",
-    "anthropic tool-continuation: tool_calls->tool_use (args unescaped), role:tool->tool_result");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"read probe.txt\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"fs_read\",\"input\":{\"path\":\"probe.txt\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"hello\"}]}]}",
+      "anthropic tool-continuation: tool_calls->tool_use (args unescaped), role:tool->tool_result");
 
     # Assistant text preamble + tool_call: the non-empty `content` becomes a text
     # block before the tool_use; an empty-object `arguments` stays {}.
     var tm2 = "[{\"role\":\"assistant\",\"content\":\"Let me check\",\"tool_calls\":[{\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}]";
     var tb2 = _build_anthropic_body("claude", tm2, strlen(tm2));
     assert_streq(tb2,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me check\"},{\"type\":\"tool_use\",\"id\":\"c2\",\"name\":\"ping\",\"input\":{}}]}]}",
-    "anthropic tool-continuation: assistant text preamble + tool_use, empty args -> {}");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me check\"},{\"type\":\"tool_use\",\"id\":\"c2\",\"name\":\"ping\",\"input\":{}}]}]}",
+      "anthropic tool-continuation: assistant text preamble + tool_use, empty args -> {}");
 
     # Gemini shaping: OpenAI messages -> contents (assistant->model), system ->
     # systemInstruction; URL carries model + key query param.
     var gm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]";
     var gb1 = _build_gemini_body(gm1, strlen(gm1));
     assert_streq(gb1,
-    "{\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief\"}]},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]},{\"role\":\"model\",\"parts\":[{\"text\":\"yo\"}]}]}",
-    "gemini shaping: system->systemInstruction, assistant->model");
+      "{\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief\"}]},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]},{\"role\":\"model\",\"parts\":[{\"text\":\"yo\"}]}]}",
+      "gemini shaping: system->systemInstruction, assistant->model");
 
     var gm2 = "[{\"role\":\"user\",\"content\":\"hi\"}]";
     var gb2 = _build_gemini_body(gm2, strlen(gm2));
     assert_streq(gb2,
-    "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}]}",
-    "gemini shaping: no system, single user turn");
+      "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}]}",
+      "gemini shaping: no system, single user turn");
 
     assert_streq(
-    _gemini_url("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=k123",
-    "gemini url: model-scoped generateContent + key query param");
+      _gemini_url("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=k123",
+      "gemini url: model-scoped generateContent + key query param");
 
     var gresp = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}],\"role\":\"model\"}}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3,\"totalTokenCount\":10}}";
     var glen = strlen(gresp);
@@ -5122,13 +5122,13 @@ fn main() {
     var sm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"}]";
     var sb1 = _build_anthropic_body_x("claude", sm1, strlen(sm1), 1);
     assert_streq(sb1,
-    "{\"model\":\"claude\",\"max_tokens\":4096,\"stream\":true,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
-    "anthropic stream body: stream:true flag set");
+      "{\"model\":\"claude\",\"max_tokens\":4096,\"stream\":true,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      "anthropic stream body: stream:true flag set");
 
     assert_streq(
-    _gemini_url_stream("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=k123",
-    "gemini stream url: streamGenerateContent + alt=sse + key");
+      _gemini_url_stream("https://generativelanguage.googleapis.com", "gemini-2.0-flash", "k123"),
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=k123",
+      "gemini stream url: streamGenerateContent + alt=sse + key");
 
     # SSE delta extraction reuses the per-provider extractors on event data.
     var oai_delta = "{\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}";
@@ -5136,14 +5136,14 @@ fn main() {
     var od_buf = alloc(od_len + 1);
     memcpy(od_buf, oai_delta, od_len);
     assert_streq(ollama_extract_text(od_buf, od_len), "Hi",
-    "openai SSE delta: content extracted");
+      "openai SSE delta: content extracted");
 
     var ant_delta = "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}";
     var ad_len = strlen(ant_delta);
     var ad_buf = alloc(ad_len + 1);
     memcpy(ad_buf, ant_delta, ad_len);
     assert_streq(anthropic_extract_text(ad_buf, ad_len), "Hi",
-    "anthropic SSE delta: text_delta extracted (type:text_delta not matched)");
+      "anthropic SSE delta: text_delta extracted (type:text_delta not matched)");
 
     # Pretty-printed JSON (OpenAI + Gemini REST responses indent and put a
     # space after the colon: `"content": "ok"`). The old compact-only needles
@@ -5155,7 +5155,7 @@ fn main() {
     var ppo_buf = alloc(ppo_len + 1);
     memcpy(ppo_buf, pp_oai, ppo_len);
     assert_streq(ollama_extract_text(ppo_buf, ppo_len), "ok",
-    "openai pretty-printed: content extracted past whitespace");
+      "openai pretty-printed: content extracted past whitespace");
     var ppo_tok = extract_openai_tokens(ppo_buf, ppo_len);
     assert_eq(ppo_tok / 0x100000000, 14, "openai pretty-printed: prompt_tokens");
     assert_eq(ppo_tok % 0x100000000, 1, "openai pretty-printed: completion_tokens");
@@ -5168,7 +5168,7 @@ fn main() {
     var ppa_buf = alloc(ppa_len + 1);
     memcpy(ppa_buf, pp_ant, ppa_len);
     assert_streq(anthropic_extract_text(ppa_buf, ppa_len), "hi",
-    "anthropic pretty-printed: text key extracted, type:text value skipped");
+      "anthropic pretty-printed: text key extracted, type:text value skipped");
     var ppa_tok = extract_anthropic_tokens(ppa_buf, ppa_len);
     assert_eq(ppa_tok / 0x100000000, 5, "anthropic pretty-printed: input_tokens");
     assert_eq(ppa_tok % 0x100000000, 2, "anthropic pretty-printed: output_tokens");
@@ -5180,7 +5180,7 @@ fn main() {
     var ppg_buf = alloc(ppg_len + 1);
     memcpy(ppg_buf, pp_gem, ppg_len);
     assert_streq(gemini_extract_text(ppg_buf, ppg_len), "yo",
-    "gemini pretty-printed: parts[].text extracted");
+      "gemini pretty-printed: parts[].text extracted");
     var ppg_tok = extract_gemini_tokens(ppg_buf, ppg_len);
     assert_eq(ppg_tok / 0x100000000, 2, "gemini pretty-printed: promptTokenCount");
     assert_eq(ppg_tok % 0x100000000, 9, "gemini pretty-printed: candidatesTokenCount");
@@ -5195,13 +5195,13 @@ fn main() {
     assert_eq(chars_per_token_x10(PROV_GOOGLE), 40, "google default 4.0");
     # estimate_tokens: 100 chars at each ratio (floor division).
     assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_OPENAI)), 26,
-    "100 chars / 3.8 = 26 tokens (openai)");
+      "100 chars / 3.8 = 26 tokens (openai)");
     assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_ANTHROPIC)), 28,
-    "100 chars / 3.5 = 28 tokens (anthropic, denser)");
+      "100 chars / 3.5 = 28 tokens (anthropic, denser)");
     assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_OLLAMA)), 27,
-    "100 chars / 3.7 = 27 tokens (local)");
+      "100 chars / 3.7 = 27 tokens (local)");
     assert_eq(estimate_tokens(0, 100, chars_per_token_x10(PROV_SYNAPSE)), 25,
-    "100 chars / 4.0 = 25 tokens (default)");
+      "100 chars / 4.0 = 25 tokens (default)");
     # Provider-aware estimate: denser tokenizer yields a higher count for the
     # same text, so anthropic > openai > default for equal input.
     var ant_est = estimate_tokens(0, 1000, chars_per_token_x10(PROV_ANTHROPIC));
@@ -5221,66 +5221,66 @@ fn main() {
     store64(lc_routes + 8, lc_r2);
     store64(lc_routes + 16, lc_r3);
     assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), lc_r2,
-    "lifecycle: finds ollama route for pull/delete");
+      "lifecycle: finds ollama route for pull/delete");
     assert_eq(_find_provider_route(lc_routes, 3, PROV_SYNAPSE), lc_r3,
-    "lifecycle: finds synapse route for training/sync");
+      "lifecycle: finds synapse route for training/sync");
     assert_eq(_find_provider_route(lc_routes, 3, PROV_ANTHROPIC), 0,
-    "lifecycle: missing provider returns 0 (404)");
+      "lifecycle: missing provider returns 0 (404)");
     # Disabled routes are skipped.
     route_set_enabled(lc_r2, 0);
     assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), 0,
-    "lifecycle: disabled ollama route skipped");
+      "lifecycle: disabled ollama route skipped");
 
     # ── http_client: generic method header (GET/POST/DELETE) ──────
     var hdr_buf = alloc(2048);
     var hdr_len = _build_req_header(hdr_buf, "DELETE", "/api/delete",
-    "localhost", 19);
+      "localhost", 19);
     assert_eq(memeq(hdr_buf, "DELETE /api/delete HTTP/1.0", 27), 1,
-    "req header: DELETE method + path line");
+      "req header: DELETE method + path line");
     assert_eq(memeq(hdr_buf + hdr_len - 4, "\r\n\r\n", 4), 1,
-    "req header: terminates with blank line");
+      "req header: terminates with blank line");
     var ghdr = alloc(2048);
     _build_req_header(ghdr, "GET", "/v1/training/job-1", "localhost", 0);
     assert_eq(memeq(ghdr, "GET /v1/training/job-1 HTTP/1.0", 31), 1,
-    "req header: GET method + path line");
+      "req header: GET method + path line");
 
     # ── DLP scanner: PII/secret detection + classification ────────
     test_group("dlp_scanner");
     # Restricted patterns
     assert_eq(_dlp_test("SSN: 123-45-6789"), CLASS_RESTRICTED, "dlp: ssn");
     assert_eq(_dlp_test("Card: 4111 1111 1111 1111"), CLASS_RESTRICTED,
-    "dlp: credit card (spaced)");
+      "dlp: credit card (spaced)");
     assert_eq(_dlp_test("Card: 4111111111111111"), CLASS_RESTRICTED,
-    "dlp: credit card (no sep)");
+      "dlp: credit card (no sep)");
     assert_eq(_dlp_test("Key: AKIAIOSFODNN7EXAMPLE"), CLASS_RESTRICTED,
-    "dlp: aws access key");
+      "dlp: aws access key");
     assert_eq(_dlp_test("Token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
-    CLASS_RESTRICTED, "dlp: github token");
+      CLASS_RESTRICTED, "dlp: github token");
     assert_eq(_dlp_test("use sk-abcdefghij0123456789ABCD here"),
-    CLASS_RESTRICTED, "dlp: api key sk- prefix");
+      CLASS_RESTRICTED, "dlp: api key sk- prefix");
     assert_eq(_dlp_test("api_key=abcdefghij0123456789ABCD"),
-    CLASS_RESTRICTED, "dlp: api_key= prefix");
+      CLASS_RESTRICTED, "dlp: api_key= prefix");
     # Confidential
     assert_eq(_dlp_test("Call 555-123-4567 now"), CLASS_CONFIDENTIAL,
-    "dlp: us phone");
+      "dlp: us phone");
     # Internal
     assert_eq(_dlp_test("Contact user@example.com please"), CLASS_INTERNAL,
-    "dlp: email");
+      "dlp: email");
     assert_eq(_dlp_test("Server at 192.168.1.1 listening"), CLASS_INTERNAL,
-    "dlp: ipv4");
+      "dlp: ipv4");
     # Highest level wins (email Internal + SSN Restricted)
     assert_eq(_dlp_test("user@test.com SSN: 123-45-6789"), CLASS_RESTRICTED,
-    "dlp: highest level wins");
+      "dlp: highest level wins");
     # Clean text + empty -> default (Public)
     assert_eq(_dlp_test("Explain Rust ownership in one sentence."), CLASS_PUBLIC,
-    "dlp: clean text is public");
+      "dlp: clean text is public");
     assert_eq(_dlp_test(""), CLASS_PUBLIC, "dlp: empty is public");
     # No false positive: a long digit run is not a 16-digit card
     assert_eq(_dlp_test("order 12345678901234567890 shipped"), CLASS_PUBLIC,
-    "dlp: 20-digit run is not a credit card");
+      "dlp: 20-digit run is not a credit card");
     # No false positive: leading-dot domain is not an email
     assert_eq(_dlp_test("reach me at x@.com"), CLASS_PUBLIC,
-    "dlp: empty domain label is not an email");
+      "dlp: empty domain label is not an email");
     # Classification ordering holds
     assert_eq(CLASS_PUBLIC < CLASS_INTERNAL, 1, "dlp: public < internal");
     assert_eq(CLASS_INTERNAL < CLASS_CONFIDENTIAL, 1, "dlp: internal < confidential");
@@ -5288,19 +5288,19 @@ fn main() {
     # Disabled scanner returns the default level regardless of content
     _dlp_enabled = 0;
     assert_eq(_dlp_test("SSN: 123-45-6789"), CLASS_PUBLIC,
-    "dlp: disabled returns default");
+      "dlp: disabled returns default");
     _dlp_enabled = 1;
 
     # ── Response cache key (exact-key) ────────────────────────────
     test_group("cache_key");
     var rq = "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
     assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq)), 1,
-    "cache key: identical (model,body) is deterministic");
+      "cache key: identical (model,body) is deterministic");
     assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o", rq)), 0,
-    "cache key: different model differs");
+      "cache key: different model differs");
     var rq2 = "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"bye\"}]}";
     assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq2)), 0,
-    "cache key: different body differs");
+      "cache key: different body differs");
     assert_eq(strlen(_ckey("gpt-4o-mini", rq)), 64, "cache key: sha256 hex is 64 chars");
 
     # ── Cache warming: canonical body + key match ─────────────────
@@ -5312,44 +5312,44 @@ fn main() {
     # otherwise warming populates an entry nothing ever hits.
     var wkey = _cache_key("gpt-4o-mini", str_cstr(wb), str_len(wb));
     assert_eq(streq(wkey, _ckey("gpt-4o-mini", wb_expect)), 1,
-    "warming: warmed key matches client request key");
+      "warming: warmed key matches client request key");
 
     # ── Prompt compression: whitespace collapse in JSON values ────
     test_group("compression");
     assert_eq(streq(_compress("{\"content\":\"hello  world\"}"),
-    "{\"content\":\"hello world\"}"), 1, "compress: collapse runs in content");
+        "{\"content\":\"hello world\"}"), 1, "compress: collapse runs in content");
     assert_eq(streq(_compress("{\"content\":\"  foo  bar  \"}"),
-    "{\"content\":\"foo bar\"}"), 1, "compress: trim leading/trailing in content");
+        "{\"content\":\"foo bar\"}"), 1, "compress: trim leading/trailing in content");
     # \n and \t escapes inside a value collapse to a single space.
     assert_eq(streq(_compress("{\"content\":\"no\\nnewlines\\there\"}"),
-    "{\"content\":\"no newlines here\"}"), 1, "compress: collapse \\n \\t escapes");
+        "{\"content\":\"no newlines here\"}"), 1, "compress: collapse \\n \\t escapes");
     # Keys and structure preserved; only the value collapses.
     assert_eq(streq(_compress("{\"role\":\"user\",\"content\":\"a   b\"}"),
-    "{\"role\":\"user\",\"content\":\"a b\"}"), 1, "compress: keys/structure preserved");
+        "{\"role\":\"user\",\"content\":\"a b\"}"), 1, "compress: keys/structure preserved");
     # Escaped quotes inside a value are preserved (not whitespace).
     assert_eq(streq(_compress("{\"content\":\"say  \\\"hi\\\"\"}"),
-    "{\"content\":\"say \\\"hi\\\"\"}"), 1, "compress: escaped quotes preserved");
+        "{\"content\":\"say \\\"hi\\\"\"}"), 1, "compress: escaped quotes preserved");
     # Clean content is unchanged.
     assert_eq(streq(_compress("{\"content\":\"already clean\"}"),
-    "{\"content\":\"already clean\"}"), 1, "compress: clean content unchanged");
+        "{\"content\":\"already clean\"}"), 1, "compress: clean content unchanged");
 
     # ── Per-token pricing + cost estimation ───────────────────────
     test_group("pricing");
     # gpt-4o-mini: 1000 in (0.15) + 500 out (0.6) = 150 + 300 = 450 µ$.
     assert_eq(estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500), 450,
-    "pricing: gpt-4o-mini exact 1000/500 = 450 µ$");
+      "pricing: gpt-4o-mini exact 1000/500 = 450 µ$");
     # Prefix match: claude-sonnet-4-20250514 → claude-sonnet-4 (3.0/15.0).
     assert_eq(estimate_cost_micro("claude-sonnet-4-20250514", PROV_ANTHROPIC, 1000, 1000),
-    18000, "pricing: prefix match claude-sonnet-4 1000/1000 = 18000 µ$");
+      18000, "pricing: prefix match claude-sonnet-4 1000/1000 = 18000 µ$");
     # Unknown model → provider fallback (OpenAI 2.5/10.0).
     assert_eq(estimate_cost_micro("gpt-9000", PROV_OPENAI, 1000, 0), 2500,
-    "pricing: unknown openai model falls back to 2.5/M");
+      "pricing: unknown openai model falls back to 2.5/M");
     # Local providers are free.
     assert_eq(estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000), 0,
-    "pricing: local provider is zero-cost");
+      "pricing: local provider is zero-cost");
     # Exact haiku at 1M input = $0.80 = 800000 µ$.
     assert_eq(estimate_cost_micro("claude-3.5-haiku", PROV_ANTHROPIC, 1000000, 0),
-    800000, "pricing: 1M tokens claude-3.5-haiku input = 800000 µ$");
+      800000, "pricing: 1M tokens claude-3.5-haiku input = 800000 µ$");
     # Cheaper model ranks below a pricier one (recommend ordering).
     var c_mini = estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500);
     var c_4o = estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000, 500);
@@ -5374,27 +5374,27 @@ fn main() {
     # meets_requirements
     metadata_lookup("llama-3.1-8b", md);  # economy, no vision, no tools, 128k
     assert_eq(meets_requirements(md, TIER_ECONOMY, 0, 0, 0, 1000), 1,
-    "meets: economy text ok");
+      "meets: economy text ok");
     assert_eq(meets_requirements(md, TIER_ECONOMY, 1, 0, 0, 1000), 0,
-    "meets: vision required but model has none");
+      "meets: vision required but model has none");
     assert_eq(meets_requirements(md, TIER_ECONOMY, 0, 1, 0, 1000), 0,
-    "meets: tools required but model has none");
+      "meets: tools required but model has none");
     assert_eq(meets_requirements(md, TIER_ECONOMY, 0, 0, 0, 200000), 0,
-    "meets: exceeds context window");
+      "meets: exceeds context window");
     metadata_lookup("gpt-4o-mini", md);  # economy, vision, tools
     assert_eq(meets_requirements(md, TIER_STANDARD, 0, 0, 0, 1000), 0,
-    "meets: economy model fails standard-tier requirement");
+      "meets: economy model fails standard-tier requirement");
 
     # ── Tool calling: extract the request's tools array ───────────
     test_group("tool_calling");
     assert_eq(streq(_etools("{\"model\":\"m\",\"tools\":[{\"type\":\"function\"}]}"),
-    "[{\"type\":\"function\"}]"), 1, "tools: extracted span");
+        "[{\"type\":\"function\"}]"), 1, "tools: extracted span");
     # Nested arrays inside a tool (e.g. an enum) are balanced correctly.
     assert_eq(streq(_etools("{\"tools\":[{\"enum\":[1,2,3]}],\"x\":1}"),
-    "[{\"enum\":[1,2,3]}]"), 1, "tools: nested arrays balanced");
+        "[{\"enum\":[1,2,3]}]"), 1, "tools: nested arrays balanced");
     # A `]` inside a string value doesn't end the array early.
     assert_eq(streq(_etools("{\"tools\":[{\"d\":\"a]b\"}]}"),
-    "[{\"d\":\"a]b\"}]"), 1, "tools: bracket in string ignored");
+        "[{\"d\":\"a]b\"}]"), 1, "tools: bracket in string ignored");
     # Absent / empty tools → 0.
     assert_eq(_etools("{\"model\":\"m\",\"messages\":[]}"), 0, "tools: absent → 0");
     assert_eq(_etools("{\"tools\":[]}"), 0, "tools: empty array → 0");
@@ -5403,19 +5403,19 @@ fn main() {
     # NB: "function" appears as both the "type" value and the real object key.
     var oai_tools = "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}]";
     assert_eq(streq(_conv(oai_tools, "input_schema"),
-    "[{\"name\":\"get_weather\",\"description\":\"d\",\"input_schema\":{\"type\":\"object\"}}]"),
-    1, "tools: OpenAI → Anthropic input_schema");
+        "[{\"name\":\"get_weather\",\"description\":\"d\",\"input_schema\":{\"type\":\"object\"}}]"),
+      1, "tools: OpenAI → Anthropic input_schema");
     assert_eq(streq(_conv(oai_tools, "parameters"),
-    "[{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}]"),
-    1, "tools: OpenAI → Gemini parameters");
+        "[{\"name\":\"get_weather\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}]"),
+      1, "tools: OpenAI → Gemini parameters");
     # Inbound: Anthropic tool_use blocks → OpenAI tool_calls (input stringified).
     var ant_resp = "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{\"city\":\"Paris\"}}]}";
     assert_eq(streq(_antc(ant_resp),
-    "[{\"id\":\"toolu_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]"),
-    1, "tools: Anthropic tool_use → OpenAI tool_calls");
+        "[{\"id\":\"toolu_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]"),
+      1, "tools: Anthropic tool_use → OpenAI tool_calls");
     # No tool_use blocks → 0.
     assert_eq(_antc("{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}"), 0,
-    "tools: Anthropic no tool_use → 0");
+      "tools: Anthropic no tool_use → 0");
 
     # ── 2.6.1: Ollama native tool_calls → OpenAI tool_calls ───────
     # Ollama nests {"function":{"index":N,"name":…,"arguments":{…}}}: `arguments` is a JSON
@@ -5425,32 +5425,32 @@ fn main() {
     # qwen3.5:9b through hoosh.
     var oll = "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_it284wqj\",\"function\":{\"index\":0,\"name\":\"read_file\",\"arguments\":{\"path\":\"VERSION\"}}}]}}";
     assert_eq(streq(_ollc(oll),
-    "[{\"id\":\"call_it284wqj\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"VERSION\\\"}\"}}]"),
-    1, "tools: Ollama object arguments → encoded string, type:function added, index dropped");
+        "[{\"id\":\"call_it284wqj\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"VERSION\\\"}\"}}]"),
+      1, "tools: Ollama object arguments → encoded string, type:function added, index dropped");
     # Empty arguments object (nemotron-3-nano:4b does this) → "{}", not a dropped call.
     var oll_empty = "{\"message\":{\"tool_calls\":[{\"id\":\"call_3q9\",\"function\":{\"index\":0,\"name\":\"list_dir\",\"arguments\":{}}}]}}";
     assert_eq(streq(_ollc(oll_empty),
-    "[{\"id\":\"call_3q9\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{}\"}}]"),
-    1, "tools: Ollama empty arguments → \"{}\"");
+        "[{\"id\":\"call_3q9\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{}\"}}]"),
+      1, "tools: Ollama empty arguments → \"{}\"");
     # Older builds omit `id` → synthesise one (mirrors the Gemini converter).
     var oll_noid = "{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"ping\",\"arguments\":{}}}]}}";
     assert_eq(streq(_ollc(oll_noid),
-    "[{\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]"),
-    1, "tools: Ollama missing id → synthesised call_0");
+        "[{\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]"),
+      1, "tools: Ollama missing id → synthesised call_0");
     # Already-encoded string arguments pass through verbatim — escaping them again would
     # double-encode (\\\" becoming \\\\\\\") and the client would parse a string, not an object.
     var oll_str = "{\"message\":{\"tool_calls\":[{\"id\":\"c9\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"VERSION\\\"}\"}}]}}";
     assert_eq(streq(_ollc(oll_str),
-    "[{\"id\":\"c9\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"VERSION\\\"}\"}}]"),
-    1, "tools: Ollama already-encoded string arguments pass through, not double-escaped");
+        "[{\"id\":\"c9\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"VERSION\\\"}\"}}]"),
+      1, "tools: Ollama already-encoded string arguments pass through, not double-escaped");
     # Two calls in one round keep their order and both get converted.
     var oll_two = "{\"message\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":{\"x\":1}}},{\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":{\"y\":2}}}]}}";
     assert_eq(streq(_ollc(oll_two),
-    "[{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"x\\\":1}\"}},{\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"g\",\"arguments\":\"{\\\"y\\\":2}\"}}]"),
-    1, "tools: Ollama multiple calls converted in order");
+        "[{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"x\\\":1}\"}},{\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"g\",\"arguments\":\"{\\\"y\\\":2}\"}}]"),
+      1, "tools: Ollama multiple calls converted in order");
     # A plain content-only chunk carries no calls → 0, so the streaming reader emits nothing.
     assert_eq(_ollc("{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"done\":false}"), 0,
-    "tools: Ollama content-only chunk → 0");
+      "tools: Ollama content-only chunk → 0");
 
     # ── 2.6.1: the OUTBOUND mirror — tool-continuation → Ollama shape ──
     # The client echoes back the assistant turn hoosh gave it, whose `arguments` is now a JSON
@@ -5458,22 +5458,22 @@ fn main() {
     # closing '}' symbol", so round 2 returns nothing and the agentic loop never closes.
     var cont = "[{\"role\":\"user\",\"content\":\"ls\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"README.md\"}]";
     assert_eq(streq(_ollm(cont),
-    "[{\"role\":\"user\",\"content\":\"ls\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}}]},{\"role\":\"tool\",\"content\":\"README.md\"}]"),
-    1, "continuation: arguments STRING unescaped to OBJECT; user + tool turns verbatim");
+        "[{\"role\":\"user\",\"content\":\"ls\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}}]},{\"role\":\"tool\",\"content\":\"README.md\"}]"),
+      1, "continuation: arguments STRING unescaped to OBJECT; user + tool turns verbatim");
     # Nothing to translate → 0, so the caller forwards the raw span untouched (no re-serialisation
     # of ordinary conversations, and no chance of mangling one).
     assert_eq(_ollm("[{\"role\":\"user\",\"content\":\"hi\"}]"), 0,
-    "continuation: no tool_calls → 0 (raw span forwarded)");
+      "continuation: no tool_calls → 0 (raw span forwarded)");
     # Empty arguments string → "{}" rather than an invalid bare value.
     var cont_empty = "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]}]";
     assert_eq(streq(_ollm(cont_empty),
-    "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":{}}}]}]"),
-    1, "continuation: empty arguments string → {}");
+        "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":{}}}]}]"),
+      1, "continuation: empty arguments string → {}");
     # Already an object (a client that never round-tripped through hoosh) → passed through as-is.
     var cont_obj = "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c3\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":{\"x\":1}}}]}]";
     assert_eq(streq(_ollm(cont_obj),
-    "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c3\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":{\"x\":1}}}]}]"),
-    1, "continuation: object arguments pass through unchanged");
+        "[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c3\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":{\"x\":1}}}]}]"),
+      1, "continuation: object arguments pass through unchanged");
 
     # ── Stale tool-pair prune (compression) ───────────────────────
     test_group("tool_prune");
@@ -5717,27 +5717,27 @@ fn main() {
     # That blind spot is why max_tokens silently fell back to 2048 pre-2.5.2.
     var rn1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\"}],\"temperature\":0.7}";
     assert_eq(_t_req_num_milli(rn1, strlen(rn1), "\"temperature\":", 14), 700,
-    "num: 0.7 after messages -> 700");
+      "num: 0.7 after messages -> 700");
     var rn2 = "{\"max_tokens\":1234,\"messages\":[]}";
     assert_eq(_t_req_num_milli(rn2, strlen(rn2), "\"max_tokens\":", 13), 1234000,
-    "num: integer 1234 -> 1234000");
+      "num: integer 1234 -> 1234000");
     # 0 must parse as 0, NOT be confused with absent — a client asking for
     # temperature 0 wants determinism and must not silently get the default.
     var rn3 = "{\"temperature\":0}";
     assert_eq(_t_req_num_milli(rn3, strlen(rn3), "\"temperature\":", 14), 0,
-    "num: explicit 0 is a value, not unset");
+      "num: explicit 0 is a value, not unset");
     var rn4 = "{\"model\":\"m\"}";
     assert_eq(_t_req_num_milli(rn4, strlen(rn4), "\"temperature\":", 14), _T_GEN_UNSET,
-    "num: absent -> GEN_UNSET");
+      "num: absent -> GEN_UNSET");
     var rn5 = "{\"top_p\": 0.95}";
     assert_eq(_t_req_num_milli(rn5, strlen(rn5), "\"top_p\":", 8), 950,
-    "num: space after colon tolerated");
+      "num: space after colon tolerated");
     var rn6 = "{\"temperature\":-0.5}";
     assert_eq(_t_req_num_milli(rn6, strlen(rn6), "\"temperature\":", 14), 0 - 500,
-    "num: negative preserved for range validation");
+      "num: negative preserved for range validation");
     var rn7 = "{\"temperature\":2}";
     assert_eq(_t_req_num_milli(rn7, strlen(rn7), "\"temperature\":", 14), 2000,
-    "num: 2 -> 2000 (range boundary)");
+      "num: 2 -> 2000 (range boundary)");
 
     test_group("milli_render");
     # Scaled ints render back to the wire form a client would have sent.
@@ -5809,7 +5809,7 @@ fn main() {
     str_builder_add_cstr(gsb, _t_default_url(10));
     str_builder_add_cstr(gsb, "/v1/chat/completions");
     assert_streq(str_cstr(str_builder_build(gsb)),
-    "https://api.groq.com/openai/v1/chat/completions", "groq: full URL correct");
+      "https://api.groq.com/openai/v1/chat/completions", "groq: full URL correct");
     # OpenRouter's existing /api prefix must be unaffected.
     assert_streq(_t_default_url(12), "https://openrouter.ai/api", "groq fix: openrouter untouched");
 
@@ -5818,25 +5818,25 @@ fn main() {
     # options.{temperature,top_p,num_predict}. Emitting the OpenAI shape for an
     # ollama route silently dropped every sampling param.
     assert_streq(_t_sampling_str(512, 700, 900, 1),
-    ",\"options\":{\"temperature\":0.7,\"top_p\":0.9,\"num_predict\":512}",
-    "ollama: nested options with num_predict");
+      ",\"options\":{\"temperature\":0.7,\"top_p\":0.9,\"num_predict\":512}",
+      "ollama: nested options with num_predict");
     assert_streq(_t_sampling_str(512, 700, 900, 0),
-    ",\"max_tokens\":512,\"temperature\":0.7,\"top_p\":0.9",
-    "openai-compat: flat top-level fields");
+      ",\"max_tokens\":512,\"temperature\":0.7,\"top_p\":0.9",
+      "openai-compat: flat top-level fields");
     # Partial sets must not emit a dangling comma inside options.
     assert_streq(_t_sampling_str(0, 700, _T_GEN_UNSET, 1),
-    ",\"options\":{\"temperature\":0.7}", "ollama: temperature only");
+      ",\"options\":{\"temperature\":0.7}", "ollama: temperature only");
     assert_streq(_t_sampling_str(256, _T_GEN_UNSET, _T_GEN_UNSET, 1),
-    ",\"options\":{\"num_predict\":256}", "ollama: num_predict only");
+      ",\"options\":{\"num_predict\":256}", "ollama: num_predict only");
     # Nothing set -> nothing emitted, so the body stays byte-identical to a
     # pre-2.5.2 request.
     assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 1), "",
-    "ollama: no params -> no options object");
+      "ollama: no params -> no options object");
     assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 0), "",
-    "openai-compat: no params -> nothing emitted");
+      "openai-compat: no params -> nothing emitted");
     # temperature 0 must still emit for Ollama.
     assert_streq(_t_sampling_str(0, 0, _T_GEN_UNSET, 1),
-    ",\"options\":{\"temperature\":0}", "ollama: temperature 0 emitted");
+      ",\"options\":{\"temperature\":0}", "ollama: temperature 0 emitted");
 
     # ── v2.5.4 cache expiry ──
     test_group("cache_ttl_expiry");
@@ -5976,13 +5976,13 @@ fn main() {
     # on Ollama matched the Groq row and billed real money for tokens generated
     # on your own GPU. Exactly the realistic cases were mispriced.
     assert_eq(cost_calculate("gpt-4o", PROV_OPENAI, 1000, 500), 7500,
-    "cost: remote gpt-4o priced");
+      "cost: remote gpt-4o priced");
     assert_eq(cost_calculate("gpt-4o", PROV_LMSTUDIO, 1000, 500), 0,
-    "cost: same model name served locally is free");
+      "cost: same model name served locally is free");
     assert_eq(cost_calculate("claude-opus-4", PROV_OLLAMA, 1000, 500), 0,
-    "cost: table-matching name on ollama is free");
+      "cost: table-matching name on ollama is free");
     assert_eq(cost_calculate("anything", PROV_LLAMACPP, 9999, 9999), 0,
-    "cost: unknown model on llamacpp is free");
+      "cost: unknown model on llamacpp is free");
 
     test_group("cost_tracker_accumulate");
     var cr = vec_new();
@@ -6226,7 +6226,7 @@ fn main() {
     var need = 2400;
     assert_eq(need <= 24000, 1, "vram: model fits the card");
     assert_eq(need <= _t_available_vram(24000, 20000, 2000), 0,
-    "vram: same model does NOT fit available -> overcommit prevented");
+      "vram: same model does NOT fit available -> overcommit prevented");
 
     test_group("compact_system_detect_whitespace");
     # The pre-2.5.7 detector was the compact literal `"role":"system"`. Virtually
@@ -6297,66 +6297,66 @@ fn main() {
 
     var hit = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: HIT");
     assert_eq(str_contains(hit, str_from("X-Hoosh-Cache: HIT")) , 1,
-    "cache: an exact hit is labelled HIT");
+      "cache: an exact hit is labelled HIT");
     assert_eq(str_contains(hit, str_from("Content-Length: 2")), 1,
-    "cache: the extra header does not disturb Content-Length");
+      "cache: the extra header does not disturb Content-Length");
     assert_eq(str_contains(hit, str_from("\r\n\r\n")), 1,
-    "cache: the header block still terminates with a blank line");
+      "cache: the header block still terminates with a blank line");
 
     var sem = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: SEMANTIC");
     assert_eq(str_contains(sem, str_from("X-Hoosh-Cache: SEMANTIC")), 1,
-    "cache: a semantic hit is labelled SEMANTIC, distinct from an exact hit");
+      "cache: a semantic hit is labelled SEMANTIC, distinct from an exact hit");
 
     var miss = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: MISS");
     assert_eq(str_contains(miss, str_from("X-Hoosh-Cache: MISS")), 1,
-    "cache: a real forward is labelled MISS");
+      "cache: a real forward is labelled MISS");
 
     # The pre-2.5.12 entry point must be byte-identical to what it always was —
     # ten call sites still use it.
     var plain = _t_respond_capture("200", "OK", "{}", 0);
     assert_eq(str_contains(plain, str_from("X-Hoosh-Cache")), 0,
-    "cache: http_respond with no extra header emits none");
+      "cache: http_respond with no extra header emits none");
     assert_eq(str_contains(plain, str_from("Content-Type: application/json")), 1,
-    "cache: and keeps the standard header set");
+      "cache: and keeps the standard header set");
     assert_eq(str_len(plain) + strlen("X-Hoosh-Cache: MISS") + 2, str_len(miss),
-    "cache: the ONLY difference is that header line plus its CRLF — nothing else in the \
+      "cache: the ONLY difference is that header line plus its CRLF — nothing else in the \
     response changed shape");
 
     # usage now carries the cost hoosh already computed, in the same integer
     # micro-USD unit estimate_cost_micro returns — no conversion, no rounding.
     var u = _t_usage_block(1000, 500, 450, "openai");
     assert_eq(str_contains(u, str_from("\"cost_micro_usd\":450")), 1,
-    "usage: carries the integer micro-USD cost");
+      "usage: carries the integer micro-USD cost");
     assert_eq(str_contains(u, str_from("\"provider\":\"openai\"")), 1,
-    "usage: and the REAL serving provider, which a model-name guess gets wrong \
+      "usage: and the REAL serving provider, which a model-name guess gets wrong \
     whenever DLP re-routes a confidential request to a local one");
     assert_eq(str_contains(u, str_from("\"total_tokens\":1500")), 1,
-    "usage: the pre-existing fields are unchanged");
+      "usage: the pre-existing fields are unchanged");
 
     # cost_record now RETURNS what it accumulated, so the response body reports
     # the same value rather than a second computation that merely ought to agree.
     var cr_ret_recs = vec_new();
     var cr_returned = _t_cost_record(cr_ret_recs, PROV_OPENAI, "https://api.openai.com",
-    1000, 500, "gpt-4o-mini");
+      1000, 500, "gpt-4o-mini");
     assert_eq(cr_returned, 450, "usage: cost_record returns the micro-USD it just recorded");
     assert_eq(cr_returned, _t_cost_total(cr_ret_recs),
-    "usage: and it equals what landed in the record — same value by construction, so a client \
+      "usage: and it equals what landed in the record — same value by construction, so a client \
     summing per-response costs cannot drift from /v1/costs");
 
     # The figure is exactly what cost_record accumulates — same function, same
     # arguments — so a per-response sum reconciles with /v1/costs.
     assert_eq(estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500), 450,
-    "usage: the response cost IS estimate_cost_micro, so it reconciles with /v1/costs");
+      "usage: the response cost IS estimate_cost_micro, so it reconciles with /v1/costs");
 
     # A local provider is free, and that has to survive into the response.
     var ul = _t_usage_block(1000, 1000, estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000),
-    "ollama");
+      "ollama");
     assert_eq(str_contains(ul, str_from("\"cost_micro_usd\":0")), 1,
-    "usage: a local model reports zero cost rather than omitting the field");
+      "usage: a local model reports zero cost rather than omitting the field");
 
     # provider is optional in the builder; omitting it must not emit an empty key.
     assert_eq(str_contains(_t_usage_block(1, 1, 0, 0), str_from("provider")), 0,
-    "usage: an absent provider omits the field entirely");
+      "usage: an absent provider omits the field entirely");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

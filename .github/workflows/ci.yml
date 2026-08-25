@@ -57,18 +57,24 @@ jobs:
         run: cyrius vet src/main.cyr
 
       - name: Format check
-        # cyrius fmt <file> emits formatted source to stdout; diff
-        # against the committed file to enforce no drift.
+        # `cyrius fmt <file>` rewrites the file IN PLACE and prints nothing.
+        # The old step diffed its (empty) stdout against the file, so it
+        # reported drift for every file including correctly-formatted ones.
+        # `--check` is the flag for this: exit 1 on drift, name the file, no
+        # stdout by design. Same shape daimon and kavach use.
         run: |
-          fail=0
+          drift=0
           for f in src/main.cyr src/lib/*.cyr tests/*.tcyr tests/*.bcyr; do
             [ -f "$f" ] || continue
-            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
+            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
-              fail=1
+              drift=1
             fi
           done
-          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+          if [ $drift -ne 0 ]; then
+            echo "::error::fmt drift — run 'cyrius fmt <file>' on the files above"
+            exit 1
+          fi
 
       - name: Lint
         # Hard gate: any `warn` line fails the build.

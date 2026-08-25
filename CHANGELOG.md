@@ -5,6 +5,47 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.4] — 2026-08-25
+
+**Toolchain and CI maintenance.** No behaviour change to the gateway; every gate now actually gates.
+Suite **689/689**, unchanged.
+
+### Fixed
+
+- **The CI format gate, which could never pass.** It diffed `cyrius fmt`'s stdout against each file, but
+  `cyrius fmt <file>` rewrites the file in place and prints nothing — so the diff compared an empty
+  stream against every file and reported drift unconditionally, including for correctly-formatted ones.
+  A gate that always fails carries the same information as one that never runs. Now uses `--check`, the
+  flag built for it (exit 1 on real drift, names the file, no stdout by design), matching the shape
+  daimon and kavach settled on.
+
+  With a gate that can answer the question, the real drift was **10 of 34 files** — `src/main.cyr`,
+  `src/lib/{audit,batch,compression,handlers,health,mcp,provider,retry}.cyr` and `tests/hoosh.tcyr` —
+  all continuation-line indentation, reformatted here. The gate is green on its own terms now.
+
+- **`BACKEND_COUNT` no longer exists in ai-hwaccel.** The 2.3.19 bump below namespaced the library's
+  public constants (`BACKEND_COUNT` -> `AIHW_BACKEND_COUNT`), and `src/lib/hardware.cyr`'s
+  `_hw_backend_from_name` still referenced the bare name, so the build failed outright. Renamed at the
+  single use site.
+
+### Changed
+
+- **Toolchain pin `6.5.27` -> `6.5.35`**, matching daimon, bote and thoth; hoosh was two pins behind.
+  `cyrius lib sync --full` re-synced the 108-file stdlib snapshot.
+- **`[deps.ai-hwaccel]` `2.3.17` -> `2.3.19`.** Verified the bump took by reading the vendored
+  `lib/ai-hwaccel.cyr` header rather than trusting the manifest. See the `BACKEND_COUNT` fix above — this
+  bump is what surfaced it.
+
+### Notes
+
+- Every CI gate re-run locally and green: include-graph audit (34 deps, 0 untrusted, 0 missing), format,
+  lint (src scope), build, ELF, **689/689 tests**, dependency policy (0 violations), symbol coverage
+  (163/481 = 33%, floor 30%), security scan, all four fuzz targets, and the mandatory benchmark gate
+  (25 benchmarks, 1091 CSV rows).
+- ⚠ `tests/hoosh.tcyr` and `tests/hoosh.bcyr` carry **98 line-length warnings** between them. These are
+  pre-existing and unchanged by this cut, and they do **not** gate — the lint step scopes to
+  `src/main.cyr` and `src/lib/*.cyr`. Recorded so the count is not mistaken for new drift later.
+
 ## [2.6.3] — 2026-08-18
 
 ### Changed

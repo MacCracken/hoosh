@@ -143,7 +143,7 @@ fn handle_ollama_tags(cfd) {
                     str_builder_add_cstr(sb, "\",\"model\":\"");
                     str_builder_add_cstr(sb, pat);
                     str_builder_add_cstr(sb,
-                    "\",\"modified_at\":\"\",\"size\":0,\"digest\":\"\",");
+                      "\",\"modified_at\":\"\",\"size\":0,\"digest\":\"\",");
                     str_builder_add_cstr(sb, "\"details\":{\"family\":\"");
                     str_builder_add_cstr(sb, provider_name(route_provider(r)));
                     str_builder_add_cstr(sb, "\"}}");
@@ -202,7 +202,7 @@ fn handle_model_pull(cfd, body_ptr, body_len) {
     }
     var fb = _build_name_body(model_cstr);
     var resp = http_req_local("POST", route_base_url(route), "/api/pull",
-    load64(fb), load64(fb + 8));
+      load64(fb), load64(fb + 8));
     return _lifecycle_reply(cfd, resp, "ollama pull failed");
 }
 
@@ -221,7 +221,7 @@ fn handle_model_delete(cfd, body_ptr, body_len) {
     }
     var fb = _build_name_body(model_cstr);
     var resp = http_req_local("DELETE", route_base_url(route), "/api/delete",
-    load64(fb), load64(fb + 8));
+      load64(fb), load64(fb + 8));
     return _lifecycle_reply(cfd, resp, "ollama delete failed");
 }
 
@@ -310,7 +310,7 @@ fn warming_run() {
                     var wptok = load64(result + 16);
                     var wctok = load64(result + 24);
                     var env = _chat_completion_body(model, load64(result), wptok, wctok, 0,
-                    estimate_cost_micro(model, wprov, wptok, wctok), provider_name(wprov));
+                      estimate_cost_micro(model, wprov, wptok, wctok), provider_name(wprov));
                     cache_insert(_cache, key, to_cstr(env));
                     warmed = warmed + 1;
                 }
@@ -562,9 +562,9 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
                 if (pl > 0 && load8(pat + pl - 1) != 42) {
                     if (metadata_lookup(pat, meta) == 1) {
                         if (meets_requirements(meta, min_tier, has_vision,
-                        uses_tools, has_system, total_tokens) == 1) {
+                            uses_tools, has_system, total_tokens) == 1) {
                             var c = estimate_cost_micro(pat, route_provider(r),
-                            in_tok, out_tok);
+                              in_tok, out_tok);
                             if (c < best_cost) {
                                 best_cost = c;
                                 best_model = pat;
@@ -581,7 +581,7 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
     }
     if (best_model == 0) {
         return http_error(cfd, "404", "Not Found",
-        "no capable exact-model route for this request profile");
+          "no capable exact-model route for this request profile");
     }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
@@ -756,7 +756,7 @@ fn handle_tokens_report(cfd, body_ptr, body_len) {
 fn handle_audit(cfd) {
     if (_audit_chain == 0) {
         return http_error(cfd, "404", "Not Found",
-        "audit logging not enabled");
+          "audit logging not enabled");
     }
     var sb = str_builder_new();
     audit_json(_audit_chain, sb, 50);
@@ -1658,7 +1658,7 @@ fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
     }
     return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen,
-    (prov == PROV_OLLAMA));
+      (prov == PROV_OLLAMA));
 }
 
 # Build the streaming request URL for a remote provider.
@@ -1679,7 +1679,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     if (route_is_remote(route) == 1) {
         http_sse_begin(cfd);
         var sbody = _remote_stream_body(route, model, msg_raw, msg_len,
-        tools_raw, tools_len, gen);
+          tools_raw, tools_len, gen);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
         var ctx = alloc(32);
@@ -1688,8 +1688,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         store64(ctx + 16, route_provider(route));
         store64(ctx + 24, 0);
         var sres = sandhi_http_stream(
-        surl, "POST", hdrs, sbody, strlen(sbody),
-        &_remote_stream_cb, ctx);
+          surl, "POST", hdrs, sbody, strlen(sbody),
+          &_remote_stream_cb, ctx);
         var emitted = load64(ctx + 24);
         var ok = 0;
         if (sres != 0) {
@@ -1703,8 +1703,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
             # the buffered emit would duplicate the partial output.
             if (emitted == 0) {
                 var rresult = retry_forward(
-                _retry_cfg, route, model, "hello", msg_raw, msg_len,
-                tools_raw, tools_len, gen);
+                  _retry_cfg, route, model, "hello", msg_raw, msg_len,
+                  tools_raw, tools_len, gen);
                 if (rresult != 0) {
                     var rtext = load64(rresult);
                     if (strlen(rtext) > 0) {
@@ -1722,8 +1722,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
             # _chat_lock: audit-chain append may race a background batch worker.
             mutex_lock(_chat_lock);
             audit_record(_audit_chain, "inference.stream", "info",
-            "streaming inference (remote)",
-            provider_name(route_provider(route)), model);
+              "streaming inference (remote)",
+              provider_name(route_provider(route)), model);
             mutex_unlock(_chat_lock);
         }
         _sse_stop(cfd, model);
@@ -1733,10 +1733,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     # 2.6.1: forward the caller's tools here too. This branch used to drop them on the floor —
     # the remote branch above has always passed them to _remote_stream_body.
     var bfd = retry_forward_stream(
-    _retry_cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
+      _retry_cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
     if (bfd < 0) {
         return http_error(cfd, "502", "Bad Gateway",
-        "provider backend unreachable");
+          "provider backend unreachable");
     }
 
     http_sse_begin(cfd);
@@ -1768,7 +1768,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                         var txt = ollama_extract_text(lbuf, lpos);
                         if (strlen(txt) > 0) {
                             if (_sse_chunk(cfd, model,
-                            txt, strlen(txt)) < 0) { done = 1; }
+                                txt, strlen(txt)) < 0) { done = 1; }
                             token_count = token_count + 1;
                         }
                         # 2.6.1: …and its tool calls. Reading only "content" meant a locally
@@ -1790,10 +1790,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                     done = 1;
                                 } else {
                                     var txt = ollama_extract_text(
-                                    dptr, dlen);
+                                      dptr, dlen);
                                     if (strlen(txt) > 0) {
                                         if (_sse_chunk(cfd, model,
-                                        txt, strlen(txt)) < 0) { done = 1; }
+                                            txt, strlen(txt)) < 0) { done = 1; }
                                         token_count = token_count + 1;
                                     }
                                     # 2.6.1: a LOCAL OpenAI-compatible backend streams
@@ -1803,7 +1803,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                     var ltc = _extract_openai_tool_calls(dptr, dlen);
                                     if (ltc != 0) {
                                         if (_sse_tool_chunk(cfd, model,
-                                        ltc) < 0) { done = 1; }
+                                            ltc) < 0) { done = 1; }
                                     }
                                 }
                             }
@@ -1830,7 +1830,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         # _chat_lock: audit-chain append may race a background batch worker.
         mutex_lock(_chat_lock);
         audit_record(_audit_chain, "inference.stream",
-        "info", "streaming inference", provider_name(route_provider(route)), model);
+          "info", "streaming inference", provider_name(route_provider(route)), model);
         mutex_unlock(_chat_lock);
     }
     return 0;
@@ -2007,7 +2007,7 @@ fn _resp_err(status, status_text, msg, etype) {
 
 fn _resp_write(cfd, r) {
     return http_respond_h(cfd, load64(r), load64(r + 8), load64(r + 16), load64(r + 24),
-    load64(r + 32));
+      load64(r + 32));
 }
 
 # ── Chat request preparation (shared by streaming + non-streaming) ─────
@@ -2050,7 +2050,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     if (g_temp != GEN_UNSET) {
         if (g_temp < 0 || g_temp > 2000) {
             store64(out + 8, _resp_err("400", "Bad Request",
-            _range_err("temperature", g_temp, "0.0", "2.0"), "invalid_request_error"));
+                _range_err("temperature", g_temp, "0.0", "2.0"), "invalid_request_error"));
             return out;
         }
     }
@@ -2058,7 +2058,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     if (g_topp != GEN_UNSET) {
         if (g_topp < 0 || g_topp > 1000) {
             store64(out + 8, _resp_err("400", "Bad Request",
-            _range_err("top_p", g_topp, "0.0", "1.0"), "invalid_request_error"));
+                _range_err("top_p", g_topp, "0.0", "1.0"), "invalid_request_error"));
             return out;
         }
     }
@@ -2067,7 +2067,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         g_maxt = g_maxt / 1000;
         if (g_maxt <= 0) {
             store64(out + 8, _resp_err("400", "Bad Request",
-            "max_tokens must be greater than 0", "invalid_request_error"));
+                "max_tokens must be greater than 0", "invalid_request_error"));
             return out;
         }
     } else {
@@ -2081,12 +2081,12 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         var vmc = _json_array_count(load64(vmsgs), load64(vmsgs + 8));
         if (vmc == 0) {
             store64(out + 8, _resp_err("400", "Bad Request",
-            "messages array is empty", "invalid_request_error"));
+                "messages array is empty", "invalid_request_error"));
             return out;
         }
         if (vmc > MAX_MESSAGES) {
             store64(out + 8, _resp_err("400", "Bad Request",
-            _count_err("Too many messages", vmc, MAX_MESSAGES), "invalid_request_error"));
+                _count_err("Too many messages", vmc, MAX_MESSAGES), "invalid_request_error"));
             return out;
         }
     }
@@ -2110,7 +2110,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         if (dlp_level == CLASS_RESTRICTED) {
             hlog_warn("dlp: restricted content blocked");
             store64(out + 8, _resp_err("403", "Forbidden",
-            "request blocked: restricted content detected", "server_error"));
+                "request blocked: restricted content detected", "server_error"));
             return out;
         }
         if (dlp_level == CLASS_CONFIDENTIAL) {
@@ -2119,8 +2119,8 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                 if (lroute == 0) {
                     hlog_warn("dlp: confidential content, no local provider");
                     store64(out + 8, _resp_err("403", "Forbidden",
-                    "request blocked: confidential content requires a local provider",
-                    "server_error"));
+                        "request blocked: confidential content requires a local provider",
+                        "server_error"));
                     return out;
                 }
                 hlog_info("dlp: confidential content routed to a local provider");
@@ -2140,7 +2140,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         if (cached != 0) {
             hlog_info("chat: response cache hit");
             store64(out + 8, _resp_set_header(_resp_new("200", "OK", cached, strlen(cached)),
-            "X-Hoosh-Cache: HIT"));
+                "X-Hoosh-Cache: HIT"));
             return out;
         }
         if (semantic_is_enabled() == 1) {
@@ -2154,8 +2154,8 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                     if (scached != 0) {
                         hlog_info("chat: semantic cache hit");
                         store64(out + 8,
-                        _resp_set_header(_resp_new("200", "OK", scached, strlen(scached)),
-                        "X-Hoosh-Cache: SEMANTIC"));
+                          _resp_set_header(_resp_new("200", "OK", scached, strlen(scached)),
+                            "X-Hoosh-Cache: SEMANTIC"));
                         return out;
                     }
                 }
@@ -2194,7 +2194,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # struct (out + 104) — hoosh is multi-threaded, so a global would race.
     # Absent/unknown values leave the request byte-identical to before.
     store64(out + 104, genopts_new(
-    _req_reasoning_effort(body_ptr, body_len), g_maxt, g_temp, g_topp));
+        _req_reasoning_effort(body_ptr, body_len), g_maxt, g_temp, g_topp));
     var bpool = budget_get_pool(_budget, pool_name);
     # 2.5.8: an unknown pool is a 400, not a silent pass. Previously a request
     # naming a pool that does not exist got bpool == 0 and skipped budgeting
@@ -2202,7 +2202,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # renamed pool silently stopped being enforced instead of failing loudly.
     if (bpool == 0) {
         store64(out + 8, _resp_err("400", "Bad Request",
-        _pool_err(pool_name), "invalid_request_error"));
+            _pool_err(pool_name), "invalid_request_error"));
         return out;
     }
     if (pool_available(bpool) < est_tokens) {
@@ -2296,8 +2296,8 @@ fn _chat_forward(prep) {
     var tools_len = load64(prep + 48);
     var prompt_cstr = load64(prep + 72);
     return retry_forward(
-    _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len,
-    tools_raw, tools_len, load64(prep + 104));
+      _retry_cfg, route, model_cstr, prompt_cstr, msg_raw, msg_raw_len,
+      tools_raw, tools_len, load64(prep + 104));
 }
 
 # Build the response descriptor from a forward result. Mutates shared state
@@ -2320,8 +2320,8 @@ fn _chat_assemble(prep, result) {
         # interesting half when reconstructing an incident.
         if (_audit_chain != 0) {
             audit_record(_audit_chain, "inference.error",
-            "error", "provider backend unreachable",
-            provider_name(route_provider(route)), model_cstr);
+              "error", "provider backend unreachable",
+              provider_name(route_provider(route)), model_cstr);
         }
         event_inference_failed(provider_name(route_provider(route)), model_cstr, "backend unreachable");
         otlp_enqueue_inference_span(provider_name(route_provider(route)), model_cstr, 0, 0, 0);
@@ -2346,16 +2346,16 @@ fn _chat_assemble(prep, result) {
     # with /v1/costs by construction.
     var route_prov = route_provider(route);
     var resp_cost_micro = cost_record(route_prov, route_base_url(route),
-    resp_ptok, resp_ctok, model_cstr);
+      resp_ptok, resp_ctok, model_cstr);
 
     if (_audit_chain != 0) {
         audit_record(_audit_chain, "inference.request",
-        "info", "inference completed",
-        provider_name(route_provider(route)), model_cstr);
+          "info", "inference completed",
+          provider_name(route_provider(route)), model_cstr);
     }
 
     var body = _chat_completion_body(model_cstr, resp_text, resp_ptok,
-    resp_ctok, resp_tool_calls, resp_cost_micro, provider_name(route_prov));
+      resp_ctok, resp_tool_calls, resp_cost_micro, provider_name(route_prov));
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
@@ -2364,7 +2364,7 @@ fn _chat_assemble(prep, result) {
     # hit on it replays the body verbatim — including this cost — which is why
     # the header, not the body, is what a consumer must bill on.
     return _resp_set_header(_resp_new("200", "OK", body_cstr, body_clen),
-    "X-Hoosh-Cache: MISS");
+      "X-Hoosh-Cache: MISS");
 }
 
 # Forward a prepared request and build its descriptor (single-threaded path).
@@ -2424,7 +2424,7 @@ fn handle_chat(cfd, body_ptr, body_len) {
             return http_bad_request(cfd, "streaming requires messages array");
         }
         var sr = handle_chat_stream(
-        cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104));
+          cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104));
         if (bpool != 0) {
             mutex_lock(_chat_lock);
             pool_commit(bpool, est_tokens, 0);
