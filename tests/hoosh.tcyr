@@ -31,6 +31,10 @@ include "src/lib/logging.cyr"
 # needs only sys_write), so the response-header path is tested against the REAL
 # implementation rather than a mirror.
 include "src/lib/http_server.cyr"
+# 2.6.5: the provider-error capture + rendering is tested against the REAL implementation for the same
+# reason http_server is — a mirror of a string builder proves only that the mirror works.
+include "src/lib/jsonlite.cyr"
+include "src/lib/provider_err.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -6357,6 +6361,112 @@ fn main() {
     # provider is optional in the builder; omitting it must not emit an empty key.
     assert_eq(str_contains(_t_usage_block(1, 1, 0, 0), str_from("provider")), 0,
       "usage: an absent provider omits the field entirely");
+
+    # ================================================================
+    # 2.6.5 — the provider's OWN error, kept rather than thrown away
+    # ================================================================
+    # ⚠ A non-2xx from a provider used to vanish: the body was dropped and one fixed sentence was
+    # logged. Downstream, `handle_chat_stream` had already sent 200 OK, so the turn finished with a
+    # clean `finish_reason:"stop"` and no content — a well-formed, successful, EMPTY completion. thoth
+    # reported "response had neither tool calls nor content" and its operator spent a session believing
+    # the model had gone quiet. An error laundered into a success is worse than a crash.
+    assert_eq(provider_last_error_status(), 0,
+      "provider_err: no error captured yet");
+    assert_eq(str_contains(str_from(provider_err_log_line()), str_from("permanent error")), 1,
+      "provider_err: with nothing captured, the pre-2.6.5 sentence is still emitted (an alloc failure must not cost the log line)");
+    assert_eq(str_contains(str_from(provider_err_client_msg()), str_from("unreachable")), 1,
+      "provider_err: and the caller still hears the generic 502 wording");
+
+    # A real provider error: status + the `message` the provider put in its body.
+    var pe_msg = "prompt is too long: 213914 tokens > 200000 maximum";
+    provider_err_set(400, pe_msg, strlen(pe_msg));
+    assert_eq(provider_last_error_status(), 400, "provider_err: the status is kept");
+    assert_streq(provider_last_error_msg(), pe_msg, "provider_err: and so is the provider's own wording");
+    assert_eq(str_contains(str_from(provider_err_log_line()), str_from("HTTP 400")), 1,
+      "provider_err: the log line names the STATUS, not just 'permanent'");
+    assert_eq(str_contains(str_from(provider_err_log_line()), str_from("213914 tokens")), 1,
+      "provider_err: and carries the reason an operator actually needs");
+    # "unreachable" was wrong for the common case — a 4xx means the provider WAS reached and refused.
+    assert_eq(str_contains(str_from(provider_err_client_msg()), str_from("unreachable")), 0,
+      "provider_err: a refusal is no longer reported to the caller as an unreachable backend");
+    assert_eq(str_contains(str_from(provider_err_client_msg()), str_from("HTTP 400")), 1,
+      "provider_err: the caller is told which status it was");
+
+    # Untrusted bytes: bounded, and flattened to ONE line so a body full of newlines cannot break the
+    # log record it lands in.
+    var pe_long = alloc(PROVIDER_ERR_MSG_CAP * 2);
+    var pe_i = 0;
+    while (pe_i < (PROVIDER_ERR_MSG_CAP * 2 - 1)) { store8(pe_long + pe_i, 65); pe_i = pe_i + 1; }
+    store8(pe_long + pe_i, 0);
+    provider_err_set(500, pe_long, strlen(pe_long));
+    assert_eq(strlen(provider_last_error_msg()), PROVIDER_ERR_MSG_CAP - 1,
+      "provider_err: an over-long provider body is bounded, not copied whole");
+    var pe_ctl = alloc(16);
+    store8(pe_ctl + 0, 97); store8(pe_ctl + 1, 10); store8(pe_ctl + 2, 9); store8(pe_ctl + 3, 98); store8(pe_ctl + 4, 0);
+    provider_err_set(429, pe_ctl, 4);
+    assert_streq(provider_last_error_msg(), "a  b",
+      "provider_err: newlines and tabs become spaces — one error is one log line");
+
+    # provider_err_reset must make a stale error unattributable to a later request.
+    provider_err_reset();
+    assert_eq(provider_last_error_status(), 0, "provider_err: reset clears the status");
+    assert_streq(provider_last_error_msg(), "", "provider_err: and the message");
+
+    # ── the SSE error frame ──────────────────────────────────────
+    # The headers are already gone (http_sse_begin sends 200 before the provider is called), so the
+    # failure has to be reported IN the stream. finish_reason is "error", not "stop".
+    var se = upstream_error_sse_body("claude-opus-5", 400, "prompt is too long");
+    assert_eq(str_contains(str_from(se), str_from("\"error\":{\"type\":\"upstream_error\",\"code\":400")), 1,
+      "sse error frame: carries an error object with the upstream status");
+    assert_eq(str_contains(str_from(se), str_from("\"finish_reason\":\"error\"")), 1,
+      "sse error frame: finish_reason is 'error', so a client branching on it is not told 'stop'");
+    assert_eq(str_contains(str_from(se), str_from("claude-opus-5")), 1,
+      "sse error frame: names the model, like every other chunk");
+    # The message is provider-controlled: a bare quote would produce a malformed frame and take out the
+    # very client this exists to inform.
+    var se_esc = upstream_error_sse_body("m", 401, "bad \"key\" and a \\ slash");
+    assert_eq(str_contains(str_from(se_esc), str_from("bad \\\"key\\\" and a \\\\ slash")), 1,
+      "sse error frame: quotes and backslashes in the provider's message are JSON-escaped");
+
+    # ── recognising an IN-STREAM provider error ──────────────────
+    # ⚠ A provider that has already sent 200 OK cannot change its status either, so it reports a
+    # mid-stream failure as an EVENT. hoosh's stream callback looked only for text, thinking and tool
+    # deltas, so such a frame extracted to empty everywhere and was skipped — the stream then ended
+    # normally and the client received a clean, successful, EMPTY completion. Measured live: a request
+    # the non-streaming path answered fine came back from the streaming path with no content and
+    # NOTHING in hoosh's own log.
+    var ev_err = sandhi_sse_event_new("error", "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}", 0, 0 - 1);
+    var d_err = sandhi_sse_event_data(ev_err);
+    assert_eq(_sse_is_error_event(ev_err, d_err, strlen(d_err)), 1,
+      "sse error detect: Anthropic names the SSE event 'error'");
+    assert_streq(_sse_error_message(d_err, strlen(d_err)), "Overloaded",
+      "sse error detect: the provider's own wording is what surfaces");
+
+    # OpenAI-compatible backends leave the event unnamed and put the shape in the data frame.
+    var ev_oai = sandhi_sse_event_new(0, "{\"type\":\"error\",\"message\":\"context length exceeded\"}", 0, 0 - 1);
+    var d_oai = sandhi_sse_event_data(ev_oai);
+    assert_eq(_sse_is_error_event(ev_oai, d_oai, strlen(d_oai)), 1,
+      "sse error detect: an unnamed frame is recognised structurally, by \"type\":\"error\"");
+    assert_streq(_sse_error_message(d_oai, strlen(d_oai)), "context length exceeded",
+      "sse error detect: and its message is extracted");
+
+    # ⚠ NO SUBSTRING GUESSING. A model's own prose routinely contains the word "error", and a false
+    # positive here aborts a perfectly good stream mid-answer.
+    var ev_txt = sandhi_sse_event_new(0, "{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"the error was in your regex\"}}", 0, 0 - 1);
+    var d_txt = sandhi_sse_event_data(ev_txt);
+    assert_eq(_sse_is_error_event(ev_txt, d_txt, strlen(d_txt)), 0,
+      "sse error detect: a content delta whose TEXT says 'error' is NOT an error frame");
+    var ev_ping = sandhi_sse_event_new("ping", "{\"type\":\"ping\"}", 0, 0 - 1);
+    var d_ping = sandhi_sse_event_data(ev_ping);
+    assert_eq(_sse_is_error_event(ev_ping, d_ping, strlen(d_ping)), 0,
+      "sse error detect: a keep-alive ping is not an error");
+
+    # A provider that errors without saying why still produces a usable line.
+    var ev_bare = sandhi_sse_event_new("error", "{\"type\":\"error\"}", 0, 0 - 1);
+    var d_bare = sandhi_sse_event_data(ev_bare);
+    assert_eq(_sse_is_error_event(ev_bare, d_bare, strlen(d_bare)), 1, "sse error detect: bare error frame recognised");
+    assert_eq(str_contains(str_from(_sse_error_message(d_bare, strlen(d_bare))), str_from("no message")), 1,
+      "sse error detect: a message-less error still reports SOMETHING rather than an empty string");
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

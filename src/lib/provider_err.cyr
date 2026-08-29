@@ -1,0 +1,171 @@
+# hoosh/lib/provider_err — the provider's OWN error, kept rather than thrown away (2.6.5).
+#
+# ⚠ WHY THIS FILE EXISTS. A non-2xx from a provider used to vanish. `provider_forward` returned
+# `FWD_PERMANENT` (or 0) and logged one fixed sentence — `provider: permanent error, not retrying` — and
+# the response body, where every provider puts the reason, was dropped on the floor. Downstream that
+# produced the worst possible shape: `handle_chat_stream` had already sent `200 OK` headers, its buffered
+# fallback then also failed, and the handler finished with a clean `finish_reason:"stop"` frame. The
+# client received a well-formed, successful, EMPTY completion.
+#
+# Measured against a live stack: thoth reported *"response had neither tool calls nor content"* and its
+# operator spent a long session believing the model had gone quiet, while hoosh's own log knew only that
+# something had been permanent. **An error laundered into a success is worse than a crash**, because
+# nothing downstream can tell that it happened.
+#
+# SEPARATE MODULE, not a block inside provider.cyr, for one reason: provider.cyr reaches `_router`, which
+# is a global defined in main.cyr, so it cannot be included by the test binary. This surface is pure
+# string handling over untrusted provider bytes — exactly the thing that must be tested against the real
+# implementation rather than a mirror — so it lives where a test can reach it.
+
+var PROVIDER_ERR_MSG_CAP = 512;
+var _provider_err_status = 0;      # the provider's HTTP status, or 0 when there was no error
+var _provider_err_msg = 0;         # bounded, control-byte-free cstr, or 0
+var _provider_err_line = 0;        # composed log line (kept alive for the caller)
+var _provider_err_cmsg = 0;        # composed client-facing line
+
+# provider_last_error_status: the status of the most recent provider failure, or 0 if the most recent
+# attempt did not fail. ONE slot, overwritten per attempt (a retry's later answer is the one that
+# matters) and reset at the top of provider_forward, so a stale error can never be attributed to a
+# later request.
+fn provider_last_error_status() { return _provider_err_status; }
+
+fn provider_last_error_msg() {
+    if (_provider_err_msg == 0) { return ""; }
+    return _provider_err_msg;
+}
+
+fn provider_err_reset() {
+    _provider_err_status = 0;
+    if (_provider_err_msg != 0) { store8(_provider_err_msg, 0); }
+    return 0;
+}
+
+# provider_err_set: remember `status` and a bounded, single-LINE copy of msg[0..len).
+#
+# The bytes come from a provider, so they are untrusted in both length and content: an unbounded copy is
+# a heap write and an embedded newline would break the log record this ends up in. Control bytes become
+# spaces rather than being dropped, so a clipped HTML error page still reads as text.
+fn provider_err_set(status, msg, len) {
+    _provider_err_status = status;
+    if (_provider_err_msg == 0) { _provider_err_msg = alloc(PROVIDER_ERR_MSG_CAP); }
+    if (_provider_err_msg == 0) { return 0; }
+    store8(_provider_err_msg, 0);
+    if (msg == 0 || len <= 0) { return 0; }
+    var n = len;
+    if (n > (PROVIDER_ERR_MSG_CAP - 1)) { n = PROVIDER_ERR_MSG_CAP - 1; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(msg + i) & 255;
+        if (c < 32 || c == 127) { c = 32; }
+        store8(_provider_err_msg + i, c);
+        i = i + 1;
+    }
+    store8(_provider_err_msg + n, 0);
+    return 0;
+}
+
+# provider_err_log_line: `provider: HTTP <status>, not retrying - <message>`, or the pre-2.6.5 sentence
+# when nothing was captured — an allocation failure must not also cost the line that says something
+# went wrong.
+fn provider_err_log_line() {
+    if (_provider_err_status == 0) { return "provider: permanent error, not retrying"; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "provider: HTTP ");
+    str_builder_add_int(sb, _provider_err_status);
+    str_builder_add_cstr(sb, ", not retrying");
+    if (_provider_err_msg != 0) {
+        if (strlen(_provider_err_msg) > 0) {
+            str_builder_add_cstr(sb, " - ");
+            str_builder_add_cstr(sb, _provider_err_msg);
+        }
+    }
+    _provider_err_line = to_cstr(str_builder_build(sb));
+    return _provider_err_line;
+}
+
+# provider_err_client_msg: the same fact worded for the CALLER rather than the log. Kept separate so the
+# client-facing string can never accidentally grow log-only detail. "unreachable" was the old wording and
+# it was wrong for the common case: a 400 or a 404 means the provider WAS reached and refused — a
+# different problem with a different fix, and telling an operator their backend is down when it answered
+# instantly sends them to the wrong place.
+fn provider_err_client_msg() {
+    if (_provider_err_status == 0) { return "provider backend unreachable"; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "upstream provider returned HTTP ");
+    str_builder_add_int(sb, _provider_err_status);
+    if (_provider_err_msg != 0) {
+        if (strlen(_provider_err_msg) > 0) {
+            str_builder_add_cstr(sb, ": ");
+            str_builder_add_cstr(sb, _provider_err_msg);
+        }
+    }
+    _provider_err_cmsg = to_cstr(str_builder_build(sb));
+    return _provider_err_cmsg;
+}
+
+# sb_add_json_escaped: append `s` as the body of a JSON string. The message came from a provider, so a
+# quote or a control byte in it would otherwise produce a malformed frame and take out the very client
+# this whole file exists to inform.
+fn sb_add_json_escaped(sb, s) {
+    if (s == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i) & 255;
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c < 32) { str_builder_putc(sb, 32); }
+        else { str_builder_putc(sb, c); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# upstream_error_sse_body: the chunk that tells a STREAMING client the turn failed.
+#
+# ⚠ THE HEADERS ARE ALREADY GONE. `http_sse_begin` sends `200 OK` before the provider is ever called, so
+# by the time a provider error arrives there is no status left to change — and the handler's only move
+# used to be the stop frame, i.e. a clean `finish_reason:"stop"` with no content. Every client reads that
+# as "the model chose to say nothing", which is a lie about whose fault it is.
+#
+# So the failure is reported IN the stream, as an `error` object. This is the shape OpenAI itself uses
+# for a mid-stream failure, so an OpenAI-compatible client already knows how to read it, and a client
+# that ignores unknown fields is no worse off than it was. `finish_reason` is `"error"` rather than
+# `"stop"` for clients that branch on that alone.
+fn upstream_error_sse_body(model, status, message) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
+    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"error\":{\"type\":\"upstream_error\",\"code\":");
+    str_builder_add_int(sb, status);
+    str_builder_add_cstr(sb, ",\"message\":\"");
+    sb_add_json_escaped(sb, message);
+    str_builder_add_cstr(sb, "\"},\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}");
+    return to_cstr(str_builder_build(sb));
+}
+
+# _sse_is_error_event: 1 when this frame is the provider reporting a failure rather than content.
+#
+# Two precise tests, no substring guessing — a model's own prose routinely contains the word "error", and
+# a false positive here would abort a perfectly good stream. Anthropic names the SSE event `error`;
+# OpenAI-compatible backends keep the event unnamed and put `"type":"error"` (or an `error` object) in
+# the data frame, which `_json_obj_str_field` finds structurally.
+fn _sse_is_error_event(ev, data, dlen) {
+    var nm = sandhi_sse_event_name(ev);
+    if (nm != 0) { if (streq(nm, "error") == 1) { return 1; } }
+    var tf = _json_obj_str_field(data, dlen, "type", 4);
+    if (tf != 0) {
+        if (load64(tf + 8) == 5) { if (memeq(load64(tf), "error", 5) == 1) { return 1; } }
+    }
+    return 0;
+}
+
+# _sse_error_message: the provider's own wording out of an error frame, or a plain fallback. Both
+# families nest it as `error.message`, and `_json_extract_str` finds the first `"message"` field at any
+# depth, which is exactly that.
+fn _sse_error_message(data, dlen) {
+    var m = _json_extract_str(data, dlen, "message", 7);
+    if (strlen(m) > 0) { return m; }
+    return "the provider reported an error mid-stream but gave no message";
+}

@@ -9,17 +9,48 @@
 
 | | |
 |---|---|
-| **Version** | **2.5.11** (security & hardening sweep — closes the rust-old parity arc) |
-| **Toolchain** | Cyrius pin **6.4.62** (`cyrius.cyml`); `ai-hwaccel` **2.3.14** |
+| **Version** | **2.6.5** (a provider error is no longer laundered into a successful, empty completion) |
+| **Toolchain** | Cyrius pin **6.5.35** (`cyrius.cyml`); `ai-hwaccel` **2.3.14** |
 | **Binary** (x86_64 static ELF) | ~15 MB default build; smaller under `CYRIUS_DCE=1` |
-| **Source** | ~11,070 lines / 32 files (`src/main.cyr` + 31 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 663 assertions · 141 groups (`tests/hoosh.tcyr`) |
+| **Source** | ~11,666 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 714 assertions (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
 | **Coverage** | symbol coverage 32% (`scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
 | **ADRs** | 11 (`docs/decisions/`) |
 | **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
+
+## 2.6.5 — errors stop being laundered into successes
+
+⭐ **The failure mode this release exists to remove: a well-formed, successful, EMPTY completion.**
+Three ways hoosh could produce one, all now closed.
+
+1. **An in-stream provider `error` event was silently dropped.** A provider that has already sent
+   `200 OK` reports a mid-stream failure as an *event* — Anthropic names the SSE event `error`,
+   OpenAI-compatible backends put an `error` object in a data frame. `_remote_stream_cb` looked only for
+   text, thinking and tool deltas, so the frame extracted to empty everywhere, was skipped, and the
+   stream ended normally. Nothing reached hoosh's log either. Measured live: a request the
+   **non-streaming** path answered fine came back from the streaming path with no content, and thoth's
+   operator spent a session believing the model had gone quiet. Recognition is **structural, never a
+   substring search** — a model's prose routinely contains the word "error".
+2. **The provider's error body was thrown away.** A non-2xx logged one fixed sentence and dropped the
+   body, so the most useful fact in the failure reached neither the log nor the caller. Now captured
+   (bounded, control bytes flattened so one error stays one log line) and surfaced both ways.
+3. **"provider backend unreachable" was the wrong words.** A 400/404 means the provider *was* reached
+   and refused; the old wording sent operators to look at a backend that had answered instantly.
+
+New modules, both created so the surface could be TESTED: `src/lib/provider_err.cyr` (capture,
+sanitising, renderings, the SSE error frame, the recognisers) and `src/lib/jsonlite.cyr` (a pure lift of
+the five byte-level JSON readers out of `provider.cyr`). The reason is mechanical: **`provider.cyr`
+reaches `_router`, a global defined in `main.cyr`, so it cannot be included by the test binary** — and
+untrusted-byte parsing is exactly what must be tested against the real implementation, not a mirror.
+
+⚠ **Not fixed here, and not hoosh's:** the vendored `lib/sandhi.cyr` in this toolchain snapshot silently
+drops whole SSE events at read boundaries, which is what made hoosh forward a tool call whose `id`/`name`
+frame never arrived. Fixed upstream in **sandhi 1.9.15**; it reaches hoosh when a cyrius release
+re-vendors the bundle. Filed as
+`cyrius/docs/development/issues/2026-08-27-revendor-sandhi-1.9.15-sse-event-loss.md`.
 
 ## Active cycle — v2.5.x arc: COMPLETE
 

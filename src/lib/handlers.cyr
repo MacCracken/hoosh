@@ -1525,6 +1525,13 @@ fn _sse_tool_chunk(cfd, model, tool_calls) {
     return http_sse_event(cfd, d, str_len(s));
 }
 
+# _sse_error_chunk: send the upstream-error frame built by provider_err.cyr. The BODY lives there (and
+# is unit-tested there); this is only the send, which needs a socket.
+fn _sse_error_chunk(cfd, model, status, message) {
+    var d = upstream_error_sse_body(model, status, message);
+    return http_sse_event(cfd, d, strlen(d));
+}
+
 # Send the final SSE stop chunk
 fn _sse_stop(cfd, model) {
     var sb = str_builder_new();
@@ -1593,6 +1600,23 @@ fn _remote_stream_cb(ctx, ev) {
     # OpenAI-compat terminates the stream with a literal `[DONE]` sentinel.
     if (dlen == 6) {
         if (memeq(data, "[DONE]", 6) == 1) { return 0; }
+    }
+    # ⚠ 2.6.5 — AN IN-STREAM ERROR EVENT WAS SILENTLY DROPPED. A provider that has already sent `200 OK`
+    # cannot change its status either, so it reports a mid-stream failure as an EVENT: Anthropic sends
+    # `event: error` with `{"type":"error","error":{"type":…,"message":…}}`, and OpenAI-compatible
+    # backends put a top-level `"error"` object in a data frame. This callback looked only for text,
+    # thinking and tool deltas, so such a frame extracted to empty everywhere and was skipped — the
+    # stream then ended normally and the client received a clean, successful, EMPTY completion.
+    #
+    # That is the same laundering the buffered path did, arriving by a different road, and it is the one
+    # that actually bit: measured live, a request the non-streaming path answered fine came back from the
+    # streaming path as `finish_reason:"stop"` with no content and NOTHING in hoosh's log. Forward it.
+    if (_sse_is_error_event(ev, data, dlen) == 1) {
+        var perr = _sse_error_message(data, dlen);
+        _sse_error_chunk(load64(ctx), load64(ctx + 8), 0, perr);
+        store64(ctx + 32, 1);                     # tell the handler an error was already reported
+        hlog_error(perr);
+        return 0;                                  # stop pulling: the provider is done talking
     }
     var txt = 0;
     if (prov == PROV_ANTHROPIC) {
@@ -1682,15 +1706,17 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
           tools_raw, tools_len, gen);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
-        var ctx = alloc(32);
+        var ctx = alloc(40);          # 2.6.5: +32 = "an error frame was already sent to the client"
         store64(ctx, cfd);
         store64(ctx + 8, model);
         store64(ctx + 16, route_provider(route));
         store64(ctx + 24, 0);
+        store64(ctx + 32, 0);
         var sres = sandhi_http_stream(
           surl, "POST", hdrs, sbody, strlen(sbody),
           &_remote_stream_cb, ctx);
         var emitted = load64(ctx + 24);
+        var err_sent = load64(ctx + 32);          # 2.6.5: the callback already told the client
         var ok = 0;
         if (sres != 0) {
             if (sandhi_stream_err(sres) == SANDHI_OK) {
@@ -1698,7 +1724,12 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                 if (st >= 200) { if (st < 300) { ok = 1; } }
             }
         }
-        if (ok == 0) {
+        if (err_sent == 1) {
+            # 2.6.5: the provider reported the failure in-stream and the client already has it. Do not
+            # retry into a buffered fallback — the provider has said no, and a second attempt would
+            # either repeat the refusal or (worse) succeed and contradict the error already sent.
+            metrics_record(0, emitted);
+        } elif (ok == 0) {
             # Only safe to fall back when nothing was streamed yet, otherwise
             # the buffered emit would duplicate the partial output.
             if (emitted == 0) {
@@ -1713,6 +1744,23 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                     var rtc = load64(rresult + 32);
                     if (rtc != 0) { _sse_tool_chunk(cfd, model, rtc); }
                     metrics_record(0, load64(rresult + 24));
+                } else {
+                    # 2.6.5: the stream failed AND the buffered fallback failed. Nothing will be sent
+                    # after this but the stop frame, so this is the last chance to say why — otherwise
+                    # the client receives a clean, empty, successful completion and blames the model.
+                    var estatus = provider_last_error_status();
+                    var emsg = provider_last_error_msg();
+                    if (estatus == 0) { emsg = "the provider could not be reached"; }
+                    _sse_error_chunk(cfd, model, estatus, emsg);
+                    hlog_error("chat stream: no content produced; reporting upstream error to the client");
+                    if (_audit_chain != 0) {
+                        mutex_lock(_chat_lock);
+                        audit_record(_audit_chain, "inference.error", "error",
+                          "streaming inference failed (remote)",
+                          provider_name(route_provider(route)), model);
+                        mutex_unlock(_chat_lock);
+                    }
+                    event_inference_failed(provider_name(route_provider(route)), model, "upstream error");
                 }
             }
         } else {
@@ -2314,7 +2362,10 @@ fn _chat_assemble(prep, result) {
 
     if (result == 0) {
         if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
-        hlog_error("chat: provider backend unreachable after retries");
+        # 2.6.5: "unreachable" was wrong for the common case. A 400 or a 404 means the provider was
+        # reached and REFUSED — a different problem with a different fix, and telling an operator their
+        # backend is down when it answered instantly sends them to the wrong place.
+        hlog_error(provider_err_log_line());
         # 2.5.7: failures belong in the audit chain too. Recording only the
         # successes made the chain a record of what worked, which is the less
         # interesting half when reconstructing an incident.
@@ -2325,6 +2376,9 @@ fn _chat_assemble(prep, result) {
         }
         event_inference_failed(provider_name(route_provider(route)), model_cstr, "backend unreachable");
         otlp_enqueue_inference_span(provider_name(route_provider(route)), model_cstr, 0, 0, 0);
+        if (provider_last_error_status() > 0) {
+            return _resp_err("502", "Bad Gateway", provider_err_client_msg(), "upstream_error");
+        }
         return _resp_err("502", "Bad Gateway", "provider backend unreachable", "server_error");
     }
 

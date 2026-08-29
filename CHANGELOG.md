@@ -5,6 +5,93 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.5] — 2026-08-28
+
+**A provider error is no longer laundered into a successful, empty completion.** No pin change (cyrius
+6.5.35). **714 assertions** (was 689), lint/vet/deny clean, 25 benchmarks recorded. Three related fixes,
+one small refactor; no behaviour change on any path where the provider succeeds.
+
+### Fixed — an in-stream provider `error` event was silently dropped
+
+A provider that has already sent `200 OK` cannot change its status either, so it reports a mid-stream
+failure as an **event**: Anthropic sends `event: error` with
+`{"type":"error","error":{"type":…,"message":…}}`, and OpenAI-compatible backends put a top-level
+`"error"` object in a data frame.
+
+`_remote_stream_cb` looked only for text deltas, thinking deltas and tool deltas. An error frame
+extracted to empty in all three, so it was skipped, the stream ended normally, and the caller received a
+well-formed, successful, **empty** completion. Nothing was written to hoosh's log either — the failure
+left no trace anywhere.
+
+Measured against a live stack: a request the **non-streaming** path answered fine came back from the
+streaming path as `finish_reason:"stop"` with no content. Downstream, thoth reported *"response had
+neither tool calls nor content"* and its operator spent a long session believing the model had gone
+quiet.
+
+Such a frame is now recognised and forwarded to the client as an `error` chunk, then the stream stops.
+Recognition is **structural, never a substring search** — a model's own prose routinely contains the word
+"error", and a false positive would abort a good stream mid-answer. Two precise tests: the SSE event is
+*named* `error` (Anthropic), or the data frame carries `"type":"error"` (OpenAI-compatible).
+
+### Fixed — the provider's error body was thrown away
+
+On a non-2xx, `provider_forward` returned `FWD_PERMANENT` (or 0) and logged one fixed sentence —
+`provider: permanent error, not retrying`. The response body, where every provider puts the reason, was
+dropped. The single most useful fact in the whole failure reached neither the log nor the caller.
+
+The status and the provider's own `message` are now captured (bounded to 512 bytes, control bytes
+flattened to spaces so one error stays one log line) and surfaced in both directions:
+
+```
+2.6.4  log:    provider: permanent error, not retrying
+       client: {"error":{"message":"provider backend unreachable","type":"server_error"}}
+
+2.6.5  log:    provider: HTTP 404, not retrying - model: claude-does-not-exist-9
+       client: {"error":{"message":"upstream provider returned HTTP 404: model: claude-does-not-exist-9",
+                         "type":"upstream_error"}}
+```
+
+### Fixed — "provider backend unreachable" was the wrong words for the common case
+
+A 400 or a 404 means the provider **was** reached and refused. Telling an operator their backend is down
+when it answered instantly sends them to the wrong place. The non-streaming 502 now names the status and
+the reason when one was captured, and keeps the old wording only when the backend genuinely could not be
+reached.
+
+### Changed — `src/lib/jsonlite.cyr` (pure lift, no behaviour change)
+
+`_json_value_pos`, `_json_extract_str`, `_json_extract_int`, `_json_obj_str_field` and `_json_obj_end`
+moved out of `provider.cyr` into their own module. They were never provider logic — `handlers.cyr` reads
+with them too — and the move has a concrete payoff: **`provider.cyr` reaches `_router`, a global defined
+in `main.cyr`, so it cannot be included by the test binary.** Anything living there is untestable, and
+the new upstream-error surface is exactly the kind of untrusted-byte parsing that must be tested against
+the real implementation rather than a mirror.
+
+`src/lib/provider_err.cyr` is new for the same reason: it holds the capture, the bounding and sanitising,
+the log/client renderings, the SSE error-frame builder and the two error recognisers — all reachable from
+`tests/hoosh.tcyr`.
+
+### Tests
+
+25 new assertions, covering: capture of status + message; the pre-capture fallback wording; bounding an
+over-long provider body; flattening newlines and tabs to spaces; `reset` making a stale error
+unattributable to a later request; the SSE error frame's shape (`error` object, upstream status,
+`finish_reason:"error"`, model named); JSON-escaping of a provider message containing quotes and
+backslashes; and error **recognition** — including the two negative cases that matter, a content delta
+whose text says "error" and a keep-alive ping.
+
+### Note for consumers
+
+This release makes hoosh **report** upstream failures instead of hiding them; it does not make them stop
+happening. A client that previously saw an empty completion will now see an `error` chunk in the stream
+(or a 502 naming the status), which is the outcome it needed in order to react.
+
+⚠ Separately, and **not** fixed here: the vendored `lib/sandhi.cyr` in this toolchain snapshot silently
+drops whole SSE events at read boundaries, which is what caused hoosh to forward a tool call whose
+`id`/`name` frame never arrived. Fixed upstream in **sandhi 1.9.15**; it reaches hoosh when a cyrius
+release re-vendors the bundle. Filed as
+`cyrius/docs/development/issues/2026-08-27-revendor-sandhi-1.9.15-sse-event-loss.md`.
+
 ## [2.6.4] — 2026-08-25
 
 **Toolchain and CI maintenance.** No behaviour change to the gateway; every gate now actually gates.

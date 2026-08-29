@@ -48,6 +48,8 @@ include "src/lib/trace.cyr"
 include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 include "src/lib/http_client.cyr"
+include "src/lib/jsonlite.cyr"       # 2.6.5: byte-level JSON field readers, lifted out of provider.cyr so tests can reach them
+include "src/lib/provider_err.cyr"   # 2.6.5: the provider-error surface; BEFORE provider.cyr, which calls it
 include "src/lib/provider.cyr"
 include "src/lib/compact.cyr"
 include "src/lib/audit.cyr"
