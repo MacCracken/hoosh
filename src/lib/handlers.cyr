@@ -1952,7 +1952,10 @@ fn _embed_query_body(body_ptr, body_len) {
     if (route_is_remote(route) == 1) {
         var url = _provider_url(route_base_url(route), "/v1/embeddings");
         var hdrs = _provider_headers(route);
-        var sresp = sandhi_http_post(url, hdrs, body, blen);
+        # Bounded: this call sits inside _chat_lock (see the semantic-cache
+        # note in _chat_prep), so an unbounded embedding round-trip would
+        # serialise the whole worker pool behind one hung backend.
+        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts());
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);
@@ -2169,8 +2172,11 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     }
 
     # DLP: Restricted -> block; Confidential -> local provider only.
+    # Hoisted: the semantic-cache stage below must honour the same
+    # classification, and it used to be scoped to this block.
+    var dlp_level = CLASS_PUBLIC;
     if (dlp_is_enabled() == 1) {
-        var dlp_level = dlp_scan_level(body_ptr, body_len);
+        dlp_level = dlp_scan_level(body_ptr, body_len);
         if (dlp_level == CLASS_RESTRICTED) {
             hlog_warn("dlp: restricted content blocked");
             store64(out + 8, _resp_err("403", "Forbidden",
@@ -2207,12 +2213,23 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                 "X-Hoosh-Cache: HIT"));
             return out;
         }
-        if (semantic_is_enabled() == 1) {
+        # CONFIDENTIAL content must not be embedded remotely. _chat_prep has
+        # just re-routed this request to a LOCAL provider a few lines above and
+        # logged "dlp: confidential content routed to a local provider" — but
+        # _embed_query_body then handed the SAME raw body to a route chosen by
+        # a plain router_select, with no locality constraint and the operator's
+        # key attached. The shipped hoosh.cyml suggests text-embedding-3-small,
+        # i.e. the remote route, so the leaking configuration was the default
+        # one, and README advertises "Confidential forced local".
+        #
+        # Skipping the embedding costs only a semantic-cache lookup for
+        # confidential requests; the exact-key cache above still applies.
+        if (semantic_is_enabled() == 1 && dlp_level < CLASS_CONFIDENTIAL) {
             var emb = _embed_query_body(body_ptr, body_len);
             if (emb != 0) {
                 sem_vec = load64(emb);
                 sem_n = load64(emb + 8);
-                var skey = semantic_find(sem_vec, sem_n);
+                var skey = semantic_find_model(sem_vec, sem_n, model_cstr);
                 if (skey != 0) {
                     var scached = cache_get(_cache, skey);
                     if (scached != 0) {
@@ -2253,6 +2270,20 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # `messages`, which is where OpenAI clients put it.
     var est_tokens = 2048;
     if (g_maxt > 0) { est_tokens = g_maxt; }
+    # Include the PROMPT side in the reservation. est_tokens is the client's own
+    # output cap, but the charge in _chat_assemble is prompt + completion — so
+    # {"max_tokens": 1} was admitted whenever the pool had a single token free
+    # and could still be charged a quarter-million prompt tokens, taking the
+    # pool far negative in one request. Against the shipped default capacity a
+    # single request could exceed the whole cap.
+    #
+    # chars_per_token_x10 is the same estimator compaction uses a few lines
+    # below, so the two agree on what a prompt costs.
+    var est_prompt = 0;
+    if (body_len > 0) {
+        est_prompt = estimate_tokens(body_ptr, body_len, chars_per_token_x10(route_provider(route)));
+    }
+    est_tokens = est_tokens + est_prompt;
 
     # 2.5.0 extended thinking + 2.5.2 sampling, carried on the per-request prep
     # struct (out + 104) — hoosh is multi-threaded, so a global would race.
@@ -2429,7 +2460,7 @@ fn _chat_assemble(prep, result) {
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
-    if (ckey != 0 && sem_vec != 0) { semantic_insert(ckey, sem_vec, sem_n); }
+    if (ckey != 0 && sem_vec != 0) { semantic_insert_model(ckey, sem_vec, sem_n, model_cstr); }
     # MISS: this response was produced by a real forward, not replayed. A later
     # hit on it replays the body verbatim — including this cost — which is why
     # the header, not the body, is what a consumer must bill on.
@@ -2495,11 +2526,26 @@ fn handle_chat(cfd, body_ptr, body_len) {
         }
         var sr = handle_chat_stream(
           cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104));
+        # Meter the stream. This committed 0, so the reservation was purely
+        # transient, POOL_USED never grew, /v1/tokens/pools reported used: 0
+        # forever, and cost_record was never reached — the streaming branch does
+        # not go through _chat_assemble. Streaming is the default in every real
+        # client, so in practice most traffic was entirely unbilled and no
+        # budget could ever be exhausted by it.
+        #
+        # Committing est_tokens converts the reservation this request already
+        # made into usage, which is the conservative reading when the provider's
+        # own counts are not available on this path. Decoding real usage
+        # (OpenAI stream_options.include_usage, Anthropic message_delta.usage)
+        # is the follow-up; charging the reservation is strictly better than
+        # charging nothing, and never exceeds what admission already approved.
         if (bpool != 0) {
             mutex_lock(_chat_lock);
-            pool_commit(bpool, est_tokens, 0);
+            pool_commit(bpool, est_tokens, est_tokens);
             mutex_unlock(_chat_lock);
         }
+        cost_record(route_provider(route), route_base_url(route), 0, est_tokens, model_cstr);
+        metrics_record(0, est_tokens);
         return sr;
     }
 

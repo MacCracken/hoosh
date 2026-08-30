@@ -107,6 +107,12 @@ fn _cache_evict_lru(c) {
     }
     if (oldest_key != 0) {
         map_delete(m, oldest_key);
+        # Drop the embedding too. cache_evict_expired already did this; the LRU
+        # path did not, so under capacity pressure every eviction orphaned an
+        # index entry permanently. Because vec_push appends, the orphans
+        # collect at the HEAD, which is exactly where a configured max_search
+        # window looks — so hit rate decays toward zero.
+        semantic_remove(oldest_key);
         var ev = load64(c + CACHE_EVICTIONS);
         store64(c + CACHE_EVICTIONS, ev + 1);
     }

@@ -5,6 +5,188 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.8] — 2026-08-30
+
+**The audit closes.** This lands the remaining findings — the confidential-data
+leak, the unmetered streaming path, the errors laundered into successes, and the
+last of the concurrency holes — and clears the transitive-dependency collision
+upstream. **775 assertions** (was 753), `src/` lint-clean, fmt/vet/deny clean,
+and the build is now warning-free for the first time in this arc. Benchmarks show
+**no regressions**.
+
+### Fixed — the /v1/embeddings controls that 2.6.6 exposed
+
+Fixing the `/v1/embeddings` SIGSEGV in 2.6.6 had a consequence the audit called
+out explicitly: two findings had been refuted *only* because the handler crashed
+before it ever forwarded. Removing the crash activated both. The endpoint had **no
+DLP scan, no rate limiting, and no metrics**, and it forwarded through
+`http_post_local`, which speaks plaintext and emits no `Authorization` header — so
+a remote route would have received the body in the clear. It is now DLP-scanned
+(RESTRICTED refused), restricted to local providers, rate limited, and counted.
+
+### Fixed — confidential data left the box
+
+`_chat_prep` enforces "CONFIDENTIAL is re-routed to a local provider" and logs
+that it did so — then handed the **same raw body** to `_embed_query_body`, which
+picked a route with a plain `router_select` (no locality constraint), JSON-escaped
+the entire body into `"input"`, and POSTed it to a **remote** embedding provider
+with the operator's key attached. The shipped `hoosh.cyml` suggests
+`text-embedding-3-small`, i.e. the remote route, so the leaking configuration was
+the default one, while README advertises "Confidential forced local". Confidential
+requests now skip semantic embedding entirely; the exact-key cache still applies.
+
+### Fixed — money and metering
+
+- **`"stream": true` was never billed.** The streaming branch committed 0 to the
+  budget pool and never reached `cost_record` — `/v1/tokens/pools` reported
+  `used: 0` forever. Streaming is the default in every real client, so in practice
+  most traffic was unmetered and no budget could be exhausted by it. The
+  reservation the request already made is now converted into usage, and cost and
+  metrics are recorded. (Decoding the provider's own counts — OpenAI
+  `stream_options.include_usage`, Anthropic `message_delta.usage` — is the
+  follow-up; charging the reservation is strictly better than charging nothing and
+  never exceeds what admission approved.)
+- **The budget reserved the output estimate but charged prompt + completion.**
+  `est_tokens` is the client's own `max_tokens`, so `{"max_tokens": 1}` was
+  admitted whenever a single token was free and could still be charged a
+  quarter-million prompt tokens — one request could exceed the entire configured
+  cap. The reservation now includes an estimate of the prompt, using the same
+  estimator compaction uses, so it is an upper bound on the charge.
+- **Provider token counts are clamped.** All four extractors packed
+  `prompt * 2^32 + completion` from untrusted provider JSON, and
+  `_json_extract_int` honours a leading `-`, so `completion_tokens: -5` unpacked
+  to 4294967291 and flowed into the budget, the cost record and the usage block
+  returned to the client.
+- **The rate limiter granted 0 rpm at small limits.** `add = rpm * elapsed_ms *
+  1000 / 60000` truncates to 0 for a short interval, and `last_refill` was stamped
+  to `now` regardless, discarding it. Because refill runs on **every** check
+  including rejected ones, a client polling faster than one token's worth of time
+  never accumulated anything: measured against the real 5–6 ms tick,
+  `rate_limit = 5` granted **0 rpm** — total starvation — and 10 granted about 3.
+  Free tiers of 5–10 RPM are common, and one tenant polling a shared route drove
+  it to zero for every other tenant. The clock now advances only by the time
+  actually converted into tokens.
+
+### Fixed — errors laundered into successes
+
+- **The local streaming path never read the provider's HTTP status.**
+  `stream_skip_headers` pulls the whole response head into a buffer and the status
+  line was simply discarded, so a 404 "model not found" went into the NDJSON loop,
+  extracted nothing, and finished as a clean `200 OK` with
+  `finish_reason:"stop"` and no content — logged nowhere, with
+  `provider_last_error_status()` still 0 and `audit_record` filing it as a
+  **success**. That is the exact failure 2.6.5 fixed for the remote path. The
+  status is now parsed, a bounded prefix of the error body is captured, and the
+  caller takes its existing error-chunk path. The parser moved to
+  `provider_err.cyr` so it is tested against the real implementation.
+- **Remote provider calls had no timeouts at all.** `sandhi_http_post` was called
+  with `opts = 0`, so every option getter returned 0: no connect deadline, no read
+  timeout, no total deadline — the outbound twin of the accepted-socket timeouts
+  added in 2.6.6. A provider that accepted and went silent parked a worker
+  forever. The library's 256 KiB default response cap also made any longer
+  completion fail as a protocol error, which the retry layer treats as retryable:
+  four identical re-POSTs, each generating and billing a full completion upstream.
+  Both call sites now pass explicit connect/read/write/total bounds and a response
+  cap sized for real completions.
+
+### Fixed — concurrency
+
+- **`provider_err` state was four process globals** written from inside
+  `provider_forward`, which every caller invokes with `_chat_lock` *released*,
+  while readers take `_chat_lock` — a lock protecting nothing against writers
+  holding nothing. Another worker's `reset` could wipe a captured error before its
+  owner read it, silently regressing every diagnostic the module exists to provide
+  back to "provider backend unreachable", and one client could be answered with
+  another client's provider error text. Now per-thread.
+- **The sync-batch path could deadlock the pool.** `wq_push` spins forever on a
+  full ring, and the batch loop pushes up to `BATCH_MAX_ITEMS` **from a pool
+  worker** before reaching its barrier; once every worker is in that spin nothing
+  calls `wq_pop` and the state is terminal — restart required, `/v1/health`
+  included. A sync batch is now refused with 503 when the queue lacks room, which
+  makes the spin unreachable.
+
+### Fixed — untrusted input
+
+- **Client `traceparent` was unvalidated.** Only `1 <= n <= 200` was checked, but
+  the OTLP span builder slices it at **fixed offsets**, so `traceparent: x`
+  produced a 2-byte allocation from which ~50 bytes were read and emitted
+  unescaped into the span batch; an embedded NUL truncated the fragment and
+  corrupted the whole batch. The same buffer is forwarded verbatim into every
+  outbound request header. It is now validated against the W3C shape
+  (`00-<32 hex>-<16 hex>-<2 hex>`, exactly 55 bytes) and a malformed value is
+  replaced by a freshly generated one. The existing tests **blessed**
+  `00-abc-def-01` as valid; they were wrong and are corrected.
+- **`Transfer-Encoding` was ignored entirely.** With no `Content-Length` the drain
+  never ran and the handler received chunk-size lines, CRLFs and the terminator as
+  the body: short bodies "worked" by accident because the JSON parser skips to the
+  first `{`, while the framing bytes polluted the cache key, and any body spanning
+  more than one segment was **silently truncated** — so the prompt forwarded and
+  billed was a cut-off prefix. Reachable via `curl -T`, undici streams, or an
+  HTTP/2-terminating proxy. Now refused with 501 rather than mis-framed.
+
+### Fixed — semantic cache
+
+- **A hit ignored the requested model.** The exact key hashes model + body, but
+  the index stored only `(key, vec, n)` and matched on dimension and cosine score
+  alone. Two bodies differing only in `"model"` are near-identical strings that
+  score far above the shipped 0.85 threshold, so a `claude-opus-4-1` request was
+  served the `gpt-4o-mini` answer, labelled `X-Hoosh-Cache: SEMANTIC`. Entries now
+  carry the model and a hit requires an exact match.
+- **Index pruning was dead on two paths.** `semantic_remove` compared keys by raw
+  **pointer** identity while the caller passes a freshly allocated `sha256_hex`
+  cstr, so the expired-on-read path never matched; and LRU eviction called
+  `map_delete` with no `semantic_remove` at all, so under capacity pressure every
+  eviction orphaned an index entry permanently. Because entries are appended, the
+  orphans collect at the head — exactly where a configured `max_search` window
+  looks — so hit rate decayed toward zero.
+
+### Fixed — silent configuration failures
+
+`_config_expand_env` returned 0 for an unset variable and the provider loop
+dropped it with no `else` and no log, so the route kept no API key,
+`_provider_headers` skipped the auth block, and requests went upstream with **no
+credential** — surfacing as a provider 401 the operator naturally blamed on the
+provider. The shipped `hoosh.cyml` has three remote providers each using
+`$..._API_KEY`. `${NAME}` failed the same way, since the `$` test matched the
+braced form too. Unset variables are now named in a warning and `${NAME}` is
+supported.
+
+### Changed
+
+- **`[deps.ai-hwaccel]` 2.3.19 → 2.3.20**, which makes its `bayan` dependency
+  optional and feature-gated. This removes the transitive `dist/bayan-json.cyr`
+  that shadowed the stdlib bayan: **131 duplicate function definitions → 0**.
+- **`lib/sankoch.cyr` refreshed** from 2.7.8 to the pinned 2.7.10, clearing the
+  last `./lib/ shadows version-pinned lib/` warning. The build now emits no
+  warnings at all.
+
+### Performance
+
+Interleaved A/B against 2.6.7 (`8279314`), 3 rounds each, same machine and
+session: **no regressions and no wins** across all 25 benchmarks — every delta
+within its own run-to-run spread.
+
+### Known issues
+
+Four audit items remain, all deferred deliberately with reasons recorded in the
+repair plan:
+
+- **Depth-aware top-level parameter scanning** — a key nested inside a tools
+  schema can shadow the real `temperature` / `max_tokens` / `stream`. Correctness
+  only; no security boundary is crossed.
+- **DLP scans raw JSON bytes**, so a `\uXXXX` escape defeats the built-in
+  patterns. Note Python's `json.dumps` defaults to `ensure_ascii=True`, so this
+  also means a non-ASCII custom pattern never matches a default Python client.
+- **Per-consumer cache partitioning** — the cache key carries no caller identity.
+  2.6.8's model match removes the most likely cross-serve.
+- **The CLI `--stream` reader drops SSE frames that straddle a read boundary.**
+  Client-side only; the gateway's own streaming is unaffected.
+
+Two pre-existing gate items also stand: 103 `line exceeds 120 characters` lint
+warnings in the test files (long JSON fixtures, where mechanical rewrapping would
+alter test data), and `src/vendor/bote-core.cyr` failing `cyrius fmt --check`
+(vendored upstream code, deliberately not reformatted).
+
 ## [2.6.7] — 2026-08-30
 
 **Second tranche of the security audit**, plus a test-integrity fix that turned

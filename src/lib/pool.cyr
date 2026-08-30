@@ -180,6 +180,21 @@ fn _handle_conn(cfd) {
     if (req_len > 0) {
         store8(req_buf + req_len, 0);
 
+        # Transfer-Encoding is not implemented. With no Content-Length the
+        # drain below never runs, so the handler received chunk-size lines,
+        # CRLFs and the terminator as the body: short bodies "worked" by
+        # accident because the JSON parser skips to the first `{`, while the
+        # framing bytes polluted the cache key, and any body spanning more than
+        # one segment was silently TRUNCATED — so the prompt forwarded and
+        # billed was a cut-off prefix. Reachable via `curl -T`, undici streams,
+        # or an HTTP/2-terminating proxy. Refuse explicitly rather than
+        # mis-framing; full chunked decoding can come later.
+        if (req_has_transfer_encoding(req_buf, req_len) == 1) {
+            http_error(cfd, "501", "Not Implemented",
+              "chunked Transfer-Encoding is not supported; send Content-Length");
+            sock_close(cfd);
+            return 0;
+        }
         var clen = req_content_length(req_buf, req_len);
         # -1 means the Content-Length header was present but malformed (no
         # digits, or a run long enough to wrap i64). Refuse rather than

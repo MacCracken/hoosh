@@ -17,8 +17,32 @@ var _route_strategy = 0;   # STRAT_PRIORITY
 # unset; passes non-"$" values through unchanged.
 fn _config_expand_env(value) {
     if (value == 0) { return 0; }
-    if (load8(value) == 36) { return getenv(value + 1); }
-    return value;
+    if (load8(value) != 36) { return value; }
+    var name = value + 1;
+    # Accept ${NAME} as well as $NAME. `load8(value) == 36` was already true
+    # for the braced form, so getenv("{NAME}") simply missed and the value was
+    # dropped with no diagnostic.
+    var n = strlen(name);
+    if (n > 2 && load8(name) == 123 && load8(name + n - 1) == 125) {
+        var inner = alloc(n - 1);
+        if (inner == 0) { return 0; }
+        memcpy(inner, name + 1, n - 2);
+        store8(inner + n - 2, 0);
+        name = inner;
+    }
+    var got = getenv(name);
+    if (got == 0) {
+        # An unset variable used to be dropped silently: the route kept
+        # ROUTE_API_KEY = 0, _provider_headers skipped the auth block, and the
+        # request went upstream with NO credential — surfacing as a provider
+        # 401 the operator naturally blamed on the provider.
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "config: environment variable is not set: ");
+        str_builder_add_cstr(sb, name);
+        var msg = to_cstr(str_builder_build(sb));
+        hlog_warn(msg);
+    }
+    return got;
 }
 
 # Bounds for the TOML string arrays below. The old inline `models` parser

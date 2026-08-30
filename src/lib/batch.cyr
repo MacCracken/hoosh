@@ -428,6 +428,18 @@ fn handle_batch(cfd, body_ptr, body_len) {
     # the queue while waiting, so a sync batch can't stall the pool even with many
     # concurrent sync batches (each per-batch `completed` counter is local, so
     # concurrent sync batches don't share a barrier). See [ADR 011].
+    # Admission control (2.6.8). wq_push spins forever on a full ring, and this
+    # loop pushes n items FROM a pool worker before reaching the barrier below.
+    # Worst-case demand is WORKER_COUNT * BATCH_MAX_ITEMS against WQ_MAX with no
+    # reserve, so under sustained mixed load workers ratchet into the push spin;
+    # once all of them are there nothing calls wq_pop and the state is terminal
+    # — restart required, /v1/health included. Refusing up front means wq_push
+    # is never entered without room, which is what makes the spin unreachable.
+    if (WQ_MAX - wq_outstanding() < n) {
+        hlog_warn("batch: work queue saturated, refusing sync batch");
+        return http_error(cfd, "503", "Service Unavailable",
+          "work queue saturated, retry shortly");
+    }
     var completed = alloc(8); store64(completed, 0);
     var failed = alloc(8); store64(failed, 0);
     var slots = alloc(n * 8);

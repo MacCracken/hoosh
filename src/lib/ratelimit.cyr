@@ -42,7 +42,19 @@ fn _rl_refill(rl) {
     cur = cur + add;
     if (cur > max_tokens) { cur = max_tokens; }
     store64(rl + 8, cur);
-    store64(rl + 16, now);
+    # Advance the clock only by the elapsed time this actually converted into
+    # tokens, so the truncated remainder is not thrown away.
+    #
+    # `add` truncates to 0 for a small elapsed_ms, and stamping `now`
+    # regardless discarded that interval permanently. Because _rl_refill runs
+    # on EVERY check — including rejected ones — a client polling faster than
+    # one token's worth of time never accumulated anything. Against the real
+    # 5-6 ms tick that made rate_limit = 5 grant 0 rpm outright (total
+    # starvation) and 10 grant roughly 3. Free tiers of 5-10 RPM are common,
+    # and one tenant polling a shared route drove it to 0 for everyone else.
+    var used_ms = add * 60000 / (rpm * 1000);
+    if (used_ms > elapsed_ms) { used_ms = elapsed_ms; }
+    store64(rl + 16, last + used_ms);
     return 0;
 }
 

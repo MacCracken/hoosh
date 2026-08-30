@@ -69,16 +69,31 @@ fn cosine_x1000(a, b, n) {
     return dot * 1000 / denom;
 }
 
-# Store an embedding under a cache key. entry: key(0) vec_ptr(8) n(16).
-fn semantic_insert(key, vec_ptr, n) {
+# Store an embedding under a cache key. entry: key(0) vec_ptr(8) n(16) model(24).
+#
+# The model is part of the entry as of 2.6.8. The exact cache key hashes
+# model+body, but the semantic index stored neither — semantic_find matched on
+# dimension and cosine score alone, and two request bodies differing only in
+# their "model" field are near-identical strings that score far above the
+# shipped 0.85 threshold. A claude-opus-4-1 request was therefore served the
+# gpt-4o-mini answer, labelled X-Hoosh-Cache: SEMANTIC.
+fn semantic_insert_model(key, vec_ptr, n, model) {
     if (_sem_enabled == 0) { return 0; }
     if (_sem_entries == 0) { _sem_entries = vec_new(); }
-    var e = alloc(24);
+    var e = alloc(32);
+    if (e == 0) { return 0; }
     store64(e, key);
     store64(e + 8, vec_ptr);
     store64(e + 16, n);
+    store64(e + 24, model);
     vec_push(_sem_entries, e);
     return 0;
+}
+
+# Back-compat wrapper: an entry with no model matches only a query with no
+# model, so an un-modelled insert can never cross-serve.
+fn semantic_insert(key, vec_ptr, n) {
+    return semantic_insert_model(key, vec_ptr, n, 0);
 }
 
 # Drop the entry stored under `key`, if any. Returns 1 when one was removed.
@@ -92,7 +107,10 @@ fn semantic_remove(key) {
     var i = 0;
     while (i < count) {
         var e = vec_get(_sem_entries, i);
-        if (load64(e) == key) {
+        # streq, not pointer equality: the caller passes a freshly allocated
+        # sha256_hex cstr, so `load64(e) == key` never matched and the
+        # expired-on-read removal path was dead.
+        if (streq(load64(e), key) == 1) {
             # Compact in place: move the tail down one slot, then drop the last.
             var j = i;
             while (j + 1 < count) {
@@ -108,7 +126,9 @@ fn semantic_remove(key) {
 }
 
 # Find the cache key of the best match above threshold, or 0 if none.
-fn semantic_find(query_vec, n) {
+# `model` scopes the search: an entry only matches a query for the SAME model.
+# Pass 0 to match only un-modelled entries.
+fn semantic_find_model(query_vec, n, model) {
     if (_sem_enabled == 0) { return 0; }
     if (_sem_entries == 0) { return 0; }
     var count = vec_len(_sem_entries);
@@ -120,7 +140,13 @@ fn semantic_find(query_vec, n) {
             i = count;
         } else {
             var e = vec_get(_sem_entries, i);
-            if (load64(e + 16) == n) {
+            var em = load64(e + 24);
+            var model_ok = 0;
+            if (model == 0 && em == 0) { model_ok = 1; }
+            if (model != 0 && em != 0) {
+                if (streq(em, model) == 1) { model_ok = 1; }
+            }
+            if (model_ok == 1 && load64(e + 16) == n) {
                 var score = cosine_x1000(query_vec, load64(e + 8), n);
                 if (score > best_score) {
                     best_score = score;
@@ -131,6 +157,11 @@ fn semantic_find(query_vec, n) {
         }
     }
     return best_key;
+}
+
+# Back-compat: search only un-modelled entries.
+fn semantic_find(query_vec, n) {
+    return semantic_find_model(query_vec, n, 0);
 }
 
 fn _sem_is_digit(c) {

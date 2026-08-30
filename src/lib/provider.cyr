@@ -198,12 +198,30 @@ fn openai_extract_text(resp_body, resp_len) {
     return ollama_extract_text(resp_body, resp_len);
 }
 
+# Pack (prompt, completion) into one i64 as prompt * 2^32 + completion.
+#
+# Both halves are clamped to [0, 2^32). A provider returning a negative or
+# absurd count used to corrupt the packing: completion_tokens: -5 unpacked to
+# 4294967291, which then flowed into pool_commit, cost_record and the usage
+# block reported to the client. _json_extract_int honours a leading `-`, and
+# the value is untrusted provider input.
+
+fn _pack_tokens(prompt, comp) {
+    var p = prompt;
+    var c = comp;
+    if (p < 0) { p = 0; }
+    if (c < 0) { c = 0; }
+    if (p >= 0x100000000) { p = 0xFFFFFFFF; }
+    if (c >= 0x100000000) { c = 0xFFFFFFFF; }
+    return p * 0x100000000 + c;
+}
+
 # Extract token counts from Ollama response
 # Returns packed: prompt_tokens * 0x100000000 + completion_tokens
 fn extract_ollama_tokens(body, blen) {
     var prompt = _json_extract_int(body, blen, "prompt_eval_count", 17);
     var comp = _json_extract_int(body, blen, "eval_count", 10);
-    return prompt * 0x100000000 + comp;
+    return _pack_tokens(prompt, comp);
 }
 
 # Extract token counts from an OpenAI-format response ("usage" object).
@@ -211,12 +229,40 @@ fn extract_ollama_tokens(body, blen) {
 fn extract_openai_tokens(body, blen) {
     var prompt = _json_extract_int(body, blen, "prompt_tokens", 13);
     var comp = _json_extract_int(body, blen, "completion_tokens", 17);
-    return prompt * 0x100000000 + comp;
+    return _pack_tokens(prompt, comp);
 }
 
 # True if the route targets a remote https endpoint (needs DNS + TLS + auth).
 # Local http:// backends keep the raw-socket fast path; https:// routes go
 # through sandhi (DNS resolve + TLS + auth headers).
+# Bounds for every REMOTE provider call.
+#
+# sandhi_http_post passes opts = 0, so every option getter returns 0: no
+# connect deadline, no read timeout, no total deadline, and the library
+# default max_bytes. A provider that accepted the connection and then went
+# silent parked a worker forever — the outbound twin of the accepted-socket
+# timeouts added in 2.6.6 — and seven such calls hang the gateway.
+#
+# max_bytes is raised well above the 256 KiB default because a long completion
+# legitimately exceeds it, and exceeding it surfaces as SANDHI_ERR_PROTOCOL ->
+# 0, which the retry layer treats as retryable: four identical re-POSTs, each
+# generating and billing a full completion upstream.
+var REMOTE_CONNECT_MS = 10000;
+var REMOTE_READ_MS = 300000;
+var REMOTE_TOTAL_MS = 600000;
+var REMOTE_MAX_BYTES = 8388608;
+
+fn _remote_http_opts() {
+    var o = sandhi_http_options_new();
+    if (o == 0) { return 0; }
+    sandhi_http_options_connect_ms(o, REMOTE_CONNECT_MS);
+    sandhi_http_options_read_ms(o, REMOTE_READ_MS);
+    sandhi_http_options_write_ms(o, REMOTE_READ_MS);
+    sandhi_http_options_total_ms(o, REMOTE_TOTAL_MS);
+    sandhi_http_options_max_response_bytes(o, REMOTE_MAX_BYTES);
+    return o;
+}
+
 fn route_is_remote(route) {
     var base = route_base_url(route);
     if (base == 0) { return 0; }
@@ -603,7 +649,7 @@ fn anthropic_extract_thinking(resp_body, resp_len) {
 fn extract_anthropic_tokens(body, blen) {
     var prompt = _json_extract_int(body, blen, "input_tokens", 12);
     var comp = _json_extract_int(body, blen, "output_tokens", 13);
-    return prompt * 0x100000000 + comp;
+    return _pack_tokens(prompt, comp);
 }
 
 # Build a Google Gemini :generateContent body from an OpenAI-style messages
@@ -704,7 +750,7 @@ fn gemini_extract_text(resp_body, resp_len) {
 fn extract_gemini_tokens(body, blen) {
     var prompt = _json_extract_int(body, blen, "promptTokenCount", 16);
     var comp = _json_extract_int(body, blen, "candidatesTokenCount", 20);
-    return prompt * 0x100000000 + comp;
+    return _pack_tokens(prompt, comp);
 }
 
 # base + "/v1beta/models/<model>:generateContent?key=<key>" -> fresh cstr.
@@ -1129,7 +1175,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             url = _provider_url(base, path);
         }
         var hdrs = _provider_headers(route);
-        var sresp = sandhi_http_post(url, hdrs, body, blen);
+        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts());
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);
@@ -1253,9 +1299,32 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);
     if (fd < 0) { return 0 - 1; }
-    # Skip HTTP response headers
+    # Read and CHECK the response head. stream_skip_headers already pulls the
+    # whole header block into hdr_buf, so the status line was sitting there and
+    # was simply thrown away: a 404 "model not found" from a local backend went
+    # straight into the NDJSON loop, extracted nothing, and ended at _sse_stop
+    # — a clean 200 OK with finish_reason:"stop" and zero content, logged
+    # nowhere, with provider_last_error_status() still 0 and audit_record
+    # filing it as a SUCCESS. That is the exact failure 2.6.5 fixed for the
+    # remote path; the local one was left uncovered.
     var hdr_buf = alloc(4096);
+    if (hdr_buf == 0) { sys_close(fd); return 0 - 1; }
     var skip = stream_skip_headers(fd, hdr_buf, 4096);
     if (skip < 0) { sys_close(fd); return 0 - 1; }
+    var sst = _stream_status(hdr_buf, skip);
+    if (sst < 200 || sst >= 300) {
+        # Capture a bounded prefix of the error body so the caller can report
+        # WHY, then stop — the caller's _sse_error_chunk path takes over.
+        var ebuf = alloc(1024);
+        var elen = 0;
+        if (ebuf != 0) {
+            var er = sys_read(fd, ebuf, 1023);
+            if (er > 0) { elen = er; }
+        }
+        provider_err_set(sst, ebuf, elen);
+        hlog_warn(provider_err_log_line());
+        sys_close(fd);
+        return 0 - 1;
+    }
     return fd;
 }

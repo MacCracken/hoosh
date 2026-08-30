@@ -87,6 +87,15 @@ fn _trace_ci_eq(a, pat, n) {
 # Extract the incoming `traceparent` header value from a raw HTTP request.
 # Returns a NUL-terminated copy, or 0 if absent. Header name is matched
 # case-insensitively at a line start.
+# A single lowercase-or-uppercase hex digit.
+fn _trace_is_hex(c) {
+    var b = c & 255;
+    if (b >= 48 && b <= 57) { return 1; }
+    if (b >= 97 && b <= 102) { return 1; }
+    if (b >= 65 && b <= 70) { return 1; }
+    return 0;
+}
+
 fn trace_extract(buf, buf_len) {
     var i = 0;
     while (i < buf_len - 12) {
@@ -97,8 +106,30 @@ fn trace_extract(buf, buf_len) {
                 var s = j;
                 while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
                 var n = j - s;
-                if (n <= 0 || n > 200) { return 0; }
+                # Validate the W3C shape rather than just the length. The OTLP
+                # span builder slices this at FIXED offsets (tp[3..35) and
+                # tp[36..52)), so `traceparent: x` yielded a 2-byte allocation
+                # from which ~50 bytes were read and emitted unescaped; a
+                # length-legal 55-byte value needed no over-read at all to
+                # inject forged span fields, and an embedded NUL truncated the
+                # fragment and corrupted the whole batch. The same buffer is
+                # also forwarded verbatim into every outbound request header.
+                # Rejecting here means a fresh, well-formed id is generated.
+                #
+                #   00-<32 hex>-<16 hex>-<2 hex>   == 55 bytes exactly
+                if (n != 55) { return 0; }
+                if (load8(buf + s + 2) != 45) { return 0; }
+                if (load8(buf + s + 35) != 45) { return 0; }
+                if (load8(buf + s + 52) != 45) { return 0; }
+                var k = 0;
+                while (k < 55) {
+                    if (k != 2 && k != 35 && k != 52) {
+                        if (_trace_is_hex(load8(buf + s + k)) == 0) { return 0; }
+                    }
+                    k = k + 1;
+                }
                 var out = alloc(n + 1);
+                if (out == 0) { return 0; }
                 memcpy(out, buf + s, n);
                 store8(out + n, 0);
                 return out;

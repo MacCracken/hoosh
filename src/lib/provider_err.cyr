@@ -18,25 +18,64 @@
 # implementation rather than a mirror — so it lives where a test can reach it.
 
 var PROVIDER_ERR_MSG_CAP = 512;
-var _provider_err_status = 0;      # the provider's HTTP status, or 0 when there was no error
-var _provider_err_msg = 0;         # bounded, control-byte-free cstr, or 0
-var _provider_err_line = 0;        # composed log line (kept alive for the caller)
-var _provider_err_cmsg = 0;        # composed client-facing line
+
+# PER-THREAD state (2.6.8). These four slots used to be process globals, which
+# was wrong from the moment the v2.4.0 worker pool landed: provider_err_reset()
+# and provider_err_set() run inside provider_forward, which every caller invokes
+# with _chat_lock RELEASED, while readers take _chat_lock — a lock that protects
+# nothing against writers holding nothing. Two concrete failures: another
+# worker's reset wiped a captured error before its owner read it, silently
+# regressing every diagnostic this file exists to provide back to "provider
+# backend unreachable"; and one client could be answered with another client's
+# provider error text. The message buffer was also truncated before being
+# re-terminated, so a concurrent strlen could splice new bytes onto a stale tail.
+#
+# Thread-local slot 3 (1 = trace, 2 = request buffer). Layout, 32 bytes:
+#   0: status   8: msg cstr   16: log line cstr   24: client msg cstr
+var PROVIDER_ERR_SLOT = 3;
+var PE_STATUS = 0;
+var PE_MSG = 8;
+var PE_LINE = 16;
+var PE_CMSG = 24;
+
+fn _pe() {
+    var e = thread_local_get(PROVIDER_ERR_SLOT);
+    if (e == 0) {
+        e = alloc(32);
+        if (e == 0) { return 0; }
+        store64(e + PE_STATUS, 0);
+        store64(e + PE_MSG, 0);
+        store64(e + PE_LINE, 0);
+        store64(e + PE_CMSG, 0);
+        thread_local_set(PROVIDER_ERR_SLOT, e);
+    }
+    return e;
+}
 
 # provider_last_error_status: the status of the most recent provider failure, or 0 if the most recent
 # attempt did not fail. ONE slot, overwritten per attempt (a retry's later answer is the one that
 # matters) and reset at the top of provider_forward, so a stale error can never be attributed to a
 # later request.
-fn provider_last_error_status() { return _provider_err_status; }
+fn provider_last_error_status() {
+    var e = _pe();
+    if (e == 0) { return 0; }
+    return load64(e + PE_STATUS);
+}
 
 fn provider_last_error_msg() {
-    if (_provider_err_msg == 0) { return ""; }
-    return _provider_err_msg;
+    var e = _pe();
+    if (e == 0) { return ""; }
+    var m = load64(e + PE_MSG);
+    if (m == 0) { return ""; }
+    return m;
 }
 
 fn provider_err_reset() {
-    _provider_err_status = 0;
-    if (_provider_err_msg != 0) { store8(_provider_err_msg, 0); }
+    var e = _pe();
+    if (e == 0) { return 0; }
+    store64(e + PE_STATUS, 0);
+    var m = load64(e + PE_MSG);
+    if (m != 0) { store8(m, 0); }
     return 0;
 }
 
@@ -46,10 +85,16 @@ fn provider_err_reset() {
 # a heap write and an embedded newline would break the log record this ends up in. Control bytes become
 # spaces rather than being dropped, so a clipped HTML error page still reads as text.
 fn provider_err_set(status, msg, len) {
-    _provider_err_status = status;
-    if (_provider_err_msg == 0) { _provider_err_msg = alloc(PROVIDER_ERR_MSG_CAP); }
-    if (_provider_err_msg == 0) { return 0; }
-    store8(_provider_err_msg, 0);
+    var e = _pe();
+    if (e == 0) { return 0; }
+    store64(e + PE_STATUS, status);
+    var buf = load64(e + PE_MSG);
+    if (buf == 0) {
+        buf = alloc(PROVIDER_ERR_MSG_CAP);
+        if (buf == 0) { return 0; }
+        store64(e + PE_MSG, buf);
+    }
+    store8(buf, 0);
     if (msg == 0 || len <= 0) { return 0; }
     var n = len;
     if (n > (PROVIDER_ERR_MSG_CAP - 1)) { n = PROVIDER_ERR_MSG_CAP - 1; }
@@ -57,10 +102,10 @@ fn provider_err_set(status, msg, len) {
     while (i < n) {
         var c = load8(msg + i) & 255;
         if (c < 32 || c == 127) { c = 32; }
-        store8(_provider_err_msg + i, c);
+        store8(buf + i, c);
         i = i + 1;
     }
-    store8(_provider_err_msg + n, 0);
+    store8(buf + n, 0);
     return 0;
 }
 
@@ -68,19 +113,24 @@ fn provider_err_set(status, msg, len) {
 # when nothing was captured — an allocation failure must not also cost the line that says something
 # went wrong.
 fn provider_err_log_line() {
-    if (_provider_err_status == 0) { return "provider: permanent error, not retrying"; }
+    var e = _pe();
+    if (e == 0) { return "provider: permanent error, not retrying"; }
+    var st = load64(e + PE_STATUS);
+    if (st == 0) { return "provider: permanent error, not retrying"; }
+    var m = load64(e + PE_MSG);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "provider: HTTP ");
-    str_builder_add_int(sb, _provider_err_status);
+    str_builder_add_int(sb, st);
     str_builder_add_cstr(sb, ", not retrying");
-    if (_provider_err_msg != 0) {
-        if (strlen(_provider_err_msg) > 0) {
+    if (m != 0) {
+        if (strlen(m) > 0) {
             str_builder_add_cstr(sb, " - ");
-            str_builder_add_cstr(sb, _provider_err_msg);
+            str_builder_add_cstr(sb, m);
         }
     }
-    _provider_err_line = to_cstr(str_builder_build(sb));
-    return _provider_err_line;
+    var line = to_cstr(str_builder_build(sb));
+    store64(e + PE_LINE, line);
+    return line;
 }
 
 # provider_err_client_msg: the same fact worded for the CALLER rather than the log. Kept separate so the
@@ -89,18 +139,23 @@ fn provider_err_log_line() {
 # different problem with a different fix, and telling an operator their backend is down when it answered
 # instantly sends them to the wrong place.
 fn provider_err_client_msg() {
-    if (_provider_err_status == 0) { return "provider backend unreachable"; }
+    var e = _pe();
+    if (e == 0) { return "provider backend unreachable"; }
+    var st = load64(e + PE_STATUS);
+    if (st == 0) { return "provider backend unreachable"; }
+    var m = load64(e + PE_MSG);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "upstream provider returned HTTP ");
-    str_builder_add_int(sb, _provider_err_status);
-    if (_provider_err_msg != 0) {
-        if (strlen(_provider_err_msg) > 0) {
+    str_builder_add_int(sb, st);
+    if (m != 0) {
+        if (strlen(m) > 0) {
             str_builder_add_cstr(sb, ": ");
-            str_builder_add_cstr(sb, _provider_err_msg);
+            str_builder_add_cstr(sb, m);
         }
     }
-    _provider_err_cmsg = to_cstr(str_builder_build(sb));
-    return _provider_err_cmsg;
+    var cmsg = to_cstr(str_builder_build(sb));
+    store64(e + PE_CMSG, cmsg);
+    return cmsg;
 }
 
 # sb_add_json_escaped: append `s` as the body of a JSON string. The message came from a provider, so a
@@ -168,4 +223,26 @@ fn _sse_error_message(data, dlen) {
     var m = _json_extract_str(data, dlen, "message", 7);
     if (strlen(m) > 0) { return m; }
     return "the provider reported an error mid-stream but gave no message";
+}
+
+# Status code from an HTTP response head: `HTTP/1.1 <code> <reason>`.
+# Returns 0 when the line is not parseable, which the caller treats as a
+# failure rather than assuming success.
+fn _stream_status(buf, len) {
+    var i = 0;
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    while (i < len && load8(buf + i) == 32) { i = i + 1; }
+    var v = 0;
+    var digits = 0;
+    while (i < len && digits < 3) {
+        var c = load8(buf + i) & 255;
+        if (c < 48 || c > 57) { i = len; }
+        else {
+            v = v * 10 + (c - 48);
+            digits = digits + 1;
+            i = i + 1;
+        }
+    }
+    if (digits != 3) { return 0; }
+    return v;
 }

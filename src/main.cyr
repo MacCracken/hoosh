@@ -265,13 +265,29 @@ fn http_route(cfd, method, path, buf, buf_len) {
         var eb = req_parse_body(buf, buf_len);
         var ebl = req_body_len(buf, buf_len);
         if (ebl > 0) {
+            # Same DLP policy as /v1/chat/completions. Until 2.6.6 this endpoint
+            # crashed before it ever forwarded, which is the only reason it was
+            # not a hole; fixing the crash made it one, so the controls land
+            # with it. RESTRICTED is refused outright.
+            if (dlp_is_enabled() == 1) {
+                var edlp = dlp_scan_level(eb, ebl);
+                if (edlp == CLASS_RESTRICTED) {
+                    hlog_warn("dlp: restricted content blocked (embeddings)");
+                    return http_error(cfd, "403", "Forbidden",
+                      "request blocked: restricted content detected");
+                }
+            }
             # Route through first available provider
             var routes = load64(_router + ROUTER_ROUTES);
             var rcount = load64(_router + ROUTER_COUNT);
             var ei = 0;
             while (ei < rcount) {
                 var er = load64(routes + ei * 8);
-                if (route_enabled(er) == 1) {
+                # LOCAL routes only. http_post_local speaks plaintext HTTP and
+                # emits no Authorization header, so a remote route would both
+                # leak the body in the clear and be rejected — and CONFIDENTIAL
+                # content must not leave the box at all.
+                if (route_enabled(er) == 1 && provider_is_local(route_provider(er)) == 1) {
                     var epath = "/api/embeddings";
                     if (route_provider(er) != PROV_OLLAMA) {
                         epath = "/v1/embeddings";
@@ -281,10 +297,18 @@ fn http_route(cfd, method, path, buf, buf_len) {
                     # port made url_host() do load8(port + 7) — an unmapped
                     # low address, so one POST /v1/embeddings killed all 7
                     # workers with a SIGSEGV.
+                    # Rate limiting applies here too — this endpoint was
+                    # entirely uncovered.
+                    var erl = route_rate_limiter(er);
+                    if (erl != 0 && hoosh_ratelimit_check(erl) == 0) {
+                        return http_error(cfd, "429", "Too Many Requests",
+                          "rate limit exceeded");
+                    }
                     var eresp = http_post_local(route_base_url(er), epath, eb, ebl);
                     if (eresp != 0) {
                         if (http_status(eresp) >= 200) {
                             if (http_status(eresp) < 300) {
+                                metrics_record(0, 0);
                                 return http_ok(cfd, http_body(eresp), http_body_len(eresp));
                             }
                         }

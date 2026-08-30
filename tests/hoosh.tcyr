@@ -30,6 +30,7 @@ include "src/lib/logging.cyr"
 # 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
 # needs only sys_write), so the response-header path is tested against the REAL
 # implementation rather than a mirror.
+include "src/lib/ratelimit.cyr"
 include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 # 2.6.5: the provider-error capture + rendering is tested against the REAL implementation for the same
@@ -1040,6 +1041,14 @@ fn _t_trace_ci_eq(a, pat, n) {
     }
     return 1;
 }
+fn _t_trace_is_hex(c) {
+    var b = c & 255;
+    if (b >= 48 && b <= 57) { return 1; }
+    if (b >= 97 && b <= 102) { return 1; }
+    if (b >= 65 && b <= 70) { return 1; }
+    return 0;
+}
+
 fn _t_trace_extract(buf, buf_len) {
     var i = 0;
     while (i < buf_len - 12) {
@@ -1050,8 +1059,30 @@ fn _t_trace_extract(buf, buf_len) {
                 var s = j;
                 while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
                 var n = j - s;
-                if (n <= 0 || n > 200) { return 0; }
+                # Validate the W3C shape rather than just the length. The OTLP
+                # span builder slices this at FIXED offsets (tp[3..35) and
+                # tp[36..52)), so `traceparent: x` yielded a 2-byte allocation
+                # from which ~50 bytes were read and emitted unescaped; a
+                # length-legal 55-byte value needed no over-read at all to
+                # inject forged span fields, and an embedded NUL truncated the
+                # fragment and corrupted the whole batch. The same buffer is
+                # also forwarded verbatim into every outbound request header.
+                # Rejecting here means a fresh, well-formed id is generated.
+                #
+                #   00-<32 hex>-<16 hex>-<2 hex>   == 55 bytes exactly
+                if (n != 55) { return 0; }
+                if (load8(buf + s + 2) != 45) { return 0; }
+                if (load8(buf + s + 35) != 45) { return 0; }
+                if (load8(buf + s + 52) != 45) { return 0; }
+                var k = 0;
+                while (k < 55) {
+                    if (k != 2 && k != 35 && k != 52) {
+                        if (_t_trace_is_hex(load8(buf + s + k)) == 0) { return 0; }
+                    }
+                    k = k + 1;
+                }
                 var out = alloc(n + 1);
+                if (out == 0) { return 0; }
                 memcpy(out, buf + s, n);
                 store8(out + n, 0);
                 return out;
@@ -5476,17 +5507,31 @@ fn main() {
     assert_eq(_t_lat_bucket(50), 3, "lat: 50ms → bucket 3 (le 50)");
     assert_eq(_t_lat_bucket(51), 4, "lat: 51ms → bucket 4 (le 100)");
     assert_eq(_t_lat_bucket(20000), 11, "lat: 20s → overflow bucket 11");
-    var treq = "POST /x HTTP/1.1\r\nHost: h\r\ntraceparent: 00-abc-def-01\r\nContent-Type: application/json\r\n\r\nbody";
+    # 2.6.8: the value must be a well-formed W3C traceparent —
+    # 00-<32 hex>-<16 hex>-<2 hex>, exactly 55 bytes. The OTLP span builder
+    # slices it at FIXED offsets, so a short value made it read ~50 bytes past
+    # a tiny allocation and emit them unescaped into the span batch. These
+    # assertions previously blessed `00-abc-def-01` and `00-XY-ZW-01` as valid.
+    var tgood = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    var treq = "POST /x HTTP/1.1\r\nHost: h\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nContent-Type: application/json\r\n\r\nbody";
     var tval = _t_trace_extract(treq, strlen(treq));
-    assert_eq(tval != 0, 1, "trace: header located");
-    assert_eq(_cmp_substr(tval, strlen(tval), "00-abc-def-01", 13) >= 0, 1, "trace: value extracted");
-    assert_eq(strlen(tval), 13, "trace: value is exactly the header value (no trailing CR)");
+    assert_eq(tval != 0, 1, "trace: well-formed header located");
+    assert_eq(strlen(tval), 55, "trace: value is exactly the 55-byte header value");
+    assert_streq(tval, tgood, "trace: value extracted verbatim");
     var tnone = "POST /x HTTP/1.1\r\nHost: h\r\n\r\nbody";
     assert_eq(_t_trace_extract(tnone, strlen(tnone)), 0, "trace: absent → 0");
-    # Case-insensitive header name.
-    var tcase = "GET / HTTP/1.1\r\nTraceParent: 00-XY-ZW-01\r\n\r\n";
-    var tpc = _t_trace_extract(tcase, strlen(tcase));
-    assert_eq(tpc != 0, 1, "trace: case-insensitive header name");
+    # Case-insensitive header NAME, with a valid value.
+    var tcase = "GET / HTTP/1.1\r\nTraceParent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n";
+    assert_eq(_t_trace_extract(tcase, strlen(tcase)) != 0, 1, "trace: case-insensitive header name");
+    # Malformed values are rejected so a fresh id is generated instead.
+    var tshort = "GET / HTTP/1.1\r\ntraceparent: x\r\n\r\n";
+    assert_eq(_t_trace_extract(tshort, strlen(tshort)), 0, "trace: one-byte value rejected");
+    var told = "GET / HTTP/1.1\r\ntraceparent: 00-abc-def-01\r\n\r\n";
+    assert_eq(_t_trace_extract(told, strlen(told)), 0, "trace: short malformed value rejected");
+    var tnonhex = "GET / HTTP/1.1\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e47ZZ-00f067aa0ba902b7-01\r\n\r\n";
+    assert_eq(_t_trace_extract(tnonhex, strlen(tnonhex)), 0, "trace: non-hex value rejected");
+    var tsep = "GET / HTTP/1.1\r\ntraceparent: 00_4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n";
+    assert_eq(_t_trace_extract(tsep, strlen(tsep)), 0, "trace: wrong separator rejected");
 
     # OTLP path extraction + int-attribute JSON (OTLP/JSON encodes ints as strings).
     var ourl = "http://localhost:4318/v1/traces";
@@ -6169,6 +6214,78 @@ fn main() {
     var kfs = 3 - 10;
     if (kfs < 0) { kfs = 0; }
     assert_eq(kfs, 0, "context: short conversation clamps to 0");
+
+    # ── 2.6.8: the local streaming path reads the provider status ──
+    test_group("stream_status_line");
+    # stream_skip_headers already pulled the whole head into a buffer; the
+    # status line was simply discarded, so a 404 was fed into the NDJSON loop
+    # and finished as a clean 200 with finish_reason:"stop" and no content,
+    # audited as a success.
+    var sl200 = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+    assert_eq(_stream_status(sl200, strlen(sl200)), 200, "stream: 200 parsed");
+    var sl404 = "HTTP/1.1 404 Not Found\r\n\r\n";
+    assert_eq(_stream_status(sl404, strlen(sl404)), 404, "stream: 404 parsed");
+    var sl500 = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
+    assert_eq(_stream_status(sl500, strlen(sl500)), 500, "stream: HTTP/1.0 status parsed");
+    var sl429 = "HTTP/1.1 429 Too Many Requests\r\n\r\n";
+    assert_eq(_stream_status(sl429, strlen(sl429)), 429, "stream: 429 parsed");
+    # Unparseable heads report 0, which the caller treats as a failure rather
+    # than assuming success.
+    var slbad = "garbage\r\n\r\n";
+    assert_eq(_stream_status(slbad, strlen(slbad)), 0, "stream: unparseable head → 0");
+    var slshort = "HTTP/1.1 20\r\n\r\n";
+    assert_eq(_stream_status(slshort, strlen(slshort)), 0, "stream: truncated code → 0");
+
+    # ── 2.6.8: chunked Transfer-Encoding is refused, not mis-framed ──
+    test_group("transfer_encoding");
+    var te1 = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    assert_eq(req_has_transfer_encoding(te1, strlen(te1)), 1, "TE: chunked detected");
+    var te2 = "POST / HTTP/1.1\r\nHost: h\r\ntransfer-encoding: Chunked\r\n\r\nx";
+    assert_eq(req_has_transfer_encoding(te2, strlen(te2)), 1, "TE: case-insensitive");
+    # identity is the no-op coding and needs no special handling.
+    var te3 = "POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\nContent-Length: 1\r\n\r\nx";
+    assert_eq(req_has_transfer_encoding(te3, strlen(te3)), 0, "TE: identity is not chunked");
+    var te4 = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\nx";
+    assert_eq(req_has_transfer_encoding(te4, strlen(te4)), 0, "TE: absent header");
+    # The literal in a BODY must not trip it — the scan stops at the header block.
+    var te5 = "POST / HTTP/1.1\r\nHost: h\r\n\r\n{\"s\":\"transfer-encoding: chunked\"}";
+    assert_eq(req_has_transfer_encoding(te5, strlen(te5)), 0, "TE: body text does not trip it");
+
+    # ── 2.6.8: rate-limiter refill keeps its remainder ──
+    test_group("ratelimit_refill_remainder");
+    # add = rpm * elapsed_ms * 1000 / 60000 truncates to 0 for a small
+    # elapsed_ms, and the old code stamped last_refill = now regardless, so the
+    # interval was discarded. _rl_refill runs on EVERY check including rejected
+    # ones, so a client polling faster than one token's worth of time never
+    # accumulated anything: at the real 5-6 ms tick, rate_limit = 5 granted
+    # 0 rpm outright.
+    var rl5 = hoosh_ratelimit_new(5);
+    store64(rl5 + 8, 0);                       # drain the bucket
+    var t_before = hoosh_now_ms() - 5;         # only 5 ms of credit
+    store64(rl5 + 16, t_before);
+    _rl_refill(rl5);
+    assert_eq(load64(rl5 + 16), t_before,
+      "ratelimit: a sub-token interval does not advance the clock");
+    assert_eq(load64(rl5 + 8), 0, "ratelimit: and grants no token yet");
+
+    # Enough elapsed time for exactly one token at 5 rpm is 12 s.
+    var rl5b = hoosh_ratelimit_new(5);
+    store64(rl5b + 8, 0);
+    store64(rl5b + 16, hoosh_now_ms() - 12000);
+    _rl_refill(rl5b);
+    assert_eq(load64(rl5b + 8), 1000, "ratelimit: 12 s at 5 rpm grants exactly one token");
+    assert_eq(hoosh_ratelimit_check(rl5b), 1, "ratelimit: that token is spendable");
+
+    # The bucket never exceeds its ceiling.
+    var rl5c = hoosh_ratelimit_new(5);
+    store64(rl5c + 16, hoosh_now_ms() - 600000);
+    _rl_refill(rl5c);
+    assert_eq(load64(rl5c + 8), 5000, "ratelimit: refill is capped at rpm * 1000");
+
+    # rpm 0 means unlimited and must never be rate limited.
+    var rl0 = hoosh_ratelimit_new(0);
+    assert_eq(hoosh_ratelimit_check(rl0), 1, "ratelimit: rpm 0 is unlimited");
+    assert_eq(hoosh_ratelimit_check(0), 1, "ratelimit: a null limiter allows");
 
     # ── 2.6.7: api_key detection covers modern key formats ──
     test_group("dlp_apikey_formats");

@@ -217,6 +217,32 @@ fn _hdr_ci_eq(a, b, n) {
 # Declared body length from the request headers, or 0 when absent/malformed.
 # Scans only the header block (returns at the CRLFCRLF) so a body that happens
 # to contain the literal "content-length:" cannot spoof the value.
+# True when a Transfer-Encoding header is present with anything other than
+# `identity`. Anchored to a line start and bounded to the header block, the
+# same way req_content_length is.
+fn req_has_transfer_encoding(buf, len) {
+    var i = 0;
+    while (i + 18 <= len) {
+        if (load8(buf + i) == 13 && i + 3 < len) {
+            if (load8(buf + i + 1) == 10 && load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) {
+                return 0;
+            }
+        }
+        var line_start = 0;
+        if (i == 0) { line_start = 1; }
+        if (i > 0) { if (load8(buf + i - 1) == 10) { line_start = 1; } }
+        if (line_start == 1 && _hdr_ci_eq(buf + i, "transfer-encoding:", 18) == 1) {
+            var j = i + 18;
+            while (j < len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
+            # `identity` is the no-op coding and needs no special handling.
+            if (j + 8 <= len && _hdr_ci_eq(buf + j, "identity", 8) == 1) { return 0; }
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn req_content_length(buf, len) {
     var i = 0;
     while (i < len - 3) {
