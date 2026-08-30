@@ -5,6 +5,109 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.9] — 2026-08-30
+
+**Nothing is deferred.** This closes the last four audit findings — the DLP
+escape bypass, shadowed request parameters, the unpartitioned cache, and the CLI
+stream reader — so the audit backlog is empty. **805 assertions** (was 775),
+`src/` lint-clean, fmt/vet/deny clean, no build warnings, no benchmark
+regressions.
+
+It also removes 26 more stale test mirrors: the DLP suite had been asserting
+against a **copy** of the scanner, one that predated the 2.5.10 custom-pattern
+support and defaulted to enabled where the shipped module defaults to disabled.
+Those assertions now run against `src/lib/dlp.cyr` itself.
+
+### Fixed — JSON escapes defeated every DLP pattern
+
+`dlp_scan_level` was handed the **undecoded** request body, while
+`_extract_messages` forwards that same undecoded span to the provider, which
+then decodes it. hoosh scanned one string and shipped a different one, so any
+pattern could be hidden by writing it with JSON escapes:
+
+- `"ssn 123\u002d45\u002d6789"` classified as PUBLIC and was forwarded.
+- `"\u0073\u006b\u002d<key>"` hid an API key from the `api_key` matcher.
+
+This was not only an evasion path. Python's `json.dumps` defaults to
+`ensure_ascii=True`, so a **default Python client** escapes every non-ASCII byte
+— which meant a non-ASCII `[[dlp_pattern]]` literal never matched real traffic at
+all. rust-old scanned `msg.content.text()`, i.e. the decoded value; the port lost
+that.
+
+`dlp_scan_level_json` now scans the raw bytes and an escape-decoded copy and
+takes the higher classification. Decoding handles the six short escapes and
+`\u` (including surrogate halves, which become U+FFFD rather than raw bytes),
+and is skipped entirely when nothing was escaped. Both the chat and embeddings
+paths use it.
+
+### Fixed — a nested schema key shadowed the real request parameter
+
+`temperature`, `top_p`, `max_tokens`, `stream`, `reasoning_effort`, `messages`
+and `tools` were all located by scanning the raw body for the key at **any**
+offset. Inside a tools JSON-Schema those are ordinary property names, so a
+nested one won whenever it appeared first — and a tools array precedes the
+trailing parameters in every OpenAI client that sends one. A client asking for
+`"max_tokens": 64` could be silently capped by a schema's `max_tokens` property.
+
+The `messages` case was worse: the validator saw a nested `"messages"`, so the
+request passed validation, and `_extract_messages` then returned the **nested**
+span — forwarding a fragment of the tool schema as the conversation.
+
+All seven now resolve through one depth- and string-aware lookup
+(`_top_key_value`, in `jsonlite.cyr` so it is tested against the real
+implementation), which only matches a key at the top level of the request object
+and skips string contents, so a key-shaped substring inside a message can never
+match either.
+
+### Fixed — the response cache was shared across tenants
+
+Neither the exact cache key nor the semantic index carried any caller identity,
+so two consumers of the same gateway sending the same prompt shared a cached
+response — one produced under a different tenant's credentials and provider
+account. `auth_check` now records **which** configured token authenticated the
+request (thread-local slot 4, following trace/request-buffer/provider_err), and
+that identity is part of both the exact key and the semantic index scope. The
+semantic index needed it independently: it matches on vector similarity, so the
+exact key's identity would not have protected it — a near-identical prompt from
+another tenant still scored above the threshold. A rejected request clears the
+slot so the next request on that worker cannot inherit it.
+
+Note the cache is cold once after upgrade, since every key now includes the
+identity prefix.
+
+### Fixed — the CLI dropped streamed output
+
+`hoosh infer --stream` began each scan at the **pre-read** fill level, so a
+`data: ` marker delivered by an earlier read was never re-tested, and the
+`acc > 60000` reset discarded a partial frame outright. This is not a rare
+split: `http_sse_event` issues three `sys_write`s per event and nothing sets
+`TCP_NODELAY`, so a read returning exactly the six bytes `"data: "` is the
+expected case — and the loop condition `i + 6 < acc` would not even execute
+against it. Against a fast local gateway the CLI could print almost nothing. It
+now always scans from 0 and slides the unconsumed tail down, so a frame spanning
+any number of reads is emitted exactly once.
+
+### Performance
+
+Interleaved A/B against 2.6.8 (`fafe31e`), 3 rounds each, same machine and
+session: **no regressions and no wins** across all 25 benchmarks. The added DLP
+decode pass is skipped whenever the body contains no escapes, so
+`dlp_scan_clean_prompt` is unchanged.
+
+### Audit status
+
+The 10-dimension security audit that opened in 2.6.6 is **closed**: 42 distinct
+confirmed findings, all fixed across 2.6.6 – 2.6.9. Test count over that arc:
+714 → 805.
+
+Two standing items remain, neither an audit finding:
+
+- 103 `line exceeds 120 characters` lint warnings in `tests/hoosh.tcyr` /
+  `tests/hoosh.bcyr` — long JSON fixtures, where mechanical rewrapping would
+  alter the test data. Needs a project decision on the limit for fixture lines.
+- `src/vendor/bote-core.cyr` fails `cyrius fmt --check` — vendored upstream code,
+  deliberately not reformatted.
+
 ## [2.6.8] — 2026-08-30
 
 **The audit closes.** This lands the remaining findings — the confidential-data

@@ -1214,11 +1214,7 @@ fn _validate_chat(pairs, body_ptr, body_len) {
     }
     # Check messages array exists
     var has_messages = 0;
-    vi = 0;
-    while (vi < body_len - 11) {
-        if (memeq(body_ptr + vi, "\"messages\":", 11) == 1) { has_messages = 1; break; }
-        vi = vi + 1;
-    }
+    if (_top_key_value(body_ptr, body_len, "\"messages\"", 10) >= 0) { has_messages = 1; }
     var has_prompt = 0;
     if (json_get(pairs, str_from("prompt")) != 0) { has_prompt = 1; }
     if (has_messages == 0) {
@@ -1235,46 +1231,40 @@ fn _validate_chat(pairs, body_ptr, body_len) {
 # client traffic. `key` must include the quotes and colon: "\"top_p\":".
 # Fractions beyond 3 decimals are truncated; a leading '-' is preserved so
 # out-of-range negatives reach validation rather than being silently dropped.
+
 fn _req_num_milli(body_ptr, body_len, key, keylen) {
-    var i = 0;
-    while (i + keylen < body_len) {
-        if (memeq(body_ptr + i, key, keylen) == 1) {
-            var j = i + keylen;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            var neg = 0;
-            if (j < body_len && load8(body_ptr + j) == 45) {
-                neg = 1;
-                j = j + 1;
-            }
-            var ip = 0;
-            var digits = 0;
-            while (j < body_len) {
-                var c = load8(body_ptr + j) & 0xFF;
-                if (c < 48 || c > 57) { break; }
-                ip = ip * 10 + (c - 48);
-                digits = digits + 1;
-                j = j + 1;
-            }
-            if (digits == 0) { return GEN_UNSET; }
-            var frac = 0;
-            var scale = 100;
-            if (j < body_len && load8(body_ptr + j) == 46) {
-                j = j + 1;
-                while (j < body_len && scale > 0) {
-                    var fc = load8(body_ptr + j) & 0xFF;
-                    if (fc < 48 || fc > 57) { break; }
-                    frac = frac + (fc - 48) * scale;
-                    scale = scale / 10;
-                    j = j + 1;
-                }
-            }
-            var v = ip * 1000 + frac;
-            if (neg == 1) { return 0 - v; }
-            return v;
-        }
-        i = i + 1;
+    var j = _top_key_value(body_ptr, body_len, key, keylen);
+    if (j < 0) { return GEN_UNSET; }
+    var neg = 0;
+    if (j < body_len && load8(body_ptr + j) == 45) {
+        neg = 1;
+        j = j + 1;
     }
-    return GEN_UNSET;
+    var ip = 0;
+    var digits = 0;
+    while (j < body_len) {
+        var c = load8(body_ptr + j) & 0xFF;
+        if (c < 48 || c > 57) { break; }
+        ip = ip * 10 + (c - 48);
+        digits = digits + 1;
+        j = j + 1;
+    }
+    if (digits == 0) { return GEN_UNSET; }
+    var frac = 0;
+    var scale = 100;
+    if (j < body_len && load8(body_ptr + j) == 46) {
+        j = j + 1;
+        while (j < body_len && scale > 0) {
+            var fc = load8(body_ptr + j) & 0xFF;
+            if (fc < 48 || fc > 57) { break; }
+            frac = frac + (fc - 48) * scale;
+            scale = scale / 10;
+            j = j + 1;
+        }
+    }
+    var v = ip * 1000 + frac;
+    if (neg == 1) { return 0 - v; }
+    return v;
 }
 
 # Upper bound on messages in one chat request (rust-old: handlers.rs).
@@ -1350,16 +1340,9 @@ fn _json_array_count(ptr, len) {
 
 # Check if request has "stream":true
 fn _req_is_stream(body_ptr, body_len) {
-    var i = 0;
-    while (i < body_len - 13) {
-        if (memeq(body_ptr + i, "\"stream\":true", 13) == 1) {
-            return 1;
-        }
-        if (memeq(body_ptr + i, "\"stream\": true", 14) == 1) {
-            return 1;
-        }
-        i = i + 1;
-    }
+    var j = _top_key_value(body_ptr, body_len, "\"stream\"", 8);
+    if (j < 0) { return 0; }
+    if (j + 4 <= body_len && memeq(body_ptr + j, "true", 4) == 1) { return 1; }
     return 0;
 }
 
@@ -1368,22 +1351,14 @@ fn _req_is_stream(body_ptr, body_len) {
 # reasoning_effort AFTER the nested `messages` array, which the flat json_parse can't reach. Matches
 # `"reasoning_effort":"low|medium|high"` (optional space) with a closing quote.
 fn _req_reasoning_effort(body_ptr, body_len) {
-    var i = 0;
-    while (i + 19 < body_len) {
-        if (memeq(body_ptr + i, "\"reasoning_effort\":", 19) == 1) {
-            var j = i + 19;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }   # skip spaces
-            if (j < body_len && load8(body_ptr + j) == 34) {                    # opening quote
-                var p = body_ptr + j + 1;
-                var rem = body_len - j - 1;
-                if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
-                if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
-                if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
-            }
-            return 0;
-        }
-        i = i + 1;
-    }
+    var j = _top_key_value(body_ptr, body_len, "\"reasoning_effort\"", 18);
+    if (j < 0) { return 0; }
+    if (j >= body_len || load8(body_ptr + j) != 34) { return 0; }
+    var p = body_ptr + j + 1;
+    var rem = body_len - j - 1;
+    if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
+    if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
+    if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
     return 0;
 }
 
@@ -1391,87 +1366,69 @@ fn _req_reasoning_effort(body_ptr, body_len) {
 # Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0.
 # Balanced-bracket scan with JSON string handling (mirrors _extract_messages).
 fn _extract_tools(body_ptr, body_len) {
-    var i = 0;
-    while (i + 9 < body_len) {
-        if (memeq(body_ptr + i, "\"tools\":", 8) == 1) {
-            var j = i + 8;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            if (j < body_len && load8(body_ptr + j) == 91) {
-                var depth = 1;
-                var start = j;
+    # Depth-aware, same reason as _extract_messages.
+    var j = _top_key_value(body_ptr, body_len, "\"tools\"", 7);
+    if (j < 0) { return 0; }
+    if (j >= body_len) { return 0; }
+    if (load8(body_ptr + j) != 91) { return 0; }
+    var depth = 1;
+    var ts = j;
+    j = j + 1;
+    while (j < body_len && depth > 0) {
+        var ch = load8(body_ptr + j);
+        if (ch == 91) { depth = depth + 1; }
+        if (ch == 93) { depth = depth - 1; }
+        if (ch == 34) {
+            j = j + 1;
+            while (j < body_len) {
+                if (load8(body_ptr + j) == 34) { break; }
+                if (load8(body_ptr + j) == 92) { j = j + 1; }
                 j = j + 1;
-                while (j < body_len && depth > 0) {
-                    var ch = load8(body_ptr + j);
-                    if (ch == 91) { depth = depth + 1; }
-                    if (ch == 93) { depth = depth - 1; }
-                    if (ch == 34) {
-                        j = j + 1;
-                        while (j < body_len) {
-                            if (load8(body_ptr + j) == 34) { break; }
-                            if (load8(body_ptr + j) == 92) { j = j + 1; }
-                            j = j + 1;
-                        }
-                    }
-                    j = j + 1;
-                }
-                var len = j - start;
-                # An empty "[]" is no tools.
-                if (len <= 2) { return 0; }
-                var result = alloc(16);
-                store64(result, body_ptr + start);
-                store64(result + 8, len);
-                return result;
             }
-            return 0;
         }
-        i = i + 1;
+        j = j + 1;
     }
-    return 0;
+    var tlen = j - ts;
+    var result = alloc(16);
+    if (result == 0) { return 0; }
+    store64(result, body_ptr + ts);
+    store64(result + 8, tlen);
+    return result;
 }
 
 fn _extract_messages(body_ptr, body_len) {
-    var mi = 0;
-    while (mi < body_len - 12) {
-        if (memeq(body_ptr + mi, "\"messages\":", 11) == 1) {
-            mi = mi + 11;
+    # Depth-aware: an identical "messages" key nested inside a tools schema used
+    # to win whenever it appeared first, so the validator saw a messages array,
+    # the request passed, and this returned the NESTED span — forwarding a
+    # schema fragment as the conversation.
+    var mi = _top_key_value(body_ptr, body_len, "\"messages\"", 10);
+    if (mi < 0) { return 0; }
+    if (mi >= body_len) { return 0; }
+    if (load8(body_ptr + mi) != 91) { return 0; }
+    var depth = 1;
+    var ms = mi;
+    mi = mi + 1;
+    while (mi < body_len && depth > 0) {
+        var ch = load8(body_ptr + mi);
+        if (ch == 91) { depth = depth + 1; }
+        if (ch == 93) { depth = depth - 1; }
+        if (ch == 34) {
+            mi = mi + 1;
             while (mi < body_len) {
-                if (load8(body_ptr + mi) != 32) { break; }
+                if (load8(body_ptr + mi) == 34) { break; }
+                if (load8(body_ptr + mi) == 92) { mi = mi + 1; }
                 mi = mi + 1;
             }
-            if (mi < body_len) {
-                if (load8(body_ptr + mi) == 91) {
-                    var depth = 1;
-                    var ms = mi;
-                    mi = mi + 1;
-                    while (mi < body_len && depth > 0) {
-                        var ch = load8(body_ptr + mi);
-                        if (ch == 91) { depth = depth + 1; }
-                        if (ch == 93) { depth = depth - 1; }
-                        if (ch == 34) {
-                            mi = mi + 1;
-                            while (mi < body_len) {
-                                if (load8(body_ptr + mi) == 34) { break; }
-                                if (load8(body_ptr + mi) == 92) {
-                                    mi = mi + 1;
-                                }
-                                mi = mi + 1;
-                            }
-                        }
-                        mi = mi + 1;
-                    }
-                    # Return packed: ptr * 0x100000000 + len
-                    var mlen = mi - ms;
-                    var result = alloc(16);
-                    store64(result, body_ptr + ms);
-                    store64(result + 8, mlen);
-                    return result;
-                }
-            }
-            break;
         }
         mi = mi + 1;
     }
-    return 0;
+    # Return packed: ptr * 0x100000000 + len
+    var mlen = mi - ms;
+    var result = alloc(16);
+    if (result == 0) { return 0; }
+    store64(result, body_ptr + ms);
+    store64(result + 8, mlen);
+    return result;
 }
 
 # Stream one SSE chunk wrapping a content token
@@ -1903,8 +1860,28 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
 # Exact-key response-cache key: sha256-hex over model + the raw request body.
 # Identical requests (same model + byte-identical body) collide to one entry;
 # this is the exact-key LRU cache (the semantic cache handles similarity).
+# Scope for a semantic index entry: caller identity + model. The index matches
+# on vector similarity, so the exact cache key's identity does NOT protect it —
+# a near-identical prompt from another tenant would still score above the
+# threshold. Entries are compared on this string before scoring.
+fn _sem_scope(model) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, auth_identity());
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, model);
+    return to_cstr(str_builder_build(sb));
+}
+
 fn _cache_key(model, body_ptr, body_len) {
     var sb = str_builder_new();
+    # Caller identity first: without it the cache was shared across every
+    # consumer of the gateway, so one tenant's response could be replayed to
+    # another for an identical prompt. 0 when auth is not configured, which
+    # keeps single-tenant deployments byte-compatible with their existing keys
+    # only in the sense that they all share one namespace — the hash changes,
+    # so the cache is cold once after upgrade.
+    str_builder_add_int(sb, auth_identity());
+    str_builder_add_cstr(sb, "\n");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\n");
     var bb = alloc(body_len + 1);
@@ -2113,7 +2090,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # put them after `messages`, and range-checked here rather than in
     # _validate_chat, which is defined ahead of the scanners in single-pass
     # order. The error carries the offending value, matching rust-old.
-    var g_temp = _req_num_milli(body_ptr, body_len, "\"temperature\":", 14);
+    var g_temp = _req_num_milli(body_ptr, body_len, "\"temperature\"", 13);
     if (g_temp != GEN_UNSET) {
         if (g_temp < 0 || g_temp > 2000) {
             store64(out + 8, _resp_err("400", "Bad Request",
@@ -2121,7 +2098,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
             return out;
         }
     }
-    var g_topp = _req_num_milli(body_ptr, body_len, "\"top_p\":", 8);
+    var g_topp = _req_num_milli(body_ptr, body_len, "\"top_p\"", 7);
     if (g_topp != GEN_UNSET) {
         if (g_topp < 0 || g_topp > 1000) {
             store64(out + 8, _resp_err("400", "Bad Request",
@@ -2129,7 +2106,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
             return out;
         }
     }
-    var g_maxt = _req_num_milli(body_ptr, body_len, "\"max_tokens\":", 13);
+    var g_maxt = _req_num_milli(body_ptr, body_len, "\"max_tokens\"", 12);
     if (g_maxt != GEN_UNSET) {
         g_maxt = g_maxt / 1000;
         if (g_maxt <= 0) {
@@ -2176,7 +2153,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # classification, and it used to be scoped to this block.
     var dlp_level = CLASS_PUBLIC;
     if (dlp_is_enabled() == 1) {
-        dlp_level = dlp_scan_level(body_ptr, body_len);
+        dlp_level = dlp_scan_level_json(body_ptr, body_len);
         if (dlp_level == CLASS_RESTRICTED) {
             hlog_warn("dlp: restricted content blocked");
             store64(out + 8, _resp_err("403", "Forbidden",
@@ -2229,7 +2206,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
             if (emb != 0) {
                 sem_vec = load64(emb);
                 sem_n = load64(emb + 8);
-                var skey = semantic_find_model(sem_vec, sem_n, model_cstr);
+                var skey = semantic_find_model(sem_vec, sem_n, _sem_scope(model_cstr));
                 if (skey != 0) {
                     var scached = cache_get(_cache, skey);
                     if (scached != 0) {
@@ -2460,7 +2437,7 @@ fn _chat_assemble(prep, result) {
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
-    if (ckey != 0 && sem_vec != 0) { semantic_insert_model(ckey, sem_vec, sem_n, model_cstr); }
+    if (ckey != 0 && sem_vec != 0) { semantic_insert_model(ckey, sem_vec, sem_n, _sem_scope(model_cstr)); }
     # MISS: this response was produced by a real forward, not replayed. A later
     # hit on it replays the body verbatim — including this cost — which is why
     # the header, not the body, is what a consumer must bill on.

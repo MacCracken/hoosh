@@ -270,7 +270,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
             # not a hole; fixing the crash made it one, so the controls land
             # with it. RESTRICTED is refused outright.
             if (dlp_is_enabled() == 1) {
-                var edlp = dlp_scan_level(eb, ebl);
+                var edlp = dlp_scan_level_json(eb, ebl);
                 if (edlp == CLASS_RESTRICTED) {
                     hlog_warn("dlp: restricted content blocked (embeddings)");
                     return http_error(cfd, "403", "Forbidden",
@@ -797,27 +797,53 @@ fn cmd_infer_remote(url, model, prompt, stream) {
     while (1 == 1) {
         var n = sys_read(fd, buf + acc, 65536 - acc - 1);
         if (n <= 0) { break; }
-        store8(buf + acc + n, 0);
-        var scan = acc;
         acc = acc + n;
-        # Emit the content of each complete `data: {...}` line.
-        var i = scan;
-        while (i + 6 < acc) {
+        store8(buf + acc, 0);
+        # Always rescan from 0 and carry the unconsumed tail forward.
+        #
+        # This used to start the scan at the PRE-READ fill level, so a `data: `
+        # marker delivered by an earlier read was never re-tested, and the
+        # `acc > 60000` reset discarded a partial frame outright. That is not a
+        # rare split: http_sse_event issues THREE writes per event and nothing
+        # sets TCP_NODELAY, so a read returning exactly the 6-byte "data: " is
+        # the expected case — and `while (i + 6 < acc)` would not even run.
+        # Against a fast local gateway the CLI could print almost nothing.
+        var consumed = 0;
+        var i = 0;
+        while (i + 6 <= acc) {
             if (memeq(buf + i, "data: ", 6) == 1) {
                 var j = i + 6;
                 var start = j;
                 while (j < acc && load8(buf + j) != 10) { j = j + 1; }
-                if (j >= acc) { break; }
-                var flen = j - start;
-                if (flen > 0 && memeq(buf + start, "[DONE]", 6) == 0) {
-                    var piece = ollama_extract_text(buf + start, flen);
-                    if (strlen(piece) > 0) { sys_write(1, piece, strlen(piece)); }
+                if (j >= acc) {
+                    # Frame is incomplete — keep it for the next read.
+                    i = acc;
                 }
-                i = j;
+                else {
+                    var flen = j - start;
+                    if (flen > 0 && memeq(buf + start, "[DONE]", 6) == 0) {
+                        var piece = ollama_extract_text(buf + start, flen);
+                        if (strlen(piece) > 0) { sys_write(1, piece, strlen(piece)); }
+                    }
+                    i = j + 1;
+                    consumed = i;
+                }
             }
-            i = i + 1;
+            else { i = i + 1; }
         }
-        # Keep the buffer from filling on a long answer: once consumed, reset.
+        # Slide the unconsumed tail down rather than dropping it.
+        if (consumed > 0) {
+            var rem = acc - consumed;
+            var k = 0;
+            while (k < rem) {
+                store8(buf + k, load8(buf + consumed + k));
+                k = k + 1;
+            }
+            acc = rem;
+            store8(buf + acc, 0);
+        }
+        # A single frame larger than the buffer cannot be completed; drop it
+        # rather than wedging with acc pinned at the ceiling.
         if (acc > 60000) { acc = 0; }
     }
     sock_close(fd);

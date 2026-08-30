@@ -168,3 +168,58 @@ fn _json_obj_end(p, len, start) {
     }
     return i;
 }
+
+# Offset of the VALUE of a TOP-LEVEL (depth-1) key, or -1 (2.6.9).
+#
+# These request parameters were all found by scanning the raw body for the key
+# at ANY offset, so an identical key nested inside a tools JSON-Schema — where
+# `"temperature"`, `"max_tokens"`, `"stream"` and `"messages"` are all perfectly
+# ordinary property names — shadowed the caller's real value whenever it
+# appeared first. A tools array precedes the trailing parameters in every
+# OpenAI client that sends one. A nested `"messages"` was worse: the validator
+# saw one, so the request passed, and _extract_messages then took the NESTED
+# span, forwarding a schema fragment as the conversation.
+#
+# `key` includes its quotes but not the colon, e.g. "\"max_tokens\"".
+# String contents are skipped (honouring backslash escapes) so a key-shaped
+# substring inside a message can never match.
+fn _top_key_value(body, len, key, keylen) {
+    var depth = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(body + i) & 255;
+        if (c == 34) {
+            if (depth == 1 && i + keylen <= len && memeq(body + i, key, keylen) == 1) {
+                var j = i + keylen;
+                while (j < len) {
+                    var w = load8(body + j) & 255;
+                    if (w != 32 && w != 9 && w != 10 && w != 13) { break; }
+                    j = j + 1;
+                }
+                if (j < len && load8(body + j) == 58) {
+                    j = j + 1;
+                    while (j < len) {
+                        var w2 = load8(body + j) & 255;
+                        if (w2 != 32 && w2 != 9 && w2 != 10 && w2 != 13) { break; }
+                        j = j + 1;
+                    }
+                    return j;
+                }
+            }
+            # Not a key we want (or a string VALUE): skip the whole string.
+            i = i + 1;
+            while (i < len) {
+                if (load8(body + i) == 34) { break; }
+                if (load8(body + i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1;
+        }
+        else {
+            if (c == 123 || c == 91) { depth = depth + 1; }
+            if (c == 125 || c == 93) { depth = depth - 1; }
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}

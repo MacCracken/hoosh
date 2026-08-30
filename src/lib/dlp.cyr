@@ -439,6 +439,129 @@ fn _dlp_has_email(t, len) {
 # Scan a byte buffer, returning the highest classification level found.
 # Returns _dlp_default_level when scanning is disabled, the text is empty, or
 # nothing matches. Restricted matches short-circuit (nothing outranks them).
+# ── JSON-escape-aware scanning (2.6.9) ─────────────────────
+#
+# dlp_scan_level was handed the UNDECODED request body while _extract_messages
+# forwards that same undecoded span to the provider, which then decodes it — so
+# hoosh scanned one string and shipped a different one. Every built-in pattern
+# was defeated by writing the payload with JSON escapes:
+#
+#   "ssn 123-45-6789"   scored CLASS_PUBLIC
+#   "sk-<key>"     hid an API key from the api_key matcher
+#
+# This is not only an evasion. Python's json.dumps defaults to
+# ensure_ascii=True, so a DEFAULT Python client escapes every non-ASCII byte —
+# which meant a non-ASCII [[dlp_pattern]] literal never matched real traffic.
+# rust-old scanned msg.content.text(), i.e. the decoded value; the port lost
+# that.
+
+# One hex digit, or -1.
+fn _dlp_hex_val(c) {
+    var b = c & 255;
+    if (b >= 48 && b <= 57) { return b - 48; }
+    if (b >= 97 && b <= 102) { return b - 87; }
+    if (b >= 65 && b <= 70) { return b - 55; }
+    return 0 - 1;
+}
+
+# Four hex digits at p, or -1.
+fn _dlp_hex4(p) {
+    var v = 0;
+    var k = 0;
+    while (k < 4) {
+        var d = _dlp_hex_val(load8(p + k));
+        if (d < 0) { return 0 - 1; }
+        v = v * 16 + d;
+        k = k + 1;
+    }
+    return v;
+}
+
+# Write code point cp at buf+pos as UTF-8; returns the new pos. A lone
+# surrogate becomes U+FFFD so the output stays well-formed. Never writes more
+# than 3 bytes, which is why the decode buffer can be the input's size.
+fn _dlp_utf8_put(buf, pos, cp) {
+    var c = cp;
+    if (c >= 0xD800 && c <= 0xDFFF) { c = 0xFFFD; }
+    if (c < 0x80) { store8(buf + pos, c); return pos + 1; }
+    if (c < 0x800) {
+        store8(buf + pos, 0xC0 + c / 64);
+        store8(buf + pos + 1, 0x80 + (c - (c / 64) * 64));
+        return pos + 2;
+    }
+    var mid = c / 64;
+    store8(buf + pos, 0xE0 + c / 4096);
+    store8(buf + pos + 1, 0x80 + (mid - (c / 4096) * 64));
+    store8(buf + pos + 2, 0x80 + (c - mid * 64));
+    return pos + 3;
+}
+
+# Decode JSON backslash escapes in t[0..len) into a fresh buffer. Returns the
+# buffer; the decoded length is written to out_len.
+#
+# Escapes are decoded wherever they appear rather than only inside strings: a
+# backslash outside a string is not valid JSON anyway, and decoding more can
+# only REVEAL a pattern, never hide one. Output is never longer than the input
+# (the shortest one is 6 bytes in and at most 3 out).
+fn dlp_json_decode(t, len, out_len) {
+    var buf = alloc(len + 1);
+    if (buf == 0) { store64(out_len, 0); return 0; }
+    var i = 0;
+    var o = 0;
+    while (i < len) {
+        var c = load8(t + i) & 255;
+        if (c != 92) { store8(buf + o, c); o = o + 1; i = i + 1; }
+        else {
+            if (i + 1 >= len) { store8(buf + o, c); o = o + 1; i = i + 1; }
+            else {
+                var e = load8(t + i + 1) & 255;
+                if (e == 34)      { store8(buf + o, 34); o = o + 1; i = i + 2; }
+                elif (e == 92)    { store8(buf + o, 92); o = o + 1; i = i + 2; }
+                elif (e == 47)    { store8(buf + o, 47); o = o + 1; i = i + 2; }
+                elif (e == 98)    { store8(buf + o, 8);  o = o + 1; i = i + 2; }
+                elif (e == 116)   { store8(buf + o, 9);  o = o + 1; i = i + 2; }
+                elif (e == 110)   { store8(buf + o, 10); o = o + 1; i = i + 2; }
+                elif (e == 102)   { store8(buf + o, 12); o = o + 1; i = i + 2; }
+                elif (e == 114)   { store8(buf + o, 13); o = o + 1; i = i + 2; }
+                elif (e == 117 && i + 5 < len) {
+                    var cp = _dlp_hex4(t + i + 2);
+                    if (cp < 0) { store8(buf + o, c); o = o + 1; i = i + 1; }
+                    else { o = _dlp_utf8_put(buf, o, cp); i = i + 6; }
+                }
+                else { store8(buf + o, c); o = o + 1; i = i + 1; }
+            }
+        }
+    }
+    store8(buf + o, 0);
+    store64(out_len, o);
+    return buf;
+}
+
+# Classify a JSON request body. Scans the raw bytes AND the escape-decoded
+# form, taking the higher classification, so a payload written with JSON
+# escapes classifies the same as the plain text the provider will actually see.
+# The raw pass is kept because it is cheap and because a pattern could span
+# structural bytes that decoding does not change.
+#must_use
+fn dlp_scan_level_json(t, len) {
+    if (_dlp_enabled == 0) { return _dlp_default_level; }
+    if (len == 0) { return _dlp_default_level; }
+    var raw = dlp_scan_level(t, len);
+    if (raw >= CLASS_RESTRICTED) { return raw; }
+    var dl = alloc(8);
+    if (dl == 0) { return raw; }
+    store64(dl, 0);
+    var dec = dlp_json_decode(t, len, dl);
+    var dlen = load64(dl);
+    if (dec == 0 || dlen == 0) { return raw; }
+    # Nothing was escaped — the decoded copy is byte-identical, so skip the
+    # second scan entirely.
+    if (dlen == len) { return raw; }
+    var decoded = dlp_scan_level(dec, dlen);
+    if (decoded > raw) { return decoded; }
+    return raw;
+}
+
 fn dlp_scan_level(t, len) {
     if (_dlp_enabled == 0) { return _dlp_default_level; }
     if (len == 0) { return _dlp_default_level; }

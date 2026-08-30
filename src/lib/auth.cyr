@@ -17,7 +17,21 @@ fn _auth_ci_eq(a, b, n) {
     return 1;
 }
 
+# Which configured token authenticated the current request, as a 1-based index
+# (0 = none / auth disabled). Thread-local slot 4, following trace (1), the
+# request buffer (2) and provider_err (3) — a request is handled start to
+# finish on one worker, so this is per-request state.
+#
+# 2.6.9: the response cache keyed on model + body only, with no caller
+# identity, so two consumers sharing a gateway and sending the same prompt
+# shared a cached response — including one produced under a different tenant's
+# credentials and provider account.
+var AUTH_IDENT_SLOT = 4;
+
+fn auth_identity() { return thread_local_get(AUTH_IDENT_SLOT); }
+
 fn auth_check(req_buf, req_len, tokens) {
+    thread_local_set(AUTH_IDENT_SLOT, 0);
     # If no auth tokens configured, allow all
     if (vec_len(tokens) == 0) { return 1; }
 
@@ -65,6 +79,7 @@ fn auth_check(req_buf, req_len, tokens) {
                     while (ti < vec_len(tokens)) {
                         var expected = vec_get(tokens, ti);
                         if (ct_eq_bytes_lens(req_buf + tok_start, tok_len, expected, strlen(expected)) == 1) {
+                            thread_local_set(AUTH_IDENT_SLOT, ti + 1);
                             return 1;
                         }
                         ti = ti + 1;
