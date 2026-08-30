@@ -21,16 +21,27 @@ fn pool_available(p) {
 }
 
 fn pool_reserve(p, tokens) {
+    # A negative `tokens` passes `pool_available(p) < tokens` trivially and then
+    # DECREASES the reservation. Client-reachable via /v1/tokens/reserve.
+    if (tokens < 0) { return 0; }
     if (pool_available(p) < tokens) { return 0; }
     store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
     return 1;
 }
 
 fn pool_commit(p, reserved, actual) {
+    # Floor both at 0. /v1/tokens/report hands `actual` straight through from
+    # the client body and str_to_int honours a leading `-`, so
+    # {"actual": -1000000000} used to erase recorded usage, push pool_available
+    # above capacity, and persist that via storage_budget_set.
+    if (reserved < 0) { reserved = 0; }
+    if (actual < 0) { actual = 0; }
     var resv = load64(p + POOL_RESERVED);
     if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
     else { store64(p + POOL_RESERVED, 0); }
-    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    var used = load64(p + POOL_USED) + actual;
+    if (used < 0) { used = 0; }
+    store64(p + POOL_USED, used);
     # Persist the new used count (no-op when persistence is disabled).
     storage_budget_set(load64(p + POOL_NAME), load64(p + POOL_CAPACITY), load64(p + POOL_USED));
     return 0;

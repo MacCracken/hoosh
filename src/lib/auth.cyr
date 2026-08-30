@@ -1,24 +1,65 @@
 # auth.cyr — bearer token authentication middleware
 # Uses constant-time comparison from the ct stdlib module (ct_eq_bytes_lens)
 
+# ASCII case-insensitive compare of n bytes. Local copy: http_server.cyr's
+# _hdr_ci_eq is identical but is included AFTER this file, and Cyrius resolves
+# forward references single-pass.
+fn _auth_ci_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        var ca = load8(a + i) & 0xFF;
+        var cb = load8(b + i) & 0xFF;
+        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
+        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
+        if (ca != cb) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn auth_check(req_buf, req_len, tokens) {
     # If no auth tokens configured, allow all
     if (vec_len(tokens) == 0) { return 1; }
-    # Find Authorization header
+
+    # Bound the scan to the header block. A token-shaped string in the BODY is
+    # not a credential.
+    var hdr_end = req_len;
+    var e = 0;
+    while (e + 3 < req_len) {
+        if (load8(req_buf + e) == 13 && load8(req_buf + e + 1) == 10
+            && load8(req_buf + e + 2) == 13 && load8(req_buf + e + 3) == 10) {
+            hdr_end = e + 2;
+            e = req_len;
+        }
+        e = e + 1;
+    }
+
+    # Find the Authorization header.
+    #
+    # Was `memeq(..., "Authorization:", 14)` at every offset. Two bugs: the
+    # compare was byte-exact, so a client sending the header lowercase — which
+    # hyper/reqwest, undici/fetch and every HTTP/2-terminating proxy do, since
+    # HTTP/2 mandates lowercase field names — got 401 with a correct token; and
+    # the match was unanchored, so it also fired inside `Proxy-Authorization:`
+    # and then `return 0` abandoned the scan without ever reaching the real
+    # header. Header names are case-insensitive per RFC 9110 §5.1.
     var i = 0;
-    while (i < req_len - 14) {
-        if (memeq(req_buf + i, "Authorization:", 14) == 1) {
-            i = i + 14;
-            while (i < req_len && load8(req_buf + i) == 32) { i = i + 1; }
-            # Skip "Bearer "
-            if (i < req_len - 7) {
-                if (memeq(req_buf + i, "Bearer ", 7) == 1) {
-                    i = i + 7;
-                    var tok_start = i;
-                    while (i < req_len && load8(req_buf + i) != 13 && load8(req_buf + i) != 10) {
-                        i = i + 1;
+    while (i + 14 <= hdr_end) {
+        var at_line_start = 0;
+        if (i == 0) { at_line_start = 1; }
+        if (i > 0) { if (load8(req_buf + i - 1) == 10) { at_line_start = 1; } }
+        if (at_line_start == 1 && _auth_ci_eq(req_buf + i, "Authorization:", 14) == 1) {
+            var j = i + 14;
+            while (j < hdr_end && load8(req_buf + j) == 32) { j = j + 1; }
+            # Scheme name is case-insensitive too (RFC 9110 §11.1).
+            if (j + 7 <= hdr_end) {
+                if (_auth_ci_eq(req_buf + j, "Bearer ", 7) == 1) {
+                    j = j + 7;
+                    var tok_start = j;
+                    while (j < hdr_end && load8(req_buf + j) != 13 && load8(req_buf + j) != 10) {
+                        j = j + 1;
                     }
-                    var tok_len = i - tok_start;
+                    var tok_len = j - tok_start;
                     # Check against configured tokens (constant-time)
                     var ti = 0;
                     while (ti < vec_len(tokens)) {
@@ -30,7 +71,8 @@ fn auth_check(req_buf, req_len, tokens) {
                     }
                 }
             }
-            return 0;
+            # Fall through rather than returning: a malformed or non-Bearer
+            # Authorization line must not stop the scan.
         }
         i = i + 1;
     }

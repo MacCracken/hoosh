@@ -30,6 +30,7 @@ include "src/lib/logging.cyr"
 # 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
 # needs only sys_write), so the response-header path is tested against the REAL
 # implementation rather than a mirror.
+include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
 # 2.6.5: the provider-error capture + rendering is tested against the REAL implementation for the same
 # reason http_server is — a mirror of a string builder proves only that the mirror works.
@@ -150,31 +151,6 @@ fn provider_name(prov) {
 
 var CHARS_PER_TOKEN_X10 = 40;
 
-fn chars_per_token_x10(prov) {
-    if (prov == PROV_OPENAI) { return 38; }
-    if (prov == PROV_DEEPSEEK) { return 38; }
-    if (prov == PROV_MISTRAL) { return 38; }
-    if (prov == PROV_GROQ) { return 38; }
-    if (prov == PROV_GROK) { return 38; }
-    if (prov == PROV_OPENROUTER) { return 38; }
-    if (prov == PROV_ANTHROPIC) { return 35; }
-    if (prov == PROV_OLLAMA) { return 37; }
-    if (prov == PROV_LLAMACPP) { return 37; }
-    if (prov == PROV_LMSTUDIO) { return 37; }
-    if (prov == PROV_LOCALAI) { return 37; }
-    return 40;
-}
-
-fn estimate_tokens(messages, msg_len, cpt_x10) {
-    var ratio = cpt_x10;
-    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
-    return msg_len * 10 / ratio;
-}
-
-# ----------------------------------------------------------------
-# Generic request header (mirrors src/lib/http_client.cyr).
-# Used by the provider-lifecycle forwarders (GET/POST/DELETE).
-# ----------------------------------------------------------------
 fn _build_req_header(buf, method, path, host, body_len, cap) {
     # src calls trace_current_or_new(); trace.cyr is not linked into this
     # harness, so budget the W3C traceparent by its maximum length instead.
@@ -1979,12 +1955,16 @@ fn _dlp_apikey_prefix(t, i, len) {
         }
     }
     if (i + 6 <= len) {
-        if (load8(t + i) == 97 && load8(t + i + 1) == 112 && load8(t + i + 2) == 105) {
+        # Case-folded: `API_KEY=` / `Api-Key:` are as common as the lowercase
+        # form in real payloads, and these positions are always letters so the
+        # |32 fold is safe.
+        if ((load8(t + i) | 32) == 97 && (load8(t + i + 1) | 32) == 112 && (load8(t + i + 2) | 32) == 105) {
             var p = i + 3;
             if (p < len && (load8(t + p) == 95 || load8(t + p) == 45)) { p = p + 1; }
             if (p + 3 <= len) {
-                if (load8(t + p) == 107 && load8(t + p + 1) == 101 && load8(t + p + 2) == 121) {
+                if ((load8(t + p) | 32) == 107 && (load8(t + p + 1) | 32) == 101 && (load8(t + p + 2) | 32) == 121) {
                     p = p + 3;
+                    # [=: ]{1,5} — at least one, at most five.
                     var sc = 0;
                     var more = 1;
                     while (more == 1 && sc < 5 && p < len) {
@@ -2008,9 +1988,11 @@ fn _dlp_match_apikey_at(t, i, len) {
     var p = _dlp_apikey_prefix(t, i, len);
     if (p < 0) { return 0; }
     var n = 0;
-    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
+    while (p < len) {
+        var c = load8(t + p);
+        if (_dlp_is_alnum(c) == 1) { n = n + 1; }
+        else { if (c != 45 && c != 95) { break; } }
         p = p + 1;
-        n = n + 1;
     }
     if (n < 20) { return 0; }
     if (_dlp_bound_after(t, p, len) == 0) { return 0; }
@@ -2147,76 +2129,6 @@ fn _provider_path(route) {
 }
 
 # Whitespace-tolerant JSON field scanners — mirror of src/lib/provider.cyr.
-fn _json_value_pos(body, len, key, keylen) {
-    var i = 0;
-    while (i < len - keylen - 1) {
-        if (load8(body + i) == 34) {
-            if (memeq(body + i + 1, key, keylen) == 1) {
-                if (load8(body + i + 1 + keylen) == 34) {
-                    var j = i + 2 + keylen;
-                    while (j < len) {
-                        var c = load8(body + j);
-                        if (c == 32) { j = j + 1; continue; }
-                        if (c == 9) { j = j + 1; continue; }
-                        if (c == 10) { j = j + 1; continue; }
-                        if (c == 13) { j = j + 1; continue; }
-                        break;
-                    }
-                    if (j < len) {
-                        if (load8(body + j) == 58) {
-                            j = j + 1;
-                            while (j < len) {
-                                var d = load8(body + j);
-                                if (d == 32) { j = j + 1; continue; }
-                                if (d == 9) { j = j + 1; continue; }
-                                if (d == 10) { j = j + 1; continue; }
-                                if (d == 13) { j = j + 1; continue; }
-                                break;
-                            }
-                            return j;
-                        }
-                    }
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 0 - 1;
-}
-
-fn _json_extract_str(body, len, key, keylen) {
-    if (body == 0) { return ""; }
-    if (len == 0) { return ""; }
-    store8(body + len, 0);
-    var p = _json_value_pos(body, len, key, keylen);
-    if (p < 0) { return ""; }
-    if (p >= len) { return ""; }
-    if (load8(body + p) != 34) { return ""; }
-    var start = p + 1;
-    var j = start;
-    while (j < len) {
-        if (load8(body + j) == 34) {
-            if (load8(body + j - 1) == 92) { j = j + 1; continue; }
-            break;
-        }
-        j = j + 1;
-    }
-    var tlen = j - start;
-    var text = alloc(tlen + 1);
-    memcpy(text, body + start, tlen);
-    store8(text + tlen, 0);
-    return text;
-}
-
-fn _json_extract_int(body, len, key, keylen) {
-    if (body == 0) { return 0; }
-    if (len == 0) { return 0; }
-    store8(body + len, 0);
-    var p = _json_value_pos(body, len, key, keylen);
-    if (p < 0) { return 0; }
-    return atoi(body + p);
-}
-
 fn ollama_extract_text(resp_body, resp_len) {
     return _json_extract_str(resp_body, resp_len, "content", 7);
 }
@@ -2252,42 +2164,6 @@ fn extract_openai_tokens(body, blen) {
 }
 
 # Anthropic system-message hoist helpers — mirror of src/lib/provider.cyr.
-fn _json_obj_str_field(p, len, key, keylen) {
-    var i = 0;
-    while (i < len - keylen - 1) {
-        if (load8(p + i) == 34) {
-            if (memeq(p + i + 1, key, keylen) == 1) {
-                if (load8(p + i + 1 + keylen) == 34) {
-                    var j = i + 2 + keylen;
-                    while (j < len) {
-                        var c = load8(p + j);
-                        if (c == 32) { j = j + 1; continue; }
-                        if (c == 58) { j = j + 1; continue; }
-                        break;
-                    }
-                    if (j >= len) { return 0; }
-                    if (load8(p + j) != 34) { return 0; }
-                    j = j + 1;
-                    var vs = j;
-                    while (j < len) {
-                        if (load8(p + j) == 34) {
-                            if (load8(p + j - 1) == 92) { j = j + 1; continue; }
-                            break;
-                        }
-                        j = j + 1;
-                    }
-                    var r = alloc(16);
-                    store64(r, p + vs);
-                    store64(r + 8, j - vs);
-                    return r;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 fn _obj_is_system(p, len) {
     var rf = _json_obj_str_field(p, len, "role", 4);
     if (rf == 0) { return 0; }
@@ -2296,34 +2172,6 @@ fn _obj_is_system(p, len) {
     return 0;
 }
 
-fn _json_obj_end(p, len, start) {
-    var depth = 0;
-    var i = start;
-    while (i < len) {
-        var ch = load8(p + i);
-        if (ch == 34) {
-            i = i + 1;
-            while (i < len) {
-                if (load8(p + i) == 34) {
-                    if (load8(p + i - 1) != 92) { break; }
-                }
-                i = i + 1;
-            }
-        } else {
-            if (ch == 123) { depth = depth + 1; }
-            if (ch == 91) { depth = depth + 1; }
-            if (ch == 93) { depth = depth - 1; }
-            if (ch == 125) {
-                depth = depth - 1;
-                if (depth == 0) { return i + 1; }
-            }
-        }
-        i = i + 1;
-    }
-    return i;
-}
-
-# Tool conversion helpers (mirror of provider.cyr).
 fn _json_span_end(p, len, start) {
     var depth = 0;
     var i = start;
@@ -3130,19 +2978,27 @@ fn pool_can_reserve(p, tokens) {
 }
 
 fn pool_reserve(p, tokens) {
+    # Mirrors src/lib/budget.cyr (2.6.7 negative clamp).
+    if (tokens < 0) { return 0; }
     if (pool_can_reserve(p, tokens) == 0) { return 0; }
     store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
     return 1;
 }
 
 fn pool_commit(p, reserved, actual) {
+    # Mirrors src/lib/budget.cyr (2.6.7 negative clamp). The src version also
+    # calls storage_budget_set, which this harness does not link.
+    if (reserved < 0) { reserved = 0; }
+    if (actual < 0) { actual = 0; }
     var resv = load64(p + POOL_RESERVED);
     if (resv >= reserved) {
         store64(p + POOL_RESERVED, resv - reserved);
     } else {
         store64(p + POOL_RESERVED, 0);
     }
-    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
+    var used = load64(p + POOL_USED) + actual;
+    if (used < 0) { used = 0; }
+    store64(p + POOL_USED, used);
     return 0;
 }
 
@@ -5715,17 +5571,35 @@ fn main() {
 
     test_group("req_content_length");
     var rcl1 = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 4096\r\n\r\nbody";
-    assert_eq(_t_req_content_length(rcl1, strlen(rcl1)), 4096, "content-length: parsed");
+    assert_eq(req_content_length(rcl1, strlen(rcl1)), 4096, "content-length: parsed");
     # Header names are case-insensitive on the wire.
     var rcl2 = "POST / HTTP/1.1\r\ncontent-length: 17\r\n\r\nx";
-    assert_eq(_t_req_content_length(rcl2, strlen(rcl2)), 17, "content-length: lowercase accepted");
+    assert_eq(req_content_length(rcl2, strlen(rcl2)), 17, "content-length: lowercase accepted");
     # Absent header → 0 (treated as no declared body).
     var rcl3 = "GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n";
-    assert_eq(_t_req_content_length(rcl3, strlen(rcl3)), 0, "content-length: absent → 0");
+    assert_eq(req_content_length(rcl3, strlen(rcl3)), 0, "content-length: absent → 0");
     # A body containing the literal header text must NOT spoof the value — the
     # scan stops at the CRLFCRLF that ends the header block.
     var rcl4 = "POST / HTTP/1.1\r\nHost: x\r\n\r\n{\"s\":\"content-length: 999\"}";
-    assert_eq(_t_req_content_length(rcl4, strlen(rcl4)), 0, "content-length: body cannot spoof");
+    assert_eq(req_content_length(rcl4, strlen(rcl4)), 0, "content-length: body cannot spoof");
+    # 2.6.7: the name must START a header line. The match used to fire at any
+    # byte offset, so the request URI or an earlier header VALUE carrying the
+    # literal won on first-match — a Referer was enough to make a small valid
+    # request answer 413.
+    var rcl5 = "GET /x?q=content-length:%209999 HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\nhello world!";
+    assert_eq(req_content_length(rcl5, strlen(rcl5)), 12,
+      "content-length: a literal in the URI does not win over the real header");
+    var rcl6 = "POST / HTTP/1.1\r\nReferer: http://a/content-length: 9999\r\nContent-Length: 5\r\n\r\nhello";
+    assert_eq(req_content_length(rcl6, strlen(rcl6)), 5,
+      "content-length: a literal in another header value does not win");
+    # 2.6.7: an absurd digit run wrapped i64 and could land on a small or
+    # negative value that passed the MAX_REQUEST_BODY check. Now refused.
+    var rcl7 = "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999999\r\n\r\nx";
+    assert_eq(req_content_length(rcl7, strlen(rcl7)), 0 - 1,
+      "content-length: over-long digit run is refused");
+    var rcl8 = "POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\nx";
+    assert_eq(req_content_length(rcl8, strlen(rcl8)), 0 - 1,
+      "content-length: non-numeric value is refused");
 
     test_group("request_body_cap");
     # MAX_REQUEST_BODY = 1 MiB, matching rust-old's DefaultBodyLimit. The check
@@ -6295,6 +6169,115 @@ fn main() {
     var kfs = 3 - 10;
     if (kfs < 0) { kfs = 0; }
     assert_eq(kfs, 0, "context: short conversation clamps to 0");
+
+    # ── 2.6.7: api_key detection covers modern key formats ──
+    test_group("dlp_apikey_formats");
+    # The body used to require 20+ CONSECUTIVE alnum after the prefix, so every
+    # current key — which carries internal separators — stopped the run almost
+    # immediately and went entirely undetected.
+    assert_eq(_dlp_test("key: sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"),
+      CLASS_RESTRICTED, "dlp: OpenAI sk-proj- key detected");
+    assert_eq(_dlp_test("key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234"),
+      CLASS_RESTRICTED, "dlp: Anthropic sk-ant-api03- key detected");
+    # The legacy consecutive-alnum form still matches.
+    assert_eq(_dlp_test("key: sk-abcdefghijklmnopqrstuvwxyz012345"),
+      CLASS_RESTRICTED, "dlp: legacy sk- key still detected");
+    # Case-folded prefix words.
+    assert_eq(_dlp_test("API_KEY=abcdefghijklmnopqrstuvwxyz01"),
+      CLASS_RESTRICTED, "dlp: uppercase API_KEY= prefix detected");
+    assert_eq(_dlp_test("Api-Key: abcdefghijklmnopqrstuvwxyz01"),
+      CLASS_RESTRICTED, "dlp: mixed-case Api-Key: prefix detected");
+    # Still no false positive on a short token.
+    assert_eq(_dlp_test("sk-short"), CLASS_PUBLIC, "dlp: short sk- token is not a key");
+
+    # ── 2.6.7: budget clamps on client-supplied token counts ──
+    test_group("budget_negative_clamp");
+    # /v1/tokens/report passes the client's `actual` straight to pool_commit,
+    # and str_to_int honours a leading `-`. A negative commit used to ERASE
+    # recorded usage, push pool_available above capacity, and persist that.
+    var clampb = pool_new("clamp-test", 1000);
+    pool_commit(clampb, 0, 400);
+    assert_eq(load64(clampb + POOL_USED), 400, "budget: normal commit records usage");
+    pool_commit(clampb, 0, 0 - 1000);
+    assert_eq(load64(clampb + POOL_USED), 400, "budget: negative commit is ignored, not subtracted");
+    assert_eq(pool_available(clampb), 600, "budget: available never exceeds capacity after a negative commit");
+
+    # A negative reservation passed the `available < tokens` test trivially and
+    # then DECREASED the outstanding reservation.
+    var clampb2 = pool_new("clamp-test-2", 1000);
+    assert_eq(pool_reserve(clampb2, 0 - 500), 0, "budget: negative reservation refused");
+    assert_eq(load64(clampb2 + POOL_RESERVED), 0, "budget: refused reservation changes nothing");
+    assert_eq(pool_reserve(clampb2, 300), 1, "budget: normal reservation still works");
+    assert_eq(load64(clampb2 + POOL_RESERVED), 300, "budget: reservation recorded");
+
+    # ── 2.6.7: trailing-backslash escape scanning ──
+    test_group("json_escape_scan");
+    # All six JSON string scanners decided "is this quote escaped?" from the
+    # single preceding byte, which is wrong when that byte is itself an escaped
+    # backslash. A value ending in `\\` — a Windows path, LaTeX, a shell
+    # continuation, a regex — then swallowed its own closing quote and ran on
+    # into the surrounding structure.
+    var esc1 = "{\"content\":\"C:\\\\path\\\\\",\"role\":\"assistant\"}";
+    var v1 = _json_extract_str(esc1, strlen(esc1), "content", 7);
+    assert_eq(streq(v1, "C:\\\\path\\\\"), 1, "escape: value ending in an escaped backslash stops at its own quote");
+
+    # An escaped quote inside the value is still not a terminator.
+    var esc2 = "{\"content\":\"say \\\"hi\\\" now\",\"role\":\"assistant\"}";
+    var v2 = _json_extract_str(esc2, strlen(esc2), "content", 7);
+    assert_eq(streq(v2, "say \\\"hi\\\" now"), 1, "escape: escaped quotes stay inside the value");
+
+    # Plain value, no escapes — unchanged behaviour.
+    var esc3 = "{\"content\":\"plain text\"}";
+    var v3 = _json_extract_str(esc3, strlen(esc3), "content", 7);
+    assert_eq(streq(v3, "plain text"), 1, "escape: unescaped value unchanged");
+
+    # A following field must still be reachable after a backslash-terminated
+    # value — the old scanner consumed it.
+    var esc_role = _json_extract_str(esc1, strlen(esc1), "role", 4);
+    assert_eq(streq(esc_role, "assistant"), 1, "escape: field after a backslash-ending value is still found");
+
+    # _json_obj_end must bound the object correctly with such a value inside.
+    var objs = "{\"a\":\"x\\\\\"}{\"b\":\"y\"}";
+    assert_eq(_json_obj_end(objs, strlen(objs), 0), 11,
+      "escape: object end is not swallowed by a trailing escaped backslash");
+
+    # ── 2.6.7: Authorization header matching ──
+    test_group("auth_header_match");
+    var atoks = vec_new();
+    vec_push(atoks, "SECRET-KEY-1");
+    vec_push(atoks, "SECRET-KEY-2");
+
+    var a_ok = "GET /v1/models HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer SECRET-KEY-1\r\n\r\n";
+    assert_eq(auth_check(a_ok, strlen(a_ok), atoks), 1, "auth: canonical-case header accepted");
+
+    # HTTP/2 mandates lowercase field names, and hyper/reqwest + undici/fetch
+    # send lowercase on HTTP/1.1 too. This used to 401 with a correct token.
+    var a_lc = "GET /v1/models HTTP/1.1\r\nhost: h\r\nauthorization: Bearer SECRET-KEY-1\r\n\r\n";
+    assert_eq(auth_check(a_lc, strlen(a_lc), atoks), 1, "auth: lowercase header accepted");
+    var a_mx = "GET /v1/models HTTP/1.1\r\nAUTHORIZATION: bearer SECRET-KEY-2\r\n\r\n";
+    assert_eq(auth_check(a_mx, strlen(a_mx), atoks), 1, "auth: mixed-case header and scheme accepted");
+
+    # A Proxy-Authorization line must not shadow the real header: the old
+    # unanchored match fired inside it and then abandoned the scan.
+    var a_px = "GET /v1/models HTTP/1.1\r\nProxy-Authorization: Basic Zm9vOmJhcg==\r\nAuthorization: Bearer SECRET-KEY-1\r\n\r\n";
+    assert_eq(auth_check(a_px, strlen(a_px), atoks), 1, "auth: Proxy-Authorization does not shadow the real header");
+
+    # A non-Bearer Authorization line must not stop the scan either.
+    var a_bs = "GET /v1/models HTTP/1.1\r\nAuthorization: Basic Zm9vOmJhcg==\r\n\r\n";
+    assert_eq(auth_check(a_bs, strlen(a_bs), atoks), 0, "auth: Basic scheme alone is rejected");
+
+    var a_bad = "GET /v1/models HTTP/1.1\r\nAuthorization: Bearer WRONG-KEY\r\n\r\n";
+    assert_eq(auth_check(a_bad, strlen(a_bad), atoks), 0, "auth: wrong token rejected");
+    var a_none = "GET /v1/models HTTP/1.1\r\nHost: h\r\n\r\n";
+    assert_eq(auth_check(a_none, strlen(a_none), atoks), 0, "auth: missing header rejected");
+
+    # A token-shaped string in the BODY is not a credential.
+    var a_body = "POST /v1/chat HTTP/1.1\r\nHost: h\r\n\r\nAuthorization: Bearer SECRET-KEY-1";
+    assert_eq(auth_check(a_body, strlen(a_body), atoks), 0, "auth: body text is not a credential");
+
+    # No configured tokens still means allow-all (unchanged).
+    var empty_toks = vec_new();
+    assert_eq(auth_check(a_none, strlen(a_none), empty_toks), 1, "auth: no tokens configured allows all");
 
     # ── 2.6.6: compact_messages boundary scan ──
     test_group("compact_boundary_scan");

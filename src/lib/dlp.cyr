@@ -301,11 +301,14 @@ fn _dlp_apikey_prefix(t, i, len) {
         }
     }
     if (i + 6 <= len) {
-        if (load8(t + i) == 97 && load8(t + i + 1) == 112 && load8(t + i + 2) == 105) {
+        # Case-folded: `API_KEY=` / `Api-Key:` are as common as the lowercase
+        # form in real payloads, and these positions are always letters so the
+        # |32 fold is safe.
+        if ((load8(t + i) | 32) == 97 && (load8(t + i + 1) | 32) == 112 && (load8(t + i + 2) | 32) == 105) {
             var p = i + 3;
             if (p < len && (load8(t + p) == 95 || load8(t + p) == 45)) { p = p + 1; }
             if (p + 3 <= len) {
-                if (load8(t + p) == 107 && load8(t + p + 1) == 101 && load8(t + p + 2) == 121) {
+                if ((load8(t + p) | 32) == 107 && (load8(t + p + 1) | 32) == 101 && (load8(t + p + 2) | 32) == 121) {
                     p = p + 3;
                     # [=: ]{1,5} — at least one, at most five.
                     var sc = 0;
@@ -327,14 +330,24 @@ fn _dlp_apikey_prefix(t, i, len) {
     return 0 - 1;
 }
 
-# api_key: prefix + [a-zA-Z0-9]{20,} + \b
+# api_key: prefix + [A-Za-z0-9_-]* containing >= 20 alnum + \b
+#
+# The body used to be [a-zA-Z0-9]{20,} CONSECUTIVE, which matched only the
+# legacy `sk-` + 48-alnum form. Every current key carries internal separators,
+# so the run stopped almost immediately and the whole class went undetected:
+#   sk-proj-<...>      -> run was "proj" (4)
+#   sk-ant-api03-<...> -> run was "ant"  (3)
+# Consuming `-`/`_` as part of the token while counting only the alphanumerics
+# against the 20 threshold catches both without loosening the length rule.
 fn _dlp_match_apikey_at(t, i, len) {
     var p = _dlp_apikey_prefix(t, i, len);
     if (p < 0) { return 0; }
     var n = 0;
-    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
+    while (p < len) {
+        var c = load8(t + p);
+        if (_dlp_is_alnum(c) == 1) { n = n + 1; }
+        else { if (c != 45 && c != 95) { break; } }
         p = p + 1;
-        n = n + 1;
     }
     if (n < 20) { return 0; }
     if (_dlp_bound_after(t, p, len) == 0) { return 0; }

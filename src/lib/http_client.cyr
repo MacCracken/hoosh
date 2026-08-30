@@ -7,6 +7,9 @@
 # connection and then went silent pinned a worker thread forever.
 var HTTP_CONNECT_TIMEOUT_MS = 10000;
 var HTTP_IO_TIMEOUT_S = 300;
+# Response buffer cap. The allocation is CAP+1 so a NUL terminator written by
+# a caller at the end of a full buffer stays inside it.
+var HTTP_RESP_CAP = 131072;
 
 # Generic request header for an arbitrary method (GET/POST/DELETE/...).
 # method must be a cstr like "POST" or "DELETE"; a single space follows it.
@@ -110,15 +113,25 @@ fn http_req_local(method, base_url, path, body, body_len) {
     if (hlen < 0) { sock_close(fd); return 0; }
     sys_write(fd, hdr, hlen);
     if (body_len > 0) { sys_write(fd, body, body_len); }
-    var rbuf = alloc(131072);
+    # One byte of headroom: the read cap stays at HTTP_RESP_CAP, but
+    # jsonlite's extractors do `store8(body + len, 0)` on the returned span,
+    # which lands one past the allocation when a provider fills the buffer
+    # exactly — into the shared bump arena at the offset the next alloc on any
+    # of 7 workers is about to receive.
+    var rbuf = alloc(HTTP_RESP_CAP + 1);
+    if (rbuf == 0) { sock_close(fd); return 0; }
     var total = 0;
     var n = 1;
-    while (n > 0) {
-        n = sys_read(fd, rbuf + total, 131072 - total);
+    while (n > 0 && total < HTTP_RESP_CAP) {
+        n = sys_read(fd, rbuf + total, HTTP_RESP_CAP - total);
         if (n > 0) { total = total + n; }
     }
     sys_close(fd);
     if (total == 0) { return 0; }
+    # A response that reached the cap was truncated mid-body; parsing it yields
+    # silent garbage, so refuse it instead.
+    if (total >= HTTP_RESP_CAP) { return 0; }
+    store8(rbuf + total, 0);
     return _http_parse_response(rbuf, total);
 }
 

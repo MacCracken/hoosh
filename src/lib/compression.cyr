@@ -125,10 +125,11 @@ fn _cmp_span_end(p, len, start) {
         var ch = load8(p + i);
         if (ch == 34) {
             i = i + 1;
+            # Forward scan (see _json_extract_str): a backslash consumes the
+            # next byte, so an escaped backslash cannot hide the terminator.
             while (i < len) {
-                if (load8(p + i) == 34) {
-                    if (load8(p + i - 1) != 92) { break; }
-                }
+                if (load8(p + i) == 34) { break; }
+                if (load8(p + i) == 92) { i = i + 1; }
                 i = i + 1;
             }
         } else {
@@ -167,10 +168,10 @@ fn _cmp_str_field(p, len, key, keylen) {
             if (j < len && load8(p + j) == 34) {
                 j = j + 1;
                 var vs = j;
+                # Forward scan (see jsonlite.cyr _json_extract_str).
                 while (j < len) {
-                    if (load8(p + j) == 34) {
-                        if (load8(p + j - 1) != 92) { break; }
-                    }
+                    if (load8(p + j) == 34) { break; }
+                    if (load8(p + j) == 92) { j = j + 1; }
                     j = j + 1;
                 }
                 var r = alloc(16);

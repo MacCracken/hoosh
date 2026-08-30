@@ -42,6 +42,11 @@ var BATCH_QUEUED    = 0;
 var BATCH_RUNNING   = 1;
 var BATCH_COMPLETED = 2;
 var BATCH_CANCELLED = 3;
+# 2.6.7: terminal state for a batch whose coordinator thread could not be
+# spawned. Without it such a batch sat at BATCH_QUEUED forever — the client
+# polled "queued" with null results and _batch_evict_terminal, which skips
+# non-terminal batches, could never reclaim the slot.
+var BATCH_FAILED    = 4;
 
 # BatchState layout (64 bytes). completed/failed/status/cancel are written by
 # the background runner + read by the accept thread serving GET — accessed
@@ -85,12 +90,20 @@ fn batch_registry_init() {
     return 0;
 }
 
-# Generate a unique batch id ("batch-<n>"). Accept-thread only.
+# Generate a unique batch id ("batch-<n>").
+#
+# Caller MUST hold _batch_reg_lock. The "accept-thread only" contract this
+# carried was stale as of the v2.4.0 worker pool: batch_submit runs on a pool
+# worker, and the read-modify-write here plus the re-read below straddled a
+# str_builder_new() allocation, so two workers could format the SAME id even
+# without a torn increment. map_set is last-write-wins, so the loser's client
+# polled the winner's results and could cancel the winner's batch.
 fn _batch_next_id() {
     _batch_id_counter = _batch_id_counter + 1;
+    var n = _batch_id_counter;
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "batch-");
-    str_builder_add_int(sb, _batch_id_counter);
+    str_builder_add_int(sb, n);
     return str_data(str_builder_build(sb));
 }
 
@@ -122,6 +135,7 @@ fn _batch_status_name(s) {
     if (s == BATCH_QUEUED) { return "queued"; }
     if (s == BATCH_RUNNING) { return "running"; }
     if (s == BATCH_COMPLETED) { return "completed"; }
+    if (s == BATCH_FAILED) { return "failed"; }
     return "cancelled";
 }
 
@@ -163,7 +177,9 @@ fn batch_submit(items) {
     if (total == 0) { return 0; }
     batch_registry_init();
     crypto_tls_main_init();
+    mutex_lock(_batch_reg_lock);
     var id = _batch_next_id();
+    mutex_unlock(_batch_reg_lock);
     var bs = batch_state_new(id, total);
     var reqs = load64(bs + BS_REQS);
     var i = 0;
@@ -183,7 +199,14 @@ fn batch_submit(items) {
     vec_push(_batch_ids, id);
     _batch_evict_terminal();
     mutex_unlock(_batch_reg_lock);
-    thread_create(&_async_batch_run, bs);
+    # Detached, and checked. thread_create leaves the stack and TLS mapped
+    # until join, and nothing joins these, so the process walked toward
+    # vm.max_map_count; past it thread_create returns 0, BS_STATUS stayed
+    # BATCH_QUEUED, and the client polled "queued" with null results forever.
+    if (thread_create_detached(&_async_batch_run, bs) == 0) {
+        store64(bs + BS_STATUS, BATCH_FAILED);
+        hlog_error("batch: could not spawn coordinator thread");
+    }
     return bs;
 }
 
@@ -199,7 +222,7 @@ fn _batch_evict_terminal() {
         var obs = map_get(_batch_registry, oid);
         if (obs != 0) {
             var st = load64(obs + BS_STATUS);
-            if (st == BATCH_COMPLETED || st == BATCH_CANCELLED) {
+            if (st == BATCH_COMPLETED || st == BATCH_CANCELLED || st == BATCH_FAILED) {
                 map_delete(_batch_registry, oid);
                 vec_remove(_batch_ids, i);
                 return 0;

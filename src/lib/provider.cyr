@@ -790,10 +790,11 @@ fn _json_span_end(p, len, start) {
         var ch = load8(p + i);
         if (ch == 34) {
             i = i + 1;
+            # Forward scan (see _json_extract_str): a backslash consumes the
+            # next byte, so an escaped backslash cannot hide the terminator.
             while (i < len) {
-                if (load8(p + i) == 34) {
-                    if (load8(p + i - 1) != 92) { break; }
-                }
+                if (load8(p + i) == 34) { break; }
+                if (load8(p + i) == 92) { i = i + 1; }
                 i = i + 1;
             }
         } else {

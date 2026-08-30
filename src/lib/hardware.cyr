@@ -377,10 +377,19 @@ fn hw_summary_json(sb) {
     }
 
     str_builder_add_cstr(sb, ",\"profiles\":[");
-    var n = hw_device_count();
+    # Snapshot the registry once. `n` came from one load of the global and each
+    # profile from another, so a concurrent hw_refresh returning fewer devices
+    # (a transient nvidia-smi failure, a driver reset) made vec_get call
+    # _vec_die() -> syscall(60,1), which exits only the CALLING THREAD: the
+    # worker vanished without sock_close(cfd) and without wq_done(), hanging
+    # that client and leaking the in-flight counter so every later shutdown
+    # drain timed out. Every sibling reader already snapshots.
+    var reg = _hw_registry;
+    var n = 0;
+    if (reg != 0) { n = reg_num_profiles(reg); }
     var i = 0;
     while (i < n) {
-        var p = reg_get_profile(_hw_registry, i);
+        var p = reg_get_profile(reg, i);
         if (i > 0) { str_builder_add_cstr(sb, ","); }
         str_builder_add_cstr(sb, "{\"type\":\"");
         str_builder_add_cstr(sb, accel_name(profile_accel_type(p)));

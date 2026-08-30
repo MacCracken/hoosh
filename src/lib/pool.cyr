@@ -181,6 +181,14 @@ fn _handle_conn(cfd) {
         store8(req_buf + req_len, 0);
 
         var clen = req_content_length(req_buf, req_len);
+        # -1 means the Content-Length header was present but malformed (no
+        # digits, or a run long enough to wrap i64). Refuse rather than
+        # proceeding with an unknown body length.
+        if (clen < 0) {
+            http_bad_request(cfd, "malformed Content-Length");
+            sock_close(cfd);
+            return 0;
+        }
         if (clen > MAX_REQUEST_BODY) {
             http_payload_too_large(cfd);
             sock_close(cfd);

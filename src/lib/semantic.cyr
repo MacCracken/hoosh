@@ -175,6 +175,11 @@ fn _sem_parse_num(buf, start, len) {
             exp = exp * 10 + (load8(buf + i) - 48);
             i = i + 1;
         }
+        # Clamp the exponent. It was applied one decade per iteration with no
+        # bound, so a provider returning `1e9223372036854775` parked the request
+        # thread effectively forever. Anything past ~40 decades is out of range
+        # for this x10000 fixed-point representation anyway.
+        if (exp > 40) { exp = 40; }
         var k = 0;
         while (k < exp) {
             if (esign > 0) { val = val * 10; } else { val = val / 10; }
@@ -227,11 +232,24 @@ fn semantic_parse_embedding(buf, len, out_n) {
                 i = len;
             } else {
                 var fr = _sem_parse_num(buf, i, len);
+                var ni = load64(fr + 8);
+                # _sem_parse_num consumes nothing for a non-numeric token
+                # (`NaN`, `Infinity`, `null`, `true`, a nested `[`/`{`/`"`),
+                # returning its start index unchanged. The caller then spun on
+                # the same byte forever, allocating 16 bytes per iteration
+                # against a never-freeing arena until alloc returned 0 and the
+                # store went to address 0. Python's json.dumps emits bare NaN /
+                # Infinity by default, so this is reachable without malice.
+                # No progress means this is not an embedding: abandon the parse.
+                if (ni <= i) {
+                    store64(out_n, 0);
+                    return vec;
+                }
                 if (n < cap) {
                     store64(vec + n * 8, load64(fr));
                     n = n + 1;
                 }
-                i = load64(fr + 8);
+                i = ni;
             }
         }
     }

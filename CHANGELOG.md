@@ -5,6 +5,163 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.7] — 2026-08-30
+
+**Second tranche of the security audit**, plus a test-integrity fix that turned
+out to matter more than any single bug. **753 assertions** (was 722),
+fmt/vet/deny clean, `src/` lint-clean, 25 benchmarks recorded with no regression
+beyond 1 ns of clamp cost. Every fix below has a regression test that was
+verified to FAIL against the previous code.
+
+### Fixed — the test suite was checking stale copies of shipped code
+
+`tests/hoosh.tcyr` includes only a handful of `src/` files and re-implements the
+rest as mirrors. Five `jsonlite.cyr` functions were **both** included **and**
+redefined in the test file, and since last definition wins, every assertion that
+touched them exercised a stale copy rather than the shipped parser — the mirrors
+had drifted and still carried the trailing-backslash bug below. Two `compact.cyr`
+functions were shadowed the same way. All seven duplicates are removed, the
+suite still passes, and `jsonlite`/`compact`/`auth` assertions now run against
+real `src/`. The `req_content_length` tests were pointed at the real function
+instead of a `_t_`-prefixed copy, and the `budget`/`dlp` mirrors were re-synced.
+
+### Fixed — untrusted input
+
+- **Six JSON string scanners walked past their closing quote.** Each decided
+  "is this quote escaped?" from the single preceding byte, which is wrong when
+  that byte is itself an escaped backslash. A value ending in `\` — a Windows
+  path, LaTeX, a shell continuation, a regex, all ordinary model output that
+  every provider serialises correctly — swallowed its own terminator and ran on
+  into the surrounding structure: `_json_extract_str` returned a span containing
+  real JSON syntax, spliced **raw** into the client's SSE frame and buffered
+  body, so the client's decoder threw and the whole completion was lost. On the
+  request side, `_json_obj_end` bounds each message object, so a *client*
+  message ending in `\` swallowed the rest of the array into the body hoosh
+  POSTs upstream. All six now use the forward-scan idiom already used correctly
+  in `_extract_openai_tool_calls`.
+- **`req_content_length` matched at any byte offset.** The name was tested at
+  every position with no line-start requirement, so the request URI or an
+  earlier header *value* carrying the literal won on first-match — a `Referer`
+  was enough to make a small valid request answer 413. The digit loop was also
+  uncapped and wrapped i64, so an absurd run could land on a small or negative
+  value that passed the `MAX_REQUEST_BODY` check. Now anchored to a line start,
+  capped at 19 digits, and a malformed value returns 400 rather than being
+  treated as absent.
+- **The 128 KiB provider response buffer could be written one byte past.** The
+  read loop filled it exactly, and `jsonlite`'s extractors then wrote a NUL
+  terminator at `body + len` — one past the allocation, into the shared bump
+  arena at the offset the next `alloc` on any of 7 workers was about to receive.
+  The buffer now carries a byte of headroom, and a response that reaches the cap
+  is refused rather than parsed from a body cut mid-JSON.
+- **`semantic_parse_embedding` could hang a worker forever.** `_sem_parse_num`
+  consumes nothing for a non-numeric token, returning its start index unchanged,
+  and the caller spun on that byte allocating 16 bytes per iteration against a
+  never-freeing arena until `alloc` returned 0 and the store went to address 0.
+  Python's `json.dumps` emits bare `NaN`/`Infinity` by default, so no malice is
+  required. The exponent loop was separately uncapped — `1e9223372036854775` was
+  effectively permanent. No progress now abandons the parse; the exponent is
+  clamped.
+
+### Fixed — security
+
+- **`Authorization` matching rejected valid tokens from real clients.** The
+  compare was byte-exact, so a client sending the header lowercase — which
+  hyper/reqwest, undici/fetch and every HTTP/2-terminating proxy do, since
+  HTTP/2 mandates lowercase field names — got 401 with a correct token. The
+  match was also unanchored, so it fired inside `Proxy-Authorization:` and then
+  abandoned the scan without reaching the real header, and it scanned the whole
+  request including the body. Now case-insensitive per RFC 9110, anchored to a
+  line start, bounded to the header block, and a non-Bearer line no longer stops
+  the scan.
+- **`api_key` DLP detection missed every current key format.** The body required
+  20+ *consecutive* alphanumerics after the prefix, but every modern key carries
+  internal separators, so the run stopped almost immediately: `sk-proj-…` scored
+  a run of 4, `sk-ant-api03-…` a run of 3, and both classified as PUBLIC. The
+  matcher now consumes `-`/`_` as part of the token while counting only
+  alphanumerics against the threshold, and the `api`/`key` prefix words are
+  case-folded.
+- **Negative token counts corrupted the budget permanently.** `/v1/tokens/report`
+  passed the client's `actual` straight to `pool_commit` and `str_to_int` honours
+  a leading `-`, so `{"actual": -1000000000}` erased recorded usage, pushed
+  `pool_available` above capacity, and persisted that through
+  `storage_budget_set`. `pool_reserve` had the mirror hole: a negative `tokens`
+  passed the availability test trivially and then *decreased* the outstanding
+  reservation. Both are clamped at the primitive.
+- **Unauthenticated `GET /v1/health` did a blocking, untimed TCP connect** (and
+  possible DNS resolve) per request, on a route deliberately exempt from the
+  auth gate and never rate limited — so an unauthenticated caller could park a
+  worker per request. It now serves from the background prober's state, as
+  `handle_health_providers` has since 2.5.5.
+
+### Fixed — concurrency and correctness
+
+- **`/v1/costs/reset` appended to the audit chain outside `_chat_lock`** — the
+  unlock was one block too early. `audit_record` is a multi-step read-modify-write
+  over the chain header that writes through to a single-threaded store, so racing
+  a worker's append produced duplicate ids, a shared `prev_hash` and a relinked
+  tail, and `audit_verify` then reported `"valid":false` — indistinguishable from
+  tampering.
+- **Batch ids were generated outside the registry lock.** The "accept-thread
+  only" contract went stale with the v2.4.0 worker pool. The read-modify-write
+  plus a re-read straddled an allocation, so two workers could format the *same*
+  id even without a torn increment; `map_set` is last-write-wins, so one client
+  polled the other's results and could cancel the other's batch.
+- **Async batch coordinator threads were never joined or detached**, so their
+  stacks and TLS stayed mapped and the process walked toward `vm.max_map_count`;
+  past it `thread_create` returned 0, the batch stayed `BATCH_QUEUED`, and the
+  client polled `"queued"` with null results forever. Now detached, the result is
+  checked, and a new terminal `BATCH_FAILED` status makes such a batch both
+  visible to the client and reclaimable by the evictor.
+- **`hw_summary_json` re-read the `_hw_registry` global inside its loop.** The
+  count came from one load and each profile from another, so a concurrent refresh
+  returning fewer devices made `vec_get` call `_vec_die()` → `syscall(60,1)`,
+  which exits only the *calling thread*: the worker vanished without closing the
+  client socket or clearing its in-flight count, hanging that client and making
+  every later shutdown drain time out. It now snapshots the registry once, as
+  every sibling reader already did.
+- **`STRAT_LOWEST_LATENCY` treated an unmeasured route as 0 ms.** `map_get`
+  returns 0 for a missing key, indistinguishable from a real measurement, and
+  every failure path returns before `router_report_latency` — so a route that
+  never succeeds stayed "unmeasured" and won every selection forever. An expired
+  API key became a permanent outage for that model while a healthy sibling idled.
+  Unmeasured routes now get a finite optimistic value that a genuinely fast route
+  can beat.
+
+### Performance
+
+Interleaved A/B against 2.6.6 (`222ce77`), 3 rounds each, same machine and
+session. No wins, and one movement outside its spread: `pool_reserve_commit`
+29 → 30 ns (+3.4 %), which is the three added comparisons that clamp negative
+token counts. Everything else is flat.
+
+### Known issues — carried forward
+
+The audit's remaining items are not in this release. The most significant:
+
+- The **semantic-cache embedding path ships DLP-CONFIDENTIAL request bodies to a
+  remote provider**, defeating the "confidential forced local" policy enforced a
+  few lines earlier, and does it while holding the global `_chat_lock`.
+- **`"stream": true` is charged zero tokens and zero cost** — the streaming path
+  never reaches `cost_record` and commits 0 to the budget pool.
+- **The local streaming path never reads the provider's HTTP status**, so a 404
+  is laundered into a clean `200 OK` with empty content and audited as a success
+  — the same class of defect 2.6.5 fixed for the remote path.
+- **`wq_push` blocks without draining**, so a full ring plus workers in the
+  sync-batch push loop can deadlock the pool.
+- **`provider_err` state is a single process-global slot** written from the
+  deliberately unlocked forward, so one client can be answered with another's
+  provider error.
+- A **semantic cache hit ignores the requested model**, and the cache key carries
+  no caller identity.
+- **Client `traceparent` is unvalidated** before being sliced at fixed offsets by
+  the OTLP span builder and forwarded verbatim into outbound headers.
+
+Two pre-existing gate items also remain: 103 `line exceeds 120 characters` lint
+warnings in the test files (long JSON fixtures), and the 131 duplicate-fn
+warnings from ai-hwaccel's transitive bayan dep — **fixed upstream in
+ai-hwaccel 2.3.20**, which makes that dep optional and feature-gated; bump
+`[deps.ai-hwaccel]` to 2.3.20 once it is tagged and the warnings go away.
+
 ## [2.6.6] — 2026-08-30
 
 **Two client-triggerable remote crashes, and credential revocation that silently

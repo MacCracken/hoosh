@@ -14,6 +14,10 @@ enum RouterField {
 # by router_report_latency from the unlocked forward on the v2.4.0 pool workers).
 # A dedicated lock (not _chat_lock) so latency recording doesn't serialize with
 # chat bookkeeping. Created once at startup (router_new runs single-threaded).
+# Optimistic latency assigned to a route with no recorded measurement, so an
+# unmeasured route is explored without permanently outranking every measured
+# one (map_get returns 0 for a missing key, which read as a perfect 0 ms).
+var LAT_UNMEASURED_MS = 50;
 var _lat_lock = 0;
 
 fn router_new(routes, count, strategy) {
@@ -105,7 +109,16 @@ fn router_select(rt, model) {
             # it gets explored (and then records a real latency), instead of MAX
             # which would avoid it forever. Once all are tried, the lowest real
             # EMA wins. (A genuine sub-1ms forward reading as "untried" is benign.)
+            # map_get returns 0 for a MISSING key, which is indistinguishable
+            # from a real 0 ms measurement — and since every failure path
+            # returns before router_report_latency, a route that never succeeds
+            # stays "unmeasured" and therefore wins every selection forever
+            # (an expired API key became a permanent outage for that model
+            # while a healthy sibling idled). Treat unmeasured as "explore
+            # once" by giving it a finite optimistic value rather than 0, so a
+            # route that has actually measured fast can still beat it.
             var lat = map_get(lat_map, url);
+            if (lat == 0) { lat = LAT_UNMEASURED_MS; }
             if (lat < best_lat) { best = c; best_lat = lat; }
             k = k + 1;
         }

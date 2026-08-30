@@ -12,15 +12,14 @@ fn handle_health(cfd) {
     var count = load64(_router + ROUTER_COUNT);
     var healthy = 1;
     if (count > 0) {
+        # Serve from the background prober's state instead of connecting here.
+        # This endpoint is deliberately exempt from the auth gate and is not
+        # rate limited, and the inline socket was a bare blocking connect(2)
+        # with no deadline (and a possible DNS resolve), so an unauthenticated
+        # caller could park a worker per request. 2.5.5 fixed exactly this in
+        # handle_health_providers; handle_health was left behind.
         var r = load64(routes);
-        var base = route_base_url(r);
-        var _sr = tcp_socket();
-        if (is_ok(_sr) == 1) {
-            var fd = payload(_sr);
-            var _cr = sock_connect(fd, host_addr(url_host(base)), url_port(base));
-            if (is_ok(_cr) == 0) { healthy = 0; }
-            sys_close(fd);
-        } else { healthy = 0; }
+        if (route_healthy(r) == 0) { healthy = 0; }
     }
     if (healthy == 1) {
         var body = "{\"status\":\"ok\"}";

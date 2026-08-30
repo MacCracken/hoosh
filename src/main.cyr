@@ -195,14 +195,20 @@ fn http_route(cfd, method, path, buf, buf_len) {
         # billing evidence, so it lands in the audit chain at `warn` — rust-old
         # recorded the same `admin.costs_reset`. _chat_lock guards the record
         # vec the pool workers append to.
+        # audit_record is a multi-step read-modify-write over the chain header
+        # and writes through to patra, which is single-threaded. Unlocking
+        # before it let a worker's append interleave — duplicate ids, a shared
+        # prev_hash, a relinked tail — and audit_verify then reports
+        # "valid":false, indistinguishable from tampering. Every other call
+        # site holds the lock.
         mutex_lock(_chat_lock);
         metrics_reset();
         cost_reset();
-        mutex_unlock(_chat_lock);
         if (_audit_chain != 0) {
             audit_record(_audit_chain, "admin.costs_reset",
               "warn", "cost records cleared", "admin", "");
         }
+        mutex_unlock(_chat_lock);
         hlog_warn("admin: cost records cleared");
         var body = "{\"status\":\"reset\"}";
         return http_ok(cfd, body, strlen(body));

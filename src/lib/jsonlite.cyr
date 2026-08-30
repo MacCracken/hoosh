@@ -73,11 +73,15 @@ fn _json_extract_str(body, len, key, keylen) {
     if (load8(body + p) != 34) { return ""; }
     var start = p + 1;
     var j = start;
+    # Forward scan: on a backslash, skip the next byte unconditionally. The
+    # previous test — "is the byte before this quote a backslash?" — is wrong
+    # when that backslash is itself escaped, so a value ending in `\\` (a
+    # Windows path, LaTeX, a regex — ordinary model output) read its real
+    # closing quote as escaped and ran past it, splicing structural JSON into
+    # the text handed to the client.
     while (j < len) {
-        if (load8(body + j) == 34) {
-            if (load8(body + j - 1) == 92) { j = j + 1; continue; }
-            break;
-        }
+        if (load8(body + j) == 34) { break; }
+        if (load8(body + j) == 92) { j = j + 1; }
         j = j + 1;
     }
     var tlen = j - start;
@@ -119,10 +123,8 @@ fn _json_obj_str_field(p, len, key, keylen) {
                     j = j + 1;
                     var vs = j;
                     while (j < len) {
-                        if (load8(p + j) == 34) {
-                            if (load8(p + j - 1) == 92) { j = j + 1; continue; }
-                            break;
-                        }
+                        if (load8(p + j) == 34) { break; }
+                        if (load8(p + j) == 92) { j = j + 1; }
                         j = j + 1;
                     }
                     var r = alloc(16);
@@ -146,10 +148,11 @@ fn _json_obj_end(p, len, start) {
         var ch = load8(p + i);
         if (ch == 34) {
             i = i + 1;
+            # Forward scan (see _json_extract_str): a backslash consumes the
+            # next byte, so an escaped backslash cannot hide the terminator.
             while (i < len) {
-                if (load8(p + i) == 34) {
-                    if (load8(p + i - 1) != 92) { break; }
-                }
+                if (load8(p + i) == 34) { break; }
+                if (load8(p + i) == 92) { i = i + 1; }
                 i = i + 1;
             }
         } else {

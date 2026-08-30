@@ -223,16 +223,32 @@ fn req_content_length(buf, len) {
         if (load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
             if (load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { return 0; }
         }
-        if (i + 15 < len && _hdr_ci_eq(buf + i, "content-length:", 15) == 1) {
+        # The name must start a header line. Without this the match fired at
+        # ANY byte offset, so the request URI or an earlier header VALUE
+        # carrying the literal "content-length:" won on first-match — a
+        # Referer or X-Forwarded-Uri was enough to make a small valid request
+        # answer 413.
+        var line_start = 0;
+        if (i == 0) { line_start = 1; }
+        if (i > 0) { if (load8(buf + i - 1) == 10) { line_start = 1; } }
+        if (line_start == 1 && i + 15 < len && _hdr_ci_eq(buf + i, "content-length:", 15) == 1) {
             var j = i + 15;
             while (j < len && load8(buf + j) == 32) { j = j + 1; }
             var v = 0;
+            var digits = 0;
             while (j < len) {
                 var c = load8(buf + j) & 0xFF;
                 if (c < 48 || c > 57) { break; }
+                # Uncapped, `v = v * 10 + d` wraps i64 and can land on a small
+                # or negative value that passes the MAX_REQUEST_BODY check.
+                # Anything past the cap is refused outright.
+                if (digits > 18) { return 0 - 1; }
                 v = v * 10 + (c - 48);
+                if (v < 0) { return 0 - 1; }
+                digits = digits + 1;
                 j = j + 1;
             }
+            if (digits == 0) { return 0 - 1; }
             return v;
         }
         i = i + 1;
