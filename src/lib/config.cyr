@@ -422,6 +422,14 @@ fn load_config(path) {
         var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
         var tok_str = toml_get(auth_p, "tokens");
         if (tok_str != 0) {
+            # Rebuild, do not append: load_config is a live reload entry point
+            # (POST /v1/admin/reload and SIGHUP), and appending made the token
+            # set union-only for the process lifetime — a revoked or rotated
+            # key kept authenticating while the reload reported success.
+            # Rebuilt only when the section is present: clearing unconditionally
+            # would make a deleted [auth] section fail OPEN (auth.cyr allows all
+            # on an empty vec).
+            _auth_tokens = vec_new();
             var toks = alloc(MAX_AUTH_TOKENS * 8);
             var tcount = _config_str_array(to_cstr(tok_str), toks, MAX_AUTH_TOKENS);
             var tj = 0;

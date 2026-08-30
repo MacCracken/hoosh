@@ -88,7 +88,8 @@ fn http_sse_begin(cfd) {
 #
 # 2.5.11: the return value is new, and callers must honor it. 2.4.13 installed
 # the SIGPIPE guard so a disconnected client stopped KILLING the gateway, and
-# noted the follow-up: with the signal ignored, writes to a dead socket just
+# recorded what remained (resolved here in 2.5.11): with the signal ignored,
+# writes to a dead socket just
 # return EPIPE and the stream loop kept going — hoosh would pull the entire
 # remaining response from the provider and write it into a closed socket. That
 # burns a worker and real provider tokens for a client that already left, and an

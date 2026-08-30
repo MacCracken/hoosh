@@ -34,6 +34,7 @@ include "src/lib/http_server.cyr"
 # 2.6.5: the provider-error capture + rendering is tested against the REAL implementation for the same
 # reason http_server is — a mirror of a string builder proves only that the mirror works.
 include "src/lib/jsonlite.cyr"
+include "src/lib/compact.cyr"
 include "src/lib/provider_err.cyr"
 
 # ================================================================
@@ -174,7 +175,17 @@ fn estimate_tokens(messages, msg_len, cpt_x10) {
 # Generic request header (mirrors src/lib/http_client.cyr).
 # Used by the provider-lifecycle forwarders (GET/POST/DELETE).
 # ----------------------------------------------------------------
-fn _build_req_header(buf, method, path, host, body_len) {
+fn _build_req_header(buf, method, path, host, body_len, cap) {
+    # src calls trace_current_or_new(); trace.cyr is not linked into this
+    # harness, so budget the W3C traceparent by its maximum length instead.
+    var _tp_max = 64;
+    var need = strlen(method) + 1 + strlen(path) + 9 + 2
+    + 6 + strlen(host) + 2
+    + 30 + 2 + 17 + 2
+    + 16 + 32 + 2
+    + 13 + _tp_max + 2
+    + 2 + 1;
+    if (need > cap) { return 0 - 1; }
     var pos = 0;
     memcpy(buf + pos, method, strlen(method)); pos = pos + strlen(method);
     store8(buf + pos, 32); pos = pos + 1;
@@ -184,7 +195,7 @@ fn _build_req_header(buf, method, path, host, body_len) {
     memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
     memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    memcpy(buf + pos, "Content-Type: application/json", 30); pos = pos + 30;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
@@ -5238,15 +5249,31 @@ fn main() {
     # ── http_client: generic method header (GET/POST/DELETE) ──────
     var hdr_buf = alloc(2048);
     var hdr_len = _build_req_header(hdr_buf, "DELETE", "/api/delete",
-      "localhost", 19);
+      "localhost", 19, 2048);
     assert_eq(memeq(hdr_buf, "DELETE /api/delete HTTP/1.0", 27), 1,
       "req header: DELETE method + path line");
     assert_eq(memeq(hdr_buf + hdr_len - 4, "\r\n\r\n", 4), 1,
       "req header: terminates with blank line");
     var ghdr = alloc(2048);
-    _build_req_header(ghdr, "GET", "/v1/training/job-1", "localhost", 0);
+    _build_req_header(ghdr, "GET", "/v1/training/job-1", "localhost", 0, 2048);
     assert_eq(memeq(ghdr, "GET /v1/training/job-1 HTTP/1.0", 31), 1,
       "req header: GET method + path line");
+    # 2.6.6: the literal is 30 bytes; both builders copied 29 and then wrote CR
+    # over the trailing `n`, so every plaintext provider request advertised
+    # `application/jso`. vLLM / llama-cpp-python / LocalAI / LM Studio all 422
+    # on that.
+    assert_eq(str_contains(str_from_buf(ghdr, strlen(ghdr)),
+        str_from("Content-Type: application/json\r\n")), 1,
+      "req header: full Content-Type media type, not truncated");
+    # 2.6.6: a path that cannot fit the caller's buffer is refused rather than
+    # written past it — job_id reaches this from a client request body.
+    var toolong = alloc(4096);
+    var tl_i = 0;
+    while (tl_i < 4000) { store8(toolong + tl_i, 97); tl_i = tl_i + 1; }
+    store8(toolong + 4000, 0);
+    var obuf = alloc(2048);
+    assert_eq(_build_req_header(obuf, "GET", toolong, "localhost", 0, 2048), 0 - 1,
+      "req header: over-capacity path is refused, not overflowed");
 
     # ── DLP scanner: PII/secret detection + classification ────────
     test_group("dlp_scanner");
@@ -6268,6 +6295,58 @@ fn main() {
     var kfs = 3 - 10;
     if (kfs < 0) { kfs = 0; }
     assert_eq(kfs, 0, "context: short conversation clamps to 0");
+
+    # ── 2.6.6: compact_messages boundary scan ──
+    test_group("compact_boundary_scan");
+    # The scan used to test every byte for `{` + `"role"` with no notion of
+    # nesting or string context, and stored into a fixed alloc(1024) — 128
+    # slots — with no bound check. handlers.cyr caps an inbound request at
+    # MAX_MESSAGES=256 using _json_array_count, which counts only depth-1
+    # elements, so the two disagreed: ONE valid message whose content is a
+    # nested array of objects carrying a "role" key drove the count into the
+    # hundreds and wrote past the table.
+    var nest_sb = str_builder_new();
+    str_builder_add_cstr(nest_sb, "[{\"role\":\"user\",\"content\":[");
+    var ni = 0;
+    while (ni < 300) {
+        if (ni > 0) { str_builder_add_cstr(nest_sb, ","); }
+        str_builder_add_cstr(nest_sb, "{\"role\":\"x\"}");
+        ni = ni + 1;
+    }
+    str_builder_add_cstr(nest_sb, "]}]");
+    var nest = to_cstr(str_builder_build(nest_sb));
+    var nest_len = strlen(nest);
+    # max_tokens 1 forces the compaction path rather than the already-fits
+    # early return, so the boundary scan actually runs.
+    var nres = compact_messages(nest, nest_len, 1, CHARS_PER_TOKEN_X10);
+    assert_neq(nres, 0, "compact: nested role objects do not crash the scan");
+    var nout_len = load64(nres + 8);
+    assert_eq(nout_len > 0, 1, "compact: nested-role input still produces output");
+    # Depth-aware now: the 300 nested objects are part of the single message,
+    # so the result keeps that one message rather than slicing it apart.
+    var nout = load64(nres);
+    assert_eq(load8(nout), 91, "compact: output is still a JSON array");
+
+    # A conversation of 200 real messages is legal (MAX_MESSAGES=256) but
+    # exceeded the old 128-slot table outright.
+    var many_sb = str_builder_new();
+    str_builder_add_cstr(many_sb, "[");
+    var cmi = 0;
+    while (cmi < 200) {
+        if (cmi > 0) { str_builder_add_cstr(many_sb, ","); }
+        str_builder_add_cstr(many_sb, "{\"role\":\"user\",\"content\":\"hello there\"}");
+        cmi = cmi + 1;
+    }
+    str_builder_add_cstr(many_sb, "]");
+    var many = to_cstr(str_builder_build(many_sb));
+    var mres = compact_messages(many, strlen(many), 20, CHARS_PER_TOKEN_X10);
+    assert_neq(mres, 0, "compact: 200 real messages do not overflow the table");
+    assert_eq(load64(mres + 8) > 0, 1, "compact: 200-message compaction produces output");
+
+    # A `{"role"` sequence inside a STRING value is not a boundary.
+    var strq = "[{\"role\":\"user\",\"content\":\"literal {\\\"role\\\": here\"}]";
+    var sres = compact_messages(strq, strlen(strq), 1, CHARS_PER_TOKEN_X10);
+    assert_neq(sres, 0, "compact: brace-role inside a string value is safe");
 
     # ── v2.5.10 DLP custom patterns ──
     test_group("dlp_custom_patterns");

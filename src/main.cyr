@@ -266,12 +266,16 @@ fn http_route(cfd, method, path, buf, buf_len) {
             while (ei < rcount) {
                 var er = load64(routes + ei * 8);
                 if (route_enabled(er) == 1) {
-                    var eport = url_port(route_base_url(er));
                     var epath = "/api/embeddings";
                     if (route_provider(er) != PROV_OLLAMA) {
                         epath = "/v1/embeddings";
                     }
-                    var eresp = http_post_local(eport, epath, eb, ebl);
+                    # http_post_local takes the BASE URL, not a port: it calls
+                    # url_host()/url_port() on this argument. Passing the int
+                    # port made url_host() do load8(port + 7) — an unmapped
+                    # low address, so one POST /v1/embeddings killed all 7
+                    # workers with a SIGSEGV.
+                    var eresp = http_post_local(route_base_url(er), epath, eb, ebl);
                     if (eresp != 0) {
                         if (http_status(eresp) >= 200) {
                             if (http_status(eresp) < 300) {

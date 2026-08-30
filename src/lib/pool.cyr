@@ -151,6 +151,11 @@ fn job_otlp_export(doc_ptr, doc_len) {
 # Slot 2 — slot 0 is sigil's crypto bank, slot 1 is the traceparent (trace.cyr).
 var REQBUF_SLOT = 2;
 
+# Whole-phase deadline for an ACCEPTED client socket, in seconds. Mirrors the
+# outbound HTTP_IO_TIMEOUT_S bound on provider sockets. Generous enough for a
+# slow uploader, short enough that a silent connection cannot hold a worker.
+var CLIENT_IO_TIMEOUT_S = 30;
+
 fn _req_buf() {
     var b = thread_local_get(REQBUF_SLOT);
     if (b == 0) {
@@ -161,6 +166,13 @@ fn _req_buf() {
 }
 
 fn _handle_conn(cfd) {
+    # Bound every blocking phase on the ACCEPTED socket. Only outbound sockets
+    # had deadlines; a client that connects and then goes silent parked a
+    # worker in sock_recv forever, and this runs BEFORE auth_check, so seven
+    # such connections wedged the gateway unauthenticated. The send timeout
+    # covers the mirror case: an SSE client that stops reading.
+    sock_set_recv_timeout(cfd, CLIENT_IO_TIMEOUT_S, 0);
+    sock_set_send_timeout(cfd, CLIENT_IO_TIMEOUT_S, 0);
     var req_buf = _req_buf();
     var recv_r = sock_recv(cfd, req_buf, REQ_READ_CHUNK);
     if (is_err_result(recv_r) == 1) { sock_close(cfd); return 0; }
@@ -182,7 +194,15 @@ fn _handle_conn(cfd) {
             var want = (body - req_buf) + clen;
             if (want > req_len) {
                 if (want > REQ_READ_CHUNK) {
+                    # Client-chosen size on a pre-auth path against a
+                    # never-freeing arena: refuse rather than memcpy into a
+                    # null on exhaustion.
                     var big = alloc(want + 1);
+                    if (big == 0) {
+                        http_error(cfd, "503", "Service Unavailable", "request buffer unavailable");
+                        sock_close(cfd);
+                        return 0;
+                    }
                     memcpy(big, req_buf, req_len);
                     req_buf = big;
                 }

@@ -10,7 +10,18 @@ var HTTP_IO_TIMEOUT_S = 300;
 
 # Generic request header for an arbitrary method (GET/POST/DELETE/...).
 # method must be a cstr like "POST" or "DELETE"; a single space follows it.
-fn _build_req_header(buf, method, path, host, body_len) {
+# Returns the header length, or -1 if it would not fit in `cap` bytes.
+# `path` reaches here from a request handler and can carry client-supplied
+# text, so the fixed 2048-byte buffer needs a real bound, not an assumption.
+fn _build_req_header(buf, method, path, host, body_len, cap) {
+    var _tp0 = trace_current_or_new();
+    var need = strlen(method) + 1 + strlen(path) + 9 + 2
+    + 6 + strlen(host) + 2
+    + 30 + 2 + 17 + 2
+    + 16 + 32 + 2
+    + 13 + strlen(_tp0) + 2
+    + 2 + 1;
+    if (need > cap) { return 0 - 1; }
     var pos = 0;
     memcpy(buf + pos, method, strlen(method)); pos = pos + strlen(method);
     store8(buf + pos, 32); pos = pos + 1;
@@ -20,7 +31,7 @@ fn _build_req_header(buf, method, path, host, body_len) {
     memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
     memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    memcpy(buf + pos, "Content-Type: application/json", 30); pos = pos + 30;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
@@ -29,16 +40,24 @@ fn _build_req_header(buf, method, path, host, body_len) {
     var cl_len = fmt_int_buf(body_len, cl_buf);
     memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    var _tp = trace_current_or_new();
-    var _tpl = strlen(_tp);
+    var _tpl = strlen(_tp0);
     memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
-    memcpy(buf + pos, _tp, _tpl); pos = pos + _tpl;
+    memcpy(buf + pos, _tp0, _tpl); pos = pos + _tpl;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     return pos;
 }
 
-fn _build_post_header(buf, path, host, body_len) {
+# Same capacity contract as _build_req_header.
+fn _build_post_header(buf, path, host, body_len, cap) {
+    var _tp1 = trace_current_or_new();
+    var need = 5 + strlen(path) + 9 + 2
+    + 6 + strlen(host) + 2
+    + 30 + 2 + 17 + 2
+    + 16 + 32 + 2
+    + 13 + strlen(_tp1) + 2
+    + 2 + 1;
+    if (need > cap) { return 0 - 1; }
     var pos = 0;
     memcpy(buf + pos, "POST ", 5); pos = pos + 5;
     memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
@@ -47,7 +66,7 @@ fn _build_post_header(buf, path, host, body_len) {
     memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
     memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Type: application/json", 29); pos = pos + 29;
+    memcpy(buf + pos, "Content-Type: application/json", 30); pos = pos + 30;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
@@ -56,10 +75,9 @@ fn _build_post_header(buf, path, host, body_len) {
     var cl_len = fmt_int_buf(body_len, cl_buf);
     memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    var _tp = trace_current_or_new();
-    var _tpl = strlen(_tp);
+    var _tpl1 = strlen(_tp1);
     memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
-    memcpy(buf + pos, _tp, _tpl); pos = pos + _tpl;
+    memcpy(buf + pos, _tp1, _tpl1); pos = pos + _tpl1;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     return pos;
@@ -87,7 +105,9 @@ fn http_req_local(method, base_url, path, body, body_len) {
     sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     var hdr = alloc(2048);
-    var hlen = _build_req_header(hdr, method, path, host, body_len);
+    if (hdr == 0) { sock_close(fd); return 0; }
+    var hlen = _build_req_header(hdr, method, path, host, body_len, 2048);
+    if (hlen < 0) { sock_close(fd); return 0; }
     sys_write(fd, hdr, hlen);
     if (body_len > 0) { sys_write(fd, body, body_len); }
     var rbuf = alloc(131072);
@@ -126,7 +146,9 @@ fn http_post_stream(base_url, path, body, body_len) {
     sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     var hdr = alloc(2048);
-    var hlen = _build_post_header(hdr, path, host, body_len);
+    if (hdr == 0) { sock_close(fd); return 0 - 1; }
+    var hlen = _build_post_header(hdr, path, host, body_len, 2048);
+    if (hlen < 0) { sock_close(fd); return 0 - 1; }
     sys_write(fd, hdr, hlen);
     sys_write(fd, body, body_len);
     return fd;

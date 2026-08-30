@@ -123,7 +123,11 @@ fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, pre
 # id order, set last_hash + next_id so new records continue the chain.
 # Returns the number of entries restored.
 fn storage_restore_audit(chain) {
-    if (_storage == 0) { return 0; }
+    # audit_chain_from_config() returns 0 when [audit] is absent (the default),
+    # so a [[storage]]-only config reached store64(chain + 56, ...) — an
+    # absolute write to address 56 — and killed the process before the
+    # listener bound.
+    if (_storage == 0 || chain == 0) { return 0; }
     var rs = patra_query(_storage, _audit_select_sql());
     if (rs == 0) { return 0; }
     var n = patra_result_count(rs);

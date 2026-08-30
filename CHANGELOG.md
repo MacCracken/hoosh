@@ -5,6 +5,120 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.6] — 2026-08-30
+
+**Two client-triggerable remote crashes, and credential revocation that silently
+did nothing.** Toolchain pin 6.5.35 → 6.5.36. **722 assertions** (was 714),
+fmt/vet/deny clean, `src/` lint-clean, 25 benchmarks recorded with no
+regressions. Every defect below was reproduced before it was fixed.
+
+This release is the **first tranche** of a 10-dimension security audit that
+produced 42 distinct confirmed findings. It lands the crashers, the auth defect
+and the wire-correctness bugs; the remainder are listed under *Known issues*.
+
+### Fixed — remote crashes
+
+- **`POST /v1/embeddings` segfaulted the whole gateway.** `src/main.cyr` called
+  `http_post_local(eport, …)` while the signature is
+  `http_post_local(base_url, …)` — an integer port where a URL cstr was
+  expected. `http_req_local` then ran `url_host(base_url)` → `load8(port + 7)`,
+  an unmapped low address. One authenticated request killed all 7 workers.
+  Every other call site already passed a URL; this one was stale.
+- **`compact_messages` overflowed its offset table (heap corruption → SIGSEGV).**
+  The boundary scan tested every byte for `{` + `"role"` with no notion of
+  nesting or string context and stored into a fixed `alloc(1024)` — 128 slots —
+  with **no bound check**. `handlers.cyr` caps a request at `MAX_MESSAGES = 256`
+  via `_json_array_count`, which counts only depth-1 elements, so the two
+  disagreed: a **single** valid message whose `content` is a nested array of
+  objects carrying a `"role"` key produced 301 boundaries from a 3.9 KB body —
+  173 entries, 1,384 bytes, past the allocation. Slots beyond the end were then
+  read back after `str_builder_new()` had reallocated over them. Compaction is
+  on by default. The scan is now depth- and string-aware (so it agrees with
+  `_json_array_count` exactly, and a `{"role"` inside a string value is no
+  longer a boundary), the table is sized to `MAX_MSG_OFFSETS`, and the store is
+  bounded regardless. Verified: the new regression test exits **139 (SIGSEGV)**
+  against the old code and 0 against the fix.
+
+### Fixed — security
+
+- **Config reload appended auth tokens without clearing, so revocation and
+  rotation silently did nothing.** `_auth_tokens` was `vec_new()`'d once and
+  only ever `vec_push`ed, while `load_config` is a live reload entry point
+  (`POST /v1/admin/reload`, SIGHUP) that reports success either way. Removing a
+  leaked key from `hoosh.cyml` and reloading left it authenticating every
+  endpoint — `/v1/admin/reload` included — until restart; every key ever loaded
+  accumulated as permanently valid. The vec is now rebuilt whenever `[auth]` is
+  present. It is deliberately **not** cleared when the section is absent:
+  `auth_check` allows all on an empty vec, so clearing unconditionally would
+  fail *open*. The same function already called `dlp_custom_clear()`
+  unconditionally — auth was the outlier.
+- **Unbounded client `job_id` was concatenated into an outbound request path**
+  and `memcpy`'d into a fixed 2048-byte header buffer whose builder had no
+  bounds check, against a 1 MiB body limit. `job_id` is now capped at 128 bytes
+  and restricted to `[A-Za-z0-9._-]`, which closes the overflow, CRLF injection
+  into the request line, and path traversal in one check. Independently, both
+  header builders take a capacity argument and return −1 rather than writing
+  past it, so no future non-literal path can reintroduce this.
+- **Accepted client sockets had no timeouts.** Only *outbound* sockets carried
+  deadlines; a client that connected and went silent parked a worker in
+  `sock_recv` forever, and that runs **before** `auth_check` — seven such
+  connections wedged the gateway unauthenticated. `_handle_conn` now sets
+  `SO_RCVTIMEO`/`SO_SNDTIMEO` (30 s), which also covers an SSE client that
+  stops reading.
+- **A client-sized growth allocation on the pre-auth path was unchecked.**
+  `alloc(want + 1)` with `want` client-chosen up to ~1 MiB, then `memcpy` into
+  it; `alloc` returns 0 on exhaustion without aborting. It now returns 503.
+
+### Fixed — correctness
+
+- **`Content-Type: application/jso` on every plaintext provider request.** The
+  literal is 30 bytes; both header builders copied 29 and then wrote CR over the
+  trailing `n`. Ollama tolerates it, but vLLM / llama-cpp-python / LocalAI /
+  LM Studio return 422. The test mirror carried the identical bug and was fixed
+  in the same edit.
+- **Sync batches queued pointers into the thread-local request buffer.** The
+  work-stealing barrier re-enters `_handle_conn` on the same thread, whose
+  `sock_recv` overwrites that buffer with the next client's request — so a
+  queued item could be processed against another caller's bytes. Item bodies are
+  now deep-copied before `wq_push`, exactly as the async path already did.
+- **`storage_restore_audit` null-dereferenced the chain.** It guarded only
+  `_storage == 0`, but `audit_chain_from_config()` returns 0 when `[audit]` is
+  absent (the default), so a `[[storage]]`-only config wrote to absolute address
+  56 and killed the process before the listener bound.
+
+### Changed
+
+- **Toolchain pin 6.5.35 → 6.5.36**, matching the installed compiler; `lib/`
+  resynced (67 declared modules). Clears the toolchain-drift build warning.
+
+### Known issues — carried into the next cycle
+
+The audit's remaining 33 findings are not in this release. The most significant:
+
+- The **semantic-cache embedding path ships DLP-CONFIDENTIAL request bodies to a
+  remote provider**, defeating the "confidential forced local" policy enforced a
+  few lines earlier, and does it while holding the global `_chat_lock`.
+- **Streaming requests are charged zero tokens and zero cost** — `"stream": true`
+  bypasses token accounting and budgets entirely.
+- **Six JSON string scanners decide "is this quote escaped?" from a single-byte
+  lookback**, so a value ending in a backslash (a Windows path, LaTeX, a regex —
+  ordinary model output) walks past the closing quote and corrupts the spliced
+  response.
+- `req_content_length` matches `content-length:` at **any** byte offset, so the
+  URI or an earlier header value wins.
+- A **semantic cache hit ignores the requested model**, and the cache key carries
+  no caller identity.
+- `semantic_parse_embedding` can **loop forever** allocating on a non-numeric
+  array element (Python's `json.dumps` emits bare `NaN`/`Infinity` by default).
+
+Two pre-existing gate items also remain: 103 `line exceeds 120 characters` lint
+warnings in `tests/hoosh.tcyr` / `tests/hoosh.bcyr` (long JSON fixtures, where
+mechanical rewrapping would alter test data), and 131 duplicate-fn warnings from
+`ai-hwaccel 2.3.19` pulling its own `[deps.bayan] 1.5.2` (`dist/bayan-json.cyr`)
+transitively, which shadows the stdlib bayan. All 131 bodies are currently
+identical, so it is a supply-chain hazard rather than a live bug, and it cannot
+be fixed from hoosh's side — 2.3.19 is ai-hwaccel's latest published tag.
+
 ## [2.6.5] — 2026-08-28
 
 **A provider error is no longer laundered into a successful, empty completion.** No pin change (cyrius

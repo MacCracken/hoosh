@@ -111,6 +111,12 @@ fn _msg_role_is(p, len, i, want, want_len) {
 # Strategy: find system message (keep it), then keep
 # as many recent messages as fit in the budget — but never fewer than
 # keep_last_messages, and never zero (see the clamp below).
+# Capacity of the message-offset table. Must be >= handlers.cyr's MAX_MESSAGES
+# (256), which is the cap enforced on an inbound request; the scan below can
+# never legitimately find more boundaries than that, and the store is bounded
+# by this value regardless.
+var MAX_MSG_OFFSETS = 256;
+
 fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
     var ratio = cpt_x10;
     if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
@@ -170,20 +176,59 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
 
     # Find message boundaries (scan for {"role": patterns)
     # Collect start offsets of each message
-    var offsets = alloc(1024);
+    var offsets = alloc(MAX_MSG_OFFSETS * 8);
+    if (offsets == 0) {
+        var oom = alloc(16);
+        store64(oom, msg_ptr);
+        store64(oom + 8, msg_len);
+        return oom;
+    }
     var msg_count = 0;
+    # Depth- and string-aware boundary scan.
+    #
+    # The previous version tested every byte for `{` + optional whitespace +
+    # `"role"` with no notion of nesting or string context, so it counted
+    # `{"role":...}` objects NESTED inside a message (a structured `content`
+    # array, a tool schema) as top-level messages. handlers.cyr guards the
+    # request with MAX_MESSAGES using _json_array_count, which counts only
+    # depth-1 elements — so the two disagreed, and one valid message could
+    # drive msg_count into the thousands while passing the cap. The table was
+    # a fixed alloc(1024) (128 slots) written without a bound check, so that
+    # overflowed the heap; slots past the end were then read back after
+    # str_builder_new() had reallocated over them.
+    #
+    # Counting only `{` at depth 1, and skipping string contents (honouring
+    # backslash escapes), makes this agree with _json_array_count exactly.
+    var depth = 0;
+    var in_str = 0;
     i = 0;
-    while (i < msg_len - 6) {
-        if (load8(msg_ptr + i) == 123) {
-            if (i + 10 < msg_len) {
+    while (i < msg_len) {
+        var c = load8(msg_ptr + i);
+        if (in_str == 1) {
+            if (c == 92) { i = i + 2; continue; }
+            if (c == 34) { in_str = 0; }
+            i = i + 1;
+            continue;
+        }
+        if (c == 34) { in_str = 1; i = i + 1; continue; }
+        if (c == 91) { depth = depth + 1; i = i + 1; continue; }
+        if (c == 93) { depth = depth - 1; i = i + 1; continue; }
+        if (c == 125) { depth = depth - 1; i = i + 1; continue; }
+        if (c == 123) {
+            if (depth == 1) {
                 # Whitespace-tolerant for the same reason as _msg_role_is above:
                 # an indented `{\n  "role"` is a message boundary too.
                 var bj = _cmp_ws(msg_ptr, msg_len, i + 1);
                 if (bj + 6 <= msg_len && memeq(msg_ptr + bj, "\"role\"", 6) == 1) {
-                    store64(offsets + msg_count * 8, i);
-                    msg_count = msg_count + 1;
+                    if (msg_count < MAX_MSG_OFFSETS) {
+                        store64(offsets + msg_count * 8, i);
+                        msg_count = msg_count + 1;
+                    }
                 }
             }
+            depth = depth + 1;
+            i = i + 1;
+            continue;
         }
         i = i + 1;
     }

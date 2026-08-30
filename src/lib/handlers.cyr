@@ -233,7 +233,24 @@ fn handle_synapse_training(cfd, body_ptr, body_len) {
     var job = json_get(pairs, str_from("job_id"));
     if (job == 0) { return http_bad_request(cfd, "missing job_id"); }
     var job_cstr = to_cstr(job);
-    if (strlen(job_cstr) == 0) { return http_bad_request(cfd, "empty job_id"); }
+    var job_n = strlen(job_cstr);
+    if (job_n == 0) { return http_bad_request(cfd, "empty job_id"); }
+    # job_id is concatenated into an outbound request path. Bounding the length
+    # and the alphabet in one check closes the fixed-header overflow, CRLF
+    # injection into the request line, and path traversal via / ? # .. — the
+    # only prior validation was "not empty", against a 1 MiB body limit.
+    if (job_n > 128) { return http_bad_request(cfd, "job_id too long"); }
+    var jci = 0;
+    while (jci < job_n) {
+        var jc = load8(job_cstr + jci);
+        var ok_ch = 0;
+        if (jc >= 48 && jc <= 57) { ok_ch = 1; }
+        if (jc >= 65 && jc <= 90) { ok_ch = 1; }
+        if (jc >= 97 && jc <= 122) { ok_ch = 1; }
+        if (jc == 45 || jc == 46 || jc == 95) { ok_ch = 1; }
+        if (ok_ch == 0) { return http_bad_request(cfd, "invalid job_id"); }
+        jci = jci + 1;
+    }
     var route = _router_find_provider(PROV_SYNAPSE);
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no synapse provider configured");

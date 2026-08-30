@@ -414,7 +414,16 @@ fn handle_batch(cfd, body_ptr, body_len) {
         var slot = alloc(8);
         store64(slot, 0);
         store64(slots + k * 8, slot);
-        wq_push(job_batch_item(load64(it), load64(it + 8), slot, completed, failed));
+        # Deep-copy the body, exactly as batch_submit does for the async path.
+        # These pointers are slices of the thread-local request buffer, and the
+        # work-stealing barrier below re-enters _handle_conn on THIS thread,
+        # whose sock_recv overwrites that buffer with the next client's request
+        # — so a queued item would be processed against another caller's bytes.
+        var ilen = load64(it + 8);
+        var icopy = alloc(ilen + 1);
+        memcpy(icopy, load64(it), ilen);
+        store8(icopy + ilen, 0);
+        wq_push(job_batch_item(icopy, ilen, slot, completed, failed));
         k = k + 1;
     }
     # Barrier with work-stealing — process queued jobs until this batch is done.
