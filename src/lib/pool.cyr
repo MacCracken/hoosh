@@ -174,9 +174,9 @@ fn _handle_conn(cfd) {
     sock_set_recv_timeout(cfd, CLIENT_IO_TIMEOUT_S, 0);
     sock_set_send_timeout(cfd, CLIENT_IO_TIMEOUT_S, 0);
     var req_buf = _req_buf();
-    var recv_r = sock_recv(cfd, req_buf, REQ_READ_CHUNK);
-    if (is_err_result(recv_r) == 1) { sock_close(cfd); return 0; }
-    var req_len = payload(recv_r);
+    var recv_r_t, recv_r_v = sock_recv(cfd, req_buf, REQ_READ_CHUNK);
+    if (is_err_result(recv_r_t) == 1) { sock_close(cfd); return 0; }
+    var req_len = recv_r_v;
     if (req_len > 0) {
         store8(req_buf + req_len, 0);
 
@@ -230,9 +230,9 @@ fn _handle_conn(cfd) {
                     req_buf = big;
                 }
                 while (req_len < want) {
-                    var more = sock_recv(cfd, req_buf + req_len, want - req_len);
-                    if (is_err_result(more) == 1) { break; }
-                    var n = payload(more);
+                    var more_t, more_v = sock_recv(cfd, req_buf + req_len, want - req_len);
+                    if (is_err_result(more_t) == 1) { break; }
+                    var n = more_v;
                     if (n <= 0) { break; }
                     req_len = req_len + n;
                 }

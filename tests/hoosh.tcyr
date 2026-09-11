@@ -3021,7 +3021,12 @@ enum Pricing {
 
 # Lookup pricing: returns (input_microdollars_per_M, output_microdollars_per_M)
 # packed as: input * 0x100000000 + output (since both fit in 32 bits)
-fn pricing_lookup(model, prov) {
+# ⚠ RENAMED from `pricing_lookup`. This is a DIFFERENT function from the arity-3
+# `pricing_lookup(model, prov, out)` defined above at :448 and in src/lib/pricing.cyr —
+# it returns the in/out prices packed into one i64 instead of filling an out-param.
+# Both were in scope with the same name; cyrius 6.6.2 makes a same-name different-arity
+# duplicate a hard error, where it used to be a silent "last definition wins".
+fn pricing_lookup_packed(model, prov) {
     if (provider_is_local(prov) == 1) { return 0; }
     if (streq(model, "gpt-4o") == 1) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
     if (streq(model, "gpt-4o-mini") == 1) { return PRICE_GPT4O_MINI_IN * 0x100000000 + PRICE_GPT4O_MINI_OUT; }
@@ -3045,7 +3050,7 @@ fn pricing_output(packed) { return packed % 0x100000000; }
 
 # Cost for a request in microdollars
 fn cost_calculate(model, prov, prompt_tokens, completion_tokens) {
-    var p = pricing_lookup(model, prov);
+    var p = pricing_lookup_packed(model, prov);
     var inp = pricing_input(p);
     var out = pricing_output(p);
     # cost = tokens * price_per_M / 1_000_000

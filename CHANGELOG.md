@@ -5,6 +5,42 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.10] — 2026-09-11
+
+**Migrated to the cyrius 6.6.x value form.** All 17 CI steps green.
+
+### Changed — cyrius pin 6.5.36 → **6.6.2**
+
+cyrius 6.6.0 flipped `Result` / `Option` / `Either` declared `: stack` to a value form — a payload
+variant returns a `(tag, payload)` register pair and allocates nothing; `payload()` is gone.
+6.6.2 is the repair release.
+
+16 declarations split across `src/`, `tests/` and `fuzz/`. No propagation traps, no
+reassignment sites, no `callptr` Results — the migration was mechanical throughout.
+
+### Changed — `ai-hwaccel` 2.3.20 → **2.3.22**
+
+### Fixed — `pricing_lookup` was defined three times, two of them colliding
+
+`src/lib/pricing.cyr:75` defines `pricing_lookup(model, prov, out)`. `tests/hoosh.tcyr` defined it
+**twice more**: an arity-3 copy at :448, and an arity-2 variant at :3024 that returns the in/out
+prices packed into one i64 instead of filling an out-param — a genuinely different function
+wearing the same name.
+
+All three were in scope together. Before 6.6.2 that was a silent "last definition wins", so calls
+to whichever lost mis-bound their arguments; 6.6.2 makes a same-name different-arity duplicate a
+hard error. The arity-2 variant is renamed `pricing_lookup_packed`.
+
+⚠ Unlike the ecosystem's other instances of this class — `health_check_new` (agnostik ↔ argonaut)
+and `audit_entry_new` (kavach ↔ agnostik) — this one is **intra-repo**: a test file shadowing its
+own source. Pre-existing, and verified so against HEAD before any migration edits.
+
+### Fixed — two fuzz harnesses called `sys_exit` without including `lib/syscalls.cyr`
+
+`fuzz/inference_request.fcyr` and `fuzz/message_content.fcyr` include `string`/`alloc`/`vec`/
+`str`/`fmt` only. CI builds harnesses with `--strict --no-deps`, where a **reachable** undefined
+symbol is an error rather than a warning, so both failed to build. Pre-existing.
+
 ## [2.6.9] — 2026-08-30
 
 **Nothing is deferred.** This closes the last four audit findings — the DLP

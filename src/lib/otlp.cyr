@@ -133,11 +133,11 @@ fn _otlp_post(body, blen) {
         return 0;
     }
     var path = _otlp_path(_otlp_endpoint);
-    var _sr = tcp_socket();
-    if (is_ok(_sr) == 0) { return 0; }
-    var fd = payload(_sr);
-    var _cr = sock_connect(fd, host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint));
-    if (is_ok(_cr) == 0) { sock_close(fd); return 0; }
+    var _sr_t, _sr_v = tcp_socket();
+    if (is_ok(_sr_t) == 0) { return 0; }
+    var fd = _sr_v;
+    var _cr_t, _cr_v = sock_connect(fd, host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint));
+    if (is_ok(_cr_t) == 0) { sock_close(fd); return 0; }
     var hdr = str_builder_new();
     str_builder_add_cstr(hdr, "POST ");
     str_builder_add_cstr(hdr, path);

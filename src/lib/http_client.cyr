@@ -92,9 +92,9 @@ fn _build_post_header(buf, path, host, body_len, cap) {
 # are reachable. body may be 0 with body_len 0 for bodyless methods. Returns
 # _http_parse_response result or 0.
 fn http_req_local(method, base_url, path, body, body_len) {
-    var _sr = tcp_socket();
-    if (is_ok(_sr) == 0) { return 0; }
-    var fd = payload(_sr);
+    var _sr_t, _sr_v = tcp_socket();
+    if (is_ok(_sr_t) == 0) { return 0; }
+    var fd = _sr_v;
     var host = url_host(base_url);
     # 2.5.3: bounded connect + read/write. rust-old had connect_timeout(10s) and
     # a 300 s request timeout (client.rs:127, provider/mod.rs:26); the port had
@@ -145,9 +145,9 @@ fn http_post_local(base_url, path, body, body_len) {
 # Caller must skip HTTP headers then read chunks.
 # Returns fd (>= 0) or -1 on failure.
 fn http_post_stream(base_url, path, body, body_len) {
-    var _sr = tcp_socket();
-    if (is_ok(_sr) == 0) { return 0 - 1; }
-    var fd = payload(_sr);
+    var _sr_t, _sr_v = tcp_socket();
+    if (is_ok(_sr_t) == 0) { return 0 - 1; }
+    var fd = _sr_v;
     var host = url_host(base_url);
     if (net_connect_nb(fd, host_addr(host), url_port(base_url), HTTP_CONNECT_TIMEOUT_MS) != 0) {
         sock_close(fd);

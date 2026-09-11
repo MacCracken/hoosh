@@ -390,16 +390,16 @@ fn http_route(cfd, method, path, buf, buf_len) {
 
 fn cmd_serve(port) {
     _http_port = port;
-    var sfd_r = tcp_socket();
-    if (is_err_result(sfd_r) == 1) { println("error: failed to create socket"); return 1; }
-    var sfd = payload(sfd_r);
+    var sfd_r_t, sfd_r_v = tcp_socket();
+    if (is_err_result(sfd_r_t) == 1) { println("error: failed to create socket"); return 1; }
+    var sfd = sfd_r_v;
     sock_reuse(sfd);
 
-    var br = sock_bind(sfd, _http_bind, _http_port);
-    if (is_err_result(br) == 1) { println("error: failed to bind"); return 1; }
+    var br_t, br_v = sock_bind(sfd, _http_bind, _http_port);
+    if (is_err_result(br_t) == 1) { println("error: failed to bind"); return 1; }
 
-    var lr = sock_listen(sfd, 128);
-    if (is_err_result(lr) == 1) { println("error: failed to listen"); return 1; }
+    var lr_t, lr_v = sock_listen(sfd, 128);
+    if (is_err_result(lr_t) == 1) { println("error: failed to listen"); return 1; }
 
     # Ignore SIGPIPE (2.4.13): hoosh runs its OWN accept loop and writes SSE chunks with bare `sys_write`
     # (MSG_NOSIGNAL-less), so a client that disconnects MID-STREAM — e.g. thoth's Esc-interrupt aborting a streaming
@@ -519,14 +519,14 @@ fn cmd_serve(port) {
     # Accept loop: accept connections and hand each to the pool. All request
     # handling (recv/route/respond/close) runs on the workers, concurrently.
     while (shutdown_requested() == 0) {
-        var client = sock_accept(sfd);
-        if (is_err_result(client) == 1) { continue; }
+        var client_t, client_v = sock_accept(sfd);
+        if (is_err_result(client_t) == 1) { continue; }
         if (shutdown_requested() == 1) {
             # Woken by the self-connect from _sig_thread, or raced with it.
-            sock_close(payload(client));
+            sock_close(client_v);
             break;
         }
-        wq_push(_job_conn(payload(client)));
+        wq_push(_job_conn(client_v));
     }
 
     # Graceful shutdown (2.5.8): stop accepting, then let the workers finish
@@ -614,11 +614,11 @@ fn cmd_health() {
         if (route_enabled(r) == 1) {
             var base = route_base_url(r);
             var up = 0;
-            var _sr = tcp_socket();
-            if (is_ok(_sr) == 1) {
-                var fd = payload(_sr);
-                var _cr = sock_connect(fd, host_addr(url_host(base)), url_port(base));
-                if (is_ok(_cr) == 1) { up = 1; }
+            var _sr_t, _sr_v = tcp_socket();
+            if (is_ok(_sr_t) == 1) {
+                var fd = _sr_v;
+                var _cr_t, _cr_v = sock_connect(fd, host_addr(url_host(base)), url_port(base));
+                if (is_ok(_cr_t) == 1) { up = 1; }
                 sys_close(fd);
             }
             sys_write(1, "  ", 2);
@@ -651,15 +651,15 @@ fn cmd_bench_connect(url, n) {
     var port = url_port(url);
     # Warmup one connect so the timed loop measures steady-state (ARP/route primed,
     # and on agnos the 8-slot conn table warmed), not first-connect setup.
-    var w = tcp_socket();
-    if (is_ok(w) == 1) { var wf = payload(w); sock_connect(wf, addr, port); sock_close(wf); }
+    var w_t, w_v = tcp_socket();
+    if (is_ok(w_t) == 1) { var wf = w_v; sock_connect(wf, addr, port); sock_close(wf); }
     var ok = 0;
     var t0 = clock_now_ns();
     var i = 0;
     while (i < n) {
-        var sr = tcp_socket();
-        if (is_ok(sr) == 1) {
-            var fd = payload(sr);
+        var sr_t, sr_v = tcp_socket();
+        if (is_ok(sr_t) == 1) {
+            var fd = sr_v;
             if (is_ok(sock_connect(fd, addr, port)) == 1) { ok = ok + 1; }
             sock_close(fd);
         }
@@ -938,9 +938,9 @@ fn _sig_thread(arg) {
             _shutdown = 1;
             # Nudge the accept loop out of its blocking accept() by connecting to
             # ourselves; it re-checks _shutdown on wake.
-            var sfd_r = tcp_socket();
-            if (is_ok(sfd_r) == 1) {
-                var s = payload(sfd_r);
+            var sfd_r_t, sfd_r_v = tcp_socket();
+            if (is_ok(sfd_r_t) == 1) {
+                var s = sfd_r_v;
                 net_connect_nb(s, 0x0100007F, _http_port, 500);
                 sock_close(s);
             }

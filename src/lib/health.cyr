@@ -53,9 +53,9 @@ fn health_probe(route) {
     if (base == 0) { return 0; }
     if (route_is_remote(route) == 1) {
         # Remote: TCP reachability only (see the header note).
-        var _sr = tcp_socket();
-        if (is_ok(_sr) == 0) { return 0; }
-        var fd = payload(_sr);
+        var _sr_t, _sr_v = tcp_socket();
+        if (is_ok(_sr_t) == 0) { return 0; }
+        var fd = _sr_v;
         var ok = 0;
         if (net_connect_nb(fd, host_addr(url_host(base)), url_port(base),
             HTTP_CONNECT_TIMEOUT_MS) == 0) {

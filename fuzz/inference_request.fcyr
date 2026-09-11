@@ -14,6 +14,7 @@
 # logic violation; a segfault or hang is caught by CI's build+run under
 # `timeout`.
 
+include "lib/syscalls.cyr"
 include "lib/string.cyr"
 include "lib/alloc.cyr"
 include "lib/vec.cyr"
