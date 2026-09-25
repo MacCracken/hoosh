@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| **Version** | **2.6.11** (cyrius 6.6.6 + dependency refresh; release detail in the CHANGELOG) |
+| **Version** | **2.6.12** (finishes the ai-hwaccel 2.4.0 adoption; release detail in the CHANGELOG) |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
 | **Binary** (x86_64 static ELF) | ~2.8 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
-| **Source** | ~12,540 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 805 assertions (`tests/hoosh.tcyr`) |
+| **Source** | ~12,600 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 834 assertions (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
 | **Coverage** | symbol coverage 37% (`scripts/coverage.sh`, CI floor 30%) |
@@ -73,7 +73,7 @@ once the code was actually exercised:
 | **2.5.7** | Compaction dropped the system prompt for any client whose JSON encoder emits `"role": "system"` with a space — i.e. essentially all of them |
 | **2.5.7** | The audit signing key was compiled into the binary; `audit_verify` could not detect a deleted record |
 | **2.5.8** | `sys_exit` is thread-exit, so a clean shutdown left the process alive; `crypto_tls_main_init` was trapped inside `cmd_serve`, segfaulting every non-serve path that made an HTTP request |
-| **2.5.9** | ai-hwaccel's threaded detector corrupts the registry (filed upstream; hoosh uses the serial one) |
+| **2.5.9** | ai-hwaccel's threaded detector corrupted the registry (fixed upstream in 2.3.25; hoosh still runs the serial one, see 2.6.12) |
 | **2.5.11** | RSS grew 64 KiB per request served — an OOM proportional to traffic handled |
 
 Twice the self-contained test mirror was **correct** while `src/` had drifted

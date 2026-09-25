@@ -1368,6 +1368,127 @@ fn _t_available_vram(total, used, reserve) {
     return avail;
 }
 
+# ── 2.6.12 simulator shared-memory mirrors ──
+# Mirror of src/lib/hardware.cyr _sim_shared_part, the totals in _sim_snapshot, and
+# _sim_shards. They count shared system RAM ONCE, as ai-hwaccel 2.4.0's
+# reg_total_accel_memory does. A mirror device holds the four profile fields they
+# read: {is_cpu, available, memory_bytes, shared_mem}.
+fn _t_simdev(is_cpu, avail, mem, shared_mem) {
+    var d = alloc(32);
+    store64(d, is_cpu);
+    store64(d + 8, avail);
+    store64(d + 16, mem);
+    store64(d + 24, shared_mem);
+    return d;
+}
+
+# _sim_shared_part: clamp to memory_bytes first, then floor at 0.
+fn _t_sim_part(d) {
+    var part = load64(d + 24);
+    if (part > load64(d + 16)) { part = load64(d + 16); }
+    if (part < 0) { part = 0; }
+    return part;
+}
+
+# _sim_snapshot's total for one side (is_cpu 0 = accelerator_memory_bytes, 1 =
+# system_memory_bytes): each available device adds its memory minus its shared
+# part, then the largest shared part on that side is added once.
+fn _t_sim_total(devs, is_cpu) {
+    var total = 0;
+    var pool = 0;
+    var i = 0;
+    while (i < vec_len(devs)) {
+        var d = vec_get(devs, i);
+        i = i + 1;
+        if (load64(d + 8) != 1) { continue; }
+        if (load64(d) != is_cpu) { continue; }
+        var part = _t_sim_part(d);
+        total = total + load64(d + 16) - part;
+        if (part > pool) { pool = part; }
+    }
+    return total + pool;
+}
+
+# The accelerators' shared pool, which _sim_snapshot hands to _sim_shards.
+fn _t_sim_pool(devs) {
+    var pool = 0;
+    var i = 0;
+    while (i < vec_len(devs)) {
+        var d = vec_get(devs, i);
+        i = i + 1;
+        if (load64(d + 8) != 1) { continue; }
+        if (load64(d) == 1) { continue; }
+        if (_t_sim_part(d) > pool) { pool = _t_sim_part(d); }
+    }
+    return pool;
+}
+
+# _sim_shards: largest capacity first, where a device holds its own memory plus
+# what is left of the shared pool, up to the part it can address. 0 = no fit.
+fn _t_sim_shards(devs, needed, pool) {
+    var n = vec_len(devs);
+    var used = alloc(n * 8 + 8);
+    var u = 0;
+    while (u < n) { store64(used + u * 8, 0); u = u + 1; }
+    var remaining = needed;
+    var shards = 0;
+    while (remaining > 0) {
+        var best = 0 - 1;
+        var best_cap = 0;
+        var best_take = 0;
+        var j = 0;
+        while (j < n) {
+            var d = vec_get(devs, j);
+            if (load64(used + j * 8) == 0 && load64(d + 8) == 1) {
+                if (load64(d) == 0) {
+                    var part = _t_sim_part(d);
+                    var take = part;
+                    if (take > pool) { take = pool; }
+                    var cap = load64(d + 16) - part + take;
+                    if (cap > best_cap) {
+                        best_cap = cap;
+                        best_take = take;
+                        best = j;
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        if (best < 0) { break; }
+        store64(used + best * 8, 1);
+        pool = pool - best_take;
+        remaining = remaining - best_cap;
+        shards = shards + 1;
+    }
+    if (remaining > 0) { return 0; }
+    return shards;
+}
+
+# ai-hwaccel 2.4.0 reg_total_accel_memory, transcribed as written (its
+# shared_mem == 0 fast path included). GET /v1/hardware reports it as
+# accel_memory_bytes, and the simulator's `original` has to agree with it.
+fn _t_reg_total_accel_memory(devs) {
+    var total = 0;
+    var pool = 0;
+    var i = 0;
+    while (i < vec_len(devs)) {
+        var d = vec_get(devs, i);
+        i = i + 1;
+        if (load64(d + 8) != 1) { continue; }
+        if (load64(d) == 1) { continue; }
+        if (load64(d + 24) == 0) {
+            total = total + load64(d + 16);
+            continue;
+        }
+        var part = load64(d + 24);
+        if (part > load64(d + 16)) { part = load64(d + 16); }
+        if (part < 0) { part = 0; }
+        if (part > pool) { pool = part; }
+        total = total + load64(d + 16) - part;
+    }
+    return total + pool;
+}
+
 # ── 2.5.7 compaction role-matcher mirror ──
 # Mirror of src/lib/compact.cyr _cmp_ws / _msg_role_is.
 fn _t_cmp_ws(p, len, j) {
@@ -5866,6 +5987,103 @@ fn main() {
         s9_oi = s9_oi + 1;
     }
     assert_eq(s9_order_shards, 4, "sim: registry order overstates the span");
+
+    test_group("hardware_simulate_shared_memory");
+    # 2.6.12: _sim_snapshot counts shared system RAM once, like ai-hwaccel's
+    # reg_total_accel_memory. A 48 GiB Apple M5 Pro reports the CPU, the Metal GPU
+    # and the Neural Engine, and all three are the same RAM. The per-device sum
+    # made that 52 GiB of accelerator memory.
+    var shg = 1073741824;
+    var sha = vec_new();
+    vec_push(sha, _t_simdev(1, 1, 48 * shg, 48 * shg));   # CPU
+    vec_push(sha, _t_simdev(0, 1, 48 * shg, 48 * shg));   # Metal GPU
+    vec_push(sha, _t_simdev(0, 1, 4 * shg, 4 * shg));     # Neural Engine
+    assert_eq(_t_sim_total(sha, 0), 48 * shg, "sim shared: Apple accelerators hold the 48 GiB once");
+    assert_eq(_t_sim_total(sha, 0), _t_reg_total_accel_memory(sha),
+      "sim shared: Apple total matches reg_total_accel_memory");
+    assert_eq(_t_sim_total(sha, 1), 48 * shg, "sim shared: system RAM counted once");
+    # The old sum said 52 GiB, so a 50 GiB model "fit".
+    var sh_need50 = 50 * shg;
+    assert_eq(sh_need50 <= 48 * shg + 4 * shg, 1, "sim shared: the per-device sum said 50 GiB fits");
+    assert_eq(sh_need50 <= _t_sim_total(sha, 0), 0, "sim shared: 50 GiB does not fit 48 GiB of RAM");
+    assert_eq(_t_sim_shards(sha, 40 * shg, _t_sim_pool(sha)), 1, "sim shared: 40 GiB packs onto the GPU");
+    assert_eq(_t_sim_shards(sha, sh_need50, _t_sim_pool(sha)), 0, "sim shared: 50 GiB does not pack");
+
+    # Intel Core Ultra laptop with an 8 GiB NVIDIA card. The Vulkan iGPU's 16 GiB
+    # heap and the NPU's 2 GiB are both system RAM; the card's memory is its own.
+    var shl = vec_new();
+    vec_push(shl, _t_simdev(1, 1, 32 * shg, 32 * shg));   # CPU
+    vec_push(shl, _t_simdev(0, 1, 8 * shg, 0));           # CUDA card
+    vec_push(shl, _t_simdev(0, 1, 16 * shg, 16 * shg));   # Vulkan iGPU
+    vec_push(shl, _t_simdev(0, 1, 2 * shg, 2 * shg));     # Intel NPU
+    assert_eq(_t_sim_total(shl, 0), 24 * shg, "sim shared: dedicated 8 GiB + the 16 GiB pool once");
+    assert_eq(_t_sim_total(shl, 0), _t_reg_total_accel_memory(shl),
+      "sim shared: laptop total matches reg_total_accel_memory");
+    assert_eq(_t_sim_total(shl, 1), 32 * shg, "sim shared: laptop system RAM");
+
+    # GH200: 96 GiB of HBM plus the Grace CPU's 480 GiB, which is marked shared.
+    var shh = vec_new();
+    vec_push(shh, _t_simdev(1, 1, 480 * shg, 480 * shg));
+    vec_push(shh, _t_simdev(0, 1, 576 * shg, 480 * shg));
+    assert_eq(_t_sim_total(shh, 0), 576 * shg, "sim shared: GH200 keeps HBM + Grace memory");
+    assert_eq(_t_sim_total(shh, 0), _t_reg_total_accel_memory(shh), "sim shared: GH200 matches");
+
+    # Discrete cards share nothing, so the total is the plain sum it always was.
+    var shd = vec_new();
+    vec_push(shd, _t_simdev(1, 1, 64 * shg, 64 * shg));
+    vec_push(shd, _t_simdev(0, 1, 3 * shg, 0));
+    vec_push(shd, _t_simdev(0, 1, 4 * shg, 0));
+    vec_push(shd, _t_simdev(0, 1, 24 * shg, 0));
+    vec_push(shd, _t_simdev(0, 1, 24 * shg, 0));
+    assert_eq(_t_sim_total(shd, 0), 55 * shg, "sim shared: discrete-only total is the plain sum");
+    assert_eq(_t_sim_total(shd, 0), _t_reg_total_accel_memory(shd), "sim shared: discrete matches");
+    assert_eq(_t_sim_shards(shd, s9_need70, 0), 2, "sim shared: 70B still spans the two 24 GiB cards");
+
+    # Unavailable profiles are skipped, as ai-hwaccel's totals skip them. An 80 GiB
+    # card that cannot run anything is not capacity.
+    var shu = vec_new();
+    vec_push(shu, _t_simdev(1, 1, 64 * shg, 64 * shg));
+    vec_push(shu, _t_simdev(0, 1, 8 * shg, 0));
+    vec_push(shu, _t_simdev(0, 0, 80 * shg, 0));
+    assert_eq(_t_sim_total(shu, 0), 8 * shg, "sim shared: unavailable card adds nothing");
+    assert_eq(_t_sim_total(shu, 0), _t_reg_total_accel_memory(shu), "sim shared: unavailable matches");
+    assert_eq(_t_sim_shards(shu, 9 * shg, _t_sim_pool(shu)), 0, "sim shared: unavailable card not packed");
+
+    # The clamp: shared_mem above memory_bytes counts as all of it, below 0 as none.
+    assert_eq(_t_sim_part(_t_simdev(0, 1, 8 * shg, 20 * shg)), 8 * shg, "sim shared: part clamps to memory");
+    assert_eq(_t_sim_part(_t_simdev(0, 1, 4 * shg, 0 - 5)), 0, "sim shared: negative part floors at 0");
+    var shc = vec_new();
+    vec_push(shc, _t_simdev(0, 1, 8 * shg, 20 * shg));
+    vec_push(shc, _t_simdev(0, 1, 4 * shg, 0 - 5));
+    assert_eq(_t_sim_total(shc, 0), _t_reg_total_accel_memory(shc), "sim shared: clamped totals match");
+
+    # _sim_shards spends the pool once. Two hypothetical 2 GiB cards on the Apple
+    # box make 52 GiB, and a 52 GiB model needs the GPU and both cards. The old
+    # loop took the GPU (48) and then the Neural Engine (4), RAM the GPU already
+    # covers, and reported 2.
+    var sha2 = vec_new();
+    vec_push(sha2, _t_simdev(1, 1, 48 * shg, 48 * shg));
+    vec_push(sha2, _t_simdev(0, 1, 48 * shg, 48 * shg));
+    vec_push(sha2, _t_simdev(0, 1, 4 * shg, 4 * shg));
+    vec_push(sha2, _t_simdev(0, 1, 2 * shg, 0));   # added cards share nothing
+    vec_push(sha2, _t_simdev(0, 1, 2 * shg, 0));
+    var sh_t2 = _t_sim_total(sha2, 0);
+    assert_eq(sh_t2, 52 * shg, "sim shared: Apple + two 2 GiB cards = 52 GiB");
+    assert_eq(_t_sim_shards(sha2, 52 * shg, _t_sim_pool(sha2)), 3, "sim shared: 52 GiB spans GPU + both cards");
+    assert_eq(48 * shg + 4 * shg >= 52 * shg, 1, "sim shared: the old loop 'held' it on GPU + NE");
+    # With both on one accounting, `fits` and packing agree at the boundary.
+    assert_eq(_t_sim_shards(sha2, sh_t2, _t_sim_pool(sha2)) > 0, 1, "sim shared: need == total packs");
+    assert_eq(_t_sim_shards(sha2, sh_t2 + 1, _t_sim_pool(sha2)), 0, "sim shared: one byte over does not");
+    assert_eq(_t_sim_shards(shl, 24 * shg, _t_sim_pool(shl)), 2, "sim shared: laptop total packs iGPU + card");
+
+    # Why _sim_profiles pins an added card's shared_mem to 0: marked shared, a
+    # 24 GiB card would fold into the 48 GiB pool and add nothing.
+    var sha3 = vec_new();
+    vec_push(sha3, _t_simdev(0, 1, 48 * shg, 48 * shg));
+    vec_push(sha3, _t_simdev(0, 1, 24 * shg, 0));
+    assert_eq(_t_sim_total(sha3, 0), 72 * shg, "sim shared: an added card adds its memory");
+    store64(vec_get(sha3, 1) + 24, 24 * shg);
+    assert_eq(_t_sim_total(sha3, 0), 48 * shg, "sim shared: a shared added card would vanish");
 
     test_group("hardware_available_vram");
     # Placement compared against TOTAL accelerator memory before 2.5.7, which

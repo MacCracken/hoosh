@@ -5,6 +5,104 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.12] — 2026-09-25
+
+**Finishes the ai-hwaccel 2.4.0 adoption.** 2.6.11 bumped `ai-hwaccel` 2.3.22 → 2.4.0 and left two
+follow-ups in `src/lib/hardware.cyr` on purpose. The what-if simulator still summed per-device memory
+by hand, and the serial-detector workaround from 2.5.9 had not been re-evaluated. This release closes
+both. **834 assertions** (was 805), fmt/lint/vet/deny clean, benchmarks within noise of 2.6.11, and
+every CI step green when replayed step for step against a clean export of the tracked tree.
+
+### Fixed — `POST /v1/hardware/simulate` counted shared system RAM once per device
+
+`_sim_snapshot` summed `profile_memory_bytes` over every accelerator. Since ai-hwaccel 2.3.28, a
+profile's `shared_mem` marks the part of its memory that is system RAM. That is all of it for Apple's
+GPU and Neural Engine and for the client NPUs, a Vulkan iGPU's heap, and GH200's 480 GiB of Grace
+memory. `reg_total_accel_memory` counts that RAM once: each device adds its memory minus its shared
+part, and the largest shared part is added at the end. The simulator counted it once per device. On a
+48 GiB Apple M5 Pro (GPU 48 GiB + Neural Engine 4 GiB) it reported 52 GiB of accelerator memory and
+`fits: true` for a 50 GiB model, and its `original` figure disagreed with `GET /v1/hardware`'s
+`accel_memory_bytes`.
+
+- Both totals now use ai-hwaccel's accounting. `accelerator_memory_bytes` is what
+  `reg_total_accel_memory` reports for the same profiles, and `system_memory_bytes` counts the CPU's
+  RAM once the same way. Hosts with only discrete cards are unaffected: nothing is shared, so the
+  total is the plain sum it was.
+- Unavailable profiles are skipped by the totals, `accelerator_count` and packing, as ai-hwaccel's
+  totals skip them. rust-old's snapshot likewise counted `available_profiles()`. No 2.4.0 detector
+  marks a profile unavailable, so this changes nothing on a detected registry today.
+- `shards_required` double-counted the same way. The largest-first packing took each device's whole
+  `memory_bytes`, so after the GPU it counted the Neural Engine's 4 GiB, RAM the GPU already covers.
+  Now a device holds its own memory plus what is left of the shared pool, up to the part it can
+  address, so the pool is spent once. On the Apple host with two hypothetical 2 GiB cards, a 52 GiB
+  model spans 3 devices, not 2. Totals and packing now use the same accounting, so a model that
+  `fits` always packs.
+- Hypothetical `add_devices` cards are discrete. `_sim_profiles` sets their `shared_mem` to 0 instead
+  of relying on `profile_cuda`'s default: a card marked shared would fold into the pool and add
+  nothing.
+- `hw_simulate_json` reads the registry once for both snapshots. It used to read `_hw_registry`
+  twice, so a concurrent `hw_refresh` could put `original` and `simulated` on different device
+  lists.
+
+Verified against the real module. A scratch harness compiled `src/lib/hardware.cyr` against
+ai-hwaccel 2.4.0 and matched `reg_total_accel_memory` on 3,000 random mixed device sets and on these
+hosts: Apple, an Intel NPU + NVIDIA laptop, GH200, discrete-only, an unavailable device, and the
+clamp edge cases. In every random set, a model that fits packed and one byte over the total did not.
+On the dev host the live `original.accelerator_memory_bytes` equals `GET /v1/hardware`'s
+`accel_memory_bytes`. `tests/hoosh.tcyr` gains a `hardware_simulate_shared_memory` group of 29
+assertions. It mirrors the accounting and checks it against a literal transcription of
+`reg_total_accel_memory`. Reverting the mirror's totals to the old sum fails 10 of them, and
+reverting its packing fails 3.
+
+### Evaluated — the threaded detector is fixed upstream, and hoosh still does not use it
+
+2.5.9 moved to the serial detector because `registry_detect_threaded`'s post-passes were passed the
+registry where a `system_io` was expected. ai-hwaccel 2.3.25 fixed that. Every entry point now shares
+`registry_post_passes(r, allow_exec)`, and `registry_detect_threaded_with(builder_mask)` would keep
+`[hardware] disabled_backends` working. Checked on ai-hwaccel 2.4.0 on the dev host (AMD Renoir APU):
+the serial and threaded registries hold the same 2 profiles and the same 8 warnings. Both
+`reg_system_io()` results are real `system_io` structs with the same storage devices, and the totals
+and best device match. The symptom 2.5.9 measured, 10 warnings instead of 8, is gone.
+
+hoosh stays on the serial detector for two reasons:
+
+- **The threaded path orders profiles differently, and hoosh reads that order.** Serial appends
+  backends in a fixed order: CPU, CUDA, ROCm, Apple, Vulkan, Intel NPU, AMD XDNA, and so on.
+  Threaded appends the sysfs backends first, then the CLI backends as it joins their threads.
+  `POST /v1/hardware/requirement-match` reports the first matching profile, and
+  `/v1/hardware/simulate`'s `remove_count` drops the first N accelerators. On an Intel NPU + NVIDIA
+  laptop, `any-accelerator` would answer `Intel NPU` instead of `CUDA GPU`, and removing one device
+  would pull the NPU. `GET /v1/hardware` and `/v1/hardware/telemetry` would also list devices in a
+  different order. Best-device selection goes by rank. The only tie the reorder flips is Metal against
+  an unknown Neuron chip (both rank 40), which would need a host that has both.
+- **The speedup is gone.** Medians of 15 alternated rounds: serial 22.5 ms, threaded 21.2 ms. 2.5.9
+  measured 34 vs 20 ms. A per-stage breakdown shows why: `vulkaninfo --summary` takes 18–23 ms, every
+  other probe takes under 1 ms, and threads cannot split one probe.
+
+The `_hw_detect` comment now records this and what switching would take. `hw_init`'s comment still
+said hoosh ran the threaded detector; it is corrected. Its `THREAD_STACK_SIZE` ≥ 1 MiB bump is gone.
+The bump existed for the threaded detector's probe threads, the serial detector spawns none, and it
+never fired anyway: cyrius's default stack has been 2 MiB since 6.3.13.
+
+### Benchmarks
+
+The gate ran and recorded all 25 benchmarks. No benchmarked path changed, because the suite does not
+cover `src/lib/hardware.cyr`. Every row is within noise of the 2.6.11 run (`192be68`). The largest
+moves are `cache_insert` 108 → 98 ns and `route_matches_model` 37 → 34 ns, both faster and both in
+code this release does not touch. The Baseline column in `benchmarks.md` (`303ca06`) predates cyrius
+6.6.5's harness rewrite (see 2.6.11), which accounts for its larger deltas.
+
+Binary: 2,840,368 bytes, the same size as 2.6.11.
+
+### Docs
+
+The roadmap's "Upstream-gated (ai-hwaccel)" item is now a low-priority open item. It records why the
+threaded detector stays off and what would justify revisiting it. The roadmap's "Current" line moves
+from v2.5.11 to v2.6.12. `state.md` and the README stats are refreshed: 834 assertions, 153 groups,
+~12,600 source lines. The README's testing block still said 427 assertions and 16 benchmarks, and is
+corrected. The `hardware.cyr` header names the ai-hwaccel 2.4.0 bundle instead of 2.3.7; the
+simulator needs 2.3.28 or later for `profile_shared_mem`.
+
 ## [2.6.11] — 2026-09-25
 
 **Toolchain and dependency refresh.** cyrius 6.6.2 → 6.6.6, `ai-hwaccel` 2.3.22 → 2.4.0, vendored

@@ -4,8 +4,9 @@
 #   - Device summary for /v1/hardware endpoint
 #   - Quantization suggestions for model placement
 #   - Sharding plans for multi-GPU inference
-# Requires: ai-hwaccel 2.3.7 bundle (registry, profile, quantization, plan,
-#   cost, training, model, json_out — vendored as lib/ai-hwaccel.cyr)
+# Requires: ai-hwaccel 2.4.0 bundle (registry, profile, quantization, plan,
+#   cost, training, model, json_out — vendored as lib/ai-hwaccel.cyr). The
+#   simulator reads profile_shared_mem, which needs 2.3.28 or later.
 
 # Global registry — initialized at startup, optionally refreshed in place
 var _hw_registry = 0;
@@ -69,26 +70,14 @@ fn hardware_configure(vram_reserve, refresh_secs, cache_ttl_secs) {
     return 0;
 }
 
-# Detect hardware and populate the global registry, using ai-hwaccel's THREADED
-# detector — the CLI-tool probes (nvidia-smi, vulkaninfo, hl-smi, neuron-ls, …)
-# run in parallel threads while sysfs backends run on this thread; results are
-# per-thread vecs merged after join (race-free by construction).
+# Detect hardware and populate the global registry, with ai-hwaccel's SERIAL
+# detector (see _hw_detect for why not the threaded one). Runs once from main,
+# before any thread is spawned; hw_refresh re-runs the same detection later.
 #
-# This segfaulted before v2.4.0 under the pre-thread-safe allocator (concurrent
-# parent-side allocs corrupted the heap). It is safe since the v6.0.64 CAS
-# spinlock: the only shared mutation is alloc (now atomic), and the fork+exec
-# child does ONLY raw syscalls (no child-side alloc → fork-safe even from a
-# worker thread). registry_detect_threaded has an internal serial fallback if
-# thread_create fails. Give the probe threads stack headroom for parsing CLI
-# output (matches the v2.4.0 worker pool); set before the first thread_create.
+# 2.6.12: the THREAD_STACK_SIZE >= 1 MiB bump that sat here was for the threaded
+# detector's probe threads. The serial detector spawns none, and cyrius's default
+# stack (2 MiB since 6.3.13) is above that floor, so the bump never fired.
 fn hw_init() {
-    # THREAD_STACK_SIZE is a Linux/posix threading knob (lib/thread.cyr); the
-    # agnos threading lib (thread_agnos.cyr) has no such global. Guard the bump
-    # out on agnos — registry_detect_threaded() has an internal serial fallback
-    # when thread_create isn't available, so detection still runs there.
-    #ifndef CYRIUS_TARGET_AGNOS
-    if (THREAD_STACK_SIZE < 1048576) { THREAD_STACK_SIZE = 1048576; }
-    #endif
     if (_hw_lock == 0) { _hw_lock = mutex_new(); }
     _hw_registry = _hw_detect();
     _hw_last_detect_ms = clock_now_ms();
@@ -97,31 +86,36 @@ fn hw_init() {
 
 # Run detection, honoring [hardware] disabled_backends (2.5.7).
 #
-# 2.5.9: this uses the SERIAL detector, not registry_detect_threaded.
+# This is the SERIAL detector, deliberately. 2.5.9 moved off the threaded one
+# because its post-passes got the registry where a system_io was expected, which
+# pushed storage into reg.warnings, replaced reg.system_io, and on NVLink or
+# InfiniBand hosts pushed interconnects into the device list. ai-hwaccel 2.3.25
+# fixed that: every entry point now shares registry_post_passes(r, allow_exec),
+# and registry_detect_threaded_with(mask) takes the same builder mask, so
+# disabled_backends would carry over. Rechecked at 2.6.12 on ai-hwaccel 2.4.0 (AMD
+# Renoir APU): both give the same 2 profiles, the same 8 warnings in a different
+# order, a real system_io with the same storage, and the same totals.
 #
-# ai-hwaccel's threaded path calls its post-passes with the wrong argument —
-# `detect_interconnects(r, …)`, `detect_storage(r)`, `detect_environment(r)`
-# pass the REGISTRY where a `system_io` is expected. The two structs overlap
-# but do not match:
-#     struct reg { profiles@0, warnings@8, system_io@16, schema@24 }
-#     struct sio { interconnects@0, storage@8, environment@16 }
-# so on the threaded path storage devices are pushed into `reg.warnings`,
-# `reg.system_io` is overwritten with a runtime_env, and — on a box that
-# actually has NVLink/InfiniBand — detected interconnects are pushed into
-# `reg.profiles`, i.e. the DEVICE LIST. That last one corrupts
-# hw_device_count() and reg_total_accel_memory(), which reads
-# profile_memory_bytes() off whatever is in the vec: exactly the multi-GPU
-# machines where placement matters most would get wrong VRAM totals.
+# It stays serial for two reasons:
+#   - Profile order. Serial appends backends in a fixed order (CPU, CUDA, ROCm,
+#     Apple, Vulkan, Intel NPU, AMD XDNA, TPU, Gaudi, Neuron, oneAPI, …). Threaded
+#     appends the sysfs backends first (ROCm, Intel NPU, AMD XDNA, TPU, …), then
+#     the CLI ones as it joins their threads (CUDA, Gaudi, Neuron, Vulkan, oneAPI,
+#     Apple). POST /v1/hardware/requirement-match reports the FIRST matching
+#     profile and /v1/hardware/simulate's remove_count drops the FIRST N
+#     accelerators, so on an Intel NPU + NVIDIA laptop "any-accelerator" would
+#     answer "Intel NPU" instead of "CUDA GPU", and removing one device would pull
+#     the NPU. GET /v1/hardware and /v1/hardware/telemetry would reorder too. The
+#     best device is picked by rank; the one tie the reorder flips (Metal against
+#     an unknown Neuron chip, both 40) needs a host that has both.
+#   - Time. Median of 15 alternated rounds here: serial 22.5 ms, threaded 21.2 ms
+#     (2.5.9 measured 34 vs 20). `vulkaninfo --summary` is 18-23 ms of either and
+#     every other probe is under 1 ms, and threads cannot split one probe. A host
+#     with two slow probes (nvidia-smi and vulkaninfo) would save more, but only
+#     at startup and on the refresh thread.
 #
-# Measured here: serial 34 ms vs threaded 20 ms, and threaded reports 10
-# "warnings" where serial reports 8 — the two extra are storage structs. 14 ms
-# of startup is not worth a corrupt device list, and the serial registry is
-# also the only one whose reg_system_io() is a real system_io, which the
-# topology accessors below need.
-#
-# 2.4.2 adopted the threaded detector as "verified byte-identical to serial";
-# that check compared profile counts on a machine with no interconnects, so it
-# could not see this. Filed upstream; revert to threaded once fixed.
+# To switch, call registry_detect_threaded_with(_hw_builder_mask) here and make
+# those two consumers order-independent, or sort the profiles into serial order.
 fn _hw_detect() {
     if (_hw_builder_mask == 0 - 1) { return registry_detect(); }
     return registry_detect_with(_hw_builder_mask);
@@ -463,24 +457,52 @@ fn hw_placement_json(sb, model_params, quant) {
 # question you ask before buying hardware or draining a node.
 var SIM_MAX_DEVICES = 64;
 
+# The part of a profile's memory that is system RAM, clamped to [0, memory_bytes]
+# in the same order as reg_total_accel_memory. It is all of the memory for the CPU,
+# Apple's GPU and Neural Engine and the client NPUs, a Vulkan iGPU's heap, GH200's
+# 480 GiB of Grace memory, and 0 for a card with memory of its own.
+fn _sim_shared_part(p) {
+    var part = profile_shared_mem(p);
+    if (part > profile_memory_bytes(p)) { part = profile_memory_bytes(p); }
+    if (part < 0) { part = 0; }
+    return part;
+}
+
 # Sharding summary for a hypothetical device set: how many devices the model
 # would span and the memory involved.
+#
+# 2.6.12: memory is counted the way ai-hwaccel counts it since 2.3.28
+# (reg_total_accel_memory / reg_total_memory), with shared system RAM counted
+# ONCE. Each available profile adds its memory minus its shared part, then the
+# largest shared part on that side is added once. Summing memory_bytes per device
+# counted a unified-memory host's RAM once per device: a 48 GiB Apple M-series
+# (GPU 48 GiB + Neural Engine 4 GiB) totalled 52 GiB, so a 50 GiB model "fit", and
+# `original` disagreed with GET /v1/hardware's accel_memory_bytes. Unavailable
+# profiles are skipped, as ai-hwaccel's totals skip them: they are not capacity.
 fn _sim_snapshot(sb, profiles, model_params, quant) {
     var devices = vec_len(profiles);
-    var accel_mem = 0;
-    var sys_mem = 0;
     var accel = 0;
+    var accel_mem = 0;
+    var accel_pool = 0;
+    var sys_mem = 0;
+    var sys_pool = 0;
     var i = 0;
     while (i < devices) {
         var p = vec_get(profiles, i);
+        i = i + 1;
+        if (profile_available(p) != 1) { continue; }
+        var part = _sim_shared_part(p);
         if (profile_accel_type(p) == ACCEL_CPU) {
-            sys_mem = sys_mem + profile_memory_bytes(p);
+            sys_mem = sys_mem + profile_memory_bytes(p) - part;
+            if (part > sys_pool) { sys_pool = part; }
         } else {
-            accel_mem = accel_mem + profile_memory_bytes(p);
+            accel_mem = accel_mem + profile_memory_bytes(p) - part;
+            if (part > accel_pool) { accel_pool = part; }
             accel = accel + 1;
         }
-        i = i + 1;
     }
+    accel_mem = accel_mem + accel_pool;
+    sys_mem = sys_mem + sys_pool;
     var needed = reg_estimate_memory(model_params, quant);
 
     str_builder_add_cstr(sb, "{\"device_count\":");
@@ -504,37 +526,9 @@ fn _sim_snapshot(sb, profiles, model_params, quant) {
         str_builder_add_cstr(sb, "false");
     }
 
-    # Devices the model would span, LARGEST FIRST — a planner packs into the
-    # biggest cards, so counting in registry order overstated the span (four
-    # devices when the two new 24 GB cards alone would do). 0 = does not fit.
     var shards = 0;
     if (needed > 0 && accel > 0 && needed <= accel_mem) {
-        var remaining = needed;
-        var used = alloc(devices * 8 + 8);
-        var u = 0;
-        while (u < devices) { store64(used + u * 8, 0); u = u + 1; }
-        while (remaining > 0) {
-            var best = 0 - 1;
-            var best_mem = 0;
-            var j = 0;
-            while (j < devices) {
-                if (load64(used + j * 8) == 0) {
-                    var pj = vec_get(profiles, j);
-                    if (profile_accel_type(pj) != ACCEL_CPU) {
-                        if (profile_memory_bytes(pj) > best_mem) {
-                            best_mem = profile_memory_bytes(pj);
-                            best = j;
-                        }
-                    }
-                }
-                j = j + 1;
-            }
-            if (best < 0) { break; }
-            store64(used + best * 8, 1);
-            remaining = remaining - best_mem;
-            shards = shards + 1;
-        }
-        if (remaining > 0) { shards = 0; }
+        shards = _sim_shards(profiles, needed, accel_pool);
     }
     str_builder_add_cstr(sb, ",\"shards_required\":");
     str_builder_add_int(sb, shards);
@@ -542,14 +536,64 @@ fn _sim_snapshot(sb, profiles, model_params, quant) {
     return 0;
 }
 
-# Build the hypothetical profile list: the current accelerators, minus
-# `remove_count` of them, plus each device in `add_mem` (a vec of byte sizes).
-fn _sim_profiles(remove_count, add_mem) {
+# Devices a model of `needed` bytes would span, LARGEST FIRST — a planner packs
+# into the biggest cards, so counting in registry order overstated the span (four
+# devices when the two new 24 GB cards alone would do). 0 = does not fit.
+#
+# 2.6.12: `pool` is the accelerators' shared-RAM pool (the largest shared part,
+# as _sim_snapshot adds it) and is spent once. A device holds its own memory plus
+# what is left of the pool, up to the part it can address. Taking every device's
+# whole memory_bytes spent the pool once per device: on that 48 GiB Apple box, the
+# Neural Engine's 4 GiB is RAM the GPU's 48 GiB already covers. On this accounting
+# all the accelerators together hold exactly accelerator_memory_bytes, so a model
+# that `fits` always packs.
+fn _sim_shards(profiles, needed, pool) {
+    var devices = vec_len(profiles);
+    var used = alloc(devices * 8 + 8);
+    var u = 0;
+    while (u < devices) { store64(used + u * 8, 0); u = u + 1; }
+    var remaining = needed;
+    var shards = 0;
+    while (remaining > 0) {
+        var best = 0 - 1;
+        var best_cap = 0;
+        var best_take = 0;
+        var j = 0;
+        while (j < devices) {
+            var pj = vec_get(profiles, j);
+            if (load64(used + j * 8) == 0 && profile_available(pj) == 1) {
+                if (profile_accel_type(pj) != ACCEL_CPU) {
+                    var part = _sim_shared_part(pj);
+                    var take = part;
+                    if (take > pool) { take = pool; }
+                    var cap = profile_memory_bytes(pj) - part + take;
+                    if (cap > best_cap) {
+                        best_cap = cap;
+                        best_take = take;
+                        best = j;
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        if (best < 0) { break; }
+        store64(used + best * 8, 1);
+        pool = pool - best_take;
+        remaining = remaining - best_cap;
+        shards = shards + 1;
+    }
+    if (remaining > 0) { return 0; }
+    return shards;
+}
+
+# Build the hypothetical profile list from registry `reg`: its accelerators,
+# minus `remove_count` of them, plus each device in `add_mem` (a vec of byte sizes).
+fn _sim_profiles(reg, remove_count, add_mem) {
     var out = vec_new();
     var kept = 0;
     var removed = 0;
-    if (_hw_registry != 0) {
-        var profs = reg_profiles(_hw_registry);
+    if (reg != 0) {
+        var profs = reg_profiles(reg);
         var n = vec_len(profs);
         var i = 0;
         while (i < n) {
@@ -570,7 +614,12 @@ fn _sim_profiles(remove_count, add_mem) {
     }
     var k = 0;
     while (k < vec_len(add_mem)) {
-        vec_push(out, profile_cuda(100 + k, vec_get(add_mem, k)));
+        # A hypothetical card is a discrete card: all of its memory is its own, and
+        # none of it joins the shared-RAM pool. profile_cuda starts it at shared_mem
+        # 0 already; setting it here keeps that true if the constructor changes.
+        var card = profile_cuda(100 + k, vec_get(add_mem, k));
+        profile_set_shared_mem(card, 0);
+        vec_push(out, card);
         k = k + 1;
     }
     return out;
@@ -578,6 +627,9 @@ fn _sim_profiles(remove_count, add_mem) {
 
 # Emit {"original":{…},"simulated":{…}} for a what-if.
 fn hw_simulate_json(sb, model_params, quant, remove_count, add_mem) {
+    # One registry for both snapshots. Reading the global twice let a concurrent
+    # hw_refresh put `original` and `simulated` on different device lists.
+    var reg = _hw_registry;
     str_builder_add_cstr(sb, "{\"model_params\":");
     str_builder_add_int(sb, model_params);
     str_builder_add_cstr(sb, ",\"quantization\":\"");
@@ -588,8 +640,8 @@ fn hw_simulate_json(sb, model_params, quant, remove_count, add_mem) {
     str_builder_add_int(sb, vec_len(add_mem));
     str_builder_add_cstr(sb, ",\"original\":");
     var orig = vec_new();
-    if (_hw_registry != 0) {
-        var op = reg_profiles(_hw_registry);
+    if (reg != 0) {
+        var op = reg_profiles(reg);
         var oi = 0;
         while (oi < vec_len(op)) {
             vec_push(orig, vec_get(op, oi));
@@ -598,7 +650,7 @@ fn hw_simulate_json(sb, model_params, quant, remove_count, add_mem) {
     }
     _sim_snapshot(sb, orig, model_params, quant);
     str_builder_add_cstr(sb, ",\"simulated\":");
-    _sim_snapshot(sb, _sim_profiles(remove_count, add_mem), model_params, quant);
+    _sim_snapshot(sb, _sim_profiles(reg, remove_count, add_mem), model_params, quant);
     str_builder_add_cstr(sb, "}");
     return 0;
 }

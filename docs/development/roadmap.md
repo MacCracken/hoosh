@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.5.11. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.6.12. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
 past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md).
 
@@ -80,20 +80,27 @@ distlib. Register them in `mcp_init` alongside `bote_echo` — no transport chan
   client doesn't thread a TLS policy. Filed upstream
   (`sandhi/docs/issues/2026-06-09-https-client-tls-policy-threading.md`).
 
-### Upstream-gated (ai-hwaccel)
+### Hardware detection — threaded detector *(low priority)*
 
-**`registry_detect_threaded` corrupts the registry.** Its post-passes are called
-with the wrong argument — `detect_interconnects(r, …)`, `detect_storage(r)`,
-`detect_environment(r)` pass the registry where a `system_io` is expected. The
-layouts overlap but differ (`reg {profiles, warnings, system_io, schema}` vs
-`sio {interconnects, storage, environment}`), so storage devices land in
-`reg.warnings`, `reg.system_io` is overwritten with a `runtime_env`, and on a box
-with NVLink/InfiniBand the interconnects are pushed into **`reg.profiles`, the
-device list** — corrupting device counts and VRAM totals on exactly the multi-GPU
-machines that need placement.
+No longer upstream-gated. ai-hwaccel 2.3.25 fixed the post-pass bug that moved
+2.5.9 to the serial detector, and 2.6.12 checked the fix on ai-hwaccel 2.4.0. The
+serial and threaded registries match except in profile order. hoosh still runs
+the serial detector for two reasons:
 
-hoosh switched to the **serial** detector in 2.5.9 (34 ms vs 20 ms — not a trade
-worth making). **Revert to threaded once fixed.**
+- **Profile order.** The threaded path lists the sysfs backends (ROCm, Intel NPU,
+  AMD XDNA, TPU, …) before the CLI ones (CUDA, Gaudi, Neuron, Vulkan, oneAPI,
+  Apple). `POST /v1/hardware/requirement-match` reports the *first* matching
+  profile and `/v1/hardware/simulate`'s `remove_count` drops the *first* N
+  accelerators, so their answers would change on mixed hosts. An Intel NPU +
+  NVIDIA laptop would report `Intel NPU` for `any-accelerator` instead of the GPU.
+- **Little to gain.** Serial takes 22.5 ms and threaded 21.2 ms on the dev host
+  (medians of 15 alternated rounds). `vulkaninfo` is ~20 ms of either, and threads
+  cannot split a single probe.
+
+Revisit only if startup time matters on hosts with several slow probes
+(nvidia-smi and vulkaninfo together). The precondition is making those two
+consumers order-independent, or sorting profiles into serial order after
+detection. `_hw_detect` in `src/lib/hardware.cyr` has the details.
 
 ### Upstream-gated (cyrius)
 
