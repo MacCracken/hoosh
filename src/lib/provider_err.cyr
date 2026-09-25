@@ -19,6 +19,118 @@
 
 var PROVIDER_ERR_MSG_CAP = 512;
 
+# ── Completion id and created (2.7.0) ──
+# Every chat.completion carried the same id, "chatcmpl-hoosh", and no `created`.
+# rust-old gave each completion chatcmpl-<uuid> and a unix timestamp; its OpenAI
+# conformance tests required both, and clients key on the id. They live here
+# because this is the OpenAI-envelope module the test binary can include.
+#
+# One id per completion, held per thread so every chunk of a stream carries the
+# same one. Thread-local slot 5 points at a 48-byte buffer allocated once per
+# thread and reused, so a request allocates nothing for it (hoosh never frees):
+#   0: "chatcmpl-" + 24 hex digits + NUL (34 bytes)   40: created, unix seconds
+var CHAT_ID_SLOT = 5;
+var CHAT_ID_CREATED = 40;
+
+fn _chat_id_buf() {
+    var b = thread_local_get(CHAT_ID_SLOT);
+    if (b == 0) {
+        b = alloc(48);
+        if (b == 0) { return 0; }
+        memcpy(b, "chatcmpl-hoosh", 15);
+        store64(b + CHAT_ID_CREATED, 0);
+        thread_local_set(CHAT_ID_SLOT, b);
+    }
+    return b;
+}
+
+# Lowercase hex of the low 4 bits of n.
+fn _chat_hex(n) {
+    if (n < 10) { return 48 + n; }
+    return 87 + n;
+}
+
+# Start a new completion on this thread: 96 random bits for the id, and the time.
+# If getrandom fails, the clock and a counter still keep ids distinct.
+var _chat_id_counter = 0;
+fn chat_id_new() {
+    var b = _chat_id_buf();
+    if (b == 0) { return 0; }
+    var r[16];
+    if (sys_getrandom(&r, 12, 0) != 12) {
+        var old = load64(&_chat_id_counter);
+        while (atomic_cas(&_chat_id_counter, old, old + 1) == 0) { old = load64(&_chat_id_counter); }
+        store64(&r, clock_now_ns());
+        store64(&r + 8, old + 1);
+    }
+    memcpy(b, "chatcmpl-", 9);
+    var i = 0;
+    while (i < 12) {
+        var bv = load8(&r + i) & 0xFF;
+        store8(b + 9 + i * 2, _chat_hex(bv >> 4));
+        store8(b + 10 + i * 2, _chat_hex(bv & 15));
+        i = i + 1;
+    }
+    store8(b + 33, 0);
+    store64(b + CHAT_ID_CREATED, clock_epoch_secs());
+    return b;
+}
+
+# This thread's current completion id ("chatcmpl-hoosh" before the first one).
+fn chat_id() {
+    var b = _chat_id_buf();
+    if (b == 0) { return "chatcmpl-hoosh"; }
+    return b;
+}
+
+# The current completion's created time; now, if none has been started.
+fn chat_created() {
+    var b = _chat_id_buf();
+    if (b == 0) { return clock_epoch_secs(); }
+    var t = load64(b + CHAT_ID_CREATED);
+    if (t == 0) { return clock_epoch_secs(); }
+    return t;
+}
+
+# `{"id":"<id>","object":"<kind>","created":<t>,` — the head of every
+# chat.completion and chat.completion.chunk.
+fn sb_add_chat_head(sb, kind) {
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add_cstr(sb, chat_id());
+    str_builder_add_cstr(sb, "\",\"object\":\"");
+    str_builder_add_cstr(sb, kind);
+    str_builder_add_cstr(sb, "\",\"created\":");
+    str_builder_add_int(sb, chat_created());
+    str_builder_add_cstr(sb, ",");
+    return 0;
+}
+
+# A cached chat.completion with a fresh head. The cache stores whole envelopes,
+# so a hit used to replay the first response's id and created time; a client
+# that dedupes by id would drop it. Returns the envelope unchanged if it does
+# not start with the head sb_add_chat_head writes.
+fn chat_rehead(env) {
+    if (env == 0) { return env; }
+    if (memeq(env, "{\"id\":\"", 7) == 0) { return env; }
+    var n = strlen(env);
+    var i = 7;
+    var key = "\"created\":";
+    while (i + 10 <= n && memeq(env + i, key, 10) == 0) {
+        if (i > 96) { return env; }
+        i = i + 1;
+    }
+    if (i + 10 > n) { return env; }
+    i = i + 10;
+    while (i < n && load8(env + i) >= 48 && load8(env + i) <= 57) { i = i + 1; }
+    if (i >= n || load8(env + i) != 44) { return env; }
+    i = i + 1;
+    chat_id_new();
+    var sb = str_builder_new();
+    sb_add_chat_head(sb, "chat.completion");
+    str_builder_add_cstr(sb, env + i);
+    return to_cstr(str_builder_build(sb));
+}
+
 # PER-THREAD state (2.6.8). These four slots used to be process globals, which
 # was wrong from the moment the v2.4.0 worker pool landed: provider_err_reset()
 # and provider_err_set() run inside provider_forward, which every caller invokes
@@ -188,8 +300,7 @@ fn sb_add_json_escaped(sb, s) {
 # `"stop"` for clients that branch on that alone.
 fn upstream_error_sse_body(model, status, message) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"error\":{\"type\":\"upstream_error\",\"code\":");

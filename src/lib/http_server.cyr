@@ -102,6 +102,16 @@ fn http_sse_event(cfd, data, data_len) {
 }
 
 # Send SSE [DONE] marker
+# An SSE comment line (": <text>\n\n"). Clients ignore it; it keeps idle
+# proxies from closing a quiet stream (2.7.0). -1 when the client is gone.
+var SSE_KEEPALIVE_S = 15;
+fn http_sse_comment(cfd, text) {
+    if (sys_write(cfd, ": ", 2) < 0) { return 0 - 1; }
+    if (sys_write(cfd, text, strlen(text)) < 0) { return 0 - 1; }
+    if (sys_write(cfd, "\n\n", 2) < 0) { return 0 - 1; }
+    return 0;
+}
+
 fn http_sse_done(cfd) {
     sys_write(cfd, "data: [DONE]\n\n", 14);
     return 0;

@@ -8,9 +8,10 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.6.13. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.7.0. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
-past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md).
+past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 closed what remained
+([rust-old-retirement.md](rust-old-retirement.md)).
 
 ---
 
@@ -42,13 +43,11 @@ load, and measure with `scripts/` + `/proc/<pid>/status` rather than assuming.
   protobuf lib (proposed:
   `cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`).
 
-### Embeddings
+### Retire `rust-old/` *(after 2.7.0 is tagged)*
 
-`POST /v1/embeddings` needs its own pass. Two known defects: the handler passes a
-port where a base-url cstr is expected, and Ollama's response is forwarded raw
-rather than normalized to the OpenAI `{object:"list", data:[…]}` envelope
-(rust-old `ollama.rs:314-340`). Deferred from 2.5.3 because fixing the envelope
-alone would be half a job.
+2.7.0 closed the last parity gaps with the archived Rust tree. Delete `rust-old/` once 2.7.0 is
+tagged; [rust-old-retirement.md](rust-old-retirement.md) has the checklist and the list of
+deliberate non-ports, so nothing needs the Rust tree afterwards.
 
 ### Test-suite structure
 

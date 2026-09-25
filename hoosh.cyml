@@ -13,7 +13,7 @@ health_check_interval_secs = 30
 
 # Per-provider knobs live on each [[providers]] block:
 #   max_tokens_limit = 4096   # clamp any request asking for more (0/omit = no cap)
-#   rate_limit       = 600    # requests per minute
+#   rate_limit       = 600    # requests per minute (rust-old's rate_limit_rpm also works)
 #   models           = ["llama*", "mistral*"]
 #   enabled          = false  # keep the route configured but out of selection
 

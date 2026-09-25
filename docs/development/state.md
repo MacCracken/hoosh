@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Version** | **2.6.13** (bounds the hardware planners' numeric inputs; release detail in the CHANGELOG) |
+| **Version** | **2.7.0** (closes rust-old parity ahead of its deletion; release detail in the CHANGELOG) |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
 | **Binary** (x86_64 static ELF) | ~2.8 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
-| **Source** | ~12,700 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 877 assertions (`tests/hoosh.tcyr`) |
+| **Source** | ~13,200 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 943 assertions (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
-| **Coverage** | symbol coverage 39% (`scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 42% (`scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
 | **ADRs** | 11 (`docs/decisions/`) |
 | **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
@@ -57,7 +57,8 @@ re-vendors the bundle. Filed as
 The rust-old parity closeout arc (**2.5.1 – 2.5.11**) is done. It began with a
 full behavioral diff of the archived Rust tree (1,007 behaviors catalogued; see
 [rust-old-parity-review.md](rust-old-parity-review.md)) which found the port
-matched rust-old's *surface area* but not its *request path*.
+matched rust-old's *surface area* but not its *request path*. 2.7.0 closed the remaining gaps
+before the Rust tree's deletion ([rust-old-retirement.md](rust-old-retirement.md)).
 
 Ten bands closed that gap and an eleventh hardened the result. The more useful
 list is what the arc found that the review did not — the defects only visible

@@ -5,6 +5,107 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.7.0] — 2026-09-25
+
+**Closes rust-old parity so the Rust tree can be deleted.** A second pass over `rust-old/` checked the
+route table, every config key, the CLI, request validation, the response shapes rust-old's OpenAI
+conformance tests assert, the model catalog entry by entry, metric names, embeddings, tools and the
+hardware endpoints. The July review's items were already fixed. What remained is below. The deliberate
+non-ports and the deletion checklist are in
+[docs/development/rust-old-retirement.md](docs/development/rust-old-retirement.md), so nothing needs the
+Rust tree after it goes. **943 assertions** (was 877).
+
+### Fixed — `/v1/embeddings`
+
+- **Routed by model.** Every request went to the first local route, whatever model it named. It now
+  takes the route that matches the model, as chat does, and a model no route serves gets rust-old's 404
+  `No provider configured for model '<model>'`.
+- **Ollama.** hoosh posted the OpenAI body to Ollama's legacy `/api/embeddings`, which reads `prompt`,
+  not `input`, and answers `{"embedding":[…]}`. It now calls `/api/embed` with `{model, input}`. That
+  endpoint takes a string or an array, and its answer is normalized to OpenAI's
+  `{"object":"list","data":[{"object":"embedding","index":i,"embedding":[…]}],"usage":…}`. rust-old
+  joined an array into one string; hoosh returns one embedding per item.
+- **Remote providers.** OpenAI-compatible remote routes (OpenAI, Mistral, Groq and others) now serve
+  embeddings with their auth over TLS. Anthropic and Google, which have no `/v1/embeddings`, answer
+  400. The DLP policy matches chat: RESTRICTED is refused, and CONFIDENTIAL goes to a local route or is
+  refused.
+
+### Fixed — `/v1/models` listed provider names as model ids
+
+The endpoint returned one entry per route, with ids like `"ollama"`. An OpenAI client's model picker
+offered those, and none of them could be routed. rust-old asked each provider for its models. hoosh
+now asks local backends live (Ollama's `/api/tags`, everyone else's `/v1/models`). Remote routes, and
+a local one that does not answer, list the catalog models and literal patterns they match, so the
+endpoint makes no remote call. Only ids a route matches are listed, each once, with `owned_by` set to
+the provider. Anyone who used this endpoint to enumerate providers can read the distinct `owned_by`
+values.
+
+### Fixed — every completion had the same id and no `created`
+
+Every chat completion was `"id":"chatcmpl-hoosh"`, and none carried `created`. rust-old sent
+`chatcmpl-<uuid>` and a unix timestamp, and its conformance tests required both. Each completion now
+gets `chatcmpl-` plus 96 random bits, and a `created` time. Every chunk of a stream, including the
+upstream-error frame, carries the same pair. A cache hit replays its stored envelope with a fresh head,
+so it no longer repeats an earlier response's id. The id buffer is allocated once per thread and
+reused, so a request allocates nothing for it.
+
+### Fixed — smaller rust-old gaps
+
+- **`GET /v1/health`** adds `version` and `providers_configured`. The 503 when degraded stays.
+- **Model catalog**: 34 → 67 entries, and all 65 of rust-old's ids resolve. New entries include
+  gpt-4.1, o3, o4-mini, gemini-2.5, claude-3-5-sonnet, llama-4, grok-2, phi, command-r and the
+  embedding models. Exact rows where a family prefix gave the wrong answer: `mistral-nemo` has 128k
+  context, not `mistral`'s 32k, and `o1-mini` has 128k, not `o1`'s 200k. Before this, those models
+  took the unknown-model path, which skips context compaction and tier reasoning.
+- **`rate_limit_rpm`**, rust-old's per-provider key and the one ADR 004 names, was silently ignored,
+  so a carried-over config ran with no limit. It is now read; `rate_limit` wins if both are set.
+- **`hoosh infer -m <model> <prompt>`**, rust-old's form, printed usage: `-m` consumed the model as its
+  value. `-m` and `--model` are now accepted. The positional form is unchanged.
+- **`/metrics`** declared `hoosh_tokens_total` but emitted its samples as `hoosh_tokens_prompt_total`
+  and `hoosh_tokens_completion_total`, which had no `TYPE` line of their own. It now emits rust-old's
+  `hoosh_tokens_total{type="prompt"|"completion"}`, and keeps the two 2.x names, now properly declared.
+- **`POST /v1/hardware/models {model?, quantization?}`** is rust-old's form. With `model`, it reports
+  whether that catalogue model runs here (`can_run`, memory, headroom), or 404. Without it, it lists
+  every compatible model. `GET` keeps the fixed size table.
+- **`POST /v1/hardware/placement`** computed a sharding plan and discarded it. It now returns it as
+  `sharding`. When the model does not fit, it adds up to five `cloud_alternatives` in rust-old's field
+  names.
+- **SSE keep-alive**: local streams send `: keep-alive` after every 15 s of silence, as rust-old did.
+  Without it, a proxy's 60 s idle timeout could cut a stream while a model loaded or thought before its
+  first token. The backend read now times out every 15 s, and the silences are summed, so a stream
+  with nothing from the backend still ends after 300 s. Remote streams are driven by sandhi, which has
+  no idle hook yet; that is recorded as a known non-port.
+
+Verified live against mock Ollama and llama.cpp backends:
+
+- Health, `/v1/models`, distinct ids on a cache hit, and Ollama embeddings over `/api/embed` with an
+  array input all behaved as described.
+- The 404 for an unknown model, the 429 on the third call under `rate_limit_rpm = 2`, the metrics
+  block, the hardware model lookup and placement all behaved as described.
+- A stream whose backend stayed silent for 35 s received keep-alives at 15 s and 31 s, then its tokens,
+  all under one id.
+
+### Tests
+
+Eight groups, 66 assertions. The completion-id tests run against `provider_err.cyr` itself, and the
+keep-alive frame is tested through a real pipe. The rest mirror the embeddings normalization, the model
+listing, the catalog lookups, the config and CLI parsing, the health body, the metrics block (with a
+check that every sample's metric is declared) and the keep-alive timing.
+
+### Gates
+
+fmt, lint, vet and deny are clean, and symbol coverage is 42% (was 39%). Every CI step, the
+benchmark gate included, was green when replayed step for step against a clean export of the tracked
+tree. No benchmarked path changed, since `tests/hoosh.bcyr` covers none of these handlers, so
+`bench-history.csv` was not re-recorded. Binary: 2,844,664 → 2,862,408 bytes (+17,744).
+
+### Docs
+
+- New: `docs/development/rust-old-retirement.md`.
+- The roadmap's Embeddings item is closed and replaced by "Retire `rust-old/`".
+- State, README, overview and index are refreshed.
+- `hoosh.cyml` notes the `rate_limit_rpm` alias.
+
 ## [2.6.13] — 2026-09-25
 
 **Bounds the hardware planners' numeric inputs, and closes a race that could kill a worker in

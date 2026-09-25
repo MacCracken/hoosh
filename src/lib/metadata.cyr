@@ -32,7 +32,7 @@ fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys) {
 # Catalog size. Lookup is exact-match then LONGEST-PREFIX, so a general key
 # ("llama3") and a specific one ("llama3.1") can coexist — the specific entry
 # wins for the models that carry its prefix.
-var _META_CAP = 34;
+var _META_CAP = 67;
 
 fn _meta_init() {
     if (_meta_tbl != 0) { return 0; }
@@ -75,6 +75,44 @@ fn _meta_init() {
     _meta_add(arr, 31, "gemma3", 128000, TIER_ECONOMY, 1, 0, 1);
     _meta_add(arr, 32, "phi3", 128000, TIER_ECONOMY, 0, 0, 1);
     _meta_add(arr, 33, "deepseek-r1", 65536, TIER_REASONING, 0, 0, 1);
+    # 2.7.0: the rest of rust-old's catalog (provider/metadata.rs), so these models get
+    # compaction and tier reasoning instead of the unknown-model path. mistral-nemo,
+    # deepseek-coder-v2 and o1-mini are here because their prefix entries have the
+    # wrong context window for them. The embedding models have no chat capability.
+    _meta_add(arr, 34, "claude-3-5-sonnet", 200000, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 35, "claude-3-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 36, "command-r", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 37, "command-r-plus", 128000, TIER_PREMIUM, 0, 1, 1);
+    _meta_add(arr, 38, "gemini-2.5-flash", 1048576, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 39, "gemini-2.5-pro", 1048576, TIER_PREMIUM, 1, 1, 1);
+    _meta_add(arr, 40, "gemma-2-27b", 8192, TIER_STANDARD, 0, 0, 1);
+    _meta_add(arr, 41, "gemma-2-9b", 8192, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 42, "gpt-4.1", 1047576, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 43, "gpt-4.1-mini", 1047576, TIER_ECONOMY, 1, 1, 1);
+    _meta_add(arr, 44, "gpt-4.1-nano", 1047576, TIER_ECONOMY, 1, 1, 1);
+    _meta_add(arr, 45, "grok-2", 131072, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 46, "llama-3.1-405b", 128000, TIER_PREMIUM, 0, 1, 1);
+    _meta_add(arr, 47, "llama-3.1-70b", 128000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 48, "llama-4-maverick", 1048576, TIER_PREMIUM, 1, 1, 1);
+    _meta_add(arr, 49, "llama-4-scout", 512000, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 50, "o1-mini", 128000, TIER_REASONING, 0, 1, 1);
+    _meta_add(arr, 51, "o3", 200000, TIER_REASONING, 1, 1, 1);
+    _meta_add(arr, 52, "o4-mini", 200000, TIER_REASONING, 1, 1, 1);
+    _meta_add(arr, 53, "openrouter/auto", 200000, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 54, "phi-3", 128000, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 55, "phi-4", 16384, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 56, "mistral-nemo", 128000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 57, "deepseek-coder-v2", 128000, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 58, "starcoder2", 16384, TIER_ECONOMY, 0, 0, 0);
+    _meta_add(arr, 59, "nomic-embed-text", 8192, TIER_ECONOMY, 0, 0, 0);
+    _meta_add(arr, 60, "text-embedding-3-large", 8191, TIER_STANDARD, 0, 0, 0);
+    _meta_add(arr, 61, "text-embedding-3-small", 8191, TIER_ECONOMY, 0, 0, 0);
+    _meta_add(arr, 62, "text-embedding-ada-002", 8191, TIER_ECONOMY, 0, 0, 0);
+    # Exact rows for rust-old ids whose family prefix above has another tier.
+    _meta_add(arr, 63, "grok-3-fast", 131072, TIER_STANDARD, 0, 1, 1);
+    _meta_add(arr, 64, "llama3:8b", 8192, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 65, "mixtral-8x7b", 32768, TIER_ECONOMY, 0, 0, 1);
+    _meta_add(arr, 66, "qwen2.5-coder", 32768, TIER_ECONOMY, 0, 0, 1);
     _meta_tbl = arr;
     _meta_n = _META_CAP;
     return 0;

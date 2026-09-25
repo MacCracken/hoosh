@@ -16,10 +16,10 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.6.6) |
-| **Source** | ~12,700 lines / 34 files (+ 2 vendored distlib bundles) |
+| **Source** | ~13,200 lines / 34 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.8 MB (static ELF, x86_64) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 877 assertions, 156 groups, 0 failures |
+| **Tests** | 943 assertions, 164 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -29,7 +29,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | | Rust | Cyrius | Ratio |
 |---|------|--------|-------|
-| Source | 22,956 lines / 58 files | ~12,700 lines / 34 files | **~1.8x fewer** |
+| Source | 22,956 lines / 58 files | ~13,200 lines / 34 files | **~1.7x fewer** |
 | Dependencies | 40+ crates | 0 third-party | **Zero third-party** |
 
 The Cyrius binary is now the smaller one (~2.8 MB vs ~5.1 MB), even though it
@@ -253,7 +253,7 @@ tokens = "your-secret-token"
 ## Testing
 
 ```bash
-# Run tests (877 assertions across 156 groups)
+# Run tests (943 assertions across 164 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)

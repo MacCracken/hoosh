@@ -55,6 +55,7 @@ type: state
 | `docs/development/roadmap.md` | 🟢 Fresh — **forward-only**; shipped work lives in the CHANGELOG | 2026-07-23 rewrite |
 | `docs/development/state.md` | 🟢 Fresh — v2.5.11 + arc retrospective | 2026-07-23 sweep |
 | `docs/development/rust-old-parity-review.md` | 🟢 Point-in-time — the 2026-07-22 parity diff that drove the arc; not rewritten as items shipped | 2026-07-22 |
+| `docs/development/rust-old-retirement.md` | 🟢 Fresh — the 2.7.0 parity check, known non-ports, deletion checklist | 2026-09-25 |
 | `docs/development/performance.md` | 🟢 Fresh — bench-system guide → benchmarks.md | 2026-07-23 re-read |
 | `docs/doc-health.md` | 🟢 This file | 2026-07-23 rewrite |
 

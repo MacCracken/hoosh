@@ -134,7 +134,7 @@ distlibs:
 | `/v1/batch/{id}` | GET | Async batch progress |
 | `/v1/batch/{id}/cancel` | POST | Cancel an async batch |
 | `/v1/events/recent` | GET | Recent provider events (majra pub/sub bus) |
-| `/v1/models` | GET | List configured providers |
+| `/v1/models` | GET | Model ids across configured providers (local backends asked live) |
 | `/api/tags` | GET | List models (native Ollama-compatible shape) |
 | `/v1/models/pull` / `/v1/models/delete` | POST | Pull / delete a model (Ollama) |
 | `/v1/training/status` / `/v1/catalog/sync` | POST | Synapse training status / catalog sync |

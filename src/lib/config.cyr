@@ -301,8 +301,11 @@ fn load_config(path) {
                 }
             }
 
-            # Parse rate limit (RPM)
+            # Parse rate limit (RPM). 2.7.0: rust-old's key, `rate_limit_rpm`, is
+            # accepted too; ADR 004 documents it, and a config carried over from
+            # rust-old used to run with no limit at all. `rate_limit` wins if both.
             var rpm_str = toml_get(pp, "rate_limit");
+            if (rpm_str == 0) { rpm_str = toml_get(pp, "rate_limit_rpm"); }
             if (rpm_str != 0) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }

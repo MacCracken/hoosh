@@ -404,6 +404,37 @@ fn hw_summary_json(sb) {
     return 0;
 }
 
+# Up to five cloud instances that would hold a model, cheapest first
+# (ai-hwaccel recommend_instances), in rust-old's CloudInstanceInfo shape.
+fn _hw_cloud_alternatives(sb, model_params, quant) {
+    var recs = recommend_instances(model_params, quant, 0 - 1);
+    var n = vec_len(recs);
+    if (n > 5) { n = 5; }
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(recs, i);
+        var inst = rec_instance(r);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"name\":\"");
+        str_builder_add_cstr(sb, cloud_inst_name(inst));
+        str_builder_add_cstr(sb, "\",\"provider\":\"");
+        str_builder_add_cstr(sb, cloud_inst_provider(inst));
+        str_builder_add_cstr(sb, "\",\"gpu\":\"");
+        str_builder_add_cstr(sb, cloud_inst_gpu(inst));
+        str_builder_add_cstr(sb, "\",\"gpu_count\":");
+        str_builder_add_int(sb, cloud_inst_gpu_count(inst));
+        str_builder_add_cstr(sb, ",\"total_gpu_memory_gb\":");
+        str_builder_add_int(sb, cloud_inst_total_mem_gb(inst));
+        str_builder_add_cstr(sb, ",\"price_per_hour\":");
+        _sb_add_milli(sb, cloud_inst_price_x100(inst) * 10);
+        str_builder_add_cstr(sb, ",\"memory_headroom_pct\":");
+        _sb_add_milli(sb, rec_headroom_x100(r) * 10);
+        str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Largest model_params the planners accept (2.6.13): 10^14, 100 trillion. The
 # estimates multiply what they are given: placement and the simulator by bits per
 # weight (up to 32), training-estimate by 1863 and then by 2^30 per GiB. Training
@@ -453,7 +484,19 @@ fn hw_placement_json(sb, model_params, quant) {
     }
     str_builder_add_cstr(sb, ",\"suggested_quant\":\"");
     str_builder_add_cstr(sb, quant_name(hw_suggest_quant(model_params)));
-    str_builder_add_cstr(sb, "\"}");
+    str_builder_add_cstr(sb, "\"");
+    # 2.7.0: the sharding plan, which was computed above and then dropped, and,
+    # when the model does not fit this host, the five cheapest cloud instances
+    # that would hold it. rust-old returned both with every placement.
+    str_builder_add_cstr(sb, ",\"sharding\":");
+    if (plan != 0) {
+        plan_to_json(sb, plan);
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"cloud_alternatives\":[");
+    if (hw_fits_available(needed) == 0) { _hw_cloud_alternatives(sb, model_params, quant); }
+    str_builder_add_cstr(sb, "]}");
     return 0;
 }
 

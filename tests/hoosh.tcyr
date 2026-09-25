@@ -515,7 +515,7 @@ fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys) {
 
 fn _meta_init() {
     if (_meta_tbl != 0) { return 0; }
-    var arr = alloc(16 * 48);
+    var arr = alloc(24 * 48);
     _meta_add(arr, 0, "claude-opus-4", 200000, TIER_PREMIUM, 1, 1, 1);
     _meta_add(arr, 1, "claude-sonnet-4", 200000, TIER_STANDARD, 1, 1, 1);
     _meta_add(arr, 2, "claude-3.5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
@@ -532,8 +532,17 @@ fn _meta_init() {
     _meta_add(arr, 13, "llama-3.3-70b", 128000, TIER_STANDARD, 0, 1, 1);
     _meta_add(arr, 14, "llama-3.1-8b", 128000, TIER_ECONOMY, 0, 0, 1);
     _meta_add(arr, 15, "gemini-2.0-flash", 1048576, TIER_ECONOMY, 1, 1, 1);
+    # 2.7.0 rows (src/lib/metadata.cyr), the ones the longest-prefix tests need.
+    _meta_add(arr, 16, "mistral", 32768, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 17, "mistral-nemo", 128000, TIER_ECONOMY, 0, 1, 1);
+    _meta_add(arr, 18, "o1-mini", 128000, TIER_REASONING, 0, 1, 1);
+    _meta_add(arr, 19, "o3", 200000, TIER_REASONING, 1, 1, 1);
+    _meta_add(arr, 20, "gpt-4.1", 1047576, TIER_STANDARD, 1, 1, 1);
+    _meta_add(arr, 21, "gpt-4.1-mini", 1047576, TIER_ECONOMY, 1, 1, 1);
+    _meta_add(arr, 22, "gemini-2.5-pro", 1048576, TIER_PREMIUM, 1, 1, 1);
+    _meta_add(arr, 23, "text-embedding-3-small", 8191, TIER_ECONOMY, 0, 0, 0);
     _meta_tbl = arr;
-    _meta_n = 16;
+    _meta_n = 24;
     return 0;
 }
 
@@ -1602,6 +1611,262 @@ fn _t_req_scan(snapshot, swap_to, want) {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# ── 2.7.0 rust-old parity mirrors ──
+# config.cyr: `rate_limit`, else rust-old's `rate_limit_rpm`.
+fn _t_rpm_key(rl, rl_rpm) {
+    if (rl != 0) { return rl; }
+    return rl_rpm;
+}
+
+# main.cyr infer: -m/--model <model> <prompt> (rust-old), else <model> <prompt>.
+# out: model(8) prompt(8).
+fn _t_infer_args(args, out) {
+    var im = _t_flag_val(args, "--model", "-m");
+    var ip = 0;
+    if (im != 0) {
+        ip = _t_positional(args, 0);
+    } else {
+        im = _t_positional(args, 0);
+        ip = _t_positional(args, 1);
+    }
+    store64(out, im);
+    store64(out + 8, ip);
+    return 0;
+}
+
+# handlers.cyr handle_health's body.
+fn _t_health_body(healthy, version, count) {
+    var sb = str_builder_new();
+    if (healthy == 1) {
+        str_builder_add_cstr(sb, "{\"status\":\"ok\"");
+    } else {
+        str_builder_add_cstr(sb, "{\"status\":\"degraded\",\"providers_down\":1");
+    }
+    str_builder_add_cstr(sb, ",\"version\":\"");
+    str_builder_add_cstr(sb, version);
+    str_builder_add_cstr(sb, "\",\"providers_configured\":");
+    str_builder_add_int(sb, count);
+    str_builder_add_cstr(sb, "}");
+    return to_cstr(str_builder_build(sb));
+}
+
+# handlers.cyr handle_metrics' token block (2.7.0, then the 2.6.x one).
+fn _t_tokens_block(p, c, old) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "# HELP hoosh_tokens_total Total tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
+    if (old == 1) {
+        str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
+        str_builder_add_int(sb, p);
+        str_builder_add_cstr(sb, "\nhoosh_tokens_completion_total ");
+        str_builder_add_int(sb, c);
+        str_builder_add_cstr(sb, "\n");
+        return to_cstr(str_builder_build(sb));
+    }
+    str_builder_add_cstr(sb, "hoosh_tokens_total{type=\"prompt\"} ");
+    str_builder_add_int(sb, p);
+    str_builder_add_cstr(sb, "\nhoosh_tokens_total{type=\"completion\"} ");
+    str_builder_add_int(sb, c);
+    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_prompt_total Prompt tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_prompt_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
+    str_builder_add_int(sb, p);
+    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_completion_total Completion tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_completion_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_tokens_completion_total ");
+    str_builder_add_int(sb, c);
+    str_builder_add_cstr(sb, "\n");
+    return to_cstr(str_builder_build(sb));
+}
+
+# 1 if every sample line's metric name has a `# TYPE <name> ` line before it.
+fn _t_prom_declared(text) {
+    var types = vec_new();
+    var n = strlen(text);
+    var i = 0;
+    while (i < n) {
+        var e = i;
+        while (e < n && load8(text + e) != 10) { e = e + 1; }
+        if (e - i > 7 && memeq(text + i, "# TYPE ", 7) == 1) {
+            var ns = i + 7;
+            var ne = ns;
+            while (ne < e && load8(text + ne) != 32) { ne = ne + 1; }
+            var nm = alloc(ne - ns + 1);
+            memcpy(nm, text + ns, ne - ns);
+            store8(nm + ne - ns, 0);
+            vec_push(types, nm);
+        } elif (e > i && load8(text + i) != 35) {
+            var se = i;
+            while (se < e && load8(text + se) != 32 && load8(text + se) != 123) { se = se + 1; }
+            var ok = 0;
+            var t = 0;
+            while (t < vec_len(types)) {
+                var tn = vec_get(types, t);
+                if (strlen(tn) == se - i && memeq(tn, text + i, se - i) == 1) { ok = 1; }
+                t = t + 1;
+            }
+            if (ok == 0) { return 0; }
+        }
+        i = e + 1;
+    }
+    return 1;
+}
+
+fn _t_sb_add_span(sb, p, n) {
+    var c = alloc(n + 1);
+    memcpy(c, p, n);
+    store8(c + n, 0);
+    str_builder_add_cstr(sb, c);
+    return 0;
+}
+
+# handlers.cyr _json_raw_value (handle_embeddings): the raw span of `"<key>"`'s
+# string, array or object value. out: ptr(8) len(8).
+fn _t_json_raw_value(body, len, key, keylen, out) {
+    var s = _json_value_pos(body, len, key, keylen);
+    if (s < 0 || s >= len) { return 0; }
+    var c = load8(body + s);
+    var e = 0 - 1;
+    if (c == 91 || c == 123) {
+        e = _json_span_end(body, len, s);
+    } elif (c == 34) {
+        var i = s + 1;
+        while (i < len) {
+            if (load8(body + i) == 34) { break; }
+            if (load8(body + i) == 92) { i = i + 1; }
+            i = i + 1;
+        }
+        if (i < len) { e = i + 1; }
+    }
+    if (e <= s || e > len) { return 0; }
+    store64(out, body + s);
+    store64(out + 8, e - s);
+    return 1;
+}
+
+# handlers.cyr _ollama_embed_to_openai: Ollama's /api/embed answer as an OpenAI list.
+fn _t_ollama_embed(model, rb, rl) {
+    var span = alloc(16);
+    if (_t_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
+    var p = load64(span);
+    var n = load64(span + 8);
+    if (load8(p) != 91) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var idx = 0;
+    var i = 1;
+    while (i < n) {
+        if (load8(p + i) == 91) {
+            var e = _json_span_end(p, n, i);
+            if (e <= i) { return 0; }
+            if (idx > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"object\":\"embedding\",\"index\":");
+            str_builder_add_int(sb, idx);
+            str_builder_add_cstr(sb, ",\"embedding\":");
+            _t_sb_add_span(sb, p + i, e - i);
+            str_builder_add_cstr(sb, "}");
+            idx = idx + 1;
+            i = e;
+        } else {
+            i = i + 1;
+        }
+    }
+    var ptok = _json_extract_int(rb, rl, "prompt_eval_count", 17);
+    if (ptok < 0) { ptok = 0; }
+    str_builder_add_cstr(sb, "],\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, "}}");
+    return to_cstr(str_builder_build(sb));
+}
+
+# handlers.cyr _models_emit / _models_scan (handle_models, _models_live_local): ids
+# from a model listing that the route matches, each once.
+fn _t_models_emit(sb, seen, id, len, owner) {
+    var n = vec_len(seen);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(seen, i);
+        if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
+        i = i + 1;
+    }
+    var c = alloc(len + 1);
+    memcpy(c, id, len);
+    store8(c + len, 0);
+    vec_push(seen, c);
+    if (n > 0) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    str_builder_add_cstr(sb, c);
+    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+    str_builder_add_cstr(sb, owner);
+    str_builder_add_cstr(sb, "\"}");
+    return 1;
+}
+
+fn _t_models_scan(sb, seen, r, body, len, key, keylen, owner) {
+    var found = 0;
+    var pos = 0;
+    while (pos < len) {
+        var p = _json_value_pos(body + pos, len - pos, key, keylen);
+        if (p < 0) { break; }
+        var s = pos + p;
+        if (load8(body + s) != 34) { pos = s + 1; continue; }
+        var e = s + 1;
+        while (e < len && load8(body + e) != 34) {
+            if (load8(body + e) == 92) { e = e + 1; }
+            e = e + 1;
+        }
+        if (e >= len) { break; }
+        found = found + 1;
+        var id = alloc(e - s);
+        memcpy(id, body + s + 1, e - s - 1);
+        store8(id + e - s - 1, 0);
+        if (route_matches_model(r, id) == 1) { _t_models_emit(sb, seen, id, e - s - 1, owner); }
+        pos = e + 1;
+    }
+    return found;
+}
+
+# _models_from_catalog: a pattern is listed as a model only if it has no wildcard.
+fn _t_pat_literal(pat) {
+    var q = 0;
+    while (load8(pat + q) != 0) {
+        if (load8(pat + q) == 42 || load8(pat + q) == 63) { return 0; }
+        q = q + 1;
+    }
+    if (q == 0) { return 0; }
+    return 1;
+}
+
+# handlers.cyr local-stream keep-alive. `reads` holds read results, -11
+# (EAGAIN) for a read that timed out. out: comments sent(8), ended-idle(8).
+var _T_SSE_KEEPALIVE_S = 15;
+var _T_HTTP_IO_TIMEOUT_S = 300;
+fn _t_keepalive(reads, out) {
+    var comments = 0;
+    var idle = 0;
+    var ended = 0;
+    var i = 0;
+    while (i < vec_len(reads)) {
+        var n = vec_get(reads, i);
+        i = i + 1;
+        if (n == 0 - 11) {
+            idle = idle + _T_SSE_KEEPALIVE_S;
+            if (idle >= _T_HTTP_IO_TIMEOUT_S) { ended = 1; break; }
+            comments = comments + 1;
+            continue;
+        }
+        if (n <= 0) { break; }
+        idle = 0;
+    }
+    store64(out, comments);
+    store64(out + 8, ended);
+    return 0;
 }
 
 # ── 2.5.7 compaction role-matcher mirror ──
@@ -6280,6 +6545,202 @@ fn main() {
     assert_eq(_t_req_scan(1, 0, 1), 1, "req snapshot: no refresh, first match");
     _t_hwreg = rqa;
     assert_eq(_t_req_scan(0, 0, 1), 1, "req snapshot: without a refresh the old read agreed");
+
+    # ── 2.7.0: the rest of rust-old ──
+    test_group("rustold_config_cli");
+    # [[providers]] rate_limit_rpm is rust-old's (and ADR 004's) key; it used to be
+    # ignored, so a carried-over config ran with no limit. rate_limit wins if both.
+    assert_eq(_t_rpm_key(0, 60), 60, "cfg: rate_limit_rpm alone is read");
+    assert_eq(_t_rpm_key(600, 60), 600, "cfg: rate_limit wins over rate_limit_rpm");
+    assert_eq(_t_rpm_key(0, 0), 0, "cfg: neither set means no limit");
+    # `hoosh infer -m llama3 "hi"` is rust-old's form; -m used to swallow the model.
+    var ia = alloc(16);
+    var iv = vec_new();
+    vec_push(iv, "hoosh"); vec_push(iv, "infer"); vec_push(iv, "-m"); vec_push(iv, "llama3"); vec_push(iv, "hi");
+    assert_eq(_t_positional(iv, 1), 0, "infer: before 2.7.0 -m left no prompt");
+    _t_infer_args(iv, ia);
+    assert_streq(load64(ia), "llama3", "infer: -m names the model");
+    assert_streq(load64(ia + 8), "hi", "infer: prompt is the positional");
+    var iv2 = vec_new();
+    vec_push(iv2, "hoosh"); vec_push(iv2, "infer"); vec_push(iv2, "--model=qwen3"); vec_push(iv2, "yo");
+    _t_infer_args(iv2, ia);
+    assert_streq(load64(ia), "qwen3", "infer: --model=value form");
+    assert_streq(load64(ia + 8), "yo", "infer: prompt after --model=value");
+    var iv3 = vec_new();
+    vec_push(iv3, "hoosh"); vec_push(iv3, "infer"); vec_push(iv3, "--stream"); vec_push(iv3, "phi3"); vec_push(iv3, "q");
+    _t_infer_args(iv3, ia);
+    assert_streq(load64(ia), "phi3", "infer: positional form unchanged");
+    assert_streq(load64(ia + 8), "q", "infer: positional prompt unchanged");
+
+    test_group("rustold_health_metrics");
+    # /v1/health carries version and providers_configured (rust-old's conformance
+    # tests required both); degraded keeps its 503 and providers_down.
+    var hb = _t_health_body(1, "2.7.0", 4);
+    assert_streq(hb, "{\"status\":\"ok\",\"version\":\"2.7.0\",\"providers_configured\":4}", "health: ok body");
+    var hd = _t_health_body(0, "2.7.0", 4);
+    assert_eq(str_contains(str_from(hd), str_from("\"providers_down\":1,\"version\":\"2.7.0\"")), 1,
+      "health: degraded body keeps providers_down and adds version");
+    # /metrics: the old block declared hoosh_tokens_total and emitted other names.
+    assert_eq(_t_prom_declared(_t_tokens_block(10, 20, 1)), 0, "metrics: 2.6 samples were undeclared");
+    var tb = _t_tokens_block(10, 20, 0);
+    assert_eq(_t_prom_declared(tb), 1, "metrics: every sample is declared");
+    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"prompt\"} 10")), 1,
+      "metrics: rust-old's labelled prompt series");
+    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"completion\"} 20")), 1,
+      "metrics: rust-old's labelled completion series");
+    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_tokens_prompt_total 10")), 1,
+      "metrics: the 2.x series is still there");
+
+    test_group("rustold_completion_id");
+    # Every completion used to be "chatcmpl-hoosh" with no `created`. These run
+    # against provider_err.cyr itself (chat_id_new, chat_id, chat_created,
+    # sb_add_chat_head, chat_rehead; _chat_id_buf, _chat_hex underneath).
+    chat_id_new();
+    var cid = alloc(40);
+    memcpy(cid, chat_id(), 34);
+    assert_eq(memeq(cid, "chatcmpl-", 9), 1, "id: chatcmpl- prefix");
+    assert_eq(strlen(cid), 33, "id: prefix + 24 hex digits");
+    var hexok = 1;
+    var hxi = 9;
+    while (hxi < 33) {
+        var hc = load8(cid + hxi);
+        if ((hc < 48 || hc > 57) && (hc < 97 || hc > 102)) { hexok = 0; }
+        hxi = hxi + 1;
+    }
+    assert_eq(hexok, 1, "id: lowercase hex");
+    chat_id_new();
+    assert_eq(streq(cid, chat_id()), 0, "id: each completion gets a new one");
+    assert_eq(chat_created() > 1704067200, 1, "id: created is a unix timestamp (rust-old's bound)");
+    var chb = str_builder_new();
+    sb_add_chat_head(chb, "chat.completion");
+    var chead = to_cstr(str_builder_build(chb));
+    assert_eq(memeq(chead, "{\"id\":\"chatcmpl-", 16), 1, "id: head starts with the id");
+    assert_eq(str_contains(str_from(chead), str_from("\",\"object\":\"chat.completion\",\"created\":")), 1,
+      "id: head carries object and created");
+    # A stream's chunks share the id until the next completion starts.
+    var cb2 = str_builder_new();
+    sb_add_chat_head(cb2, "chat.completion.chunk");
+    assert_eq(str_contains(str_from(to_cstr(str_builder_build(cb2))), str_from(chat_id())), 1,
+      "id: a chunk carries the current id");
+    assert_eq(str_contains(str_from(upstream_error_sse_body("m", 500, "x")), str_from(chat_id())), 1,
+      "id: the upstream error frame carries it too");
+    # A cache hit replays the stored envelope with a fresh head.
+    var cenv = "{\"id\":\"chatcmpl-aaaa\",\"object\":\"chat.completion\",\"created\":5,\"model\":\"m\",\"choices\":[]}";
+    var rh = chat_rehead(cenv);
+    assert_eq(str_contains(str_from(rh), str_from("chatcmpl-aaaa")), 0, "rehead: old id replaced");
+    assert_eq(str_contains(str_from(rh), str_from("\"created\":5,")), 0, "rehead: old created replaced");
+    assert_eq(str_contains(str_from(rh), str_from(",\"model\":\"m\",\"choices\":[]}")), 1, "rehead: body kept");
+    assert_eq(str_contains(str_from(rh), str_from(chat_id())), 1, "rehead: carries the new id");
+    var cother = "{\"object\":\"list\"}";
+    assert_eq(chat_rehead(cother), cother, "rehead: other shapes pass through");
+
+    test_group("rustold_embeddings");
+    # Ollama gets /api/embed with the caller's `input` (string or array), and its
+    # {"embeddings":[[...]]} answer comes back as OpenAI's list.
+    var eb = "{\"model\":\"nomic\",\"input\":[\"a, b\",\"c\"],\"encoding_format\":\"float\"}";
+    var esp = alloc(16);
+    assert_eq(_t_json_raw_value(eb, strlen(eb), "input", 5, esp), 1, "embed: array input found");
+    assert_eq(load64(esp + 8), 12, "embed: whole array, commas in strings included");
+    var eb2 = "{\"model\":\"nomic\", \"input\": \"one \\\"q\\\" line\"}";
+    assert_eq(_t_json_raw_value(eb2, strlen(eb2), "input", 5, esp), 1, "embed: string input found");
+    assert_eq(memeq(load64(esp), "\"one \\\"q\\\" line\"", load64(esp + 8)), 1, "embed: escaped quotes kept");
+    var eb3 = "{\"model\":\"nomic\"}";
+    assert_eq(_t_json_raw_value(eb3, strlen(eb3), "input", 5, esp), 0, "embed: missing input");
+    var oresp = "{\"model\":\"nomic\",\"embeddings\":[[0.1,-0.2],[0.3,0.4]],\"prompt_eval_count\":7}";
+    var orb = alloc(strlen(oresp) + 1);
+    memcpy(orb, oresp, strlen(oresp) + 1);
+    var onorm = _t_ollama_embed("nomic", orb, strlen(oresp));
+    assert_streq(onorm,
+      "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.1,-0.2]},{\"object\":\"embedding\",\"index\":1,\"embedding\":[0.3,0.4]}],\"model\":\"nomic\",\"usage\":{\"prompt_tokens\":7,\"total_tokens\":7}}",
+      "embed: Ollama answer normalized");
+    var obad = "{\"embedding\":[0.1]}";
+    var obb = alloc(strlen(obad) + 1);
+    memcpy(obb, obad, strlen(obad) + 1);
+    assert_eq(_t_ollama_embed("nomic", obb, strlen(obad)), 0, "embed: legacy shape is not an answer");
+
+    test_group("rustold_models_list");
+    # /v1/models lists model ids a route can serve, once each, owned_by the provider.
+    var mr = route_new(1, 1, "http://127.0.0.1:11434");
+    var mlpats = alloc(16);
+    store64(mlpats, "llama*");
+    store64(mlpats + 8, "qwen3:8b");
+    route_set_patterns(mr, mlpats, 2);
+    var tags = "{\"models\":[{\"name\":\"llama3.2:3b\",\"model\":\"llama3.2:3b\"},{\"name\":\"phi3:mini\"},{\"name\":\"llama3.2:3b\"}]}";
+    var msb = str_builder_new();
+    var mseen = vec_new();
+    assert_eq(_t_models_scan(msb, mseen, mr, tags, strlen(tags), "name", 4, "ollama"), 3, "models: three names listed");
+    assert_eq(vec_len(mseen), 1, "models: unroutable and duplicate ids skipped");
+    assert_streq(to_cstr(str_builder_build(msb)), "{\"id\":\"llama3.2:3b\",\"object\":\"model\",\"owned_by\":\"ollama\"}",
+      "models: entry shape");
+    assert_eq(_t_pat_literal("qwen3:8b"), 1, "models: a literal pattern is a model id");
+    assert_eq(_t_pat_literal("llama*"), 0, "models: a wildcard pattern is not");
+    assert_eq(_t_pat_literal(""), 0, "models: an empty pattern is not");
+
+    test_group("rustold_catalog");
+    # rust-old's catalog entries, found by exact match and longest prefix.
+    var cm = alloc(40);
+    assert_eq(metadata_lookup("mistral-nemo-2407", cm), 1, "catalog: mistral-nemo found");
+    assert_eq(load64(cm), 128000, "catalog: mistral-nemo's own 128k, not mistral's 32k");
+    assert_eq(metadata_lookup("o3-2025-04-16", cm), 1, "catalog: o3 found");
+    assert_eq(load64(cm + 16), 1, "catalog: o3 (vision) not o3-mini (none)");
+    assert_eq(metadata_lookup("o1-mini-2024-09-12", cm), 1, "catalog: o1-mini found");
+    assert_eq(load64(cm), 128000, "catalog: o1-mini's 128k, not o1's 200k");
+    assert_eq(metadata_lookup("gpt-4.1-mini-2025-04-14", cm), 1, "catalog: gpt-4.1-mini found");
+    assert_eq(load64(cm + 8), TIER_ECONOMY, "catalog: gpt-4.1-mini is economy, not gpt-4.1's standard");
+    assert_eq(metadata_lookup("gemini-2.5-pro-preview", cm), 1, "catalog: gemini-2.5-pro found");
+    assert_eq(load64(cm + 8), TIER_PREMIUM, "catalog: gemini-2.5-pro is premium");
+    assert_eq(metadata_lookup("text-embedding-3-small", cm), 1, "catalog: embedding model found");
+    assert_eq(load64(cm + 32), 0, "catalog: embedding model takes no system prompt");
+
+    test_group("rustold_keepalive");
+    # Local streams send an SSE comment every 15 s of silence and still end after
+    # 300 s with nothing from the backend.
+    var ka = alloc(16);
+    var kr = vec_new();
+    vec_push(kr, 0 - 11); vec_push(kr, 0 - 11); vec_push(kr, 0 - 11); vec_push(kr, 512); vec_push(kr, 0);
+    _t_keepalive(kr, ka);
+    assert_eq(load64(ka), 3, "keepalive: one comment per quiet 15 s");
+    assert_eq(load64(ka + 8), 0, "keepalive: data resets the idle clock");
+    var kr2 = vec_new();
+    var kz = 0;
+    while (kz < 25) { vec_push(kr2, 0 - 11); kz = kz + 1; }
+    _t_keepalive(kr2, ka);
+    assert_eq(load64(ka), 19, "keepalive: comments until the idle bound");
+    assert_eq(load64(ka + 8), 1, "keepalive: 300 s of silence still ends the stream");
+    var kr3 = vec_new();
+    kz = 0;
+    while (kz < 19) { vec_push(kr3, 0 - 11); kz = kz + 1; }
+    vec_push(kr3, 64);
+    kz = 0;
+    while (kz < 19) { vec_push(kr3, 0 - 11); kz = kz + 1; }
+    vec_push(kr3, 0);
+    _t_keepalive(kr3, ka);
+    assert_eq(load64(ka + 8), 0, "keepalive: silence is counted per gap, not in total");
+    assert_eq(load64(ka), 38, "keepalive: both gaps kept alive");
+    # http_sse_comment (http_server.cyr, the real one) writes the comment frame.
+    var kpf = alloc(16);
+    sys_pipe(kpf);
+    var kprd = load64(kpf) & 0xFFFFFFFF;
+    var kpwr = (load64(kpf) >> 32) & 0xFFFFFFFF;
+    assert_eq(http_sse_comment(kpwr, "keep-alive"), 0, "keepalive: comment written");
+    var kpb = alloc(32);
+    assert_eq(sys_read(kprd, kpb, 32), 14, "keepalive: 14 bytes");
+    assert_eq(memeq(kpb, ": keep-alive\n\n", 14), 1, "keepalive: an SSE comment line");
+    sys_close(kprd);
+    sys_close(kpwr);
+
+    test_group("rustold_hw_numbers");
+    # handle_hw_models_post / _hw_model_info and _hw_cloud_alternatives (placement)
+    # print rust-old's float fields from ai-hwaccel's fixed-point ones.
+    var hsb = str_builder_new();
+    _t_sb_add_milli(hsb, 8030);                 # params_b_x1000
+    str_builder_add_cstr(hsb, " ");
+    _t_sb_add_milli(hsb, 4412 * 10);            # headroom x100
+    str_builder_add_cstr(hsb, " ");
+    _t_sb_add_milli(hsb, 9832 * 10);            # price x100
+    str_builder_add_cstr(hsb, " ");
+    _t_sb_add_milli(hsb, 70000);
+    assert_streq(to_cstr(str_builder_build(hsb)), "8.03 44.12 98.32 70", "hw: fixed-point to JSON numbers");
 
     test_group("hardware_available_vram");
     # Placement compared against TOTAL accelerator memory before 2.5.7, which

@@ -21,32 +21,313 @@ fn handle_health(cfd) {
         var r = load64(routes);
         if (route_healthy(r) == 0) { healthy = 0; }
     }
+    # 2.7.0: version and providers_configured, as rust-old reported (its
+    # conformance tests required both).
+    var sb = str_builder_new();
     if (healthy == 1) {
-        var body = "{\"status\":\"ok\"}";
-        return http_ok(cfd, body, strlen(body));
+        str_builder_add_cstr(sb, "{\"status\":\"ok\"");
+    } else {
+        str_builder_add_cstr(sb, "{\"status\":\"degraded\",\"providers_down\":1");
     }
-    var body = "{\"status\":\"degraded\",\"providers_down\":1}";
-    return http_respond(cfd, "503", "Service Unavailable", body, strlen(body));
+    str_builder_add_cstr(sb, ",\"version\":\"");
+    str_builder_add_cstr(sb, HOOSH_VERSION);
+    str_builder_add_cstr(sb, "\",\"providers_configured\":");
+    str_builder_add_int(sb, count);
+    str_builder_add_cstr(sb, "}");
+    var body = str_builder_build(sb);
+    if (healthy == 1) { return http_json_ok(cfd, body); }
+    return http_respond(cfd, "503", "Service Unavailable", to_cstr(body), str_len(body));
 }
 
-# GET /v1/models
+# ── POST /v1/embeddings (2.7.0) ──
+# rust-old routed embeddings like chat: the route that matches the requested
+# model (404 when none does), local or remote, and it normalized Ollama's answer
+# to the OpenAI envelope. The port sent every request to the first LOCAL route
+# whatever the model, and for Ollama it posted the OpenAI body to the legacy
+# /api/embeddings, which reads `prompt`, not `input`, and answers in its own
+# shape. Now: routed by model; Ollama gets /api/embed with {model, input}, which
+# takes a string or an array; other OpenAI-compatible backends, local or remote
+# (with their auth), get the body unchanged at /v1/embeddings.
+
+# Span of the raw JSON value of `"<key>"` at the top of an object: a string, an
+# array or an object. out: ptr(8) len(8). Returns 1, or 0 when absent/malformed.
+fn _json_raw_value(body, len, key, keylen, out) {
+    var s = _json_value_pos(body, len, key, keylen);
+    if (s < 0 || s >= len) { return 0; }
+    var c = load8(body + s);
+    var e = 0 - 1;
+    if (c == 91 || c == 123) {
+        e = _json_span_end(body, len, s);
+    } elif (c == 34) {
+        var i = s + 1;
+        while (i < len) {
+            if (load8(body + i) == 34) { break; }
+            if (load8(body + i) == 92) { i = i + 1; }
+            i = i + 1;
+        }
+        if (i < len) { e = i + 1; }
+    }
+    if (e <= s || e > len) { return 0; }
+    store64(out, body + s);
+    store64(out + 8, e - s);
+    return 1;
+}
+
+# Ollama's /api/embed answer, {"embeddings":[[...],...],"prompt_eval_count":N},
+# as an OpenAI {"object":"list","data":[{"object":"embedding","index":i,...}]}.
+# Returns 0 when the answer has no embeddings array.
+fn _ollama_embed_to_openai(model, rb, rl) {
+    var span = alloc(16);
+    if (_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
+    var p = load64(span);
+    var n = load64(span + 8);
+    if (load8(p) != 91) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var idx = 0;
+    var i = 1;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c == 91) {
+            var e = _json_span_end(p, n, i);
+            if (e <= i) { return 0; }
+            if (idx > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"object\":\"embedding\",\"index\":");
+            str_builder_add_int(sb, idx);
+            str_builder_add_cstr(sb, ",\"embedding\":");
+            _sb_add_span(sb, p + i, e - i);
+            str_builder_add_cstr(sb, "}");
+            idx = idx + 1;
+            i = e;
+        } else {
+            i = i + 1;
+        }
+    }
+    var ptok = _json_extract_int(rb, rl, "prompt_eval_count", 17);
+    if (ptok < 0) { ptok = 0; }
+    str_builder_add_cstr(sb, "],\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
+
+fn handle_embeddings(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var mf = _json_obj_str_field(body_ptr, body_len, "model", 5);
+    if (mf == 0 || load64(mf + 8) == 0) { return http_bad_request(cfd, "model field is required"); }
+    var model = alloc(load64(mf + 8) + 1);
+    memcpy(model, load64(mf), load64(mf + 8));
+    store8(model + load64(mf + 8), 0);
+    var input = alloc(16);
+    if (_json_raw_value(body_ptr, body_len, "input", 5, input) == 0) {
+        return http_bad_request(cfd, "input is required (a string or an array of strings)");
+    }
+    var route = router_select(_router, model);
+    if (route == 0) {
+        var nsb = str_builder_new();
+        str_builder_add_cstr(nsb, "No provider configured for model '");
+        _json_escape_into(nsb, model, strlen(model));
+        str_builder_add_cstr(nsb, "'");
+        return http_error(cfd, "404", "Not Found", to_cstr(str_builder_build(nsb)));
+    }
+    # Same DLP policy as /v1/chat/completions: RESTRICTED is refused, and
+    # CONFIDENTIAL may only go to a local provider.
+    if (dlp_is_enabled() == 1) {
+        var lvl = dlp_scan_level_json(body_ptr, body_len);
+        if (lvl == CLASS_RESTRICTED) {
+            hlog_warn("dlp: restricted content blocked (embeddings)");
+            return http_error(cfd, "403", "Forbidden", "request blocked: restricted content detected");
+        }
+        if (lvl == CLASS_CONFIDENTIAL && provider_is_local(route_provider(route)) == 0) {
+            var lr = router_select_local(_router, model);
+            if (lr == 0) {
+                return http_error(cfd, "403", "Forbidden",
+                  "request blocked: confidential content requires a local provider");
+            }
+            route = lr;
+        }
+    }
+    var prov = route_provider(route);
+    if (prov == PROV_ANTHROPIC || prov == PROV_GOOGLE) {
+        var usb = str_builder_new();
+        str_builder_add_cstr(usb, "provider '");
+        str_builder_add_cstr(usb, provider_name(prov));
+        str_builder_add_cstr(usb, "' does not serve /v1/embeddings");
+        return http_bad_request(cfd, to_cstr(str_builder_build(usb)));
+    }
+    var erl = route_rate_limiter(route);
+    if (erl != 0 && hoosh_ratelimit_check(erl) == 0) {
+        return http_error(cfd, "429", "Too Many Requests", "rate limit exceeded");
+    }
+    var base = route_base_url(route);
+    var st = 0;
+    var rb = 0;
+    var rl = 0;
+    if (route_is_remote(route) == 1) {
+        var sresp = sandhi_http_post_opts(_provider_url(base, "/v1/embeddings"), _provider_headers(route),
+          body_ptr, body_len, _remote_http_opts());
+        if (sresp != 0 && sandhi_http_err_kind(sresp) == SANDHI_OK) {
+            st = sandhi_http_status(sresp);
+            rb = sandhi_http_body(sresp);
+            rl = sandhi_http_body_len(sresp);
+        }
+    } else {
+        var resp = 0;
+        if (prov == PROV_OLLAMA) {
+            var osb = str_builder_new();
+            str_builder_add_cstr(osb, "{\"model\":\"");
+            _json_escape_into(osb, model, strlen(model));
+            str_builder_add_cstr(osb, "\",\"input\":");
+            _sb_add_span(osb, load64(input), load64(input + 8));
+            str_builder_add_cstr(osb, "}");
+            var ob = str_builder_build(osb);
+            resp = http_post_local(base, "/api/embed", to_cstr(ob), str_len(ob));
+        } else {
+            resp = http_post_local(base, "/v1/embeddings", body_ptr, body_len);
+        }
+        if (resp != 0) {
+            st = http_status(resp);
+            rb = http_body(resp);
+            rl = http_body_len(resp);
+        }
+    }
+    if (st >= 200 && st < 300 && rb != 0) {
+        metrics_record(0, 0);
+        if (prov == PROV_OLLAMA && route_is_remote(route) == 0) {
+            var norm = _ollama_embed_to_openai(model, rb, rl);
+            if (norm == 0) {
+                return http_error(cfd, "502", "Bad Gateway", "embeddings backend returned no embeddings");
+            }
+            return http_json_ok(cfd, norm);
+        }
+        return http_ok(cfd, rb, rl);
+    }
+    if (st != 0 && rb != 0) {
+        _provider_err_capture(st, rb, rl);
+        hlog_warn(provider_err_log_line());
+        return http_error(cfd, "502", "Bad Gateway", provider_err_client_msg());
+    }
+    hlog_error("embeddings: no backend produced a usable response");
+    return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
+}
+
+# ── GET /v1/models (2.7.0) ──
+# Concrete model ids, each owned_by the provider that would serve it. This used
+# to list one entry per route with the PROVIDER NAME as the id ("ollama"), so an
+# OpenAI client's model picker offered models that do not exist. rust-old asked
+# each provider for its models. Local backends are asked live (Ollama's
+# /api/tags, everyone else's /v1/models); remote routes, and a local one that
+# does not answer, list the catalogue models and literal patterns they match, so
+# /v1/models makes no remote call. Only ids a route actually matches are listed.
+
+# Append one {"id","object":"model","owned_by"} entry unless `id` is already in
+# `seen`. id[0..len) need not be NUL-terminated.
+fn _models_emit(sb, seen, id, len, owner) {
+    var n = vec_len(seen);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(seen, i);
+        if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
+        i = i + 1;
+    }
+    var c = alloc(len + 1);
+    memcpy(c, id, len);
+    store8(c + len, 0);
+    vec_push(seen, c);
+    if (n > 0) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    _json_escape_into(sb, c, len);
+    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+    str_builder_add_cstr(sb, owner);
+    str_builder_add_cstr(sb, "\"}");
+    return 1;
+}
+
+# Every string value of `"<key>"` in a model listing that route `r` matches.
+# Returns how many ids the listing held (matched or not), so 0 means "no answer".
+fn _models_scan(sb, seen, r, body, len, key, keylen) {
+    var found = 0;
+    var pos = 0;
+    while (pos < len) {
+        var p = _json_value_pos(body + pos, len - pos, key, keylen);
+        if (p < 0) { break; }
+        var s = pos + p;
+        if (load8(body + s) != 34) { pos = s + 1; continue; }
+        var e = s + 1;
+        while (e < len && load8(body + e) != 34) {
+            if (load8(body + e) == 92) { e = e + 1; }
+            e = e + 1;
+        }
+        if (e >= len) { break; }
+        found = found + 1;
+        var id = alloc(e - s);
+        memcpy(id, body + s + 1, e - s - 1);
+        store8(id + e - s - 1, 0);
+        if (route_matches_model(r, id) == 1) {
+            _models_emit(sb, seen, id, e - s - 1, provider_name(route_provider(r)));
+        }
+        pos = e + 1;
+    }
+    return found;
+}
+
+# A local backend's own model list. Returns 0 when it did not answer.
+fn _models_live_local(sb, seen, r) {
+    if (route_healthy(r) == 0) { return 0; }
+    var path = "/v1/models";
+    var key = "id";
+    if (route_provider(r) == PROV_OLLAMA) { path = "/api/tags"; key = "name"; }
+    var resp = http_req_local("GET", route_base_url(r), path, 0, 0);
+    if (resp == 0) { return 0; }
+    if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
+    return _models_scan(sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
+}
+
+# Catalogue models that route `r` would serve, plus its literal (wildcard-free)
+# patterns.
+fn _models_from_catalog(sb, seen, r) {
+    var owner = provider_name(route_provider(r));
+    var n = metadata_count();
+    var i = 0;
+    while (i < n) {
+        var k = metadata_key(i);
+        if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
+        i = i + 1;
+    }
+    var pats = load64(r + ROUTE_PATTERNS);
+    var pn = load64(r + ROUTE_PATTERNS_N);
+    var j = 0;
+    while (j < pn) {
+        var pat = load64(pats + j * 8);
+        var literal = 1;
+        var q = 0;
+        while (load8(pat + q) != 0) {
+            if (load8(pat + q) == 42 || load8(pat + q) == 63) { literal = 0; }
+            q = q + 1;
+        }
+        if (literal == 1 && q > 0) { _models_emit(sb, seen, pat, q, owner); }
+        j = j + 1;
+    }
+    return 0;
+}
+
 fn handle_models(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var seen = vec_new();
     var routes = load64(_router + ROUTER_ROUTES);
     var count = load64(_router + ROUTER_COUNT);
-    var first = 1;
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
         if (route_enabled(r) == 1) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-            str_builder_add_cstr(sb, provider_name(route_provider(r)));
-            str_builder_add_cstr(sb, "\"}");
-            first = 0;
+            var got = 0;
+            if (route_is_remote(r) == 0) { got = _models_live_local(sb, seen, r); }
+            if (got == 0) { _models_from_catalog(sb, seen, r); }
         }
         i = i + 1;
     }
@@ -1143,6 +1424,75 @@ fn handle_hw_models(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# One catalogue model as rust-old's CompatibleModelInfo.
+fn _hw_model_info(sb, m, quant, total) {
+    str_builder_add_cstr(sb, "{\"name\":\"");
+    str_builder_add_cstr(sb, model_name(m));
+    str_builder_add_cstr(sb, "\",\"family\":\"");
+    str_builder_add_cstr(sb, model_family(m));
+    str_builder_add_cstr(sb, "\",\"params_billions\":");
+    _sb_add_milli(sb, model_params_b_x1000(m));
+    str_builder_add_cstr(sb, ",\"memory_required_bytes\":");
+    str_builder_add_int(sb, model_memory_bytes(m, quant));
+    str_builder_add_cstr(sb, ",\"headroom_pct\":");
+    _sb_add_milli(sb, model_headroom_x100(m, quant, total) * 10);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# POST /v1/hardware/models {model?, quantization?} (2.7.0) — rust-old's form of
+# this route. With `model`, whether that catalogue model runs on the detected
+# accelerators (404 when the catalogue has no such model); without it, every
+# catalogue model that does. `quantization` defaults to what the hardware would
+# pick for a 7B model, as rust-old did. GET keeps the fixed size table above.
+fn handle_hw_models_post(cfd, body_ptr, body_len) {
+    var name = 0;
+    var quant = 0 - 1;   # unset; QUANT_NONE (fp32) is 0
+    if (body_len > 0) {
+        var pairs = json_parse(str_new(body_ptr, body_len));
+        if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
+        var mn = json_get(pairs, str_from("model"));
+        if (mn != 0 && str_len(mn) > 0) { name = to_cstr(mn); }
+        var q_str = json_get(pairs, str_from("quantization"));
+        if (q_str != 0) {
+            quant = quant_from_str(to_cstr(q_str));
+            if (quant < 0) { return http_bad_request(cfd, "invalid quantization (fp32/fp16/bf16/int8/int4)"); }
+        }
+    }
+    if (quant < 0) { quant = hw_suggest_quant(7000000000); }
+    var total = hw_accel_memory();
+    var models = load_models();
+    var sb = str_builder_new();
+    if (name != 0) {
+        var m = find_model(models, name);
+        if (m == 0) { return http_error(cfd, "404", "Not Found", "model not found in catalogue"); }
+        str_builder_add_cstr(sb, "{\"model\":");
+        _hw_model_info(sb, m, quant, total);
+        str_builder_add_cstr(sb, ",\"can_run\":");
+        if (model_can_run(m, quant, total) == 1 && total > 0) {
+            str_builder_add_cstr(sb, "true");
+        } else {
+            str_builder_add_cstr(sb, "false");
+        }
+    } else {
+        str_builder_add_cstr(sb, "{\"compatible\":[");
+        var compat = compatible_models(models, quant, total);
+        var i = 0;
+        while (i < vec_len(compat)) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            _hw_model_info(sb, vec_get(compat, i), quant, total);
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    str_builder_add_cstr(sb, ",\"quantization\":\"");
+    str_builder_add_cstr(sb, quant_name(quant));
+    str_builder_add_cstr(sb, "\",\"total_vram_bytes\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, "}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
 # POST /v1/hardware/cost — cloud instance $ recommendations for a model
 # size + quantization (ai-hwaccel cost.cyr; reads data/cloud_pricing.json,
 # degrades to empty recommendations if that file is absent).
@@ -1257,11 +1607,24 @@ fn handle_metrics(cfd) {
     str_builder_add_cstr(sb, "# TYPE hoosh_requests_total counter\n");
     str_builder_add_cstr(sb, "hoosh_requests_total ");
     str_builder_add_int(sb, _met_requests);
+    # 2.7.0: hoosh_tokens_total carries its samples, split by a `type` label as
+    # rust-old emitted them. The family used to be declared with no samples of
+    # its own, and the numbers went out as hoosh_tokens_prompt_total and
+    # hoosh_tokens_completion_total, undeclared. Those two stay, now declared, so
+    # 2.x dashboards keep working.
     str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_total Total tokens processed\n");
     str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_tokens_total{type=\"prompt\"} ");
+    str_builder_add_int(sb, _met_prompt_tokens);
+    str_builder_add_cstr(sb, "\nhoosh_tokens_total{type=\"completion\"} ");
+    str_builder_add_int(sb, _met_comp_tokens);
+    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_prompt_total Prompt tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_prompt_total counter\n");
     str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
     str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, "\nhoosh_tokens_completion_total ");
+    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_completion_total Completion tokens processed\n");
+    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_completion_total counter\n");
+    str_builder_add_cstr(sb, "hoosh_tokens_completion_total ");
     str_builder_add_int(sb, _met_comp_tokens);
     str_builder_add_cstr(sb, "\n# HELP hoosh_providers_configured ");
     str_builder_add_cstr(sb, "Number of configured providers\n");
@@ -1530,8 +1893,7 @@ fn _extract_messages(body_ptr, body_len) {
 # Stream one SSE chunk wrapping a content token
 fn _sse_chunk(cfd, model, content, content_len) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
@@ -1557,8 +1919,7 @@ fn _sse_chunk(cfd, model, content, content_len) {
 # so a client can fold the reasoning apart from the answer. Byte-for-byte `_sse_chunk` but for the delta key.
 fn _sse_reasoning_chunk(cfd, model, content, content_len) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
@@ -1581,8 +1942,7 @@ fn _sse_reasoning_chunk(cfd, model, content, content_len) {
 # Stream one SSE chunk wrapping a tool_calls delta (passed through verbatim).
 fn _sse_tool_chunk(cfd, model, tool_calls) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
@@ -1604,8 +1964,7 @@ fn _sse_error_chunk(cfd, model, status, message) {
 # Send the final SSE stop chunk
 fn _sse_stop(cfd, model) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion.chunk\",");
+    sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
@@ -1764,6 +2123,8 @@ fn _remote_stream_url(route, model) {
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
 fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
+    # 2.7.0: one id and created time for every chunk of this stream.
+    chat_id_new();
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -1866,13 +2227,28 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
 
     var rbuf = alloc(4096);
     var done = 0;
+    # 2.7.0: SSE keep-alive. rust-old sent a comment every 15 s of silence, which
+    # keeps a proxy's idle timeout (nginx and most load balancers: 60 s) from
+    # cutting a stream while a model loads or thinks before its first token. The
+    # backend read now times out every SSE_KEEPALIVE_S; each timeout sends a
+    # comment line, which SSE clients ignore, and the silences are summed so the
+    # stream still ends after HTTP_IO_TIMEOUT_S with nothing from the backend.
+    sock_set_recv_timeout(bfd, SSE_KEEPALIVE_S, 0);
+    var idle_s = 0;
     # 2.5.11: `done` is now also set when a chunk write fails, i.e. the client
     # hung up. Before, hoosh drained the WHOLE upstream response into a closed
     # socket — a worker and real provider tokens spent on a request that had
     # already left, and something an unauthenticated caller could do in a loop.
     while (done == 0) {
         var n = sys_read(bfd, rbuf, 4096);
+        if (n == 0 - EAGAIN) {
+            idle_s = idle_s + SSE_KEEPALIVE_S;
+            if (idle_s >= HTTP_IO_TIMEOUT_S) { done = 1; break; }
+            if (http_sse_comment(cfd, "keep-alive") < 0) { done = 1; }
+            continue;
+        }
         if (n <= 0) { done = 1; break; }
+        idle_s = 0;
         var ri = 0;
         while (ri < n) {
             var ch = load8(rbuf + ri);
@@ -2074,8 +2450,9 @@ fn _embed_query_body(body_ptr, body_len) {
 # unknown fields. `provider` is the real serving route, not the requested one.
 fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider) {
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":\"chatcmpl-hoosh\",");
-    str_builder_add_cstr(sb, "\"object\":\"chat.completion\",");
+    # 2.7.0: a fresh id and created time per completion (see provider_err.cyr).
+    chat_id_new();
+    sb_add_chat_head(sb, "chat.completion");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
@@ -2282,6 +2659,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         var cached = cache_get(_cache, ckey);
         if (cached != 0) {
             hlog_info("chat: response cache hit");
+            cached = chat_rehead(cached);
             store64(out + 8, _resp_set_header(_resp_new("200", "OK", cached, strlen(cached)),
                 "X-Hoosh-Cache: HIT"));
             return out;
@@ -2307,6 +2685,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                     var scached = cache_get(_cache, skey);
                     if (scached != 0) {
                         hlog_info("chat: semantic cache hit");
+                        scached = chat_rehead(scached);
                         store64(out + 8,
                           _resp_set_header(_resp_new("200", "OK", scached, strlen(scached)),
                             "X-Hoosh-Cache: SEMANTIC"));

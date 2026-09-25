@@ -184,7 +184,13 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/tokens/pools") == 1) { return handle_token_pools(cfd); }
     if (streq(path, "/v1/queue/status") == 1) { return handle_queue_status(cfd); }
     if (streq(path, "/v1/hardware") == 1) { return handle_hardware(cfd); }
-    if (streq(path, "/v1/hardware/models") == 1) { return handle_hw_models(cfd); }
+    if (streq(path, "/v1/hardware/models") == 1) {
+        # 2.7.0: POST is rust-old's per-model form; GET keeps the size table.
+        if (streq(method, "POST") == 1) {
+            return handle_hw_models_post(cfd, req_parse_body(buf, buf_len), req_body_len(buf, buf_len));
+        }
+        return handle_hw_models(cfd);
+    }
     if (streq(path, "/v1/hardware/compatible-models") == 1) { return handle_hw_compatible(cfd); }
     if (streq(path, "/v1/hardware/telemetry") == 1) { return handle_hw_telemetry(cfd); }
     if (streq(path, "/metrics") == 1) { return handle_metrics(cfd); }
@@ -262,63 +268,9 @@ fn http_route(cfd, method, path, buf, buf_len) {
         return handle_hw_simulate(cfd, smb, req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/embeddings") == 1) {
-        var eb = req_parse_body(buf, buf_len);
-        var ebl = req_body_len(buf, buf_len);
-        if (ebl > 0) {
-            # Same DLP policy as /v1/chat/completions. Until 2.6.6 this endpoint
-            # crashed before it ever forwarded, which is the only reason it was
-            # not a hole; fixing the crash made it one, so the controls land
-            # with it. RESTRICTED is refused outright.
-            if (dlp_is_enabled() == 1) {
-                var edlp = dlp_scan_level_json(eb, ebl);
-                if (edlp == CLASS_RESTRICTED) {
-                    hlog_warn("dlp: restricted content blocked (embeddings)");
-                    return http_error(cfd, "403", "Forbidden",
-                      "request blocked: restricted content detected");
-                }
-            }
-            # Route through first available provider
-            var routes = load64(_router + ROUTER_ROUTES);
-            var rcount = load64(_router + ROUTER_COUNT);
-            var ei = 0;
-            while (ei < rcount) {
-                var er = load64(routes + ei * 8);
-                # LOCAL routes only. http_post_local speaks plaintext HTTP and
-                # emits no Authorization header, so a remote route would both
-                # leak the body in the clear and be rejected — and CONFIDENTIAL
-                # content must not leave the box at all.
-                if (route_enabled(er) == 1 && provider_is_local(route_provider(er)) == 1) {
-                    var epath = "/api/embeddings";
-                    if (route_provider(er) != PROV_OLLAMA) {
-                        epath = "/v1/embeddings";
-                    }
-                    # http_post_local takes the BASE URL, not a port: it calls
-                    # url_host()/url_port() on this argument. Passing the int
-                    # port made url_host() do load8(port + 7) — an unmapped
-                    # low address, so one POST /v1/embeddings killed all 7
-                    # workers with a SIGSEGV.
-                    # Rate limiting applies here too — this endpoint was
-                    # entirely uncovered.
-                    var erl = route_rate_limiter(er);
-                    if (erl != 0 && hoosh_ratelimit_check(erl) == 0) {
-                        return http_error(cfd, "429", "Too Many Requests",
-                          "rate limit exceeded");
-                    }
-                    var eresp = http_post_local(route_base_url(er), epath, eb, ebl);
-                    if (eresp != 0) {
-                        if (http_status(eresp) >= 200) {
-                            if (http_status(eresp) < 300) {
-                                metrics_record(0, 0);
-                                return http_ok(cfd, http_body(eresp), http_body_len(eresp));
-                            }
-                        }
-                    }
-                }
-                ei = ei + 1;
-            }
-        }
-        hlog_error("embeddings: no backend produced a usable response");
-        return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
+        # 2.7.0: routed by model, local or remote, Ollama normalized
+        # (handle_embeddings in handlers.cyr).
+        return handle_embeddings(cfd, req_parse_body(buf, buf_len), req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/chat/completions") == 1) {
         var body = req_parse_body(buf, buf_len);
@@ -1200,10 +1152,18 @@ fn main() {
         return cmd_bench_connect(argv(2), bn);
     }
     if (streq(cmd, "infer") == 1) {
-        var im = _positional(0);
-        var ip = _positional(1);
+        # 2.7.0: -m/--model <model> <prompt> is rust-old's form. Without it,
+        # `-m llama3` took llama3 as the flag's value and left one positional.
+        var im = _flag_val("--model", "-m");
+        var ip = 0;
+        if (im != 0) {
+            ip = _positional(0);
+        } else {
+            im = _positional(0);
+            ip = _positional(1);
+        }
         if (im == 0 || ip == 0) {
-            println("Usage: hoosh infer [--server <url>] [--stream] <model> <prompt>");
+            println("Usage: hoosh infer [--server <url>] [--stream] [-m] <model> <prompt>");
             return 1;
         }
         var isrv = _flag_val("--server", 0);
