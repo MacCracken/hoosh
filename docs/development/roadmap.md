@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.6.12. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.6.13. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
 past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md).
 

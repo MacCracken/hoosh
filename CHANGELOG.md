@@ -5,6 +5,89 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.13] — 2026-09-25
+
+**Bounds the hardware planners' numeric inputs, and closes a race that could kill a worker in
+requirement-match.** Both were found while working on the simulator for 2.6.12. **877 assertions**
+(was 834), fmt/lint/vet/deny clean, and every CI step green when replayed against a clean export of
+the tracked tree. No benchmarked path changed, so benchmarks were not re-run.
+
+### Fixed — `POST /v1/hardware/requirement-match` could kill its worker during a hardware refresh
+
+The handler read `_hw_registry` twice: once for the profile count and once per profile. Since 2.5.7,
+`[hardware] refresh_interval_secs` lets `hw_refresh` swap the registry at any time. If a refresh
+found fewer devices between the two reads (a transient nvidia-smi failure, a driver reset), `vec_get`
+indexed past the end and called `_vec_die()`. That exits only the calling worker, so the client hung
+and `sock_close` and `wq_done` never ran. The handler now reads the registry once and scans that
+snapshot, as `hw_summary_json` already did. Its comment still called the registry immutable, which
+stopped being true in 2.5.7; it now says why no lock is needed. Only gateways with refresh enabled
+were exposed. The default, refresh off, never swaps the registry.
+
+### Fixed — the hardware planners wrapped oversized numbers into wrong answers
+
+Reproduced on the 2.6.12 binary:
+
+- `POST /v1/hardware/simulate` with `"memory_bytes": 18446744073709551615` added a card of −1 byte.
+  The digit loop had no bound, so 2^64−1 wrapped to −1 and passed the `v == 0` check. Two cards of
+  9e18 bytes each parsed fine but summed to a negative accelerator total.
+- A `model_params` of 3e18 wrapped ai-hwaccel's memory estimate (parameters × bits ÷ 8). Simulate and
+  `POST /v1/hardware/placement` both reported `memory_required_bytes` −1101034833169298227 with
+  `fits: true`; placement also said `fits_single_device` and `fits_available`.
+- `POST /v1/hardware/training-estimate` with `model_params_m` 9e15 reported negative GiB figures.
+- `str_to_int` wraps and skips non-digits. `18446744073709551617` became a 1-parameter model, `7e9`
+  became 79, and `7000000000.0`, which is what Python's `json.dumps` writes for `7e9`, became 7e10.
+
+All four inputs now go through one parser, `_hw_whole_bounded`. It checks the cap before each
+multiply, so it cannot wrap, and the handler answers 400 when a value is out of range or is not a
+whole number:
+
+- `memory_bytes` is capped at `SIM_MAX_DEVICE_BYTES`, 2^56 bytes (64 PiB). 64 cards at the cap total
+  2^62, which leaves 2^62 for the detected devices, so the simulator's totals cannot wrap either.
+- `model_params` (simulate, placement) is capped at `HW_MAX_MODEL_PARAMS`, 10^14, about 50× the
+  largest disclosed models. `model_params_m` (training-estimate) is capped at 10^8. The training
+  estimate is the first to overflow, near 8.4 × 10^14 parameters, so the cap keeps 8× of headroom.
+- The error names the cap, as in `model_params out of range (max 100000000000000)`. A sign, an
+  exponent, a real fraction or a stray byte gets `… must be a positive whole number`. 0 keeps its
+  existing message, `… must be greater than 0`.
+- A zero fraction such as `7000000000.0` is the same whole number, so Python clients that send floats
+  get the right value. Before, `memory_bytes` read it correctly by accident and `model_params` read
+  it 10× too large.
+- Blanks around a value are trimmed, because the flat JSON parser leaves a trailing CR or tab in a
+  bare value. An absent, empty or `null` value still means "not given", so placement still falls
+  back to the model name and then to 7B.
+- The `memory_bytes` scan reads the whole number token, so `1.5e9` is refused rather than read as a
+  1-byte card.
+
+Verified live on the dev host against the rebuilt binary. Each input above now gets the 400
+described. 64 cards at the cap simulate without wrapping, for a total of 2^62 plus the host's 8 GiB.
+Training at the cap returns 1024650000 GiB×1000. A null or absent `model_params` in placement still
+falls back.
+
+### Tests
+
+`tests/hoosh.tcyr` gains three groups with 43 assertions:
+
+- `hardware_whole_number_inputs` mirrors the parser, including the old loop's wraparound.
+- `hardware_planner_caps` checks the arithmetic headroom at both caps, and the wraps at the values
+  that used to get through.
+- `hardware_requirement_snapshot` mirrors the scan with a registry swap between the count and the
+  loop.
+
+Breaking the mirrors fails them: removing the pre-multiply check fails 5 assertions, dropping the
+zero-fraction rule fails 3, dropping the trimming fails 3, and reading the global once per profile
+fails 2. Symbol coverage rises from 37% to 39%.
+
+### Benchmarks
+
+Not re-run, because no benchmarked path changed: `tests/hoosh.bcyr` covers none of these handlers.
+
+Binary: 2,840,368 → 2,844,664 bytes (+4,296).
+
+### Docs
+
+The README and `state.md` stats are refreshed: 877 assertions, 156 groups, ~12,700 source lines and
+39% symbol coverage. The roadmap's "Current" line moves to v2.6.13.
+
 ## [2.6.12] — 2026-09-25
 
 **Finishes the ai-hwaccel 2.4.0 adoption.** 2.6.11 bumped `ai-hwaccel` 2.3.22 → 2.4.0 and left two

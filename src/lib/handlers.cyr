@@ -817,6 +817,74 @@ fn handle_hardware(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
+# ── Whole-number inputs for the hardware planners (2.6.13) ──
+# str_to_int skips every byte that is not a digit and wraps on overflow: "7e9" is
+# 79, "7000000000.0" is 70000000000 and "18446744073709551617" is 1. The planners
+# multiply what they are given, so a wrapped or huge model_params came back as a
+# negative memory requirement with "fits": true.
+
+fn _hw_blank(c) {
+    if (c == 32 || c == 9 || c == 13 || c == 10) { return 1; }
+    return 0;
+}
+
+# A byte that can be part of a JSON number: a digit, a point, an exponent or a sign.
+fn _hw_num_byte(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45) { return 1; }
+    return 0;
+}
+
+# p[0..len) as a whole number no larger than `cap`. Returns the value, -1 when the
+# text is not a whole number (empty, a sign, an exponent, a fraction other than
+# zeros, any other byte), or -2 when it is larger than `cap`. The cap is checked
+# before each multiply, so the accumulator never wraps. A zero fraction is the same
+# whole number: Python's json.dumps writes 7e9 as 7000000000.0.
+fn _hw_whole_bounded(p, len, cap) {
+    var v = 0;
+    var i = 0;
+    while (i < len) {
+        var d = (load8(p + i) & 0xFF) - 48;
+        if (d < 0 || d > 9) { break; }
+        if (v > (cap - d) / 10) { return 0 - 2; }
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    if (i == 0) { return 0 - 1; }
+    if (i < len && load8(p + i) == 46) {
+        i = i + 1;
+        if (i == len) { return 0 - 1; }
+        while (i < len && load8(p + i) == 48) { i = i + 1; }
+    }
+    if (i < len) { return 0 - 1; }
+    return v;
+}
+
+# A json_get value (a Str, or 0 when the key is absent) as a whole number in
+# [0, cap] by the rules above. Absent, empty and null read as 0, "not given", which
+# is what str_to_int made of them. Blanks around the value are trimmed: the flat
+# parser ends a bare value at a space or LF, so a trailing CR or tab stays in it.
+fn _hw_json_whole(s, cap) {
+    if (s == 0) { return 0; }
+    var p = str_data(s);
+    var len = str_len(s);
+    while (len > 0 && _hw_blank(load8(p)) == 1) { p = p + 1; len = len - 1; }
+    while (len > 0 && _hw_blank(load8(p + len - 1)) == 1) { len = len - 1; }
+    if (len == 0) { return 0; }
+    if (len == 4 && memeq(p, "null", 4) == 1) { return 0; }
+    return _hw_whole_bounded(p, len, cap);
+}
+
+# 400 "<field> out of range (max <cap>)", worded from the cap so the two agree.
+fn _hw_out_of_range(cfd, field, cap) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, field);
+    str_builder_add_cstr(sb, " out of range (max ");
+    str_builder_add_int(sb, cap);
+    str_builder_add_cstr(sb, ")");
+    return http_bad_request(cfd, to_cstr(str_builder_build(sb)));
+}
+
 # POST /v1/hardware/placement
 # POST /v1/hardware/simulate (2.5.9)
 # {model_params, quantization?, remove_count?, add_devices:[{memory_bytes}]}
@@ -829,10 +897,10 @@ fn handle_hw_simulate(cfd, body_ptr, body_len) {
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
 
-    var mp = 0;
-    var mp_str = json_get(pairs, str_from("model_params"));
-    if (mp_str != 0) { mp = str_to_int(mp_str); }
-    if (mp <= 0) {
+    var mp = _hw_json_whole(json_get(pairs, str_from("model_params")), HW_MAX_MODEL_PARAMS);
+    if (mp == 0 - 2) { return _hw_out_of_range(cfd, "model_params", HW_MAX_MODEL_PARAMS); }
+    if (mp == 0 - 1) { return http_bad_request(cfd, "model_params must be a positive whole number"); }
+    if (mp == 0) {
         return http_bad_request(cfd, "model_params must be greater than 0");
     }
 
@@ -848,29 +916,34 @@ fn handle_hw_simulate(cfd, body_ptr, body_len) {
 
     # add_devices is a raw array scan: json_parse is flat and cannot reach into
     # the nested objects (same constraint the sampling params hit in 2.5.2).
+    # 2.6.13: each size is the whole number token after the key, bounded by
+    # SIM_MAX_DEVICE_BYTES. The old digit loop had no bound, so 18446744073709551615
+    # wrapped to a -1 byte card, and sizes that fit in i64 still wrapped the totals
+    # once summed. It also stopped at the first non-digit, so 1.5e9 was a 1 byte card.
     var add_mem = vec_new();
     var i = 0;
     while (i + 15 < body_len) {
         if (memeq(body_ptr + i, "\"memory_bytes\":", 15) == 1) {
             var j = i + 15;
             while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            var v = 0;
-            var digits = 0;
-            while (j < body_len) {
-                var c = load8(body_ptr + j) & 0xFF;
-                if (c < 48 || c > 57) { break; }
-                v = v * 10 + (c - 48);
-                digits = digits + 1;
-                j = j + 1;
+            # The token: digits plus any point, exponent or sign that belong to it.
+            var k = j;
+            while (k < body_len && _hw_num_byte(load8(body_ptr + k)) == 1) { k = k + 1; }
+            var v = _hw_whole_bounded(body_ptr + j, k - j, SIM_MAX_DEVICE_BYTES);
+            if (v == 0 - 2) {
+                return _hw_out_of_range(cfd, "device memory_bytes", SIM_MAX_DEVICE_BYTES);
             }
-            if (digits == 0 || v == 0) {
+            if (v == 0 - 1) {
+                return http_bad_request(cfd, "device memory_bytes must be a positive whole number");
+            }
+            if (v == 0) {
                 return http_bad_request(cfd, "device memory_bytes must be greater than 0");
             }
             if (vec_len(add_mem) >= SIM_MAX_DEVICES) {
                 return http_bad_request(cfd, "add_devices limited to 64 entries");
             }
             vec_push(add_mem, v);
-            i = j;
+            i = k;
         }
         i = i + 1;
     }
@@ -916,9 +989,14 @@ fn handle_hw_placement(cfd, body_ptr, body_len) {
     if (pairs == 0) {
         return http_bad_request(cfd, "invalid JSON");
     }
-    var mp_str = json_get(pairs, str_from("model_params"));
-    var model_params = 0;
-    if (mp_str != 0) { model_params = str_to_int(mp_str); }
+    # 2.6.13: a model_params that is present must be a whole number within
+    # HW_MAX_MODEL_PARAMS. 3e18 used to wrap the memory estimate negative and
+    # answer fits_single_device: true. Absent, null or 0 still means "not given".
+    var model_params = _hw_json_whole(json_get(pairs, str_from("model_params")), HW_MAX_MODEL_PARAMS);
+    if (model_params == 0 - 2) { return _hw_out_of_range(cfd, "model_params", HW_MAX_MODEL_PARAMS); }
+    if (model_params == 0 - 1) {
+        return http_bad_request(cfd, "model_params must be a positive whole number");
+    }
     # Also try extracting from model name
     if (model_params == 0) {
         var mn = json_get(pairs, str_from("model"));
@@ -966,7 +1044,8 @@ fn _hoosh_req_from_str(s) {
 
 # POST /v1/hardware/requirement-match — does the detected hardware satisfy a
 # scheduler requirement? Body {requirement: "gpu"|"tpu"|..., min_chips?: N}.
-# Reads the immutable hw registry (detected once at startup) — no lock needed.
+# No lock: the scan reads one snapshot of the registry (below). hw_refresh swaps
+# in a new registry rather than editing the current one.
 fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
@@ -979,11 +1058,19 @@ fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
     var mc_str = json_get(pairs, str_from("min_chips"));
     if (mc_str != 0) { min_chips = str_to_int(mc_str); }
     var hit = 0;
-    if (hw_ready() == 1) {
-        var np = reg_num_profiles(_hw_registry);
+    # 2.6.13: one load of the registry for the count and every profile. Since
+    # 2.5.7 [hardware] refresh_interval_secs lets hw_refresh swap _hw_registry
+    # mid-request. With the count and the profiles on separate loads, a refresh
+    # that found fewer devices made vec_get call _vec_die(), which exits only the
+    # calling worker: the client hung, and sock_close and wq_done never ran.
+    # hw_summary_json has the same fix. The bump allocator never frees, so the
+    # snapshot stays valid after a swap.
+    var reg = _hw_registry;
+    if (reg != 0) {
+        var np = reg_num_profiles(reg);
         var i = 0;
         while (i < np && hit == 0) {
-            var p = reg_get_profile(_hw_registry, i);
+            var p = reg_get_profile(reg, i);
             if (requirement_satisfied(req, min_chips, p) == 1) { hit = p; }
             i = i + 1;
         }
@@ -1083,8 +1170,17 @@ fn handle_hw_training(cfd, body_ptr, body_len) {
     var params_m = 0;
     var mn = json_get(pairs, str_from("model"));
     if (mn != 0) { params_m = _hoosh_parse_model_params(to_cstr(mn)) / 1000000; }
+    # 2.6.13: model_params_m is bounded like model_params, in millions. 9e15 used
+    # to wrap the estimate, and the response reported negative GiB figures.
     var mp = json_get(pairs, str_from("model_params_m"));
-    if (mp != 0) { params_m = str_to_int(mp); }
+    if (mp != 0) {
+        var cap_m = HW_MAX_MODEL_PARAMS / 1000000;
+        params_m = _hw_json_whole(mp, cap_m);
+        if (params_m == 0 - 2) { return _hw_out_of_range(cfd, "model_params_m", cap_m); }
+        if (params_m == 0 - 1) {
+            return http_bad_request(cfd, "model_params_m must be a positive whole number");
+        }
+    }
     if (params_m == 0) { return http_bad_request(cfd, "missing 'model' (e.g. \"7b\") or 'model_params_m'"); }
     var method = TRAIN_LORA;
     var meth_s = json_get(pairs, str_from("method"));

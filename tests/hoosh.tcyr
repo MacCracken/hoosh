@@ -1489,6 +1489,121 @@ fn _t_reg_total_accel_memory(devs) {
     return total + pool;
 }
 
+# ── 2.6.13 hardware whole-number input mirrors ──
+# Mirror of src/lib/handlers.cyr _hw_blank, _hw_num_byte, _hw_whole_bounded and
+# _hw_json_whole. handle_hw_simulate parses model_params and add_devices'
+# memory_bytes with them, handle_hw_placement model_params, and handle_hw_training
+# model_params_m; _hw_out_of_range words the 400 from the cap. The caps mirror
+# SIM_MAX_DEVICE_BYTES and HW_MAX_MODEL_PARAMS in src/lib/hardware.cyr.
+var _T_SIM_MAX_DEVICE_BYTES = 72057594037927936;
+var _T_HW_MAX_MODEL_PARAMS = 100000000000000;
+
+fn _t_hw_blank(c) {
+    if (c == 32 || c == 9 || c == 13 || c == 10) { return 1; }
+    return 0;
+}
+
+fn _t_hw_num_byte(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45) { return 1; }
+    return 0;
+}
+
+# _hw_whole_bounded: the value, -1 when not a whole number, -2 when above `cap`.
+fn _t_hw_whole_bounded(p, len, cap) {
+    var v = 0;
+    var i = 0;
+    while (i < len) {
+        var d = (load8(p + i) & 0xFF) - 48;
+        if (d < 0 || d > 9) { break; }
+        if (v > (cap - d) / 10) { return 0 - 2; }
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    if (i == 0) { return 0 - 1; }
+    if (i < len && load8(p + i) == 46) {
+        i = i + 1;
+        if (i == len) { return 0 - 1; }
+        while (i < len && load8(p + i) == 48) { i = i + 1; }
+    }
+    if (i < len) { return 0 - 1; }
+    return v;
+}
+
+# _hw_json_whole: blanks trimmed; absent, empty and null read as 0.
+fn _t_hw_json_whole(s, cap) {
+    if (s == 0) { return 0; }
+    var p = str_data(s);
+    var len = str_len(s);
+    while (len > 0 && _t_hw_blank(load8(p)) == 1) { p = p + 1; len = len - 1; }
+    while (len > 0 && _t_hw_blank(load8(p + len - 1)) == 1) { len = len - 1; }
+    if (len == 0) { return 0; }
+    if (len == 4 && memeq(p, "null", 4) == 1) { return 0; }
+    return _t_hw_whole_bounded(p, len, cap);
+}
+
+fn _t_whole(cs, cap) { return _t_hw_whole_bounded(cs, strlen(cs), cap); }
+
+# handle_hw_simulate's memory_bytes token: the JSON-number bytes after the key.
+fn _t_mem_token(cs) {
+    var k = 0;
+    while (load8(cs + k) != 0 && _t_hw_num_byte(load8(cs + k)) == 1) { k = k + 1; }
+    return _t_hw_whole_bounded(cs, k, _T_SIM_MAX_DEVICE_BYTES);
+}
+
+# The pre-2.6.13 arithmetic: the memory_bytes digit loop, and str_to_int, which
+# also skips every non-digit. No bound, so both wrap.
+fn _t_naive_digits(cs) {
+    var v = 0;
+    var i = 0;
+    while (load8(cs + i) != 0) {
+        var c = load8(cs + i);
+        if (c >= 48 && c <= 57) { v = v * 10 + (c - 48); }
+        i = i + 1;
+    }
+    return v;
+}
+
+# ai-hwaccel's estimates, to show the caps' headroom. quant_model_bytes_with_overhead
+# (placement, simulate): params x bits / 8, plus 20%.
+fn _t_model_bytes_oh(params, bits) {
+    var raw = params * bits / 8;
+    return raw + raw / 5;
+}
+
+# estimate_training_memory's base (GiB x1000) and its largest total in bytes, as
+# _est_field writes it: GPU DPO/RLHF, model 2x + optimizer 2x + activations 1.5x.
+fn _t_train_base(params_m) { return params_m * 1863 / 1000; }
+fn _t_train_total_bytes(params_m) {
+    var base = _t_train_base(params_m);
+    var total = base * 2 + base * 2 + base * 3 / 2;
+    return total * 1073741824 / 1000;
+}
+
+# ── 2.6.13 requirement-match snapshot mirror ──
+# Mirror of handle_hw_requirement_match's scan. A mirror registry is a vec of device
+# kinds; the scan returns the index of the first `want`, or -1. _t_hwreg stands in
+# for _hw_registry, and `swap_to` is the registry a concurrent hw_refresh installs
+# after the count is read (0 = none). snapshot 1 takes the count and every device
+# from one load, as 2.6.13 does; snapshot 0 reloads the global per device, as
+# before. -2 marks the index vec_get would have died on (_vec_die exits the worker).
+var _t_hwreg = 0;
+
+fn _t_req_scan(snapshot, swap_to, want) {
+    var reg = _t_hwreg;
+    var np = vec_len(reg);
+    if (swap_to != 0) { _t_hwreg = swap_to; }
+    var i = 0;
+    while (i < np) {
+        var cur = reg;
+        if (snapshot == 0) { cur = _t_hwreg; }
+        if (i >= vec_len(cur)) { return 0 - 2; }
+        if (vec_get(cur, i) == want) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 # ── 2.5.7 compaction role-matcher mirror ──
 # Mirror of src/lib/compact.cyr _cmp_ws / _msg_role_is.
 fn _t_cmp_ws(p, len, j) {
@@ -6084,6 +6199,87 @@ fn main() {
     assert_eq(_t_sim_total(sha3, 0), 72 * shg, "sim shared: an added card adds its memory");
     store64(vec_get(sha3, 1) + 24, 24 * shg);
     assert_eq(_t_sim_total(sha3, 0), 48 * shg, "sim shared: a shared added card would vanish");
+
+    test_group("hardware_whole_number_inputs");
+    # 2.6.13: _hw_whole_bounded and _hw_json_whole replace str_to_int and the raw
+    # digit loop for model_params, model_params_m and add_devices' memory_bytes.
+    var wc = _T_SIM_MAX_DEVICE_BYTES;
+    assert_eq(_t_whole("25769803776", wc), 25769803776, "whole: a 24 GiB card parses");
+    assert_eq(_t_whole("72057594037927936", wc), wc, "whole: the cap itself is accepted");
+    assert_eq(_t_whole("72057594037927937", wc), 0 - 2, "whole: one past the cap is out of range");
+    assert_eq(_t_whole("9223372036854775807", wc), 0 - 2, "whole: i64 max is out of range");
+    assert_eq(_t_whole("18446744073709551615", wc), 0 - 2, "whole: 2^64-1 is out of range");
+    assert_eq(_t_whole("99999999999999999999999999", wc), 0 - 2, "whole: 26 digits never wrap");
+    # The old arithmetic: 2^64-1 became -1, which passed the `v == 0` check, and
+    # str_to_int turned 2^64+1 into 1.
+    assert_eq(_t_naive_digits("18446744073709551615"), 0 - 1, "whole: the old loop made 2^64-1 into -1");
+    assert_eq(_t_naive_digits("18446744073709551617"), 1, "whole: str_to_int made 2^64+1 into 1");
+    # The check runs before the multiply, so even a cap of i64 max cannot wrap.
+    var wmax = 9223372036854775807;
+    assert_eq(_t_whole("9223372036854775807", wmax), wmax, "whole: i64 max under an i64 cap");
+    assert_eq(_t_whole("9223372036854775808", wmax), 0 - 2, "whole: one past i64 max is refused");
+    # Not whole numbers: signs, exponents, real fractions, junk, nothing.
+    assert_eq(_t_whole("-5", wc), 0 - 1, "whole: a sign is refused");
+    assert_eq(_t_whole("7e9", wc), 0 - 1, "whole: an exponent is refused");
+    assert_eq(_t_naive_digits("7e9"), 79, "whole: str_to_int read 7e9 as 79");
+    assert_eq(_t_whole("7.5", wc), 0 - 1, "whole: a real fraction is refused");
+    assert_eq(_t_whole("7.", wc), 0 - 1, "whole: a bare point is refused");
+    assert_eq(_t_whole("12abc", wc), 0 - 1, "whole: trailing junk is refused");
+    assert_eq(_t_whole("", wc), 0 - 1, "whole: no digits is refused");
+    # A zero fraction is the same whole number. Python's json.dumps writes 7e9 as
+    # 7000000000.0, which str_to_int read as 7e10.
+    assert_eq(_t_whole("7000000000.0", wc), 7000000000, "whole: 7000000000.0 is 7e9");
+    assert_eq(_t_naive_digits("7000000000.0"), 70000000000, "whole: str_to_int read it as 7e10");
+    assert_eq(_t_whole("24000000000.000", wc), 24000000000, "whole: any run of zeros");
+    # json_get values: blanks trimmed; absent, empty and null read as 0.
+    assert_eq(_t_hw_json_whole(str_from(" 7000000000\r"), wc), 7000000000, "whole: CR after a bare value");
+    assert_eq(_t_hw_json_whole(str_from("7000000000\t"), wc), 7000000000, "whole: tab after a bare value");
+    assert_eq(_t_hw_json_whole(str_from("null"), wc), 0, "whole: null is not given");
+    assert_eq(_t_hw_json_whole(str_from("  "), wc), 0, "whole: blank is not given");
+    assert_eq(_t_hw_json_whole(0, wc), 0, "whole: absent is not given");
+    assert_eq(_t_hw_json_whole(str_from("\"7\""), wc), 0 - 1, "whole: stray quotes are refused");
+    # handle_hw_simulate's memory_bytes token takes the whole number, so 1.5e9 is
+    # refused rather than read as a 1 byte card.
+    assert_eq(_t_mem_token("1.5e9}"), 0 - 1, "whole: token 1.5e9 is refused");
+    assert_eq(_t_mem_token("24000000000.0}"), 24000000000, "whole: token 24000000000.0 is 24 GB");
+    assert_eq(_t_mem_token("25769803776,"), 25769803776, "whole: token ends at a comma");
+    assert_eq(_t_mem_token("\"24\"}"), 0 - 1, "whole: a quoted size is refused");
+
+    test_group("hardware_planner_caps");
+    # SIM_MAX_DEVICE_BYTES: 64 added cards at the cap total 2^62, which leaves 2^62
+    # of headroom for the detected devices before the snapshot totals could wrap.
+    assert_eq(64 * _T_SIM_MAX_DEVICE_BYTES, 4611686018427387904, "caps: 64 cards at the cap = 2^62");
+    assert_eq(64 * _T_SIM_MAX_DEVICE_BYTES + 4611686018427387903 > 0, 1, "caps: + 2^62-1 more does not wrap");
+    # The old failure: two 9e18 cards parsed but summed to a negative total.
+    assert_eq(9000000000000000000 + 9000000000000000000 < 0, 1, "caps: two 9e18 cards wrapped negative");
+    # HW_MAX_MODEL_PARAMS: the estimates stay exact at the cap...
+    assert_eq(_t_model_bytes_oh(_T_HW_MAX_MODEL_PARAMS, 32), 480000000000000, "caps: fp32 estimate at the cap");
+    assert_eq(_t_train_total_bytes(_T_HW_MAX_MODEL_PARAMS / 1000000), 1100209559961600,
+      "caps: training's largest total at the cap");
+    # ...and wrapped negative at the values that used to get through.
+    assert_eq(_t_model_bytes_oh(3000000000000000000, 16) < 0, 1, "caps: 3e18 fp16 estimate wrapped");
+    assert_eq(_t_train_base(9000000000000000) < 0, 1, "caps: 9e15 M params wrapped the training base");
+    # Training runs out near 8.4e8 M params; nine times the cap already wraps.
+    assert_eq(_t_train_total_bytes(900000000) < 0, 1, "caps: 9e8 M params wraps the training total");
+
+    test_group("hardware_requirement_snapshot");
+    # 2.6.13: handle_hw_requirement_match takes the count and every profile from
+    # one load of _hw_registry. A refresh that swapped in a smaller registry between
+    # two loads made vec_get index past the end and exit the worker thread.
+    var rqa = vec_new();
+    vec_push(rqa, 0); vec_push(rqa, 1); vec_push(rqa, 2);   # CPU, CUDA, ROCm
+    var rqb = vec_new();
+    vec_push(rqb, 0);                                       # CPU only
+    _t_hwreg = rqa;
+    assert_eq(_t_req_scan(0, rqb, 9), 0 - 2, "req snapshot: two loads index past a smaller registry");
+    _t_hwreg = rqa;
+    assert_eq(_t_req_scan(1, rqb, 9), 0 - 1, "req snapshot: one load finishes the scan");
+    _t_hwreg = rqa;
+    assert_eq(_t_req_scan(1, rqb, 2), 2, "req snapshot: answers from the registry it started on");
+    _t_hwreg = rqa;
+    assert_eq(_t_req_scan(1, 0, 1), 1, "req snapshot: no refresh, first match");
+    _t_hwreg = rqa;
+    assert_eq(_t_req_scan(0, 0, 1), 1, "req snapshot: without a refresh the old read agreed");
 
     test_group("hardware_available_vram");
     # Placement compared against TOTAL accelerator memory before 2.5.7, which

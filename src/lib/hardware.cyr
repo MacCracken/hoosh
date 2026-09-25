@@ -404,6 +404,13 @@ fn hw_summary_json(sb) {
     return 0;
 }
 
+# Largest model_params the planners accept (2.6.13): 10^14, 100 trillion. The
+# estimates multiply what they are given: placement and the simulator by bits per
+# weight (up to 32), training-estimate by 1863 and then by 2^30 per GiB. Training
+# runs out first, near 8.4 x 10^14 parameters (GPU DPO/RLHF totals 5.5x its base),
+# so the cap keeps 8x of headroom. training-estimate takes millions: 10^8.
+var HW_MAX_MODEL_PARAMS = 100000000000000;
+
 # Placement recommendation for a model
 fn hw_placement_json(sb, model_params, quant) {
     if (_hw_registry == 0) {
@@ -456,6 +463,12 @@ fn hw_placement_json(sb, model_params, quant) {
 # more cards / pulled one out" without touching the real registry — the
 # question you ask before buying hardware or draining a node.
 var SIM_MAX_DEVICES = 64;
+
+# Largest memory_bytes a hypothetical device may claim (2.6.13): 2^56 bytes, 64
+# PiB, orders of magnitude past any accelerator. The bound is for the arithmetic:
+# 64 added cards at the cap total 2^62, which leaves 2^62 of i64 headroom for the
+# detected devices, so _sim_snapshot's totals cannot wrap.
+var SIM_MAX_DEVICE_BYTES = 72057594037927936;
 
 # The part of a profile's memory that is system RAM, clamped to [0, memory_bytes]
 # in the same order as reg_total_accel_memory. It is all of the memory for the CPU,

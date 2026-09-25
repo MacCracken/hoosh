@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Version** | **2.6.12** (finishes the ai-hwaccel 2.4.0 adoption; release detail in the CHANGELOG) |
+| **Version** | **2.6.13** (bounds the hardware planners' numeric inputs; release detail in the CHANGELOG) |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
 | **Binary** (x86_64 static ELF) | ~2.8 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
-| **Source** | ~12,600 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 834 assertions (`tests/hoosh.tcyr`) |
+| **Source** | ~12,700 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 877 assertions (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
-| **Coverage** | symbol coverage 37% (`scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 39% (`scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
 | **ADRs** | 11 (`docs/decisions/`) |
 | **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
