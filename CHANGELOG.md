@@ -41,6 +41,16 @@ The semantic cache embeds each query. For an Ollama route it posted the OpenAI-s
 model never produced a semantic hit. It now uses `/api/embed` and the `/v1/embeddings` normalizer from
 2.7.0.
 
+### Filed upstream — szál tools
+
+szál's Cyrius port (2.1.2) has its 54 MCP tools, but hoosh cannot vendor them yet. There is no dist
+bundle (szál's M5 item). szál also avoids collisions by renaming its *vendored* majra and bote-core,
+which leaves its own `STEP_COMPLETED` / `STEP_FAILED` / `STEP_SKIPPED` (different values from
+majra's), `step_result_new` and `cache_new` (different arities), and `uuid_generate`,
+`compiled_compile` and `TRIGGER_*` colliding with the upstream copies hoosh ships. Filed as
+`szal/docs/development/issues/2026-09-25-hoosh-consumer-bundle.md`, with the measured collision table
+and a bundle and registration shape hoosh can use.
+
 ### Filed upstream — remote SSE keep-alive
 
 Remote streams still cannot send keep-alives: `sandhi_http_stream` gives the caller no turn while the

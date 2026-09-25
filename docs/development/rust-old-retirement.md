@@ -59,7 +59,7 @@ Each of these is a decision, not an omission.
 |---|---|
 | `/v1/audio/transcriptions`, `/v1/audio/speech`, `whisper` / `tts` config, `transcribe` / `speak` CLI | Audio moved to **svara**; hoosh keeps the provider interface only |
 | `POST /v1/hardware/format` (a file path) | Became `POST /v1/hardware/model-format` taking raw bytes in 2.4.1: no server-side path access |
-| szál's 58 MCP tools, tool discovery and announce, `hoosh_workflow_step_*` metrics | Waiting on a szál Cyrius distlib; `/v1/tools/*` runs on bote with a smoke tool until then |
+| szál's MCP tools, tool discovery and announce, `hoosh_workflow_step_*` metrics | szál's Cyrius port (2.1.2, 54 tools) has no consumer bundle yet, and its names collide with upstream majra and bote-core. Filed as `szal/docs/development/issues/2026-09-25-hoosh-consumer-bundle.md`. `/v1/tools/*` runs on bote with a smoke tool until then |
 | SSE keep-alive on **remote** streams | sandhi drives the remote stream loop and has no idle hook; local streams have it. Filed as `sandhi/docs/development/issues/2026-09-25-http-stream-no-idle-hook.md` |
 | Live model listing from **remote** providers in `/v1/models` | Deliberate: no outbound call per `/v1/models`; remote routes list the catalog models they match |
 | `hoosh_request_duration_seconds{provider,model}`, `hoosh_requests_total{provider,model,status}` | Replaced by the per-provider `hoosh_provider_latency_ms` histogram ([ADR 010](../decisions/010-observability.md)); `hoosh_requests_total` is unlabelled |

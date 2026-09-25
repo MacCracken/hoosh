@@ -65,9 +65,15 @@ deliberate non-ports, so nothing needs the Rust tree afterwards.
 ### MCP tools (szál) — *upstream-gated*
 
 `/v1/tools/list` + `/v1/tools/call` are live, but the registry holds only a
-`bote_echo` smoke tool until **szál** (58 built-in MCP tools) ships as a Cyrius
-distlib. Register them in `mcp_init` alongside `bote_echo` — no transport changes.
-([ADR 005](../decisions/005-mcp-via-bote.md).)
+`bote_echo` smoke tool. szál's Cyrius port is done (2.1.2, 54 tools on the same
+bote API), but it has no dist bundle yet, and its own names collide with upstream
+majra, bote-core and hoosh (`STEP_*` with different values, `step_result_new` and
+`cache_new` with different arities). Filed 2026-09-25 as
+`szal/docs/development/issues/2026-09-25-hoosh-consumer-bundle.md`, which asks for
+`szal_` renames, a bundle without the vendored libraries, and a
+register-into-an-existing-dispatcher entry point. Then vendor it at
+`src/vendor/szal-mcp.cyr` and register the tools in `mcp_init` next to `bote_echo`,
+with no transport changes. ([ADR 005](../decisions/005-mcp-via-bote.md).)
 
 ### Upstream-gated (sandhi)
 
