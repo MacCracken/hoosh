@@ -8,9 +8,9 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.7.0. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.7.1. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
-past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 closed what remained
+past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 and 2.7.1 closed what remained
 ([rust-old-retirement.md](rust-old-retirement.md)).
 
 ---
@@ -43,9 +43,9 @@ load, and measure with `scripts/` + `/proc/<pid>/status` rather than assuming.
   protobuf lib (proposed:
   `cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`).
 
-### Retire `rust-old/` *(after 2.7.0 is tagged)*
+### Retire `rust-old/` *(after 2.7.1 is tagged)*
 
-2.7.0 closed the last parity gaps with the archived Rust tree. Delete `rust-old/` once 2.7.0 is
+2.7.0 and 2.7.1 closed the last parity gaps with the archived Rust tree. Delete `rust-old/` once 2.7.1 is
 tagged; [rust-old-retirement.md](rust-old-retirement.md) has the checklist and the list of
 deliberate non-ports, so nothing needs the Rust tree afterwards.
 
@@ -71,13 +71,15 @@ distlib. Register them in `mcp_init` alongside `bote_echo` — no transport chan
 
 ### Upstream-gated (sandhi)
 
-- **Connection pooling** — the high-value case is remote TLS-handshake reuse;
-  gated on sandhi keep-alive/pooling. (Local loopback connect ≪ inference latency,
-  so the local path has low ROI.)
-- **Certificate pinning + mTLS** — pinning/mTLS exist
-  (`sandhi_tls_policy_new_pinned`) but the high-level `sandhi_http_post`/`_stream`
-  client doesn't thread a TLS policy. Filed upstream
-  (`sandhi/docs/issues/2026-06-09-https-client-tls-policy-threading.md`).
+- **Remote SSE keep-alive** — local streams send `: keep-alive` every 15 s of
+  silence (2.7.0); remote streams cannot, because `sandhi_http_stream` gives the
+  caller no turn while the upstream is quiet. Filed 2026-09-25 as
+  `sandhi/docs/development/issues/2026-09-25-http-stream-no-idle-hook.md`
+  (proposes `sandhi_http_options_idle_ms` / `_idle_cb`).
+- **Connection pooling** — no longer upstream-gated: sandhi has
+  `sandhi_http_options_pool` (policy-bound requests bypass it). The high-value case
+  is remote TLS-handshake reuse; adopt it when that cost shows up. (Local loopback
+  connect ≪ inference latency, so the local path has low ROI.)
 
 ### Hardware detection — threaded detector *(low priority)*
 

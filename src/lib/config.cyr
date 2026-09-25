@@ -96,6 +96,61 @@ fn bind_addr_str(addr) {
     return to_cstr(str_builder_build(sb));
 }
 
+# Per-provider TLS policy (2.7.0): rust-old's tls_pinned_certs / client_cert /
+# client_key (config.rs:281-287). tls_pinned_certs were PEM files trusted as the
+# ONLY roots for that provider (reqwest tls_certs_only), which is sandhi's trust
+# store; the client pair is sandhi mTLS. sandhi takes one trust bundle, so the
+# certificates go in one PEM file. Returns the policy, 0 for none, or -1 when the
+# block would silently weaken TLS (several bundles, a missing file, half an mTLS
+# pair), which fails the config load rather than falling back to the system roots.
+fn _config_tls_policy(pp, purl) {
+    var pins = toml_get(pp, "tls_pinned_certs");
+    var ccert = toml_get(pp, "client_cert");
+    var ckey = toml_get(pp, "client_key");
+    if (pins == 0 && ccert == 0 && ckey == 0) { return 0; }
+    if (memeq(purl, "https", 5) == 0) {
+        hlog_warn("config: tls_pinned_certs / client_cert / client_key apply to https providers; ignored");
+        return 0;
+    }
+    var pol = 0;
+    if (pins != 0) {
+        var arr = alloc(8 * 8);
+        var n = _config_str_array(to_cstr(pins), arr, 8);
+        if (n > 1) {
+            hlog_error("config: tls_pinned_certs takes one PEM bundle; put the certificates in one file");
+            return 0 - 1;
+        }
+        if (n == 1) {
+            var bundle = load64(arr);
+            if (file_exists(bundle) == 0) {
+                hlog_error("config: tls_pinned_certs bundle not found");
+                return 0 - 1;
+            }
+            pol = sandhi_tls_policy_new_trust_store(bundle);
+            if (pol == 0) { return 0 - 1; }
+        }
+    }
+    if (ccert != 0 || ckey != 0) {
+        if (ccert == 0 || ckey == 0) {
+            hlog_error("config: client_cert and client_key must be set together");
+            return 0 - 1;
+        }
+        var cc = to_cstr(ccert);
+        var ck = to_cstr(ckey);
+        if (file_exists(cc) == 0 || file_exists(ck) == 0) {
+            hlog_error("config: client_cert or client_key file not found");
+            return 0 - 1;
+        }
+        var m = sandhi_tls_policy_new_mtls(cc, ck);
+        if (m == 0) { return 0 - 1; }
+        pol = sandhi_tls_policy_combine(pol, m);
+    }
+    if (pol != 0 && sandhi_tls_policy_enforcement_available() == 0) {
+        hlog_warn("config: TLS policy set but this build cannot enforce it; the route will fail closed");
+    }
+    return pol;
+}
+
 fn load_config(path) {
     var sections = toml_parse_file(path);
     if (vec_len(sections) == 0) { return 0; }
@@ -309,6 +364,10 @@ fn load_config(path) {
             if (rpm_str != 0) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }
+
+            var tpol = _config_tls_policy(pp, purl);
+            if (tpol < 0) { return 0; }
+            store64(route + ROUTE_TLS_POLICY, tpol);
 
             # Per-provider output cap (2.5.2) — a request asking for more
             # max_tokens than this is clamped down to it, with a warn log.

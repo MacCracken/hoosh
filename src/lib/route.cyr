@@ -2,7 +2,7 @@
 # Requires: types.cyr
 
 enum RouteField {
-    ROUTE_SIZE       = 80;
+    ROUTE_SIZE       = 88;
     ROUTE_PROVIDER   = 0;
     ROUTE_PRIORITY   = 8;
     ROUTE_PATTERNS   = 16;
@@ -13,6 +13,7 @@ enum RouteField {
     ROUTE_RATE_LIMIT = 56;
     ROUTE_MAX_TOKENS = 64;
     ROUTE_HEALTH     = 72;
+    ROUTE_TLS_POLICY = 80;   # sandhi TLS policy for https routes, or 0 (2.7.0)
 }
 
 # ── Per-route health record (2.5.5) ──
@@ -60,6 +61,7 @@ fn route_new(prov, priority, base_url) {
     store64(r + ROUTE_RATE_LIMIT, 0);
     store64(r + ROUTE_MAX_TOKENS, 0);
     store64(r + ROUTE_HEALTH, _health_record_new());
+    store64(r + ROUTE_TLS_POLICY, 0);
     return r;
 }
 
@@ -68,6 +70,7 @@ fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
 fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
 fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
 fn route_api_key(r) { return load64(r + ROUTE_API_KEY); }
+fn route_tls_policy(r) { return load64(r + ROUTE_TLS_POLICY); }
 fn route_rate_limiter(r) { return load64(r + ROUTE_RATE_LIMIT); }
 # Per-provider output cap (2.5.2). 0 = no limit; a request asking for more is
 # clamped to this rather than rejected.

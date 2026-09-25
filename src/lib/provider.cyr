@@ -263,6 +263,35 @@ fn _remote_http_opts() {
     return o;
 }
 
+# The same options plus the route's TLS policy (2.7.0: [[providers]]
+# tls_pinned_certs / client_cert / client_key). sandhi fails closed when a
+# policy cannot be enforced, and bypasses the connection pool for it.
+fn _remote_http_opts_for(route) {
+    var o = _remote_http_opts();
+    if (o == 0) { return 0; }
+    var pol = route_tls_policy(route);
+    if (pol != 0) { sandhi_http_options_tls_policy(o, pol); }
+    return o;
+}
+
+# Options for a remote STREAM (2.7.0). The stream used sandhi_http_stream with no
+# options, so every getter answered 0: no connect deadline and no read timeout,
+# and a provider that accepted and then went silent parked a worker forever, the
+# failure 2.6.6 closed for sandhi_http_post and missed here. read_ms is the idle
+# bound, as on the local stream path; there is no total deadline, so a long
+# generation is not cut off.
+fn _remote_stream_opts(route) {
+    var o = sandhi_http_options_new();
+    if (o == 0) { return 0; }
+    sandhi_http_options_connect_ms(o, REMOTE_CONNECT_MS);
+    sandhi_http_options_read_ms(o, REMOTE_READ_MS);
+    sandhi_http_options_write_ms(o, REMOTE_READ_MS);
+    sandhi_http_options_max_response_bytes(o, REMOTE_MAX_BYTES);
+    var pol = route_tls_policy(route);
+    if (pol != 0) { sandhi_http_options_tls_policy(o, pol); }
+    return o;
+}
+
 fn route_is_remote(route) {
     var base = route_base_url(route);
     if (base == 0) { return 0; }
@@ -1175,7 +1204,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             url = _provider_url(base, path);
         }
         var hdrs = _provider_headers(route);
-        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts());
+        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts_for(route));
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);

@@ -69,7 +69,7 @@ slow cadence; supersede with a new ADR or an `## Update` section rather than edi
 | 001 HTTP Gateway | Accepted | Evergreen rationale |
 | 002 Audit Chain | Accepted | **Re-read needed** — 2.5.7 changed the threat model materially: the signing key moved out of the binary into `[audit] signing_key`, auditing became opt-in, and `audit_verify` gained chain-link verification. ADR-002 predates all three |
 | 003 Majra Messaging | Accepted | Predates the 2.3.4 event-bus use of majra — that landing is in ADR-010; reconcile if 003 is ever revised |
-| 004 Auth & Security | Accepted | Mentions TLS pinning — still **deferred** (sandhi policy-threading gap; see roadmap) |
+| 004 Auth & Security | Accepted | TLS pinning + mTLS implemented in 2.7.0 on sandhi TLS policies (note in the ADR) |
 | 005 MCP via Bote + Szál | Accepted | szál (58 tools) still pending; `bote_echo` smoke tool live |
 | 006 Kavach Tool Sandbox | **Proposed** | Not implemented |
 | 007 Cyrius 6 Modernization | Accepted | Historical (toolchain has since advanced to 6.4.62) |

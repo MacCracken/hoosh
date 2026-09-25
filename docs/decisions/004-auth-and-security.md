@@ -29,6 +29,13 @@ Hoosh proxies API keys to paid providers and handles user inference data. It nee
 - Loud failure: if all pinned certs fail to load, logs `error!` (not silent degradation)
 - Shared `build_provider_client()` utility across all 12+ providers
 
+> **2.7.0 (Cyrius):** implemented on sandhi TLS policies, attached per route and
+> threaded through every remote call and stream. `tls_pinned_certs` is one PEM
+> bundle (a sandhi trust store; sandhi keeps a single bundle, so several paths
+> refuse the config), and `client_cert` + `client_key` are sandhi mTLS. A missing
+> file or half an mTLS pair refuses the config instead of logging and continuing
+> with the system roots. `rate_limit_rpm` is accepted alongside `rate_limit`.
+
 ### Secret Management
 
 - Config `Debug` impls redact `api_key`, `signing_key`, and auth `tokens`

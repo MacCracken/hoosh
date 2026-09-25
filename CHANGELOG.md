@@ -5,6 +5,72 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.7.1] — 2026-09-25
+
+**The last rust-old parity item, and three fixes found while filing the sandhi issue.** 2.7.0 listed
+per-provider TLS pinning and mTLS as a non-port blocked on sandhi. That came from a stale roadmap entry,
+not from sandhi. **959 assertions** (was 943).
+
+### Added — per-provider TLS pinning and mTLS
+
+rust-old's `tls_pinned_certs`, `client_cert` and `client_key` provider keys are ported. sandhi 1.4.6
+threads a TLS policy through `sandhi_http_*` and `sandhi_http_stream`, 1.6.0 enforces pinning, trust
+stores and mTLS natively, and hoosh's bundled sandhi 1.9.17 has all of it.
+
+- **The keys.** `tls_pinned_certs` is the PEM bundle trusted as the provider's only roots, as rust-old's
+  `tls_certs_only` did; in sandhi it is a trust store. `client_cert` and `client_key` present a client
+  identity. The policy lives on the route (`ROUTE_TLS_POLICY`) and goes to every remote call and stream.
+- **One bundle.** sandhi keeps a single trust bundle, so several paths refuse the config rather than
+  silently dropping all but one.
+- **Fail closed.** A missing file, or half an mTLS pair, also refuses the config. rust-old logged the
+  problem and carried on with the system roots.
+- **Scope.** On a plain-http route the keys are ignored, with a warning.
+
+### Fixed — remote streams had no timeouts
+
+The remote streaming path called `sandhi_http_stream` with no options, so it had no connect deadline and
+no read timeout. A provider that accepted the connection and then went silent held a worker forever, and
+seven such streams hung the gateway. 2.6.6 fixed this for `sandhi_http_post` and missed the stream.
+Streams now get a 10 s connect deadline and a 300 s idle bound. They get no total deadline, so a long
+generation is not cut off.
+
+### Fixed — the semantic cache never matched through Ollama
+
+The semantic cache embeds each query. For an Ollama route it posted the OpenAI-shaped body to the legacy
+`/api/embeddings`, which reads `prompt`, not `input`. The answer held no vector, so an Ollama embedding
+model never produced a semantic hit. It now uses `/api/embed` and the `/v1/embeddings` normalizer from
+2.7.0.
+
+### Filed upstream — remote SSE keep-alive
+
+Remote streams still cannot send keep-alives: `sandhi_http_stream` gives the caller no turn while the
+upstream is silent. Filed as `sandhi/docs/development/issues/2026-09-25-http-stream-no-idle-hook.md`.
+The issue checks sandhi's full stream surface first, proposes `sandhi_http_options_idle_ms` / `_idle_cb`,
+flags partial TLS records across a timed-out read, and specifies a gate.
+
+### Tests
+
+Two groups, 16 assertions:
+
+- `rustold_provider_tls`: the TLS config decisions and the remote stream options.
+- `rustold_semantic_ollama`: the semantic parser reading a normalized Ollama answer, and the empty legacy
+  answer it used to get.
+
+### Docs
+
+- The roadmap's sandhi items are corrected. Pinning and mTLS are done. Connection pooling is no longer
+  upstream-gated, since sandhi has `sandhi_http_options_pool`. Remote keep-alive now points at the new
+  issue.
+- ADR 004 and doc-health note the TLS implementation, and `hoosh.cyml` documents the three keys.
+- `rust-old-retirement.md` moves TLS pinning to "ported". Deletion now follows 2.7.1, the last tag that
+  contains `rust-old/`.
+
+### Gates
+
+fmt, lint, vet and deny are clean, and symbol coverage is 42%. Every CI step, the benchmark gate
+included, was green when replayed against a clean export of the tracked tree. No benchmarked path
+changed, so `bench-history.csv` was not re-recorded. Binary: 2,862,408 → 2,862,824 bytes.
+
 ## [2.7.0] — 2026-09-25
 
 **Closes rust-old parity so the Rust tree can be deleted.** A second pass over `rust-old/` checked the

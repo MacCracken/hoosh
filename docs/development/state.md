@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| **Version** | **2.7.0** (closes rust-old parity ahead of its deletion; release detail in the CHANGELOG) |
+| **Version** | **2.7.1** (last rust-old parity item: provider TLS pinning/mTLS; release detail in the CHANGELOG) |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
 | **Binary** (x86_64 static ELF) | ~2.8 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
 | **Source** | ~13,200 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 943 assertions (`tests/hoosh.tcyr`) |
+| **Tests** | 959 assertions (`tests/hoosh.tcyr`) |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
 | **Coverage** | symbol coverage 42% (`scripts/coverage.sh`, CI floor 30%) |
@@ -57,7 +57,7 @@ re-vendors the bundle. Filed as
 The rust-old parity closeout arc (**2.5.1 – 2.5.11**) is done. It began with a
 full behavioral diff of the archived Rust tree (1,007 behaviors catalogued; see
 [rust-old-parity-review.md](rust-old-parity-review.md)) which found the port
-matched rust-old's *surface area* but not its *request path*. 2.7.0 closed the remaining gaps
+matched rust-old's *surface area* but not its *request path*. 2.7.0 and 2.7.1 closed the remaining gaps
 before the Rust tree's deletion ([rust-old-retirement.md](rust-old-retirement.md)).
 
 Ten bands closed that gap and an eleventh hardened the result. The more useful

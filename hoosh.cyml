@@ -14,6 +14,9 @@ health_check_interval_secs = 30
 # Per-provider knobs live on each [[providers]] block:
 #   max_tokens_limit = 4096   # clamp any request asking for more (0/omit = no cap)
 #   rate_limit       = 600    # requests per minute (rust-old's rate_limit_rpm also works)
+#   tls_pinned_certs = "/etc/hoosh/provider-ca.pem"   # https only: trust ONLY this PEM bundle
+#   client_cert      = "/etc/hoosh/client.pem"        # https only: mTLS, with client_key
+#   client_key       = "/etc/hoosh/client.key"
 #   models           = ["llama*", "mistral*"]
 #   enabled          = false  # keep the route configured but out of selection
 

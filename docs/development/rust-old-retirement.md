@@ -1,15 +1,15 @@
 # Retiring `rust-old/`
 
-**Date**: 2026-09-25 · **Release**: 2.7.0 · **Compared**: `rust-old/` (Rust v1.3.0, 22,956 lines) against
+**Date**: 2026-09-25 · **Releases**: 2.7.0, 2.7.1 · **Compared**: `rust-old/` (Rust v1.3.0, 22,956 lines) against
 `src/` (Cyrius, ~13,200 lines)
 
 `rust-old/` is the archived Rust implementation hoosh 2.x was ported from. This document records the
-last parity check before it is deleted, the items 2.7.0 ported to close it, and every behavior that was
+last parity check before it is deleted, the items 2.7.0 and 2.7.1 ported to close it, and every behavior that was
 deliberately not carried over, so nobody needs the Rust tree to know what it did.
 
-After the deletion, the tree stays in git history: `git show 2.7.0:rust-old/src/server/handlers.rs` and
+After the deletion, the tree stays in git history: `git show 2.7.1:rust-old/src/server/handlers.rs` and
 so on. The `rust-old <file>:<line>` citations in `src/` comments and in the CHANGELOG refer to that
-tree as of tag **2.7.0**.
+tree as of tag **2.7.1**, the last release that contains it.
 
 ## Method
 
@@ -26,7 +26,7 @@ closed. This second pass went back to the Rust tree and checked, against `src/`:
 - embeddings, tools, and the hardware endpoints;
 - each item of the July review.
 
-## Ported in 2.7.0
+## Ported in 2.7.0 and 2.7.1
 
 | Gap | rust-old | Now |
 |---|---|---|
@@ -41,6 +41,8 @@ closed. This second pass went back to the Rust tree and checked, against `src/`:
 | `POST /v1/hardware/models {model?, quantization?}` | per-model lookup | same; GET keeps the size table |
 | placement `recommendation` / `cloud_alternatives` | sharding plan + cloud options | `sharding` + `cloud_alternatives` |
 | SSE keep-alive | comment every 15 s | local streams; remote see below |
+| per-provider `tls_pinned_certs`, `client_cert` / `client_key` (2.7.1) | PEM roots only + mTLS identity | sandhi trust store + mTLS on the route, every remote call and stream |
+| semantic cache embeddings through Ollama (2.7.1) | `/api/embed` | same (it posted to the legacy endpoint with the wrong field) |
 
 The July review's items were already fixed in 2.5.x and 2.6.x; the CHANGELOG entries name each one.
 
@@ -58,8 +60,7 @@ Each of these is a decision, not an omission.
 | `/v1/audio/transcriptions`, `/v1/audio/speech`, `whisper` / `tts` config, `transcribe` / `speak` CLI | Audio moved to **svara**; hoosh keeps the provider interface only |
 | `POST /v1/hardware/format` (a file path) | Became `POST /v1/hardware/model-format` taking raw bytes in 2.4.1: no server-side path access |
 | szál's 58 MCP tools, tool discovery and announce, `hoosh_workflow_step_*` metrics | Waiting on a szál Cyrius distlib; `/v1/tools/*` runs on bote with a smoke tool until then |
-| Per-provider `tls_pinned_certs`, `client_cert`, `client_key` | sandhi's high-level HTTP client does not thread a TLS policy yet (roadmap, upstream-gated) |
-| SSE keep-alive on **remote** streams | sandhi drives the remote stream loop and has no idle hook; local streams have it |
+| SSE keep-alive on **remote** streams | sandhi drives the remote stream loop and has no idle hook; local streams have it. Filed as `sandhi/docs/development/issues/2026-09-25-http-stream-no-idle-hook.md` |
 | Live model listing from **remote** providers in `/v1/models` | Deliberate: no outbound call per `/v1/models`; remote routes list the catalog models they match |
 | `hoosh_request_duration_seconds{provider,model}`, `hoosh_requests_total{provider,model,status}` | Replaced by the per-provider `hoosh_provider_latency_ms` histogram ([ADR 010](../decisions/010-observability.md)); `hoosh_requests_total` is unlabelled |
 | OpenTelemetry via OTLP gRPC (`telemetry.rs`) | OTLP/HTTP+JSON export instead ([ADR 010](../decisions/010-observability.md)) |
@@ -68,17 +69,18 @@ Each of these is a decision, not an omission.
 | `/v1/hardware` carrying available VRAM, interconnect and environment | Split out to `GET /v1/hardware/telemetry` (2.5.9) |
 | `/v1/health/providers` `last_error`; `/v1/audit` `total` / `chain_valid`; `/v1/queue/status` `queued` | Same information under hoosh's names (`consecutive_failures`, `count` / `valid`, `pending` / `processing`); rust-old's queue was never fed, so its `queued` was always 0 |
 | Ollama embeddings joining array inputs into one string | Not reproduced: an array `input` returns one embedding per item |
+| Several `tls_pinned_certs` files | sandhi keeps one trust bundle; put the certificates in one PEM file (several paths refuse the config rather than silently dropping one) |
 
 ## Deleting `rust-old/`
 
 Nothing in the build, CI, scripts, tests, fuzz targets or coverage reads `rust-old/`; every reference is
-a comment or a document. After 2.7.0 is tagged:
+a comment or a document. After 2.7.1 is tagged:
 
 1. `git rm -r rust-old/`.
 2. Keep the `rust-old <file>:<line>` provenance comments in `src/`, `tests/` and the CHANGELOG. They
-   resolve against tag 2.7.0, as stated above.
+   resolve against tag 2.7.1, as stated above.
 3. README "Port comparison": keep the Rust figures (22,956 lines / 58 files, ~5.1 MB) as historical
-   numbers, and say the Rust tree was removed after 2.7.0.
+   numbers, and say the Rust tree was removed after 2.7.1.
 4. `docs/development/state.md`, `docs/development/roadmap.md`, `docs/index.md`, `docs/doc-health.md`:
    change present-tense mentions of `rust-old/` as a live reference to past tense, and point to this
    document.
