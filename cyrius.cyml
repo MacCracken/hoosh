@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.6.6"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -15,7 +15,12 @@ output = "build/hoosh"
 # bayan (6.1.27) is the consolidated bigint + toml + json module — the
 # standalone bigint/toml/json snapshot files were merged into it. It must
 # precede sigil (sigil references bayan's u256 surface).
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench"]
+# sys must precede sigil too: since sigil 3.12.18 (cyrius 6.6.4) its
+# agnosys_uname calls lib/sys.cyr's sys_uname. Without sys the build warns
+# `undefined function 'sys_uname'` and that call compiles to a trap. sigil
+# still carries its own copy of uname_release + the UTS_* offsets (identical
+# body and values), so expect one benign `duplicate fn 'uname_release'`.
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sys", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
 # bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,
@@ -23,15 +28,15 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.3.22"
+tag = "2.4.0"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
 # /v1/tools/list + /v1/tools/call. We consume bote's **core** bundle
-# (`[lib.core]`, 9 transport-free modules: error/protocol/jsonx/registry/
-# events/audit/dispatch/codec/schema) — the surface for consumers that
-# wrap bote's Dispatcher/Registry but supply their own transport, exactly
-# hoosh's HTTP server.
+# (`[lib.core]`, 12 transport-free modules: error/protocol/jsonx/registry/
+# prompts/resources/events/audit/dispatch/codec/schema/content) — the
+# surface for consumers that wrap bote's Dispatcher/Registry but supply
+# their own transport, exactly hoosh's HTTP server.
 #
 # NOT consumed via `[deps.bote]`: unlike ai-hwaccel (whose manifest has no
 # git sub-deps), bote's manifest declares `[deps.libro]` + `[deps.majra]`
@@ -41,15 +46,20 @@ modules = ["dist/ai-hwaccel.cyr"]
 # (agnosys) collides with bote-core's registry constructor ("last definition
 # wins", a correctness hazard) and trips an agnosys slice-include error.
 # (As of bote 2.7.6 the constructor is `tool_registry_new`; the other
-# `registry_*` ops keep their names — and ai-hwaccel still ships its own
-# `registry_new`, so hoosh calls `tool_registry_new` explicitly in mcp.cyr.)
-# The core bundle itself is fully self-contained (no includes, no libro/
-# majra symbols), so we vendor it directly as `src/vendor/bote-core.cyr`
-# (committed; see that file's header for the pinned bote tag) and include
-# it from src/main.cyr. Re-sync with `./scripts/sync-bote.sh <tag>`.
+# `registry_*` ops keep their names. ai-hwaccel's own constructor is
+# `hw_registry_new`, so the two no longer share a name.)
+# The core bundle itself is self-contained (no libro/majra symbols; its only
+# includes are the stdlib hashmap + bayan, both listed above), so we vendor
+# it directly as `src/vendor/bote-core.cyr` (committed; see that file's
+# header for the pinned bote tag) and include it from src/main.cyr. Re-sync
+# with `./scripts/sync-bote.sh <tag>`.
 #
-# majra (2.4.7) — provider event bus pubsub — is vendored the same way at
-# src/vendor/majra.cyr (self-contained dist/majra.cyr). Note: majra defines
-# ratelimit_new/ratelimit_check that collide by name with src/lib/ratelimit.cyr
-# (different arity); harmless — they're dead code in majra's core pubsub, so
-# hoosh's win (last-definition). Powers src/lib/events.cyr.
+# majra (2.9.1) — provider event bus pubsub — is vendored the same way at
+# src/vendor/majra.cyr (self-contained dist/majra.cyr, no includes; majra
+# ships no pubsub-only profile, so this is its smallest bundle). Re-sync by
+# fetching dist/majra.cyr at the new tag. majra still exports
+# ratelimit_new/ratelimit_check, which is why src/lib/ratelimit.cyr names its
+# own hoosh_ratelimit_* — no function names overlap. The one shared name is
+# the enum member ERR_NONE (= 0 in both majra and src/lib/types.cyr; majra
+# 2.8.0 renamed its codes MAJRA_ERR_* and keeps ERR_* as aliases until 3.0.0).
+# Powers src/lib/events.cyr.

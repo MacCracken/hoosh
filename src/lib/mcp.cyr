@@ -35,7 +35,7 @@ fn _hoosh_tool_echo(args, claims) {
 # Idempotent: a second call rebuilds (only invoked once from cmd_serve).
 fn mcp_init() {
     # bote 2.7.6 renamed the registry constructor to tool_registry_new
-    # (ai-hwaccel also defines registry_new — call bote's explicitly).
+    # (ai-hwaccel's own constructor is hw_registry_new — no name overlap).
     var reg = tool_registry_new();
     var disp = dispatcher_new(reg);
     # Empty object schema — bote_echo accepts any arguments.

@@ -7,20 +7,21 @@
 # bundle's events_majra / audit_libro modules). `cyrius deps` resolves
 # those transitively, vendoring libro/majra → bayan/ganita/agnosys into
 # the compile set, where the agnos superset collides with bote-core's
-# registry_new and trips an agnosys slice-include error. The core bundle
-# (`dist/bote-core.cyr`, bote's [lib.core] profile) is fully self-contained
-# — 9 transport-free modules, no includes, no libro/majra symbols — so we
-# vendor just that file and skip the dep machinery entirely.
+# registry constructor and trips an agnosys slice-include error. The core
+# bundle (`dist/bote-core.cyr`, bote's [lib.core] profile) is self-contained
+# — 12 transport-free modules, no libro/majra symbols, and its only includes
+# are the stdlib hashmap + bayan — so we vendor just that file and skip the
+# dep machinery entirely.
 #
 # Living under src/ (not a top-level vendor/) keeps `cyrius vet` happy:
 # cyaudit trusts the authored src tree; a top-level vendor/ file reads as
 # untrusted. The fmt/lint CI globs are src/main.cyr + src/lib/*.cyr, so the
 # generated bundle in src/vendor/ is excluded from those gates.
 #
-# Usage: ./scripts/sync-bote.sh [tag]   (default: 2.7.6)
+# Usage: ./scripts/sync-bote.sh [tag]   (default: 3.3.13)
 set -euo pipefail
 
-TAG="${1:-2.7.6}"
+TAG="${1:-3.3.13}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$REPO_ROOT/src/vendor/bote-core.cyr"
 URL="https://raw.githubusercontent.com/MacCracken/bote/${TAG}/dist/bote-core.cyr"

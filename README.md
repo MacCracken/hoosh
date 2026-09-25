@@ -15,11 +15,11 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | Metric | Value |
 |--------|-------|
-| **Language** | Cyrius (pin 6.4.62) |
-| **Source** | ~11,070 lines / 32 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~15 MB (static ELF, x86_64) |
+| **Language** | Cyrius (pin 6.6.6) |
+| **Source** | ~12,540 lines / 34 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.8 MB (static ELF, x86_64) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 663 assertions, 141 groups, 0 failures |
+| **Tests** | 805 assertions, 152 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -29,12 +29,13 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | | Rust | Cyrius | Ratio |
 |---|------|--------|-------|
-| Source | 22,956 lines / 58 files | ~11,070 lines / 32 files | **~2x fewer** |
+| Source | 22,956 lines / 58 files | ~12,540 lines / 34 files | **~1.8x fewer** |
 | Dependencies | 40+ crates | 0 third-party | **Zero third-party** |
 
-The Cyrius binary is larger (~15 MB vs ~5.1 MB) — it statically links the whole
-stdlib plus three vendored AGNOS distlibs with no dead-code elimination in the
-default build. `CYRIUS_DCE=1` reclaims a chunk of it.
+The Cyrius binary is now the smaller one (~2.8 MB vs ~5.1 MB), even though it
+statically links the whole stdlib plus three vendored AGNOS distlibs.
+`CYRIUS_DCE=1` does not shrink the file: it NOPs the ~1.1 MB of unreachable
+functions in place rather than removing them.
 
 ---
 

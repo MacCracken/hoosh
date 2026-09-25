@@ -5,6 +5,137 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.6.11] — 2026-09-25
+
+**Toolchain and dependency refresh.** cyrius 6.6.2 → 6.6.6, `ai-hwaccel` 2.3.22 → 2.4.0, vendored
+`bote-core` 3.1.4 → 3.3.13 and `majra` 2.5.3 → 2.9.1. No gateway logic changed. **805 assertions**,
+fmt/lint/vet/deny clean, and every CI step green when run step for step against a clean `git archive`
+export. The build gains one benign warning, the `uname_release` duplicate explained below. 6.6.6
+also reports sigil's per-bank static crypto buffer (`lib/sigil.cyr:25118`) as a located warning;
+6.6.2 printed the same condition as an unlocated note.
+
+### Changed — cyrius pin 6.6.2 → **6.6.6**
+
+The snapshot drops nothing hoosh uses; its one new file, `alloc_cx.cyr`, is the cx-target allocator.
+Bundled modules in hoosh's compile set moved: sandhi 1.9.16 → 1.9.17, sigil 3.12.16 → 3.12.18, patra
+1.14.1 → 1.14.3, sakshi 2.5.1 → 2.5.2, bayan 1.5.5 → 1.5.6.
+
+**`sys` added to `[deps].stdlib`, ahead of `sigil`.** sigil 3.12.18 (cyrius 6.6.4) changed
+`agnosys_uname` from a raw `syscall(63)` (which is `read(2)` on aarch64) to `lib/sys.cyr`'s
+`sys_uname`. A hand-written stdlib list does not pick up that dependency, so the 6.6.6 build warned
+`undefined function 'sys_uname'` and the call compiled to a trap. The only caller is sigil's
+kernel-module sign-file fallback, which hoosh never reaches (DCE NOPs it), so this was a latent trap,
+not a live crash. The fix follows the upstream guidance in cyrius `docs/ecosystem.md`. sigil still
+carries its own `uname_release` and `UTS_*` offsets, identical in body and value on every target, so
+the build now prints one benign `duplicate fn 'uname_release'` warning from `lib/sigil.cyr`.
+
+**`lib/` re-synced clean.** The working `lib/` held 105 files. Seven of them (ganita, niyama, yukti,
+vani, mabda, sankoch, yantra) were leftovers from older toolchains that the declared-subset
+`cyrius lib sync` never refreshes; hoosh includes none of them, and the build warned that `./lib/`
+shadowed the pinned snapshot. `cyrius.lock` had locked those leftovers too, 111 entries in all. It now
+records exactly what a fresh checkout vendors: 81 entries, written in path order, which is most of the
+lock diff. The regenerated lock is byte-identical to one produced from a clean `git archive` export,
+so CI's `cyrius deps --verify` sees the same set.
+
+### Changed — `ai-hwaccel` 2.3.22 → **2.4.0**
+
+Every function, enum constant and `AIHW_BACKEND_COUNT` that hoosh references is unchanged in arity
+and value, and no new name collides with hoosh. The changes (2.3.25–2.4.0) are in detection and
+accounting:
+
+- A GPU reported by both Vulkan and CUDA/ROCm is now listed once, matched by PCI vendor:device, and
+  Vulkan views of Apple Metal GPUs are dropped. Device counts and totals go down on such hosts.
+- `reg_total_memory` and `reg_total_accel_memory` count shared system RAM once instead of once per
+  device (unified memory, client NPUs, GH200). Vulkan iGPUs are sized from their real heap, and
+  software Vulkan devices (lavapipe, SwiftShader) are no longer reported as GPUs.
+- macOS reads real RAM from `hw.memsize` and detects Apple Silicon through sysctl.
+- The threaded detector's post-pass bug that 2.5.9 worked around (the registry was passed where a
+  `system_io` was expected) is fixed upstream at 2.3.25. hoosh still runs the serial detector:
+  switching back is a separate change, and the threaded path orders profiles differently.
+- ⚠ `POST /v1/hardware/simulate` still sums per-device memory itself (`_sim_snapshot`). On a
+  unified-memory host its accelerator total now differs from the `reg_total_accel_memory` figure that
+  `GET /v1/hardware` and placement use. The simulator's own number is unchanged by this upgrade: it
+  counted shared RAM once per device before, as ai-hwaccel did. What changed is that the two no longer
+  agree.
+
+`data/cloud_pricing.json` and `data/models.json` are byte-identical between the two tags, so there
+was nothing to re-sync.
+
+### Changed — vendored `bote-core` 3.1.4 → **3.3.13**
+
+All ten bote-core functions hoosh calls keep their signatures and bodies. `_json_emit_escaped` is
+byte-identical and not `private`. The rest of the upgrade is additive. Behavior visible through
+`POST /v1/tools/call`, which hands the body to bote's codec:
+
+- `ping` now answers `{"result":{}}` instead of `-32601`.
+- Protocol version `2025-06-18` is accepted.
+- `initialize` reports `serverInfo` version `3.3.13`. The name is still `bote`; the new
+  `dispatcher_set_server_info` (3.3.0) could make it `hoosh`.
+
+The core profile is now 12 modules (`content.cyr` joined at 3.3.6), and `scripts/sync-bote.sh`
+defaults to 3.3.13. The rationale for vendoring still holds: bote 3.3.13 still declares `[deps.libro]`
+and `[deps.majra]`.
+
+### Changed — vendored `majra` 2.5.3 → **2.9.1**
+
+`pubsub_new`, `pubsub_publish` and `pubsub_total_published` keep their signatures and contract, so
+`src/lib/events.cyr` needs no change. majra no longer declares top-level `SYS_CLOCK_GETTIME` /
+`SYS_GETRANDOM` vars holding x86_64 numbers, which shared names with the stdlib's per-architecture
+syscall enum. The one remaining shared name is the enum member `ERR_NONE`, which is 0 on both sides.
+majra 2.8.0 renamed its codes `MAJRA_ERR_*` and keeps `ERR_*` as aliases until 3.0.0. The bundle grows
+from 3,284 to 5,984 lines, and majra ships no pubsub-only profile.
+
+### Fixed — every published event leaked 152 bytes (via majra 2.9.1)
+
+majra 2.5.3's `pubsub_publish` called `map_keys(patterns)` on every publish. That allocates a vec (a
+24-byte header plus a 16-slot buffer), and hoosh's bump allocator never frees. `event_emit` publishes
+on every completed and failed inference, every rate-limit rejection and every health transition. So a
+long-running gateway grew by at least 152 bytes per completed request and got nothing for it: hoosh
+has no pattern subscribers. 2.9.1 snapshots the pattern slot array under the lock instead, allocates
+nothing per publish, and skips the pattern walk when there are no pattern subscribers.
+
+### Benchmarks — ⚠ the instrument changed
+
+**cyrius 6.6.5 rewrote `lib/bench.cyr`, so `bench-history.csv` has a measurement break at this
+release.** Per-op figures used to be truncated to whole ns and are now rounded half-up. Clock-read
+cost is now netted at read time, and the calibration floor is re-checked. The harness's own note:
+*"a row can move by up to 1 ns against 6.6.4"*. On rows of a few ns that is +5–15% with no code
+change. Compiled against the **old 6.6.2 harness**, the 2.6.11 code measures exactly what 2.6.10 did
+on every sub-40 ns row: `pool_available`, `work_queue_push_pop`, `rate_limit_check`,
+`event_publish_ring`, `estimate_tokens_per_provider` and `route_matches_model` all read 4 / 8 / 32
+ns, same as before. So the jumps `benchmarks.md` shows on those rows are the instrument, not hoosh.
+
+Method: back to back on one machine against a pristine 6.6.2 export of HEAD, five alternating rounds
+per variant, comparing medians. Three variants separated the causes: 6.6.6 alone (old bote-core, no
+`sys`), the release built against the old harness, and the release as shipped. **No shift is
+attributable to the dependency bumps.** Two shifts persist under the old harness and come from the
+toolchain itself, since both reproduce with the old bote-core and without `sys`:
+
+- `route_select_20_providers`: +3–9% across runs, about +25–75 ns on ~790 ns.
+- The constant-time auth pair is layout-sensitive. `auth_verify_wrong_late` read 90–94 ns on 6.6.2
+  and 100–105 ns on 6.6.6, while `auth_verify_wrong_early` swung between 91 and 104 ns across builds
+  that differ only in code the bench never runs. Under the shipped harness all three auth rows
+  (`ct_eq_bytes_lens`) sit at 101–107 ns wherever the mismatch falls. `lib/ct.cyr` and
+  `src/lib/auth.cyr` are unchanged.
+
+Every other row is within ±4% of 6.6.2 under the old harness, and within ±6% as shipped. The first
+single run showed `cache_insert` at +96%; alternated runs put it at 92–96 ns against 94–97 ns, so
+that was noise.
+
+Binary: 2,765,064 → 2,840,368 bytes (+75,304, +2.7%). The toolchain adds 12,904 bytes, `sys` 4,192,
+and the three dependency bumps 58,208.
+
+### Docs
+
+README stats (pin, source size, tests, binary) and the `docs/development/state.md` table are
+refreshed; both were several releases stale. The README also said the Cyrius binary was ~15 MB and
+that `CYRIUS_DCE=1` shrinks it. It is ~2.8 MB either way: DCE NOPs unreachable functions in place (~1.1
+MB of them here) rather than removing them. `CLAUDE.md`'s toolchain line said 6.5.35. Stale comments
+in `cyrius.cyml`, `src/main.cyr`, `src/lib/mcp.cyr` and `scripts/sync-bote.sh` are corrected: they
+cited bote 2.7.6 and majra 2.4.7, a 9-module include-free core bundle, a `registry_new` that
+ai-hwaccel renamed to `hw_registry_new` long ago, and a `ratelimit_*` collision that hoosh's
+`hoosh_ratelimit_*` naming already avoids.
+
 ## [2.6.10] — 2026-09-11
 
 **Migrated to the cyrius 6.6.x value form.** All 17 CI steps green.
