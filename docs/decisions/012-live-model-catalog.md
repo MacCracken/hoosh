@@ -63,6 +63,10 @@ effort for models that take it, a thinking budget for those that take only that,
 ones the model accepts, and `display: "summarized"` whenever thinking is on. A model the catalog has not listed gets
 what the client asked for, exactly as before.
 
+**2.8.1:** the entry's output ceiling also bounds the request. `max_tokens` is trimmed to the operator's
+`[[models]]` `max_output_tokens`, else the provider's listed ceiling (`catalog_out_cap`), because a provider refuses a
+request over it with a 400 rather than trimming it. The thinking budget is planned against the trimmed figure.
+
 ## Consequences
 
 - A new model appears in every client's picker at the next refresh, priced and shaped correctly, with no hoosh

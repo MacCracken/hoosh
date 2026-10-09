@@ -4082,6 +4082,47 @@ fn _t280_urlparse() {
     return 0;
 }
 
+# 2.8.1: the model's own output ceiling. Over it a provider answers 400, not a trim (measured 2026-10-09: Haiku 4.5
+# refuses 65536, every current Claude refuses 131072).
+fn _t281_catalog_out_cap() {
+    test_group("catalog_out_cap");
+    catalog_config_set(vec_new());
+    var hk = catalog_entry_new("claude-haiku-4-5-20251001", CATSRC_LIVE);
+    store64(hk + CAT_E_MAXOUT, 64000);
+    store64(hk + CAT_E_THINK, CAT_THINK_ENABLED | CAT_THINK_DISABLE);
+    var un = catalog_entry_new("some-model", CATSRC_LIVE);
+    assert_eq(catalog_out_cap(hk, "claude-haiku-4-5-20251001"), 64000, "out cap: the provider's own ceiling");
+    assert_eq(catalog_out_cap(un, "some-model"), 0, "out cap: a model listed with no ceiling is unknown");
+    assert_eq(catalog_out_cap(0, "never-listed"), 0, "out cap: a model no route listed is unknown");
+    assert_eq(catalog_clamp_out(64000, 65536), 64000, "clamp: reasoning=max's 65536 trimmed for Haiku 4.5");
+    assert_eq(catalog_clamp_out(128000, 131072), 128000, "clamp: 131072 trimmed to a 128000 ceiling");
+    assert_eq(catalog_clamp_out(128000, 4096), 4096, "clamp: a request under the ceiling is untouched");
+    assert_eq(catalog_clamp_out(0, 131072), 131072, "clamp: an unknown ceiling leaves the request as asked");
+    var plan = alloc(24);
+    catalog_thinking_plan(hk, 5, catalog_clamp_out(catalog_out_cap(hk, "claude-haiku-4-5-20251001"), 65536), plan);
+    assert_eq(load64(plan), CAT_PLAN_ENABLED, "clamp: Haiku 4.5 at max still thinks on a budget");
+    assert_eq(load64(plan + 16), 16384, "clamp: ...a budget inside the trimmed ceiling");
+    var cv = vec_new();
+    var ce = catalog_entry_new("claude-haiku-4-5-20251001", CATSRC_CONFIG);
+    store64(ce + CAT_E_MAXOUT, 8192);
+    vec_push(cv, ce);
+    catalog_config_set(cv);
+    assert_eq(catalog_out_cap(hk, "claude-haiku-4-5-20251001"), 8192,
+      "out cap: the operator's [[models]] max_output_tokens wins");
+    assert_eq(catalog_out_cap(hk, "claude-haiku-4-5"), 8192, "out cap: ...for the alias of its dated id too");
+    catalog_thinking_plan(hk, 5, catalog_clamp_out(catalog_out_cap(hk, "claude-haiku-4-5"), 65536), plan);
+    assert_eq(load64(plan + 16), 7168, "clamp: the budget is planned against the trimmed 8192 (8192 - 1024)");
+    var cv2 = vec_new();
+    var ce2 = catalog_entry_new("claude-haiku-4-5-20251001", CATSRC_CONFIG);
+    store64(ce2 + CAT_E_IN_PRICE, 1000);
+    vec_push(cv2, ce2);
+    catalog_config_set(cv2);
+    assert_eq(catalog_out_cap(hk, "claude-haiku-4-5-20251001"), 64000,
+      "out cap: a block that only prices keeps the provider's ceiling");
+    catalog_config_set(vec_new());
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -7749,6 +7790,7 @@ fn main() {
     _t280_sse_split_boundary();
     _t280_openai_extras();
     _t280_urlparse();
+    _t281_catalog_out_cap();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

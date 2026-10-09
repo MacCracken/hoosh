@@ -6,8 +6,8 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-10-09 (**v2.8.0**: CHANGELOG, roadmap, state, overview, README, index and hoosh.cyml
-> touched for the live catalog; ADR 012 added). The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the
+> **Last refresh**: 2026-10-09 (**v2.8.1**: CHANGELOG, state, README, roadmap, overview and ADR 012 touched for the
+> output-ceiling clamp). The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the
 > rust-old parity arc), when every doc below was re-read against the source.
 >
 > **What moved**: `roadmap.md` rewritten as forward-only (557 → 153 lines; ten

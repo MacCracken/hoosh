@@ -91,7 +91,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |
 | `dlp.cyr` | PII/secret scanner + privacy-aware routing |
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
-| `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
+| `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
 | `urlparse.cyr` | Scheme-aware host / port of a base url (2.8.0 — the remote health probe had been reading `https://` urls as `localhost:80`) |
 | `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09 |

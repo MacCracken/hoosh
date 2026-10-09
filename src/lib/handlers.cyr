@@ -2970,6 +2970,13 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         hlog_warn("chat: max_tokens clamped to the provider limit");
         g_maxt = mt_limit;
     }
+    # 2.8.1: and to the MODEL's own output ceiling, which the provider enforces with a 400 (catalog_out_cap).
+    var mo_cap = catalog_out_cap(catalog_find_on(route_provider(route), route_base_url(route), model_cstr),
+      model_cstr);
+    if (g_maxt > 0 && catalog_clamp_out(mo_cap, g_maxt) < g_maxt) {
+        hlog_warn("chat: max_tokens clamped to the model's output ceiling");
+        g_maxt = mo_cap;
+    }
 
     # The budget reservation follows the request's own output cap when it set
     # one. g_maxt comes from the raw scan, so — unlike the pre-2.5.2

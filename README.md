@@ -19,7 +19,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.9 MB (static ELF, x86_64) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 1192 assertions, 180 groups, 0 failures |
+| **Tests** | 1205 assertions, 181 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -255,7 +255,7 @@ tokens = "your-secret-token"
 ## Testing
 
 ```bash
-# Run tests (1192 assertions across 180 groups)
+# Run tests (1205 assertions across 181 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)

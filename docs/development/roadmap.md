@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.8.0. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.8.1. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
 past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 and 2.7.1 closed what remained
 ([rust-old-retirement.md](rust-old-retirement.md)).
@@ -47,6 +47,12 @@ load, and measure with `scripts/` + `/proc/<pid>/status` rather than assuming.
   OpenAI-compatible reasoning models; Gemini's `generationConfig.thinkingConfig` and Ollama's `think` are not mapped.
 - **Cache tokens.** Anthropic reports `cache_creation_input_tokens` / `cache_read_input_tokens` and every provider
   prices cached input lower; hoosh counts neither, so a cached prompt is costed at the full input rate.
+- **`POST /v1/cost/recommend` over the live catalog.** It ranks only routes' exact-model patterns
+  (`handle_cost_recommend` skips every pattern ending in `*`), so a gateway whose routes are all `claude-*`-style
+  answers it 404 ("no capable exact-model route"), and a model a provider lists but no pattern names is never
+  recommended. Rank each route's catalog entries instead: `metadata_lookup` and `estimate_cost_micro` already read
+  their live context window, vision bit and price. agnosai's B33 (choosing a model per tier from the catalog)
+  can use it.
 - **AGNOS build.** There is no `hoosh_agnos` build in CI or `scripts/` (the one on disk downstream is 2.4.11) —
   thoth's v1.0 gate 1 rung 2 (a real turn against the spine on AGNOS) waits on it. A follow-up, by the
   maintainer's call.
@@ -67,14 +73,20 @@ deliberate non-ports, so nothing needs the Rust tree afterwards.
 
 ### Test-suite structure
 
-- **Mirror drift is unguarded.** `tests/hoosh.tcyr` re-implements the logic it
-  tests rather than linking `src/` (`src/main.cyr` is a program, not a library).
-  That means src and its mirror can diverge while both stay internally consistent
-  and the suite stays green — which has happened twice (v2.5.6 pricing
-  local-provider ordering, v2.5.7 audit chain-link verification; in both the
-  mirror was right and src was wrong). `scripts/coverage.sh` is a floor against
-  *unwatched* code, not against drift. Closing this properly means making `src/`
-  linkable by tests, which is a structural change worth designing.
+- **Mirror drift is unguarded for most of the suite.** `tests/hoosh.tcyr` still
+  re-implements much of what it tests — the response-cache key, compression, the
+  semantic cache, batch, metrics, the trace and OTLP helpers, the config and router
+  pickers, the pool ring, DLP custom patterns, `main.cyr`'s flag parser and
+  hardware — rather than including it, so src and a mirror can diverge while both
+  stay internally consistent and the suite stays green. That has happened twice
+  (v2.5.6 pricing local-provider ordering, v2.5.7 audit chain-link verification;
+  in both the mirror was right and src was wrong). `scripts/coverage.sh` is a
+  floor against *unwatched* code, not against drift. A `src/lib/` module can be
+  included for real when its own includes allow — `pricing.cyr`, `metadata.cyr`,
+  `catalog.cyr`, `outcome.cyr` and `urlparse.cyr` are — so the fix goes module by
+  module: include each, and move a helper that lives in a module needing the whole
+  server (`handlers.cyr`, `main.cyr`) into one that does not, as `urlparse.cyr` was
+  split out of `http_client.cyr`.
 - **Split `tests/hoosh.tcyr` / `hoosh.bcyr` into per-topic units** — only if the
   suite keeps growing. Currently workable as single files.
 

@@ -614,6 +614,9 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     if (a_max <= 0) {
         if (effort > 0) { a_max = 16384; } else { a_max = 4096; }
     }
+    # 2.8.1: the default too stays inside the model's ceiling (a client's own value was trimmed in _chat_prep), and the
+    # thinking budget below is planned against what is actually sent.
+    a_max = catalog_clamp_out(catalog_out_cap(cat_e, model), a_max);
     var plan = alloc(24);
     catalog_thinking_plan(cat_e, effort, a_max, plan);
     var pmode = load64(plan);

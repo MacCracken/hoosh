@@ -786,6 +786,30 @@ fn catalog_add_thinking(sb, plan) {
     return 0;
 }
 
+# ── the model's own output ceiling (2.8.1) ──
+#
+# A request for more output than the serving model takes is refused by the provider, not trimmed. Measured
+# 2026-10-09: Anthropic answers `max_tokens: 65536 > 64000, which is the maximum allowed number of output tokens for
+# claude-haiku-4-5-20251001` with a 400, and every current Claude model refuses 131072 (their ceiling is 128000).
+# 2.8.0 already knew each model's ceiling — the Models API lists it and the catalog publishes it as
+# max_output_tokens — but clamped only to a route's max_tokens_limit, so a client asking for the most a NEWER model
+# takes (thoth's `reasoning = "max"` asks 65536) failed on every request to Haiku, Sonnet and Opus 4.5.
+#
+# The ceiling is the operator's [[models]] block's when it sets one (the operator's word wins, as everywhere in the
+# catalog), else what the serving route's provider listed (`e`, catalog_find_on); 0 when neither knows one.
+fn catalog_out_cap(e, model) {
+    var cfg = catalog_config_find(model);
+    if (cfg != 0) { if (cat_e_maxout(cfg) > 0) { return cat_e_maxout(cfg); } }
+    if (e != 0) { if (cat_e_maxout(e) > 0) { return cat_e_maxout(e); } }
+    return 0;
+}
+
+# `want` trimmed to `cap`; a cap of 0 (unknown) leaves it as asked.
+fn catalog_clamp_out(cap, want) {
+    if (cap > 0 && want > cap) { return cap; }
+    return want;
+}
+
 # ── OpenAI-compatible request extras ──
 #
 # reasoning_effort was never forwarded on an OpenAI-compatible route (only the Anthropic builder read it), so a

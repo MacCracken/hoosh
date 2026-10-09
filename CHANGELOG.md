@@ -5,6 +5,37 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.8.1] — 2026-10-09
+
+**A request's `max_tokens` is trimmed to the serving model's own output ceiling.** Providers refuse anything over
+it with a 400; they don't trim it. Measured 2026-10-09 against the live Anthropic API:
+- Haiku 4.5 answers `max_tokens: 65536 > 64000, which is the maximum allowed number of output tokens`.
+- Every current Claude model refuses 131072 (their ceiling is 128,000).
+
+2.8.0's catalog already held each model's ceiling, which the Models API lists and `/v1/models/catalog` publishes as
+`max_output_tokens`. But hoosh clamped only to a route's operator-set `max_tokens_limit`. So a client asking for
+the most a newer model takes failed on every request to Haiku, Sonnet and Opus 4.5. thoth's `reasoning = "max"`
+(65,536) is one such client, and so is its own `[hoosh].max_tokens` maximum (131,072). Found by thoth's repair
+batch 12 audit. **1205 assertions** (was 1192).
+
+### Fixed
+
+- **The model's ceiling clamps the request** (`catalog_out_cap`, `catalog_clamp_out`).
+  - The ceiling is the operator's `[[models]]` `max_output_tokens` when a block sets one (the operator's word wins,
+    as everywhere in the catalog). Otherwise it is what the serving route's provider listed. A model with no known
+    ceiling is sent what was asked, as before.
+  - `_chat_prep` trims the client's value after the route clamp, so the token-budget reservation counts what is
+    actually sent. It logs `chat: max_tokens clamped to the model's output ceiling`.
+  - The Anthropic builder applies the same ceiling to its own default (16,384 with thinking, 4,096 without), and
+    plans a thinking budget against the trimmed figure. A Claude 4.5 model at effort `max` thinks on 16,384 inside
+    a 64,000 ceiling. A `[[models]]` ceiling of 8,192 plans 7,168.
+- Verified live through a 2.8.1 gateway: the requests that had returned 400 now return 200.
+  - Haiku 4.5 at 65,536, buffered, and its alias at effort `max`, streamed.
+  - Sonnet 4.5 at `xhigh` and 65,536, streamed.
+  - Opus 5.5 at 131,072.
+  - The four were trimmed, and a request under the ceiling was left alone.
+- Tests: `_t281_catalog_out_cap` (13 assertions). Replacing the clamp with a pass-through fails three of them.
+
 ## [2.8.0] — 2026-10-09
 
 **The model catalog is asked of the providers, and requests take the shape each current model accepts.** Through

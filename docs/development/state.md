@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| **Version** | **2.8.0** (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md); release detail in the CHANGELOG) |
+| **Version** | **2.8.1** (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
 | **Binary** (x86_64 static ELF) | ~2.9 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
 | **Source** | ~15,600 lines / 38 files (`src/main.cyr` + 37 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 1192 assertions, 180 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
+| **Tests** | 1205 assertions, 181 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
 | **Coverage** | symbol coverage 43% (`scripts/coverage.sh`, CI floor 30%) |
