@@ -5,6 +5,157 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.8.0] — 2026-10-09
+
+**The model catalog is asked of the providers, and requests take the shape each current model accepts.** Through
+2.7.1, `GET /v1/models/catalog` (thoth's model picker) listed a table compiled in mid-2025. Against the live
+Anthropic API on 2026-10-09, none of the six Claude ids it offered could be served, and no newer model could
+appear without a new hoosh release. Pricing billed Opus 4.5–4.8 at three times their rate, and the Anthropic
+request builder sent a thinking shape that Haiku 4.5 and Sonnet 4.6 reject. Streams always ended with
+`finish_reason: "stop"` and never sent the usage chunk clients ask for. [ADR 012](docs/decisions/012-live-model-catalog.md)
+records the design. Also fixed: since 2.5.5 the health prober had been checking every remote route at
+localhost:80. **1192 assertions** (was 959).
+
+### Added — the live model catalog
+
+- **Asked of each route's own provider, with its own key.** Each provider's list endpoint is used:
+  - **Anthropic** `/v1/models`: each model's context window, output ceiling and capability tree (which thinking
+    modes and which effort levels it accepts).
+  - **Gemini** `/v1beta/models`: generateContent models only.
+  - **OpenAI-compatible** `/v1/models`: embeddings, speech, image, moderation and realtime models are dropped.
+    OpenRouter and Mistral answers also carry context lengths, vision flags and per-model prices.
+  - **Ollama** `/api/tags`.
+- **When it refreshes.** At startup (enqueued, so startup never waits on a provider), after `/v1/admin/reload`,
+  on `POST /v1/models/refresh` (new; inline), and every `[catalog] refresh_secs` (new; six hours by default).
+- **Where it runs.** A refresh is a pool job, because remote lists are HTTPS and only the workers own a crypto
+  bank. It is single-flight.
+- **How it is published.** A fresh snapshot goes out with one pointer store. A route whose fetch fails keeps its
+  last good list.
+- **Memory.** The fetch and the parse use one reusable arena, reset after every route, so only the kept entries
+  reach the never-freeing heap.
+- **Per route.** `[[providers]] catalog = "live" | "static"` (new). Live is the default everywhere except
+  OpenRouter (a marketplace of several hundred models) and Whisper. Measured: 14 Claude models listed live.
+- **Richer catalog entries.** `source`, `routes` (every enabled route that would serve the id, in router order),
+  `display_name`, `context_window`, `max_output_tokens`, `capabilities` (vision, thinking modes, effort levels) and
+  `pricing` (micro-USD per 1K tokens, only when known). The 2.4.9 fields come first and are unchanged.
+  `/v1/models` lists live ids too.
+- **Aliases find snapshots.** An alias finds its dated entry: Anthropic lists `claude-haiku-4-5-20251001`, and
+  clients send `claude-haiku-4-5`.
+- **`[[models]]` operator blocks (new).** They set a model's price (`input_per_mtok` / `output_per_mtok` in USD
+  per million, both or neither), `context`, `max_output`, `tier`, `vision`, `reasoning` and `listed`. These win
+  over anything a provider or the table says, and are layered over the provider's entry rather than replacing
+  it. This is how to price a model released after this hoosh.
+- **`/v1/health/providers` reports each route's last catalog answer.** It carries `catalog`, `catalog_status`,
+  `catalog_models` and `catalog_checked_ms`. A 401/403 there is the first place a revoked or mistyped key shows:
+  the remote health probe is a TCP connect and cannot see a key. Measured: a bad OpenAI key reads
+  `catalog_status: 401`.
+
+### Fixed — requests for current models
+
+- **The thinking shape comes from the model's capability tree.** Models that take it get adaptive thinking plus
+  effort. Models that take only a budget get `{"type":"enabled","budget_tokens":N}`, inside `max_tokens` with
+  1024 left for the answer. The effort level is clamped to the ones the model accepts.
+  - Measured on 2026-10-09: Haiku 4.5 rejected the 2.7.1 shape with HTTP 400 ("adaptive thinking is not supported
+    on this model"), and Sonnet 4.6 rejected effort `xhigh` ("Supported levels: high, low, max, medium").
+  - Both now answer, and a model the catalog has not listed gets what the client asked for, as before.
+- **Reasoning text is requested.** Since Opus 4.7, thinking blocks arrive with empty text unless the request sets
+  `display: "summarized"`, which hoosh now sends whenever thinking is on. It costs the same, and a client that
+  folds `reasoning_content` now has something to fold. Measured: Haiku 4.5 streamed 218 characters of reasoning.
+- **`reasoning_effort` knows `xhigh` and `max`** (Claude 4.7 and later) and `minimal` / `none` (OpenAI). 2.7.1
+  read any of them as "no thinking".
+- **`reasoning_effort` is forwarded on OpenAI-compatible routes**, verbatim, to models whose providers document it:
+  OpenAI's o-series, GPT-5 and GPT-6; xAI's Grok 4.x and Grok Build; DeepSeek; gpt-oss on Groq. 2.7.1 never
+  forwarded it, so a client's reasoning setting did nothing on o3 or GPT-5. GPT-4o and GPT-4.1 400 on the field,
+  so they never get it. `[[models]] reasoning = true|false` overrides.
+
+### Fixed — pricing and metadata
+
+- **Anthropic rows are the current lineup, from the Models API and Anthropic's published rates.** One row per
+  family, with Haiku 5.5's long-context tier ($0.10/$0.50, then $0.50/$2.50 past 100K input). Before, the single
+  `claude-opus-4` row ($15/$75) priced every Opus 4.x, and Claude 5.x models fell to the $3/$15 provider default.
+- **Retired and invalid ids are gone from the table.** `claude-3.5-haiku` (never an id) and the Claude 3.x rows
+  are removed. Rows now carry a `listed` bit, so the static catalog never offers a family prefix
+  (`claude-opus-4`) as an id.
+- **Other providers' rows are refreshed from their official pricing pages, read 2026-10-09.** That covers OpenAI
+  GPT-6 / GPT-5.x / GPT-4.x / o-series, Gemini 3.x and 2.5, Grok 4.x, DeepSeek V4, Mistral Large 4 / Medium 3.5 /
+  Small 4 / Codestral, and Groq's gpt-oss and Qwen. The published long-context tiers are included: OpenAI past
+  272K, Gemini Pro past 200K, xAI at 200K. Shut-down or retiring ids stay for lookups but are no longer offered:
+  `gemini-2.0-flash`, `deepseek-chat` / `deepseek-reasoner`, Groq's Llama models, and o1 / o3-mini / o4-mini
+  (shutting down 2026-10-23).
+- **Context windows come from the provider when it reports one.** Claude 4.6 and later are 1M; the 2.7.1 table had
+  200K for every Claude.
+- **Gemini thinking tokens are billed as output** (`thoughtsTokenCount`, on both paths). They were not counted.
+- **The shipped `hoosh.cyml` OpenAI patterns** were `o1-*` / `o3-*`, which missed the bare `o1`, `o3` and `o4-mini`
+  ids. They are now `o1*` / `o3*` / `o4*`.
+
+### Fixed — streams
+
+- **`finish_reason` is the provider's own, mapped** (new `src/lib/outcome.cyr`). `length` when a reply hits
+  `max_tokens` or the context window; `tool_calls` whenever calls are carried; `content_filter` for a classifier
+  refusal (Claude 5.x answers HTTP 200 with `stop_reason: "refusal"`) or a Gemini safety stop. 2.7.1's streams
+  always said `stop`, and its buffered replies said `stop` or `tool_calls`. Measured: `max_tokens: 12` now ends
+  `length` on both paths.
+- **The usage chunk.** When the client sets `stream_options.include_usage`, a stream ends with OpenAI's usage chunk
+  (`choices: []`, then `usage` with hoosh's `cost_micro_usd` and `provider`), built from the provider's own counts:
+  - Anthropic: `message_start` / `message_delta`.
+  - OpenAI and DeepSeek: hoosh now asks them for usage.
+  - Gemini: `usageMetadata`.
+  - Ollama: the final line.
+
+  thoth always asked for this chunk and never got one. Measured: Haiku 4.5, 53 + 184 tokens, 973 µ$, which is
+  exactly $1/$5 per million.
+- **Streams are metered by those counts** (pool commit and cost record), falling back to the admission estimate
+  only when the provider reported none. A local stream that never reached its backend is no longer billed. 2.7.1
+  billed every stream at the estimate and called `cost_record` without `_chat_lock`.
+- **Orphan tool-argument fragments are dropped.** An Anthropic `input_json_delta` for a content block whose
+  `tool_use` start was never forwarded is dropped and counted instead of sent without a header. The root cause of
+  the headerless calls thoth reported at 0.44.2 was sandhi's SSE parser losing an event at a TCP read boundary.
+  That is fixed in sandhi 1.9.15, part of the cyrius 6.6.6 stdlib hoosh pins, and a new test feeds a `tool_use`
+  start through `sandhi_sse_parse` split at every byte.
+- **`/v1/health/providers` JSON-escapes `base_url`.** A quote in an operator's url made the whole body
+  unparseable, so a client read every route's health as unavailable.
+
+### Fixed — the remote health probe connected to localhost:80
+
+`url_host` and `url_port` assumed an `http://` scheme, because the raw-socket local path they were written for is
+plaintext. The background prober (2.5.5) reused them for remote routes. For `https://api.anthropic.com` the host
+came out as `localhost` and the port as 80, so every remote route's liveness was a TCP connect to localhost:80.
+
+- With nothing listening there (measured 2026-10-09), every remote route went `unhealthy` after three sweeps while
+  its requests succeeded. `router_select` fell back to "all candidates unhealthy" on every request, and a client
+  painted every cloud model red.
+- With something listening on :80, every remote route read `healthy` whatever its real state.
+
+Both functions now read the scheme (`https://` defaults to 443) and live in the new `src/lib/urlparse.cyr`, which
+the tests include. Measured after the fix: both remote routes healthy, zero failures over two sweeps.
+
+### Known limitations (named, not fixed here)
+
+- **gpt-6-astra and gpt-6.1-sol take no function calling on Chat Completions.** OpenAI serves tools for them
+  through the Responses API only. hoosh speaks Chat Completions to OpenAI, so a tool-using client cannot drive
+  them yet. The metadata rows say `tools = 0`.
+- **Cache-token pricing is not modelled.** Anthropic's `cache_*` input counts and the providers' cached-input
+  rates are absent, so a cached prompt is costed at the full input rate.
+- **Gemini and Ollama thinking are not mapped** from `reasoning_effort` (`thinkingConfig`, Ollama's `think`).
+
+### Tests
+
+- **Fourteen new groups, 233 assertions, against the real modules.** That covers the catalog parsers for all four
+  families, units, the thinking plan, request options, the snapshot, entry JSON, metadata and pricing, OpenAI
+  extras, finish mapping, stream usage, the tool guard, the SSE split boundary, and scheme-aware url parsing. The fixtures are trimmed from
+  the live Anthropic answer.
+- **`pricing.cyr` and `metadata.cyr` are now included by the test binary instead of mirrored**, closing the
+  roadmap's mirror-drift problem for them. 2.5.0's `_req_reasoning_effort` mirror is gone too.
+- **Break-tested.** Removing the effort clamp fails three assertions, and removing the Opus 4.8 price row fails
+  two.
+
+### Gates
+
+fmt, lint, vet and deny are clean, symbol coverage is 43% (294 of 677 functions), the security scan and all four
+fuzz targets pass, and the benchmark gate ran (25 benchmarks recorded). The suite was also run live against the Anthropic API from a scratch config: the catalog,
+the refresh, health with a deliberately bad key, the thinking shapes on Haiku 4.5, Sonnet 4.6 and Opus 4.8, the
+usage chunk, and `length`.
+
 ## [2.7.1] — 2026-09-25
 
 **The last rust-old parity item, and three fixes found while filing the sandhi issue.** 2.7.0 listed

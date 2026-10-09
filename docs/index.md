@@ -31,6 +31,7 @@
 - [ADR-009: Concurrent Batch Inference](decisions/009-concurrent-batch-inference.md) — worker/crypto-lane pools, thread-safety
 - [ADR-010: Observability](decisions/010-observability.md) — latency histograms, event bus, traceparent, OTLP export
 - [ADR-011: Multi-threaded accept loop](decisions/011-multithreaded-accept-loop.md) — unified 7-worker pool, crypto-bank budget, synchronization pass
+- [ADR-012: The model catalog is asked of the providers](decisions/012-live-model-catalog.md) — live per-route lists, the snapshot, `[[models]]`, capability-shaped requests
 
 ## Reference
 

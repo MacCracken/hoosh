@@ -16,10 +16,10 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.6.6) |
-| **Source** | ~13,200 lines / 34 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~2.8 MB (static ELF, x86_64) |
+| **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.9 MB (static ELF, x86_64) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 959 assertions, 166 groups, 0 failures |
+| **Tests** | 1192 assertions, 180 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -29,7 +29,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | | Rust | Cyrius | Ratio |
 |---|------|--------|-------|
-| Source | 22,956 lines / 58 files | ~13,200 lines / 34 files | **~1.7x fewer** |
+| Source | 22,956 lines / 58 files | ~15,600 lines / 38 files | **~1.5x fewer** |
 | Dependencies | 40+ crates | 0 third-party | **Zero third-party** |
 
 The Cyrius binary is now the smaller one (~2.8 MB vs ~5.1 MB), even though it
@@ -175,8 +175,10 @@ request cost. A `HIT` costs nothing.
 |--------|------|-------------|
 | GET | `/` | Gateway info |
 | GET | `/v1/health` | Health check (probes first provider) |
-| GET | `/v1/health/providers` | Per-provider health, failure counts, probe interval |
-| GET | `/v1/models` | List models across configured providers |
+| GET | `/v1/health/providers` | Per-route health, failure counts, probe interval, last catalog answer (`catalog_status`: a 401 is a rejected key) |
+| GET | `/v1/models` | List models across configured providers (the live catalog's ids, local backends asked live) |
+| GET | `/v1/models/catalog` | The model catalog a picker reads: ids asked of each provider live (2.8.0), with serving routes, context window, capabilities and known prices |
+| POST | `/v1/models/refresh` | Ask every live route for its models now; answers with each route's `catalog_status` |
 | GET | `/api/tags` | List models, native Ollama-compatible shape |
 | POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
 | POST | `/v1/batch` | Concurrent batch inference — `{"requests":[…]}` → `{"results":[…]}`; add `"async":true` for a job id |
@@ -253,7 +255,7 @@ tokens = "your-secret-token"
 ## Testing
 
 ```bash
-# Run tests (959 assertions across 166 groups)
+# Run tests (1192 assertions across 180 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)

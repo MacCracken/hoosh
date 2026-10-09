@@ -189,40 +189,7 @@ fn stream_skip_headers(fd, buf, buf_sz) {
 }
 
 # Extract port number from URL like "http://localhost:11434"
-fn url_port(url) {
-    var i = 7;
-    while (load8(url + i) != 0) {
-        if (load8(url + i) == 58) { return atoi(url + i + 1); }
-        if (load8(url + i) == 47) { return 80; }
-        i = i + 1;
-    }
-    return 80;
-}
-
-# Host substring of a plaintext http://host[:port][/path] URL, as a fresh
-# cstr. Mirrors url_port's assumption that the scheme is "http://" (7 chars) —
-# the local raw-socket path is always plaintext (https routes go via sandhi).
-# An empty host falls back to "localhost".
-fn url_host(url) {
-    var start = 7;                            # past "http://"
-    var i = start;
-    var c = load8(url + i);
-    while (c != 0 && c != 58 && c != 47) {    # stop at ':' (port) or '/' (path)
-        i = i + 1;
-        c = load8(url + i);
-    }
-    var len = i - start;
-    if (len <= 0) {
-        var lh = alloc(10);
-        memcpy(lh, "localhost", 9);
-        store8(lh + 9, 0);
-        return lh;
-    }
-    var h = alloc(len + 1);
-    memcpy(h, url + start, len);
-    store8(h + len, 0);
-    return h;
-}
+# url_port / url_host moved to urlparse.cyr (2.8.0), scheme-aware and tested for real.
 
 # Resolve a host cstr to a network-byte-order IPv4 address for sockaddr_in:
 # "localhost" -> 127.0.0.1; a dotted-quad literal is parsed directly; any other

@@ -151,6 +151,82 @@ fn _config_tls_policy(pp, purl) {
     return pol;
 }
 
+# One [[models]] block -> a CATSRC_CONFIG catalog entry, or 0 (refused, with a warning). Keys:
+#   id = "claude-opus-5-5"          required; the id a client sends
+#   input_per_mtok = "4.00"         USD per million input tokens (a string or a bare number)
+#   output_per_mtok = "20.00"       both, or neither — a half-priced model is unpriced, never billed $0 on one side
+#   context = 1000000               context window (input tokens)
+#   max_output = 128000             output ceiling
+#   tier = "premium"                economy | standard | premium | reasoning (for /v1/cost/recommend)
+#   vision = true
+#   reasoning = true                an OpenAI-compatible model that takes reasoning_effort (forwarded only then)
+#   listed = false                  known for lookups, not offered by /v1/models/catalog
+fn _config_model(mp) {
+    var mid = toml_get(mp, "id");
+    if (mid == 0) {
+        hlog_warn("config: a [[models]] block has no id — ignored");
+        return 0;
+    }
+    var idc = to_cstr(mid);
+    if (catalog_id_ok(idc) == 0) {
+        hlog_warn("config: a [[models]] id holds a space, quote, backslash or non-printable byte — ignored");
+        return 0;
+    }
+    var e = catalog_entry_new(idc, CATSRC_CONFIG);
+    var ip = toml_get(mp, "input_per_mtok");
+    var op = toml_get(mp, "output_per_mtok");
+    if (ip != 0 && op != 0) {
+        var ipv = catalog_usd_per_mtok_scaled(to_cstr(ip));
+        var opv = catalog_usd_per_mtok_scaled(to_cstr(op));
+        if (ipv >= 0 && opv >= 0) {
+            store64(e + CAT_E_IN_PRICE, ipv);
+            store64(e + CAT_E_OUT_PRICE, opv);
+        } else {
+            hlog_warn("config: a [[models]] price is not a plain decimal (USD per million tokens): unpriced");
+        }
+    } elif (ip != 0 || op != 0) {
+        hlog_warn("config: a [[models]] block sets only one of input_per_mtok / output_per_mtok: unpriced");
+    }
+    var cx = toml_get(mp, "context");
+    if (cx != 0) { store64(e + CAT_E_CTX, str_to_int(cx)); }
+    var mo = toml_get(mp, "max_output");
+    if (mo != 0) { store64(e + CAT_E_MAXOUT, str_to_int(mo)); }
+    var vi = toml_get(mp, "vision");
+    if (vi != 0) {
+        if (str_eq_cstr(vi, "true") == 1) { store64(e + CAT_E_VISION, 1); }
+        if (str_eq_cstr(vi, "false") == 1) { store64(e + CAT_E_VISION, 0); }
+    }
+    var ti = toml_get(mp, "tier");
+    if (ti != 0) {
+        if (str_eq_cstr(ti, "economy") == 1) { store64(e + CAT_E_TIER, TIER_ECONOMY); }
+        if (str_eq_cstr(ti, "standard") == 1) { store64(e + CAT_E_TIER, TIER_STANDARD); }
+        if (str_eq_cstr(ti, "premium") == 1) { store64(e + CAT_E_TIER, TIER_PREMIUM); }
+        if (str_eq_cstr(ti, "reasoning") == 1) { store64(e + CAT_E_TIER, TIER_REASONING); }
+    }
+    var re = toml_get(mp, "reasoning");
+    if (re != 0) {
+        if (str_eq_cstr(re, "true") == 1) { store64(e + CAT_E_REASON, 1); }
+        if (str_eq_cstr(re, "false") == 1) { store64(e + CAT_E_REASON, 0); }
+    }
+    var li = toml_get(mp, "listed");
+    if (li != 0) {
+        if (str_eq_cstr(li, "false") == 1) { store64(e + CAT_E_LISTED, 0); }
+    }
+    return e;
+}
+
+fn _config_models(msecs) {
+    var mv = vec_new();
+    var mi = 0;
+    while (mi < vec_len(msecs)) {
+        var e = _config_model(toml_section_pairs(vec_get(msecs, mi)));
+        if (e != 0) { vec_push(mv, e); }
+        mi = mi + 1;
+    }
+    catalog_config_set(mv);
+    return 0;
+}
+
 fn load_config(path) {
     var sections = toml_parse_file(path);
     if (vec_len(sections) == 0) { return 0; }
@@ -376,6 +452,14 @@ fn load_config(path) {
                 route_set_max_tokens_limit(route, str_to_int(mtl_str));
             }
 
+            # 2.8.0: catalog = "live" (ask the provider for its models) | "static" (offer the compiled table's).
+            var pcat_str = toml_get(pp, "catalog");
+            if (pcat_str != 0) {
+                if (str_eq_cstr(pcat_str, "static") == 1) { route_set_catalog_live(route, 0); }
+                elif (str_eq_cstr(pcat_str, "live") == 1) { route_set_catalog_live(route, 1); }
+                else { hlog_warn("config: [[providers]] catalog must be \"live\" or \"static\" (default kept)"); }
+            }
+
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = toml_get(pp, "models");
             if (models_str != 0) {
@@ -392,6 +476,19 @@ fn load_config(path) {
         _router = router_new(routes, route_count, _route_strategy);
         _met_providers = route_count;
     }
+
+    # Parse [catalog] (2.8.0) — how often the live model catalog asks the providers again. 0 = only at startup,
+    # on a reload and on POST /v1/models/refresh.
+    var cats_secs = toml_get_sections(sections, "catalog");
+    if (vec_len(cats_secs) > 0) {
+        var catp = toml_section_pairs(vec_get(cats_secs, 0));
+        var crs_str = toml_get(catp, "refresh_secs");
+        if (crs_str != 0) { catalog_configure(str_to_int(crs_str)); }
+    }
+
+    # Parse [[models]] (2.8.0) — the operator's own word on a model: its price, context window and tier, and
+    # whether the catalog offers it. Replaced whole on every load, so a block deleted before a reload is gone.
+    _config_models(toml_get_sections(sections, "models"));
 
     # Parse [[budgets]] sections
     var bud_secs = toml_get_sections(sections, "budgets");

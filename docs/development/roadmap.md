@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.7.1. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.8.0. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
 past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 and 2.7.1 closed what remained
 ([rust-old-retirement.md](rust-old-retirement.md)).
@@ -34,6 +34,22 @@ what is request-scoped versus process-scoped and enforcing that split.
 
 Until then, treat a hoosh instance as needing a periodic restart under sustained
 load, and measure with `scripts/` + `/proc/<pid>/status` rather than assuming.
+
+### Current-model requests — what 2.8.0 left
+
+- **An OpenAI Responses API path.** gpt-6-astra and gpt-6.1-sol take no function calling on Chat Completions
+  (OpenAI serves their tools through `/v1/responses` only), so a tool-using client cannot drive them through hoosh.
+  Translate a tool-carrying request for those models to the Responses shape and back.
+- **Multimodal content parts.** `content` is read as a string and a plain message passes through verbatim
+  (`provider.cyr`), so an OpenAI `image_url` part is never translated to Anthropic `image` / Gemini `inline_data`.
+  The catalog now knows each model's vision bit. This is thoth's F10 (image input) gate.
+- **Thinking on Gemini and Ollama.** `reasoning_effort` maps to Anthropic's thinking and is forwarded to
+  OpenAI-compatible reasoning models; Gemini's `generationConfig.thinkingConfig` and Ollama's `think` are not mapped.
+- **Cache tokens.** Anthropic reports `cache_creation_input_tokens` / `cache_read_input_tokens` and every provider
+  prices cached input lower; hoosh counts neither, so a cached prompt is costed at the full input rate.
+- **AGNOS build.** There is no `hoosh_agnos` build in CI or `scripts/` (the one on disk downstream is 2.4.11) —
+  thoth's v1.0 gate 1 rung 2 (a real turn against the spine on AGNOS) waits on it. A follow-up, by the
+  maintainer's call.
 
 ### Observability
 

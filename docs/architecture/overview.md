@@ -91,7 +91,10 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |
 | `dlp.cyr` | PII/secret scanner + privacy-aware routing |
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
-| `pricing.cyr` / `metadata.cyr` | Pricing table, per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), 34-entry model catalog |
+| `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
+| `urlparse.cyr` | Scheme-aware host / port of a base url (2.8.0 — the remote health probe had been reading `https://` urls as `localhost:80`) |
+| `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
+| `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09 |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) parsing + `$ENV` key expansion |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
@@ -134,7 +137,9 @@ distlibs:
 | `/v1/batch/{id}` | GET | Async batch progress |
 | `/v1/batch/{id}/cancel` | POST | Cancel an async batch |
 | `/v1/events/recent` | GET | Recent provider events (majra pub/sub bus) |
-| `/v1/models` | GET | Model ids across configured providers (local backends asked live) |
+| `/v1/models` | GET | Model ids across configured providers (the live catalog; local backends asked live) |
+| `/v1/models/catalog` | GET | The model catalog: ids per provider with routes, limits, capabilities, known prices ([ADR 012](../decisions/012-live-model-catalog.md)) |
+| `/v1/models/refresh` | POST | Ask every live route for its models now |
 | `/api/tags` | GET | List models (native Ollama-compatible shape) |
 | `/v1/models/pull` / `/v1/models/delete` | POST | Pull / delete a model (Ollama) |
 | `/v1/training/status` / `/v1/catalog/sync` | POST | Synapse training status / catalog sync |

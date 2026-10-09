@@ -287,15 +287,18 @@ fn _models_live_local(sb, seen, r) {
     return _models_scan(sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
 }
 
-# Catalogue models that route `r` would serve, plus its literal (wildcard-free)
-# patterns.
-fn _models_from_catalog(sb, seen, r) {
+# The model ids route `r` can be offered for when nothing asked its provider live (2.8.0: a static route, or a
+# live one that has not answered yet): the compiled table's LISTED ids its patterns match, plus its literal
+# (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id.
+fn _models_from_table(sb, seen, r) {
     var owner = provider_name(route_provider(r));
     var n = metadata_count();
     var i = 0;
     while (i < n) {
         var k = metadata_key(i);
-        if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
+        if (metadata_listed(i) == 1) {
+            if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
+        }
         i = i + 1;
     }
     var pats = load64(r + ROUTE_PATTERNS);
@@ -311,6 +314,30 @@ fn _models_from_catalog(sb, seen, r) {
         }
         if (literal == 1 && q > 0) { _models_emit(sb, seen, pat, q, owner); }
         j = j + 1;
+    }
+    return 0;
+}
+
+# Route `r`'s good live catalog record, or 0.
+fn _models_live_record(r) {
+    var rec = catalog_record_find(catalog_snapshot(), route_provider(r), route_base_url(r));
+    if (rec == 0) { return 0; }
+    if (cat_r_good_ms(rec) == 0) { return 0; }
+    return rec;
+}
+
+# What route `r` can be offered for: its provider's live list (2.8.0) when it has answered, else the table.
+fn _models_from_catalog(sb, seen, r) {
+    var rec = _models_live_record(r);
+    if (rec == 0) { return _models_from_table(sb, seen, r); }
+    var owner = provider_name(route_provider(r));
+    var es = cat_r_entries(rec);
+    var n = vec_len(es);
+    var i = 0;
+    while (i < n) {
+        var id = cat_e_id(vec_get(es, i));
+        if (route_matches_model(r, id) == 1) { _models_emit(sb, seen, id, strlen(id), owner); }
+        i = i + 1;
     }
     return 0;
 }
@@ -335,48 +362,184 @@ fn handle_models(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
-# Provider of the first ENABLED route whose patterns match `model`, or -1 if no
-# configured route can serve it. The pricing catalog (metadata.cyr) is global, but
-# the catalog endpoint must only advertise models THIS gateway can actually route.
-fn _catalog_provider_for(model) {
+# ── GET /v1/models/catalog (2.4.9; 2.8.0: asked of the providers) ──
+#
+# Concrete, switchable model ids — never provider names, never glob patterns — each tagged with the provider
+# that would route it as `owned_by`. 2.8.0: a route in live catalog mode is offered for what ITS provider listed
+# at the last refresh (catalog_fetch.cyr); a static route, or a live one that has not answered yet, for the
+# compiled table's listed ids its patterns match, as before. The operator's [[models]] blocks come first. Only ids
+# an enabled route matches appear. Each entry is catalog_emit_entry's shape (catalog.cyr): the 2.4.9 fields, then
+# `source`, `routes` (every enabled route matching the id, in router order — the set router_select chooses
+# among, so a client can join a model to the health of the routes that would serve it), and whatever the provider
+# or the operator said about it: display_name, context_window, max_output_tokens, capabilities, pricing.
+
+# Every enabled route whose patterns match `model`, in router (priority) order.
+fn _cat_routes_for(model) {
+    var out = vec_new();
     var routes = load64(_router + ROUTER_ROUTES);
     var count = load64(_router + ROUTER_COUNT);
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
         if (route_enabled(r) == 1) {
-            if (route_matches_model(r, model) == 1) { return route_provider(r); }
+            if (route_matches_model(r, model) == 1) { vec_push(out, r); }
         }
         i = i + 1;
     }
-    return 0 - 1;
+    return out;
 }
 
-# GET /v1/models/catalog — concrete, switchable model ids (not provider names, and
-# not glob patterns) from the pricing catalog, each tagged with the provider that
-# would route it as `owned_by`. Only models an ENABLED route actually matches are
-# listed, so the catalog reflects what THIS gateway can serve. Shape mirrors
-# /v1/models so the same client parser works:
-#   {"object":"list","data":[{"id":"claude-sonnet-4","object":"model","owned_by":"anthropic"},...]}
-# Clients drill down per provider by filtering on owned_by.
+fn _cat_seen(seen, id) {
+    var n = vec_len(seen);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(seen, i), id) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A compiled-table row as a catalog entry, so a static route's ids carry the same fields a live one's do.
+fn _cat_table_entry(k) {
+    var e = catalog_entry_new(k, CATSRC_BUILTIN);
+    var md = alloc(40);
+    if (_meta_table_lookup(k, md) == 1) {
+        store64(e + CAT_E_CTX, load64(md));
+        store64(e + CAT_E_VISION, load64(md + 16));
+    }
+    return e;
+}
+
+# Emit entry `e` once, with the routes that would serve it and its price when one is known. An operator's
+# [[models]] block for the same id lends its fields to a provider's entry (the operator's word wins).
+fn _cat_emit(sb, seen, e) {
+    var id = cat_e_id(e);
+    if (_cat_seen(seen, id) == 1) { return 0; }
+    var rs = _cat_routes_for(id);
+    if (vec_len(rs) == 0) { return 0; }
+    if (vec_len(seen) > 0) { str_builder_add_cstr(sb, ","); }
+    vec_push(seen, id);
+    var urls = vec_new();
+    var i = 0;
+    while (i < vec_len(rs)) {
+        vec_push(urls, route_base_url(vec_get(rs, i)));
+        i = i + 1;
+    }
+    var r0 = vec_get(rs, 0);
+    var px = alloc(16);
+    var pin = 0 - 1;
+    var pout = 0 - 1;
+    if (pricing_known(id, route_provider(r0), px) == 1) {
+        pin = load64(px);
+        pout = load64(px + 8);
+    }
+    catalog_emit_entry(sb, e, provider_name(route_provider(r0)), urls, pin, pout);
+    return 1;
+}
+
+# A provider's (or the table's) entry, unless the operator's [[models]] block for it says listed = false.
+fn _cat_emit_unless_hidden(sb, seen, e) {
+    var ce = catalog_config_find(cat_e_id(e));
+    if (ce != 0) {
+        if (cat_e_listed(ce) == 0) { return 0; }
+    }
+    return _cat_emit(sb, seen, e);
+}
+
 fn handle_models_catalog(cfd) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var n = metadata_count();
-    var first = 1;
-    var i = 0;
-    while (i < n) {
-        var key = metadata_key(i);
-        var prov = _catalog_provider_for(key);
-        if (prov != (0 - 1)) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"id\":\"");
-            str_builder_add_cstr(sb, key);
-            str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-            str_builder_add_cstr(sb, provider_name(prov));
-            str_builder_add_cstr(sb, "\"}");
-            first = 0;
+    var seen = vec_new();
+    var cfg = catalog_config();
+    if (cfg != 0) {
+        var ci = 0;
+        while (ci < vec_len(cfg)) {
+            var ce = vec_get(cfg, ci);
+            if (cat_e_listed(ce) == 1) { _cat_emit(sb, seen, catalog_merge(ce, catalog_find_any(cat_e_id(ce)))); }
+            ci = ci + 1;
         }
+    }
+    var routes = load64(_router + ROUTER_ROUTES);
+    var count = load64(_router + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var rec = _models_live_record(r);
+            if (rec != 0) {
+                var es = cat_r_entries(rec);
+                var j = 0;
+                while (j < vec_len(es)) {
+                    var e = vec_get(es, j);
+                    if (route_matches_model(r, cat_e_id(e)) == 1) { _cat_emit_unless_hidden(sb, seen, e); }
+                    j = j + 1;
+                }
+            } else {
+                var n = metadata_count();
+                var k = 0;
+                while (k < n) {
+                    if (metadata_listed(k) == 1) {
+                        var key = metadata_key(k);
+                        if (route_matches_model(r, key) == 1) {
+                            _cat_emit_unless_hidden(sb, seen, _cat_table_entry(key));
+                        }
+                    }
+                    k = k + 1;
+                }
+                var pats = load64(r + ROUTE_PATTERNS);
+                var pn = load64(r + ROUTE_PATTERNS_N);
+                var p = 0;
+                while (p < pn) {
+                    var pat = load64(pats + p * 8);
+                    if (_cat_literal(pat) == 1) { _cat_emit_unless_hidden(sb, seen, _cat_table_entry(pat)); }
+                    p = p + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# A pattern with no `*` or `?` names one model.
+fn _cat_literal(pat) {
+    var q = 0;
+    while (load8(pat + q) != 0) {
+        if (load8(pat + q) == 42 || load8(pat + q) == 63) { return 0; }
+        q = q + 1;
+    }
+    if (q == 0) { return 0; }
+    return 1;
+}
+
+# ── POST /v1/models/refresh (2.8.0) ──
+# Ask every live route for its models now, on this (banked) worker, and answer with what each said — the same
+# per-route lines GET /v1/health/providers carries. 202 when a refresh is already running.
+fn handle_models_refresh(cfd) {
+    var n = catalog_refresh_all();
+    if (n < 0) {
+        var busy = "{\"status\":\"running\",\"message\":\"a catalog refresh is already running\"}";
+        return http_respond(cfd, "202", "Accepted", busy, strlen(busy));
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"status\":\"refreshed\",\"models\":");
+    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, ",\"routes\":[");
+    var snap = catalog_snapshot();
+    var i = 0;
+    while (i < vec_len(snap)) {
+        var rec = vec_get(snap, i);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"provider\":\"");
+        str_builder_add_cstr(sb, provider_name(cat_r_prov(rec)));
+        str_builder_add_cstr(sb, "\",\"base_url\":\"");
+        catalog_add_esc(sb, cat_r_base(rec));
+        str_builder_add_cstr(sb, "\",\"catalog_status\":");
+        str_builder_add_int(sb, cat_r_status(rec));
+        str_builder_add_cstr(sb, ",\"catalog_models\":");
+        str_builder_add_int(sb, cat_r_count(rec));
+        str_builder_add_cstr(sb, "}");
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
@@ -607,7 +770,7 @@ fn warming_run() {
                     var wptok = load64(result + 16);
                     var wctok = load64(result + 24);
                     var env = _chat_completion_body(model, load64(result), wptok, wctok, 0,
-                      estimate_cost_micro(model, wprov, wptok, wctok), provider_name(wprov));
+                      estimate_cost_micro(model, wprov, wptok, wctok), provider_name(wprov), load64(result + 40));
                     cache_insert(_cache, key, to_cstr(env));
                     warmed = warmed + 1;
                 }
@@ -919,7 +1082,9 @@ fn handle_health_providers(cfd) {
         str_builder_add_cstr(sb, "{\"provider\":\"");
         str_builder_add_cstr(sb, provider_name(route_provider(r)));
         str_builder_add_cstr(sb, "\",\"base_url\":\"");
-        str_builder_add_cstr(sb, route_base_url(r));
+        # 2.8.0: escaped. 2.7.1 wrote the url raw, so a quote in an operator's base_url made the whole body
+        # unparseable, and a client (thoth's picker) read every route's health as "unavailable".
+        catalog_add_esc(sb, route_base_url(r));
         str_builder_add_cstr(sb, "\",\"status\":\"");
         str_builder_add_cstr(sb, health_status_str(r));
         str_builder_add_cstr(sb, "\",\"enabled\":");
@@ -946,6 +1111,7 @@ fn handle_health_providers(cfd) {
         } else {
             str_builder_add_int(sb, 0);
         }
+        _health_add_catalog(sb, r);
         str_builder_add_cstr(sb, "}");
         first = 0;
         hi = hi + 1;
@@ -954,6 +1120,32 @@ fn handle_health_providers(cfd) {
     str_builder_add_int(sb, health_interval());
     str_builder_add_cstr(sb, "}");
     return http_json_ok(cfd, str_builder_build(sb));
+}
+
+# 2.8.0: the route's last catalog answer. A remote route's `healthy` is a TCP connect (health.cyr) and cannot see
+# a bad key; the catalog GET is authenticated, so a 401 or 403 here is the first place a revoked or mistyped key
+# shows before a completion fails on it. catalog: "live" | "static"; catalog_status: the HTTP status of the last
+# list (0 = not asked yet or static, -1 = no answer, -2 = not a model list); catalog_models: how many it listed.
+fn _health_add_catalog(sb, r) {
+    str_builder_add_cstr(sb, ",\"catalog\":\"");
+    if (route_catalog_live(r) == 1) { str_builder_add_cstr(sb, "live"); } else { str_builder_add_cstr(sb, "static"); }
+    str_builder_add_cstr(sb, "\"");
+    var rec = catalog_record_find(catalog_snapshot(), route_provider(r), route_base_url(r));
+    var st = 0;
+    var nm = 0;
+    var ck = 0;
+    if (rec != 0) {
+        st = cat_r_status(rec);
+        nm = cat_r_count(rec);
+        ck = cat_r_checked(rec);
+    }
+    str_builder_add_cstr(sb, ",\"catalog_status\":");
+    str_builder_add_int(sb, st);
+    str_builder_add_cstr(sb, ",\"catalog_models\":");
+    str_builder_add_int(sb, nm);
+    str_builder_add_cstr(sb, ",\"catalog_checked_ms\":");
+    str_builder_add_int(sb, ck);
+    return 0;
 }
 
 # POST /v1/tokens/check
@@ -1805,20 +1997,12 @@ fn _req_is_stream(body_ptr, body_len) {
     return 0;
 }
 
-# 2.5.0: the OpenAI `reasoning_effort` -> an Anthropic thinking EFFORT LEVEL (1=low, 2=medium, 3=high, 0=none), fed
-# to the adaptive `output_config.effort`. A RAW byte scan (like _req_is_stream), NOT json_get: clients put
-# reasoning_effort AFTER the nested `messages` array, which the flat json_parse can't reach. Matches
-# `"reasoning_effort":"low|medium|high"` (optional space) with a closing quote.
+# 2.5.0: the OpenAI `reasoning_effort` -> a thinking EFFORT LEVEL. 2.8.0: the scan lives in catalog.cyr
+# (catalog_req_effort, tested for real) and knows the words current models take — xhigh and max for Claude 4.7 and
+# later, minimal and none for OpenAI's reasoning models; before it, "xhigh" silently meant "no thinking".
 fn _req_reasoning_effort(body_ptr, body_len) {
-    var j = _top_key_value(body_ptr, body_len, "\"reasoning_effort\"", 18);
-    if (j < 0) { return 0; }
-    if (j >= body_len || load8(body_ptr + j) != 34) { return 0; }
-    var p = body_ptr + j + 1;
-    var rem = body_len - j - 1;
-    if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
-    if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
-    if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
-    return 0;
+    var w = alloc(8);
+    return catalog_req_effort(body_ptr, body_len, w);
 }
 
 # Extract raw "messages" array from request body
@@ -1961,18 +2145,14 @@ fn _sse_error_chunk(cfd, model, status, message) {
     return http_sse_event(cfd, d, strlen(d));
 }
 
-# Send the final SSE stop chunk
-fn _sse_stop(cfd, model) {
-    var sb = str_builder_new();
-    sb_add_chat_head(sb, "chat.completion.chunk");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"delta\":{},");
-    str_builder_add_cstr(sb, "\"finish_reason\":\"stop\"}]}");
-    var s = str_builder_build(sb);
-    var d = to_cstr(s);
-    http_sse_event(cfd, d, str_len(s));
+# Send the final SSE stop chunk. 2.8.0: with the finish reason the provider gave (outcome.cyr) — every stream
+# used to end "stop", so a reply cut at max_tokens, a call for tools and a classifier refusal all read as a clean
+# finish — and, before [DONE], the usage chunk when the client asked for one (stream_options.include_usage).
+# `usage` is 0 for none, else the chunk's Str (outcome_usage_chunk).
+fn _sse_stop(cfd, model, finish, usage) {
+    var s = outcome_stop_chunk(model, finish);
+    http_sse_event(cfd, to_cstr(s), str_len(s));
+    if (usage != 0) { http_sse_event(cfd, to_cstr(usage), str_len(usage)); }
     http_sse_done(cfd);
     return 0;
 }
@@ -1985,7 +2165,7 @@ fn _sse_stop(cfd, model) {
 # Convert an Anthropic streaming event into an OpenAI tool_call delta and emit
 # it. `content_block_start` (tool_use) carries the id+name; `input_json_delta`
 # carries incremental `partial_json` argument fragments. Returns 1 if emitted.
-fn _emit_anthropic_tool_delta(cfd, model, data, dlen) {
+fn _emit_anthropic_tool_delta(cfd, model, data, dlen, st) {
     var is_start = _cmp_substr(data, dlen, "content_block_start", 19) >= 0;
     var is_delta = _cmp_substr(data, dlen, "input_json_delta", 16) >= 0;
     if (is_start == 0 && is_delta == 0) { return 0; }
@@ -1995,6 +2175,7 @@ fn _emit_anthropic_tool_delta(cfd, model, data, dlen) {
         var idf = _json_obj_str_field(data, dlen, "id", 2);
         var nmf = _json_obj_str_field(data, dlen, "name", 4);
         if (idf == 0 || nmf == 0) { return 0; }
+        outcome_tool_started(st, idx);             # 2.8.0: fragments for this index may now be forwarded
         var sb = str_builder_new();
         str_builder_add_cstr(sb, "[{\"index\":");
         str_builder_add_int(sb, idx);
@@ -2008,6 +2189,12 @@ fn _emit_anthropic_tool_delta(cfd, model, data, dlen) {
     }
     var pjf = _json_obj_str_field(data, dlen, "partial_json", 12);
     if (pjf == 0) { return 0; }
+    # 2.8.0: arguments for a block whose START was never forwarded belong to no call — see outcome.cyr's tool
+    # guard. Dropped and counted, never sent headerless.
+    if (outcome_tool_known(st, idx) == 0) {
+        outcome_note_orphan(st);
+        return 0;
+    }
     var sb2 = str_builder_new();
     str_builder_add_cstr(sb2, "[{\"index\":");
     str_builder_add_int(sb2, idx);
@@ -2046,6 +2233,10 @@ fn _remote_stream_cb(ctx, ev) {
         hlog_error(perr);
         return 0;                                  # stop pulling: the provider is done talking
     }
+    var st = load64(ctx + 40);                    # 2.8.0: finish reason, usage, tool guard (outcome.cyr)
+    if (prov == PROV_ANTHROPIC) { outcome_feed_anthropic(st, data, dlen); }
+    elif (prov == PROV_GOOGLE) { outcome_feed_gemini(st, data, dlen); }
+    else { outcome_feed_openai(st, data, dlen); }
     var txt = 0;
     if (prov == PROV_ANTHROPIC) {
         # content_block_delta carries delta.text; other event types have no
@@ -2074,7 +2265,7 @@ fn _remote_stream_cb(ctx, ev) {
     }
     # Tool-call deltas, converted per provider to OpenAI tool_call delta chunks.
     if (prov == PROV_ANTHROPIC) {
-        if (_emit_anthropic_tool_delta(load64(ctx), load64(ctx + 8), data, dlen) == 1) {
+        if (_emit_anthropic_tool_delta(load64(ctx), load64(ctx + 8), data, dlen, st) == 1) {
             store64(ctx + 24, load64(ctx + 24) + 1);
         }
     } else {
@@ -2085,6 +2276,7 @@ fn _remote_stream_cb(ctx, ev) {
             if (gtc != 0) {
                 _sse_tool_chunk(load64(ctx), load64(ctx + 8), gtc);
                 store64(ctx + 24, load64(ctx + 24) + 1);
+                outcome_note_tools(st);
             }
         } else {
             # OpenAI-compat tool_call deltas pass straight through.
@@ -2092,6 +2284,7 @@ fn _remote_stream_cb(ctx, ev) {
             if (tc != 0) {
                 _sse_tool_chunk(load64(ctx), load64(ctx + 8), tc);
                 store64(ctx + 24, load64(ctx + 24) + 1);
+                outcome_note_tools(st);
             }
         }
     }
@@ -2104,13 +2297,14 @@ fn _remote_stream_cb(ctx, ev) {
 fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
-        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, gen);
+        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, gen,
+          catalog_find_on(PROV_ANTHROPIC, route_base_url(route), model));
     }
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
     }
     return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen,
-      (prov == PROV_OLLAMA));
+      (prov == PROV_OLLAMA), route);
 }
 
 # Build the streaming request URL for a remote provider.
@@ -2122,9 +2316,43 @@ fn _remote_stream_url(route, model) {
 }
 
 # Streaming handler: proxy NDJSON/SSE from backend to client
-fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
+# 2.8.0: meter a finished stream and build its usage chunk. With the provider's own counts (outcome.cyr) the
+# pool is charged and the cost recorded from them; without, the admission estimate stands in, as it did for every
+# stream through 2.7.1 — and no usage chunk is sent, because a client must not be handed an estimate as a count.
+# `served` = 0 when nothing reached the provider (the reservation is released, nothing is billed). Takes
+# _chat_lock: the cost records and the pool are shared with every worker (2.7.1 called cost_record unlocked here).
+fn _stream_meter(route, model, bpool, est_tokens, st, gen, served) {
+    var real = outcome_has_usage(st);
+    var ptok = outcome_ptok(st);
+    var ctok = outcome_ctok(st);
+    var cost = 0;
+    mutex_lock(_chat_lock);
+    if (served == 0) {
+        if (bpool != 0) { pool_commit(bpool, est_tokens, 0); }
+    } elif (real == 1) {
+        if (bpool != 0) { pool_commit(bpool, est_tokens, ptok + ctok); }
+        cost = cost_record(route_provider(route), route_base_url(route), ptok, ctok, model);
+    } else {
+        if (bpool != 0) { pool_commit(bpool, est_tokens, est_tokens); }
+        cost_record(route_provider(route), route_base_url(route), 0, est_tokens, model);
+    }
+    mutex_unlock(_chat_lock);
+    if (served == 1) {
+        if (real == 1) { metrics_record(ptok, ctok); } else { metrics_record(0, est_tokens); }
+    }
+    if (outcome_orphans(st) > 0) {
+        hlog_warn("chat stream: dropped tool-argument fragments whose call never started (no id/name reached hoosh)");
+    }
+    if (real == 1 && gen_usage(gen) == 1) {
+        return outcome_usage_chunk(model, ptok, ctok, cost, provider_name(route_provider(route)));
+    }
+    return 0;
+}
+
+fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, gen, bpool, est_tokens) {
     # 2.7.0: one id and created time for every chunk of this stream.
     chat_id_new();
+    var oc = outcome_new();                   # 2.8.0: finish reason, usage, the tool guard (outcome.cyr)
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -2136,12 +2364,13 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
           tools_raw, tools_len, gen);
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
-        var ctx = alloc(40);          # 2.6.5: +32 = "an error frame was already sent to the client"
+        var ctx = alloc(48);          # 2.6.5: +32 = "an error frame was already sent to the client"
         store64(ctx, cfd);
         store64(ctx + 8, model);
         store64(ctx + 16, route_provider(route));
         store64(ctx + 24, 0);
         store64(ctx + 32, 0);
+        store64(ctx + 40, oc);        # 2.8.0: the stream's outcome state
         var sres = sandhi_http_stream_opts(
           surl, "POST", hdrs, sbody, strlen(sbody),
           &_remote_stream_cb, ctx, _remote_stream_opts(route));
@@ -2154,11 +2383,12 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                 if (st >= 200) { if (st < 300) { ok = 1; } }
             }
         }
+        var served = 1;
         if (err_sent == 1) {
             # 2.6.5: the provider reported the failure in-stream and the client already has it. Do not
             # retry into a buffered fallback — the provider has said no, and a second attempt would
             # either repeat the refusal or (worse) succeed and contradict the error already sent.
-            metrics_record(0, emitted);
+            served = 1;
         } elif (ok == 0) {
             # Only safe to fall back when nothing was streamed yet, otherwise
             # the buffered emit would duplicate the partial output.
@@ -2172,9 +2402,16 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                         _sse_chunk(cfd, model, rtext, strlen(rtext));
                     }
                     var rtc = load64(rresult + 32);
-                    if (rtc != 0) { _sse_tool_chunk(cfd, model, rtc); }
-                    metrics_record(0, load64(rresult + 24));
+                    if (rtc != 0) {
+                        _sse_tool_chunk(cfd, model, rtc);
+                        outcome_note_tools(oc);
+                    }
+                    # 2.8.0: the buffered answer's own counts and finish reason stand for the stream's.
+                    store64(oc + OC_PTOK, load64(rresult + 16));
+                    store64(oc + OC_CTOK, load64(rresult + 24));
+                    if (load64(rresult + 40) != FIN_NONE) { store64(oc + OC_FINISH, load64(rresult + 40)); }
                 } else {
+                    served = 0;
                     # 2.6.5: the stream failed AND the buffered fallback failed. Nothing will be sent
                     # after this but the stop frame, so this is the last chance to say why — otherwise
                     # the client receives a clean, empty, successful completion and blames the model.
@@ -2193,8 +2430,6 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                     event_inference_failed(provider_name(route_provider(route)), model, "upstream error");
                 }
             }
-        } else {
-            metrics_record(0, emitted);
         }
         if (_audit_chain != 0) {
             # _chat_lock: audit-chain append may race a background batch worker.
@@ -2204,7 +2439,8 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
               provider_name(route_provider(route)), model);
             mutex_unlock(_chat_lock);
         }
-        _sse_stop(cfd, model);
+        var uchunk = _stream_meter(route, model, bpool, est_tokens, oc, gen, served);
+        _sse_stop(cfd, model, outcome_finish_final(outcome_finish(oc), outcome_tools(oc)), uchunk);
         return 0;
     }
 
@@ -2213,6 +2449,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     var bfd = retry_forward_stream(
       _retry_cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
     if (bfd < 0) {
+        _stream_meter(route, model, bpool, est_tokens, oc, gen, 0);   # 2.8.0: nothing served, nothing billed
         return http_error(cfd, "502", "Bad Gateway",
           "provider backend unreachable");
     }
@@ -2257,6 +2494,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                 if (lpos > 0) {
                     store8(lbuf + lpos, 0);
                     if (is_ollama == 1) {
+                        outcome_feed_ollama(oc, lbuf, lpos);       # 2.8.0: the final line's counts + done_reason
                         # Ollama NDJSON: extract "content"
                         var txt = ollama_extract_text(lbuf, lpos);
                         if (strlen(txt) > 0) {
@@ -2271,6 +2509,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                         # exactly as the non-streaming path does.
                         var otc = _ollama_tool_calls(lbuf, lpos);
                         if (otc != 0) {
+                            outcome_note_tools(oc);
                             if (_sse_tool_chunk(cfd, model, otc) < 0) { done = 1; }
                         }
                     } else {
@@ -2282,6 +2521,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                 if (memeq(dptr, "[DONE]", 6) == 1) {
                                     done = 1;
                                 } else {
+                                    outcome_feed_openai(oc, dptr, dlen);   # 2.8.0
                                     var txt = ollama_extract_text(
                                       dptr, dlen);
                                     if (strlen(txt) > 0) {
@@ -2295,6 +2535,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                     # reason Ollama's were.
                                     var ltc = _extract_openai_tool_calls(dptr, dlen);
                                     if (ltc != 0) {
+                                        outcome_note_tools(oc);
                                         if (_sse_tool_chunk(cfd, model,
                                             ltc) < 0) { done = 1; }
                                     }
@@ -2316,9 +2557,9 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         }
     }
 
-    _sse_stop(cfd, model);
     sys_close(bfd);
-    metrics_record(0, token_count);
+    var luchunk = _stream_meter(route, model, bpool, est_tokens, oc, gen, 1);
+    _sse_stop(cfd, model, outcome_finish_final(outcome_finish(oc), outcome_tools(oc)), luchunk);
     if (_audit_chain != 0) {
         # _chat_lock: audit-chain append may race a background batch worker.
         mutex_lock(_chat_lock);
@@ -2458,7 +2699,7 @@ fn _embed_query_body(body_ptr, body_len) {
 # returns, so a consumer never converts and never rounds. Both fields are
 # additive inside the existing `usage` object; an OpenAI-shaped client ignores
 # unknown fields. `provider` is the real serving route, not the requested one.
-fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider) {
+fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
     var sb = str_builder_new();
     # 2.7.0: a fresh id and created time per completion (see provider_err.cyr).
     chat_id_new();
@@ -2470,13 +2711,17 @@ fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, p
     str_builder_add_cstr(sb, "\"content\":\"");
     str_builder_add_cstr(sb, resp_text);
     str_builder_add_cstr(sb, "\"");
+    var has_tools = 0;
     if (tool_calls != 0) {
         str_builder_add_cstr(sb, ",\"tool_calls\":");
         str_builder_add_cstr(sb, tool_calls);
-        str_builder_add_cstr(sb, "},\"finish_reason\":\"tool_calls\"}],");
-    } else {
-        str_builder_add_cstr(sb, "},\"finish_reason\":\"stop\"}],");
+        has_tools = 1;
     }
+    # 2.8.0: the provider's own reason, mapped (outcome.cyr); "tool_calls" whenever calls are carried, unless the
+    # reply was cut short or declined.
+    str_builder_add_cstr(sb, "},\"finish_reason\":\"");
+    str_builder_add_cstr(sb, outcome_finish_name(outcome_finish_final(finish, has_tools)));
+    str_builder_add_cstr(sb, "\"}],");
     str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
     str_builder_add_int(sb, ptok);
     str_builder_add_cstr(sb, ",\"completion_tokens\":");
@@ -2750,8 +2995,11 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # 2.5.0 extended thinking + 2.5.2 sampling, carried on the per-request prep
     # struct (out + 104) — hoosh is multi-threaded, so a global would race.
     # Absent/unknown values leave the request byte-identical to before.
-    store64(out + 104, genopts_new(
-        _req_reasoning_effort(body_ptr, body_len), g_maxt, g_temp, g_topp));
+    var eff_word = alloc(8);
+    var gopts = genopts_new(catalog_req_effort(body_ptr, body_len, eff_word), g_maxt, g_temp, g_topp);
+    gen_set_effort_name(gopts, load64(eff_word));        # 2.8.0: verbatim to OpenAI-compatible reasoning models
+    gen_set_usage(gopts, catalog_req_include_usage(body_ptr, body_len));   # 2.8.0: the final usage chunk on a stream
+    store64(out + 104, gopts);
     var bpool = budget_get_pool(_budget, pool_name);
     # 2.5.8: an unknown pool is a 400, not a silent pass. Previously a request
     # naming a pool that does not exist got bpool == 0 and skipped budgeting
@@ -2918,7 +3166,7 @@ fn _chat_assemble(prep, result) {
     }
 
     var body = _chat_completion_body(model_cstr, resp_text, resp_ptok,
-      resp_ctok, resp_tool_calls, resp_cost_micro, provider_name(route_prov));
+      resp_ctok, resp_tool_calls, resp_cost_micro, provider_name(route_prov), load64(result + 40));
     var body_cstr = to_cstr(body);
     var body_clen = str_len(body);
     if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
@@ -2986,28 +3234,12 @@ fn handle_chat(cfd, body_ptr, body_len) {
             }
             return http_bad_request(cfd, "streaming requires messages array");
         }
+        # 2.8.0: the stream meters itself (_stream_meter) — from the provider's own counts when it reported them,
+        # the admission estimate otherwise — because the usage chunk a client asked for must carry the cost before
+        # [DONE] goes out.
         var sr = handle_chat_stream(
-          cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104));
-        # Meter the stream. This committed 0, so the reservation was purely
-        # transient, POOL_USED never grew, /v1/tokens/pools reported used: 0
-        # forever, and cost_record was never reached — the streaming branch does
-        # not go through _chat_assemble. Streaming is the default in every real
-        # client, so in practice most traffic was entirely unbilled and no
-        # budget could ever be exhausted by it.
-        #
-        # Committing est_tokens converts the reservation this request already
-        # made into usage, which is the conservative reading when the provider's
-        # own counts are not available on this path. Decoding real usage
-        # (OpenAI stream_options.include_usage, Anthropic message_delta.usage)
-        # is the follow-up; charging the reservation is strictly better than
-        # charging nothing, and never exceeds what admission already approved.
-        if (bpool != 0) {
-            mutex_lock(_chat_lock);
-            pool_commit(bpool, est_tokens, est_tokens);
-            mutex_unlock(_chat_lock);
-        }
-        cost_record(route_provider(route), route_base_url(route), 0, est_tokens, model_cstr);
-        metrics_record(0, est_tokens);
+          cfd, route, model_cstr, msg_raw, msg_raw_len, tools_raw, tools_len, load64(prep + 104),
+          bpool, est_tokens);
         return sr;
     }
 

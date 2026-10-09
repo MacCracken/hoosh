@@ -264,6 +264,11 @@ fn job_process(job) {
         _otlp_post(load64(job + 8), load64(job + 16));
         return 0;
     }
+    if (load64(job) == JOB_CATALOG_REFRESH) {
+        # 2.8.0: the model catalog's provider lists are HTTPS, so they are fetched here, on a banked worker.
+        catalog_refresh_all();
+        return 0;
+    }
     # JOB_BATCH_ITEM — produce the response, store it, then bump the failure +
     # completion counters (completion LAST so the slot is visible to the barrier).
     var d = _chat_produce(load64(job + 8), load64(job + 16));

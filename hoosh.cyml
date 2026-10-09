@@ -19,6 +19,31 @@ health_check_interval_secs = 30
 #   client_key       = "/etc/hoosh/client.key"
 #   models           = ["llama*", "mistral*"]
 #   enabled          = false  # keep the route configured but out of selection
+#   catalog          = "static"  # "live" (default; OpenRouter and Whisper default "static"): GET /v1/models/catalog
+#                                # lists the models THIS route's provider says it serves, asked with its own key
+
+# The model catalog (GET /v1/models/catalog, GET /v1/models) is asked of each "live" route's provider — Anthropic's
+# /v1/models (with each model's context window and the thinking modes and effort levels it accepts, which shape
+# the request hoosh sends it), Gemini's /v1beta/models, an OpenAI-compatible /v1/models (minus embeddings, speech,
+# image, moderation and realtime models), Ollama's /api/tags — at startup, on a reload, on
+# POST /v1/models/refresh, and every refresh_secs. Each list is one unbilled GET. A route that has not answered
+# lists the compiled table's ids its patterns match, as before.
+# [catalog]
+# refresh_secs = 21600   # six hours; 0 = only at startup, reload and POST /v1/models/refresh
+
+# The operator's word on a model, over anything a provider or the compiled table says: its price (USD per
+# million tokens — both sides, or it stays unpriced), context window, tier, and whether an OpenAI-compatible
+# model takes reasoning_effort. Use it for a model released after this hoosh, or a fine-tune.
+# [[models]]
+# id = "claude-opus-5-5"
+# input_per_mtok = "4.00"
+# output_per_mtok = "20.00"
+# context = 1000000
+# max_output = 128000
+# tier = "premium"       # economy | standard | premium | reasoning (for /v1/cost/recommend)
+# vision = true
+# reasoning = true       # OpenAI-compatible routes: forward reasoning_effort (o-series and GPT-5 take it)
+# listed = false         # known for lookups and pricing, not offered by the catalog
 
 # Hardware detection + placement. disabled_backends skips named ai-hwaccel
 # probes. vram_reserve_bytes is held back from placement decisions, so a model
@@ -177,7 +202,7 @@ models = ["ornith*", "llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*
 type = "OpenAi"
 api_key = "$OPENAI_API_KEY"
 priority = 10
-models = ["gpt-*", "o1-*", "o3-*"]
+models = ["gpt-*", "o1*", "o3*", "o4*"]   # "o1-*" missed the bare o1 / o3 / o4-mini ids
 
 [[providers]]
 type = "Anthropic"

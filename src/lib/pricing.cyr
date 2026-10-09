@@ -11,42 +11,154 @@
 var _pricing_tbl = 0;
 var _pricing_n = 0;
 
+# Entry: key(0) in(8) out(16) long_threshold(24) long_in(32) long_out(40) — 48 bytes. A long-context tier
+# (2.8.0) applies when a request's input exceeds long_threshold tokens; 0 = the model has one flat rate.
 fn _pricing_add(arr, idx, key, in_s, out_s) {
-    var e = arr + idx * 24;
+    var e = arr + idx * 48;
     store64(e, key);
     store64(e + 8, in_s);
     store64(e + 16, out_s);
+    store64(e + 24, 0);
+    store64(e + 32, 0);
+    store64(e + 40, 0);
     return 0;
 }
 
-# Built-in pricing table (model id -> input/output $/M ×1000). Built once.
+fn _pricing_tier(arr, idx, threshold, in_s, out_s) {
+    var e = arr + idx * 48;
+    store64(e + 24, threshold);
+    store64(e + 32, in_s);
+    store64(e + 40, out_s);
+    return 0;
+}
+
+var _PRICING_CAP = 81;
+
+# Built-in pricing table (model id -> input/output $/M x1000). Built once.
 fn _pricing_init() {
     if (_pricing_tbl != 0) { return 0; }
-    var arr = alloc(16 * 24);
-    # Anthropic
-    _pricing_add(arr, 0, "claude-opus-4", 15000, 75000);
-    _pricing_add(arr, 1, "claude-sonnet-4", 3000, 15000);
-    _pricing_add(arr, 2, "claude-3.5-haiku", 800, 4000);
-    _pricing_add(arr, 3, "claude-3-5-haiku", 800, 4000);
-    # OpenAI
-    _pricing_add(arr, 4, "gpt-4o", 2500, 10000);
-    _pricing_add(arr, 5, "gpt-4o-mini", 150, 600);
-    _pricing_add(arr, 6, "o1", 15000, 60000);
-    _pricing_add(arr, 7, "o3-mini", 1100, 4400);
-    # DeepSeek
-    _pricing_add(arr, 8, "deepseek-chat", 270, 1100);
-    _pricing_add(arr, 9, "deepseek-coder", 140, 280);
-    _pricing_add(arr, 10, "deepseek-reasoner", 550, 2190);
-    # Grok
-    _pricing_add(arr, 11, "grok-3", 3000, 15000);
-    _pricing_add(arr, 12, "grok-3-mini", 300, 500);
-    # Groq-hosted
-    _pricing_add(arr, 13, "llama-3.3-70b", 590, 790);
-    _pricing_add(arr, 14, "llama-3.1-8b", 50, 80);
-    # Google
-    _pricing_add(arr, 15, "gemini-2.0-flash", 100, 400);
+    var arr = alloc(_PRICING_CAP * 48);
+    # Anthropic — 2.8.0, Anthropic's published first-party rates (cached 2026-10-06). The 2.7.1 table had one
+    # `claude-opus-4` row at $15/$75, which the longest-prefix match applied to EVERY Opus 4.x: Opus 4.5-4.8 cost
+    # $5/$25 and were billed at three times that. Claude 5.x models matched no row and fell to the provider
+    # default ($3/$15), so Haiku 5.5 was billed thirty times its rate and Fable 5.1 a third of it. Each family now
+    # has its own row; `claude-opus-4` / `claude-sonnet-4` remain only for the dated 4.0 ids.
+    _pricing_add(arr, 0, "claude-fable-5-1", 10000, 50000);
+    _pricing_add(arr, 1, "claude-fable-5", 10000, 50000);
+    _pricing_add(arr, 2, "claude-mythos-5-1", 10000, 50000);
+    _pricing_add(arr, 3, "claude-mythos-5", 10000, 50000);
+    _pricing_add(arr, 4, "claude-opus-5-5", 4000, 20000);
+    _pricing_add(arr, 5, "claude-opus-5", 5000, 25000);
+    _pricing_add(arr, 6, "claude-opus-4-8", 5000, 25000);
+    _pricing_add(arr, 7, "claude-opus-4-7", 5000, 25000);
+    _pricing_add(arr, 8, "claude-opus-4-6", 5000, 25000);
+    _pricing_add(arr, 9, "claude-opus-4-5", 5000, 25000);
+    _pricing_add(arr, 10, "claude-opus-4-1", 15000, 75000);
+    _pricing_add(arr, 11, "claude-opus-4", 15000, 75000);
+    _pricing_add(arr, 12, "claude-sonnet-5-5", 2000, 10000);
+    _pricing_add(arr, 13, "claude-sonnet-5", 2000, 10000);
+    _pricing_add(arr, 14, "claude-sonnet-4-6", 3000, 15000);
+    _pricing_add(arr, 15, "claude-sonnet-4-5", 3000, 15000);
+    _pricing_add(arr, 16, "claude-sonnet-4", 3000, 15000);
+    # Haiku 5.5 is priced by prompt length: $0.10/$0.50 up to 100K input tokens, $0.50/$2.50 above.
+    _pricing_add(arr, 17, "claude-haiku-5-5", 100, 500);
+    _pricing_tier(arr, 17, 100000, 500, 2500);
+    _pricing_add(arr, 18, "claude-haiku-4-5", 1000, 5000);
+    # Non-Anthropic rates, 2.8.0: each provider's official pricing page, read 2026-10-09 (USD per million tokens,
+    # standard tier, no cache or batch discount). [[models]] in hoosh.cyml overrides any of them, and a provider that
+    # publishes per-model prices in its list (OpenRouter) is priced by its own. Notes per provider:
+    #   OpenAI   prompts over 272K bill the whole request at 2x input / 1.5x output (6.x, 5.6.x, 5.5, 5.4)
+    #   Google   Pro prompts over 200K use the higher tier; the 3.6-3.8 Flash rates double on 2027-01-01
+    #   xAI      prompts of 200K or more use the higher tier; retired grok-3 / grok-4-fast ids bill at grok-4.3 rates
+    #   DeepSeek peak-hour cache-miss rates (off-peak is half)
+    #   Mistral  Large 4 is a public preview at a sale price
+    _pricing_add(arr, 19, "gpt-6-astra", 10000, 50000);
+    _pricing_tier(arr, 19, 272000, 20000, 75000);
+    _pricing_add(arr, 20, "gpt-6.1-sol", 2000, 10000);
+    _pricing_tier(arr, 20, 272000, 4000, 15000);
+    _pricing_add(arr, 21, "gpt-6-sol", 2000, 10000);
+    _pricing_tier(arr, 21, 272000, 4000, 15000);
+    _pricing_add(arr, 22, "gpt-6-luna", 100, 500);
+    _pricing_tier(arr, 22, 272000, 200, 750);
+    _pricing_add(arr, 23, "gpt-5.6-sol", 4000, 20000);
+    _pricing_tier(arr, 23, 272000, 8000, 30000);
+    _pricing_add(arr, 24, "gpt-5.6-terra", 2000, 12000);
+    _pricing_tier(arr, 24, 272000, 4000, 18000);
+    _pricing_add(arr, 25, "gpt-5.6-luna", 200, 1200);
+    _pricing_tier(arr, 25, 272000, 400, 1800);
+    _pricing_add(arr, 26, "gpt-5.6", 4000, 20000);
+    _pricing_tier(arr, 26, 272000, 8000, 30000);
+    _pricing_add(arr, 27, "gpt-5.5", 5000, 30000);
+    _pricing_tier(arr, 27, 272000, 10000, 45000);
+    _pricing_add(arr, 28, "gpt-5.4", 2500, 15000);
+    _pricing_tier(arr, 28, 272000, 5000, 22500);
+    _pricing_add(arr, 29, "gpt-5.4-mini", 750, 4500);
+    _pricing_add(arr, 30, "gpt-5.4-nano", 200, 1250);
+    _pricing_add(arr, 31, "gpt-5.2", 1750, 14000);
+    _pricing_add(arr, 32, "gpt-5", 1250, 10000);
+    _pricing_add(arr, 33, "gpt-5-mini", 250, 2000);
+    _pricing_add(arr, 34, "gpt-5-nano", 50, 400);
+    _pricing_add(arr, 35, "gpt-4.1", 2000, 8000);
+    _pricing_add(arr, 36, "gpt-4.1-mini", 400, 1600);
+    _pricing_add(arr, 37, "gpt-4.1-nano", 100, 400);
+    _pricing_add(arr, 38, "gpt-4o", 2500, 10000);
+    _pricing_add(arr, 39, "gpt-4o-mini", 150, 600);
+    _pricing_add(arr, 40, "o3", 2000, 8000);
+    _pricing_add(arr, 41, "o4-mini", 1100, 4400);
+    _pricing_add(arr, 42, "o3-mini", 1100, 4400);
+    _pricing_add(arr, 43, "o1", 15000, 60000);
+    _pricing_add(arr, 44, "gemini-3.8-flash", 750, 3750);
+    _pricing_add(arr, 45, "gemini-3.7-flash", 750, 3750);
+    _pricing_add(arr, 46, "gemini-3.6-flash", 750, 3750);
+    _pricing_add(arr, 47, "gemini-3.5-flash", 1500, 9000);
+    _pricing_add(arr, 48, "gemini-3.5-flash-lite", 300, 2500);
+    _pricing_add(arr, 49, "gemini-3.1-flash-lite", 250, 1500);
+    _pricing_add(arr, 50, "gemini-3.1-pro-preview", 2000, 12000);
+    _pricing_tier(arr, 50, 200000, 4000, 18000);
+    _pricing_add(arr, 51, "gemini-3-flash-preview", 500, 3000);
+    _pricing_add(arr, 52, "gemini-2.5-pro", 1250, 10000);
+    _pricing_tier(arr, 52, 200000, 2500, 15000);
+    _pricing_add(arr, 53, "gemini-2.5-flash", 300, 2500);
+    _pricing_add(arr, 54, "gemini-2.5-flash-lite", 100, 400);
+    _pricing_add(arr, 55, "grok-4.7", 2000, 6000);
+    _pricing_tier(arr, 55, 199999, 4000, 12000);
+    _pricing_add(arr, 56, "grok-4.6", 2000, 6000);
+    _pricing_tier(arr, 56, 199999, 4000, 12000);
+    _pricing_add(arr, 57, "grok-4.5", 2000, 6000);
+    _pricing_tier(arr, 57, 199999, 4000, 12000);
+    _pricing_add(arr, 58, "grok-4.3", 1250, 2500);
+    _pricing_tier(arr, 58, 199999, 2500, 5000);
+    _pricing_add(arr, 59, "grok-4.20", 1250, 2500);
+    _pricing_tier(arr, 59, 199999, 2500, 5000);
+    _pricing_add(arr, 60, "grok-build-0.1", 1000, 2000);
+    _pricing_tier(arr, 60, 199999, 2000, 4000);
+    _pricing_add(arr, 61, "grok-code-fast-1", 1000, 2000);
+    _pricing_tier(arr, 61, 199999, 2000, 4000);
+    _pricing_add(arr, 62, "grok-4-1-fast", 1250, 2500);
+    _pricing_tier(arr, 62, 199999, 2500, 5000);
+    _pricing_add(arr, 63, "grok-4-fast", 1250, 2500);
+    _pricing_tier(arr, 63, 199999, 2500, 5000);
+    _pricing_add(arr, 64, "grok-4-0709", 1250, 2500);
+    _pricing_tier(arr, 64, 199999, 2500, 5000);
+    _pricing_add(arr, 65, "grok-3", 1250, 2500);
+    _pricing_tier(arr, 65, 199999, 2500, 5000);
+    _pricing_add(arr, 66, "deepseek-flash", 300, 1200);
+    _pricing_add(arr, 67, "deepseek-v4-pro", 1320, 3960);
+    _pricing_add(arr, 68, "mistral-large-4-0", 680, 2090);
+    _pricing_add(arr, 69, "mistral-large-4", 680, 2090);
+    _pricing_add(arr, 70, "mistral-large-2512", 500, 1500);
+    _pricing_add(arr, 71, "mistral-medium-3-5", 1500, 7500);
+    _pricing_add(arr, 72, "mistral-small-2603", 150, 600);
+    _pricing_add(arr, 73, "mistral-small-latest", 150, 600);
+    _pricing_add(arr, 74, "codestral-2508", 300, 900);
+    _pricing_add(arr, 75, "ministral-14b-2512", 200, 200);
+    _pricing_add(arr, 76, "openai/gpt-oss-120b", 150, 600);
+    _pricing_add(arr, 77, "openai/gpt-oss-20b", 75, 300);
+    _pricing_add(arr, 78, "qwen/qwen3.8-27b", 800, 4000);
+    _pricing_add(arr, 79, "llama-3.3-70b", 590, 790);
+    _pricing_add(arr, 80, "llama-3.1-8b", 50, 80);
     _pricing_tbl = arr;
-    _pricing_n = 16;
+    _pricing_n = _PRICING_CAP;
     return 0;
 }
 
@@ -70,10 +182,74 @@ fn _pricing_fallback(prov, out) {
     return 0;
 }
 
-# Look up (input_scaled, output_scaled) for a model into out[0],out[8]:
-# 1) exact match, 2) longest-prefix match, 3) provider fallback.
-fn pricing_lookup(model, prov, out) {
+# The compiled table alone: exact, then longest prefix. Returns the row, or 0.
+fn _pricing_row(model) {
     _pricing_init();
+    var ml = strlen(model);
+    var i = 0;
+    while (i < _pricing_n) {
+        var e = _pricing_tbl + i * 48;
+        if (streq(model, load64(e)) == 1) { return e; }
+        i = i + 1;
+    }
+    var best = 0;
+    var best_len = 0;
+    i = 0;
+    while (i < _pricing_n) {
+        var e = _pricing_tbl + i * 48;
+        var key = load64(e);
+        var kl = strlen(key);
+        if (kl <= ml) {
+            if (memeq(model, key, kl) == 1) {
+                if (kl > best_len) {
+                    best_len = kl;
+                    best = e;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# A KNOWN price for `model` into out[0], out[8] ($/M x1000): the operator's [[models]] rates, then the
+# provider's own (OpenRouter lists one per model), then the compiled table; local providers are free.
+# Returns 1 when known, 0 when only the provider-level guess would apply — /v1/models/catalog publishes a price
+# only when it is known (2.8.0), and the guess stays what the cost tracker falls back to.
+fn pricing_known(model, prov, out) {
+    if (provider_is_local(prov) == 1) {
+        store64(out, 0);
+        store64(out + 8, 0);
+        return 1;
+    }
+    var ce = catalog_config_find(model);
+    if (ce != 0) {
+        if (cat_e_in_price(ce) >= 0 && cat_e_out_price(ce) >= 0) {
+            store64(out, cat_e_in_price(ce));
+            store64(out + 8, cat_e_out_price(ce));
+            return 1;
+        }
+    }
+    var le = catalog_find_any(model);
+    if (le != 0) {
+        if (cat_e_in_price(le) >= 0 && cat_e_out_price(le) >= 0) {
+            store64(out, cat_e_in_price(le));
+            store64(out + 8, cat_e_out_price(le));
+            return 1;
+        }
+    }
+    var row = _pricing_row(model);
+    if (row != 0) {
+        store64(out, load64(row + 8));
+        store64(out + 8, load64(row + 16));
+        return 1;
+    }
+    return 0;
+}
+
+# Look up (input_scaled, output_scaled) for a model into out[0],out[8]:
+# 1) a known price (pricing_known), 2) the provider fallback.
+fn pricing_lookup(model, prov, out) {
     # Local providers are free, whatever the model is called. The table is keyed
     # by model NAME, and plenty of hosted-model names are served locally —
     # `llama-3.3-70b` on Ollama would otherwise match the Groq row and be billed
@@ -81,55 +257,27 @@ fn pricing_lookup(model, prov, out) {
     # below already zeroed local providers; it was only reached for models
     # absent from the table, so exactly the realistic cases were mispriced.
     # (Found while verifying 2.5.6 accumulation: a local route reported spend.)
-    if (provider_is_local(prov) == 1) {
-        store64(out, 0);
-        store64(out + 8, 0);
-        return 0;
-    }
-    var ml = strlen(model);
-    var i = 0;
-    while (i < _pricing_n) {
-        var e = _pricing_tbl + i * 24;
-        if (streq(model, load64(e)) == 1) {
-            store64(out, load64(e + 8));
-            store64(out + 8, load64(e + 16));
-            return 0;
-        }
-        i = i + 1;
-    }
-    var best = 0 - 1;
-    var best_len = 0;
-    i = 0;
-    while (i < _pricing_n) {
-        var e = _pricing_tbl + i * 24;
-        var key = load64(e);
-        var kl = strlen(key);
-        if (kl <= ml) {
-            if (memeq(model, key, kl) == 1) {
-                if (kl > best_len) {
-                    best_len = kl;
-                    best = i;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    if (best >= 0) {
-        var be = _pricing_tbl + best * 24;
-        store64(out, load64(be + 8));
-        store64(out + 8, load64(be + 16));
-        return 0;
-    }
+    if (pricing_known(model, prov, out) == 1) { return 0; }
     _pricing_fallback(prov, out);
     return 0;
 }
 
-# Estimate request cost in micro-USD (1e-6 USD).
+# Estimate request cost in micro-USD (1e-6 USD). 2.8.0: a model with a long-context tier is priced at the tier's
+# rates when the input exceeds its threshold (the whole request, as Anthropic bills it).
 fn estimate_cost_micro(model, prov, in_tok, out_tok) {
     var px = alloc(16);
     pricing_lookup(model, prov, px);
     var in_s = load64(px);
     var out_s = load64(px + 8);
+    if (provider_is_local(prov) == 0) {
+        var row = _pricing_row(model);
+        if (row != 0 && catalog_config_find(model) == 0) {
+            if (load64(row + 24) > 0 && in_tok > load64(row + 24)) {
+                in_s = load64(row + 32);
+                out_s = load64(row + 40);
+            }
+        }
+    }
     return in_tok * in_s / 1000 + out_tok * out_s / 1000;
 }
 

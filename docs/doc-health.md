@@ -6,9 +6,9 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-07-23 (**v2.5.11** + a full doc sweep closing the
-> rust-old parity arc). Every doc below was re-read against the source this pass,
-> not just the ones the release touched.
+> **Last refresh**: 2026-10-09 (**v2.8.0**: CHANGELOG, roadmap, state, overview, README, index and hoosh.cyml
+> touched for the live catalog; ADR 012 added). The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the
+> rust-old parity arc), when every doc below was re-read against the source.
 >
 > **What moved**: `roadmap.md` rewritten as forward-only (557 → 153 lines; ten
 > shipped `v2.5.x` band records and the absorbed Backlog tables removed — that
@@ -77,6 +77,7 @@ slow cadence; supersede with a new ADR or an `## Update` section rather than edi
 | 009 Concurrent Batch Inference | Accepted | Current (2.3.1–2.3.3, with Update sections). Note: `batch_submit`'s deep copy is now load-bearing for the 2.5.11 buffer reuse |
 | 010 Observability | Accepted | Current (2.3.4–2.3.5, with Update section) |
 | 011 Multi-threaded accept loop | Accepted | Current (2.4.0, §2.4.5). The 7-worker/crypto-bank ceiling still stands |
+| 012 Live model catalog | Accepted | New (2.8.0). The catalog asked of each route's provider; capability-shaped requests |
 
 ## Policy / legal
 

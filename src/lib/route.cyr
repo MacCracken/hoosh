@@ -2,7 +2,7 @@
 # Requires: types.cyr
 
 enum RouteField {
-    ROUTE_SIZE       = 88;
+    ROUTE_SIZE       = 96;
     ROUTE_PROVIDER   = 0;
     ROUTE_PRIORITY   = 8;
     ROUTE_PATTERNS   = 16;
@@ -14,6 +14,7 @@ enum RouteField {
     ROUTE_MAX_TOKENS = 64;
     ROUTE_HEALTH     = 72;
     ROUTE_TLS_POLICY = 80;   # sandhi TLS policy for https routes, or 0 (2.7.0)
+    ROUTE_CATALOG    = 88;   # 1 = list this route's models live from the provider, 0 = static (2.8.0)
 }
 
 # ── Per-route health record (2.5.5) ──
@@ -62,8 +63,21 @@ fn route_new(prov, priority, base_url) {
     store64(r + ROUTE_MAX_TOKENS, 0);
     store64(r + ROUTE_HEALTH, _health_record_new());
     store64(r + ROUTE_TLS_POLICY, 0);
+    store64(r + ROUTE_CATALOG, route_catalog_default(prov));
     return r;
 }
+
+# 2.8.0: whether a route's catalog is asked of its provider. Live by default; static for OpenRouter, whose
+# /v1/models is a marketplace of several hundred models from every vendor (it would flood a picker, and its
+# ~1 MB answer is the largest parse the catalog would make), and for Whisper, which serves no chat model.
+# [[providers]] catalog = "live" | "static" overrides either way.
+fn route_catalog_default(prov) {
+    if (prov == PROV_OPENROUTER) { return 0; }
+    if (prov == PROV_WHISPER) { return 0; }
+    return 1;
+}
+fn route_catalog_live(r) { return load64(r + ROUTE_CATALOG); }
+fn route_set_catalog_live(r, v) { store64(r + ROUTE_CATALOG, v); return 0; }
 
 fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
 fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }

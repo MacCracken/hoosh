@@ -145,7 +145,21 @@ fn _sb_add_messages(sb, messages_raw, messages_len, ollama) {
     return 0;
 }
 
-fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama) {
+# 2.8.0: what an OpenAI-compatible route's body adds for this model (catalog.cyr): the client's reasoning_effort
+# when the model takes it, and stream_options.include_usage on an OpenAI / DeepSeek stream. Never on Ollama's
+# native /api/chat, which takes neither.
+fn _sb_add_openai_extras(sb, route, model, gen, stream) {
+    var prov = route_provider(route);
+    if (prov == PROV_OLLAMA) { return 0; }
+    var usage = 0;
+    if (stream == 1) {
+        if (prov == PROV_OPENAI || prov == PROV_DEEPSEEK) { usage = 1; }
+    }
+    catalog_add_openai_extras(sb, gen_effort_name(gen), catalog_reasoning_ok(provider_name(prov), model), usage);
+    return 0;
+}
+
+fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -156,12 +170,13 @@ fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len,
         _sb_add_span(sb, tools_raw, tools_len);
     }
     _sb_add_sampling(sb, gen, ollama);
+    if (route != 0) { _sb_add_openai_extras(sb, route, model, gen, 0); }
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
 
 # Build streaming chat body from model + raw messages (+ optional tools).
-fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama) {
+fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -172,6 +187,7 @@ fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, too
         _sb_add_span(sb, tools_raw, tools_len);
     }
     _sb_add_sampling(sb, gen, ollama);
+    if (route != 0) { _sb_add_openai_extras(sb, route, model, gen, 1); }
     str_builder_add_cstr(sb, "}");
     return to_cstr(str_builder_build(sb));
 }
@@ -446,7 +462,7 @@ fn _tools_convert(tools_raw, tools_len, schema_key) {
 # {role,content} turns pass through unchanged. Objects whose content is not a
 # plain string are left in `messages` rather than dropped. `stream` adds the
 # top-level `"stream":true` flag for the incremental SSE path.
-fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw, tools_len, gen) {
+fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw, tools_len, gen, cat_e) {
     var sys_sb = str_builder_new();
     var msgs_sb = str_builder_new();
     str_builder_putc(msgs_sb, '[');
@@ -584,28 +600,28 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     var body = str_builder_new();
     str_builder_add_cstr(body, "{\"model\":\"");
     str_builder_add_cstr(body, model);
-    # 2.5.0 extended thinking: `reasoning_effort` -> Anthropic ADAPTIVE thinking + `output_config.effort`. This is
-    # the format current models (Opus 4.8, Sonnet 4.x) require — the legacy `thinking.type:enabled`+budget_tokens is
-    # REJECTED for them ("not supported for this model"). `effort` here is the LEVEL (1=low, 2=medium, 3=high, 0=off).
-    # 2.5.2: max_tokens is now the CLIENT's when it set one (Anthropic requires the field, so there is always a
-    # value); the historical 4096 / thinking-headroom 16384 remain the defaults when the request omits it.
+    # 2.5.0 extended thinking: `reasoning_effort` -> Anthropic thinking. 2.8.0: the SHAPE comes from the model's own
+    # capability tree in the live catalog (catalog_thinking_plan): adaptive + effort for Claude 4.6 and later, a
+    # thinking budget for Claude 4.5 and earlier (which 400 "adaptive thinking is not supported on this model"), and
+    # the effort level clamped to the ones the model accepts (Sonnet 4.6 400s on "xhigh"). A model the catalog has
+    # not listed gets adaptive + the level, as before. `display: "summarized"` asks for the reasoning TEXT: since
+    # Opus 4.7 the default is "omitted", so thinking blocks streamed empty and a client folding reasoning_content
+    # showed nothing — billed the same either way (measured 2026-10-09: Opus 4.5 summarized 21 chars at effort high).
+    # 2.5.2: max_tokens is the CLIENT's when it set one (Anthropic requires the field, so there is always a value);
+    # the historical 4096 / thinking-headroom 16384 remain the defaults when the request omits it.
     var effort = gen_effort(gen);
     var a_max = gen_max_tokens(gen);
-    if (effort > 0) {
-        if (a_max <= 0) { a_max = 16384; }
-        str_builder_add_cstr(body, "\",\"max_tokens\":");
-        str_builder_add_int(body, a_max);
-        str_builder_add_cstr(body, ",\"thinking\":{\"type\":\"adaptive\"},");
-        str_builder_add_cstr(body, "\"output_config\":{\"effort\":\"");
-        if (effort == 1) { str_builder_add_cstr(body, "low"); }
-        if (effort == 2) { str_builder_add_cstr(body, "medium"); }
-        if (effort >= 3) { str_builder_add_cstr(body, "high"); }
-        str_builder_add_cstr(body, "\"},");
-    } else {
-        if (a_max <= 0) { a_max = 4096; }
-        str_builder_add_cstr(body, "\",\"max_tokens\":");
-        str_builder_add_int(body, a_max);
-        str_builder_add_cstr(body, ",");
+    if (a_max <= 0) {
+        if (effort > 0) { a_max = 16384; } else { a_max = 4096; }
+    }
+    var plan = alloc(24);
+    catalog_thinking_plan(cat_e, effort, a_max, plan);
+    var pmode = load64(plan);
+    str_builder_add_cstr(body, "\",\"max_tokens\":");
+    str_builder_add_int(body, a_max);
+    str_builder_add_cstr(body, ",");
+    catalog_add_thinking(body, plan);
+    if (pmode == CAT_PLAN_NONE) {
         # temperature / top_p are forwarded ONLY with thinking off. Anthropic
         # pins temperature to 1 when extended thinking is on and rejects any
         # other value, so sending the client's here would turn a working
@@ -643,8 +659,8 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
 
 # Non-streaming Anthropic body (the common case). `gen` = the per-request
 # generation options (thinking effort + sampling, 2.5.2; was a bare effort i64).
-fn _build_anthropic_body(model, messages_raw, messages_len, tools_raw, tools_len, gen) {
-    return _build_anthropic_body_x(model, messages_raw, messages_len, 0, tools_raw, tools_len, gen);
+fn _build_anthropic_body(model, messages_raw, messages_len, tools_raw, tools_len, gen, cat_e) {
+    return _build_anthropic_body_x(model, messages_raw, messages_len, 0, tools_raw, tools_len, gen, cat_e);
 }
 
 # Anthropic /v1/messages body from a bare prompt (no messages array).
@@ -779,6 +795,10 @@ fn gemini_extract_text(resp_body, resp_len) {
 fn extract_gemini_tokens(body, blen) {
     var prompt = _json_extract_int(body, blen, "promptTokenCount", 16);
     var comp = _json_extract_int(body, blen, "candidatesTokenCount", 20);
+    # 2.8.0: Gemini 2.5 and later think by default and bill the thinking as OUTPUT (usageMetadata
+    # thoughtsTokenCount, outside candidatesTokenCount) — hoosh counted only the candidates and under-billed.
+    var thoughts = _json_extract_int(body, blen, "thoughtsTokenCount", 18);
+    if (thoughts > 0) { comp = comp + thoughts; }
     return _pack_tokens(prompt, comp);
 }
 
@@ -1164,8 +1184,9 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
     var body = 0;
     if (is_anthropic == 1) {
         if (messages_raw != 0) {
+            # 2.8.0: the model's live catalog entry on THIS route shapes the thinking fields (catalog.cyr).
             body = _build_anthropic_body(model, messages_raw, messages_len,
-              tools_raw, tools_len, gen);
+              tools_raw, tools_len, gen, catalog_find_on(PROV_ANTHROPIC, base, model));
         } else {
             body = _build_anthropic_body_prompt(model, prompt);
         }
@@ -1181,7 +1202,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             if (messages_raw != 0) {
                 # Ollama's native /api/chat nests sampling under `options`.
                 body = _build_chat_body_raw(model, messages_raw, messages_len,
-                  tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA));
+                  tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA), route);
             } else {
                 body = _build_chat_body(model, prompt);
             }
@@ -1297,12 +1318,27 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         }
     }
 
-    var result = alloc(40);
+    # 2.8.0: how the provider says the reply ended (outcome.cyr) — a reply cut at max_tokens and a classifier
+    # refusal no longer read as a clean stop. Ollama's native shape says done_reason, in OpenAI's words.
+    var finish = FIN_NONE;
+    if (is_anthropic == 1) {
+        finish = outcome_finish_anthropic(_json_extract_str(rb, rbl, "stop_reason", 11));
+    } else { if (is_google == 1) {
+            finish = outcome_finish_gemini(_json_extract_str(rb, rbl, "finishReason", 12));
+        } else { if (route_provider(route) == PROV_OLLAMA) {
+                finish = outcome_finish_openai(_json_extract_str(rb, rbl, "done_reason", 11));
+            } else {
+                finish = outcome_finish_openai(_json_extract_str(rb, rbl, "finish_reason", 13));
+            } } }
+
+    # Result: text(0) 0(8) ptok(16) ctok(24) tool_calls(32) finish(40) — 2.8.0 grew it by the finish slot.
+    var result = alloc(48);
     store64(result, text);
     store64(result + 8, 0);
     store64(result + 16, ptok);
     store64(result + 24, ctok);
     store64(result + 32, tool_calls);
+    store64(result + 40, finish);
     return result;
 }
 
@@ -1323,7 +1359,7 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     var base = route_base_url(route);
     var body = _build_chat_body_raw_stream(
       model, messages_raw, messages_len, tools_raw, tools_len, gen,
-      (route_provider(route) == PROV_OLLAMA));
+      (route_provider(route) == PROV_OLLAMA), route);
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

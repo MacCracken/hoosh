@@ -1,0 +1,261 @@
+# catalog_fetch.cyr — the live model catalog's I/O half (2.8.0).
+# Requires: catalog.cyr (the pure half), route.cyr, router.cyr (`_router`), provider.cyr (_provider_headers,
+#           route_is_remote), logging.cyr, pool.cyr (wq_push), sandhi + alloc (lib).
+#
+# Who asks, when, and with what:
+#
+#  - A refresh asks every enabled route in "live" catalog mode for its model list, with that route's own key, and
+#    publishes the answers as one new snapshot (catalog.cyr). It runs on a POOL WORKER: remote lists are HTTPS,
+#    and a TLS request needs a sigil crypto bank, which only the workers own (bank 0 is the accept thread; the
+#    health prober and this file's timer thread are bankless, which is why the prober only TCP-connects).
+#  - Startup and /v1/admin/reload ENQUEUE a refresh (the gateway never waits on a provider to start serving);
+#    POST /v1/models/refresh runs one inline on the worker serving it and answers with the result; and a bankless
+#    timer enqueues one every [catalog] refresh_secs.
+#  - A refresh is single-flight (catalog_refresh_begin): a second one asked for while the first runs is skipped.
+#
+# Memory. hoosh's heap never frees, and a provider's list is parsed into a full JSON tree before the few fields
+# kept are copied out. So the fetch and the parse use one growable scratch ARENA, reset after every route: the
+# arena settles at the largest single answer and stops growing, and only the kept entries reach the heap.
+
+var _cat_arena = 0;         # scratch allocator: one route's response body + its parsed tree, reset per route
+var _cat_opts = 0;          # sandhi options for a catalog GET with no TLS policy (shared, immutable)
+var _cat_timer_on = 0;
+
+# A catalog GET is not a completion: it answers in well under a second, so it gets short deadlines rather than
+# REMOTE_*'s 5-minute read bound, and a 4 MiB cap (OpenRouter's whole marketplace is ~1 MB).
+var CAT_CONNECT_MS = 5000;
+var CAT_READ_MS = 15000;
+var CAT_TOTAL_MS = 20000;
+var CAT_MAX_BYTES = 4194304;
+var CAT_MAX_PAGES = 10;     # Anthropic / Google pagination bound (1000 models a page)
+var JOB_CATALOG_REFRESH = 3;
+
+fn _cat_family(prov) {
+    if (prov == PROV_ANTHROPIC) { return CATFAM_ANTHROPIC; }
+    if (prov == PROV_GOOGLE) { return CATFAM_GOOGLE; }
+    if (prov == PROV_OLLAMA) { return CATFAM_OLLAMA; }
+    return CATFAM_OPENAI;
+}
+
+fn _cat_new_opts() {
+    var o = sandhi_http_options_new();
+    if (o == 0) { return 0; }
+    sandhi_http_options_connect_ms(o, CAT_CONNECT_MS);
+    sandhi_http_options_read_ms(o, CAT_READ_MS);
+    sandhi_http_options_write_ms(o, CAT_READ_MS);
+    sandhi_http_options_total_ms(o, CAT_TOTAL_MS);
+    sandhi_http_options_max_response_bytes(o, CAT_MAX_BYTES);
+    return o;
+}
+
+# The route's TLS policy goes with its catalog GET exactly as with its completions ([[providers]]
+# tls_pinned_certs / client_cert): a pinned route is asked only over the pinned trust.
+fn _cat_opts_for(route) {
+    var pol = route_tls_policy(route);
+    if (pol == 0) {
+        if (_cat_opts == 0) { _cat_opts = _cat_new_opts(); }
+        return _cat_opts;
+    }
+    var o = _cat_new_opts();
+    if (o != 0) { sandhi_http_options_tls_policy(o, pol); }
+    return o;
+}
+
+# GET `url` into the scratch arena with the route's auth headers. Returns the HTTP status (2xx-5xx), or -1 when
+# nothing answered; *resp receives the sandhi response.
+fn _cat_get(route, url, resp) {
+    store64(resp, 0);
+    var r = sandhi_http_get_opts_a(_cat_arena, url, _provider_headers(route), _cat_opts_for(route));
+    if (r == 0) { return 0 - 1; }
+    if (sandhi_http_err_kind(r) != SANDHI_OK) { return 0 - 1; }
+    store64(resp, r);
+    return sandhi_http_status(r);
+}
+
+fn _cat_url(base, path) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, path);
+    return to_cstr(str_builder_build(sb));
+}
+
+# Anthropic: GET /v1/models?limit=1000, following has_more / last_id.
+fn _cat_fetch_anthropic(route, es) {
+    var base = route_base_url(route);
+    var more = alloc(8);
+    var last = alloc(8);
+    var resp = alloc(8);
+    var after = 0;
+    var page = 0;
+    while (page < CAT_MAX_PAGES) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, base);
+        str_builder_add_cstr(sb, "/v1/models?limit=1000");
+        if (after != 0) {
+            str_builder_add_cstr(sb, "&after_id=");
+            str_builder_add_cstr(sb, after);
+        }
+        var st = _cat_get(route, to_cstr(str_builder_build(sb)), resp);
+        if (st != 200) { return st; }
+        var r = load64(resp);
+        var n = catalog_parse_anthropic(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), es, more, last);
+        if (n < 0) { return 0 - 2; }
+        if (load64(more) == 0) { return 200; }
+        after = load64(last);
+        page = page + 1;
+    }
+    return 200;
+}
+
+# Google: GET /v1beta/models?pageSize=1000&key=K, following nextPageToken. The key rides the query string, as on
+# every Gemini call hoosh makes — so this URL is never logged.
+fn _cat_fetch_google(route, es) {
+    var base = route_base_url(route);
+    var key = route_api_key(route);
+    var next = alloc(8);
+    var resp = alloc(8);
+    var tok = 0;
+    var page = 0;
+    while (page < CAT_MAX_PAGES) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, base);
+        str_builder_add_cstr(sb, "/v1beta/models?pageSize=1000");
+        if (key != 0) {
+            str_builder_add_cstr(sb, "&key=");
+            str_builder_add_cstr(sb, key);
+        }
+        if (tok != 0) {
+            str_builder_add_cstr(sb, "&pageToken=");
+            str_builder_add_cstr(sb, tok);
+        }
+        var st = _cat_get(route, to_cstr(str_builder_build(sb)), resp);
+        if (st != 200) { return st; }
+        var r = load64(resp);
+        var n = catalog_parse_google(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), es, next);
+        if (n < 0) { return 0 - 2; }
+        tok = load64(next);
+        if (tok == 0) { return 200; }
+        page = page + 1;
+    }
+    return 200;
+}
+
+# OpenAI-compatible (GET /v1/models) and Ollama (GET /api/tags): one page.
+fn _cat_fetch_simple(route, es, fam) {
+    var path = "/v1/models";
+    if (fam == CATFAM_OLLAMA) { path = "/api/tags"; }
+    var resp = alloc(8);
+    var st = _cat_get(route, _cat_url(route_base_url(route), path), resp);
+    if (st != 200) { return st; }
+    var r = load64(resp);
+    var n = 0;
+    if (fam == CATFAM_OLLAMA) {
+        n = catalog_parse_ollama(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), es);
+    } else {
+        n = catalog_parse_openai(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), es, 1);
+    }
+    if (n < 0) { return 0 - 2; }
+    return 200;
+}
+
+# Ask one route. Fills `es` and returns the HTTP status of the answer (200 = a model list was read), -1 when
+# nothing answered, -2 when the answer was not a model list.
+fn catalog_fetch_route(route, es) {
+    var fam = _cat_family(route_provider(route));
+    if (fam == CATFAM_ANTHROPIC) { return _cat_fetch_anthropic(route, es); }
+    if (fam == CATFAM_GOOGLE) { return _cat_fetch_google(route, es); }
+    return _cat_fetch_simple(route, es, fam);
+}
+
+# One refresh over the routes of the CURRENT router. Returns the number of models now listed live, or -1 when a
+# refresh was already running. Every record in the new snapshot is fresh, so a published snapshot is never
+# mutated under a reader; a route whose fetch failed carries its previous good entries forward.
+fn catalog_refresh_all() {
+    if (catalog_refresh_begin() == 0) { return 0 - 1; }
+    if (_cat_arena == 0) { _cat_arena = arena_allocator_growable(262144); }
+    var rt = _router;
+    var old = catalog_snapshot();
+    var snap = vec_new();
+    var total = 0;
+    var asked = 0;
+    var failed = 0;
+    if (rt != 0) {
+        var routes = load64(rt + ROUTER_ROUTES);
+        var count = load64(rt + ROUTER_COUNT);
+        var i = 0;
+        while (i < count) {
+            var r = load64(routes + i * 8);
+            var prov = route_provider(r);
+            var base = route_base_url(r);
+            if (route_enabled(r) == 1 && base != 0) {
+                if (catalog_record_find(snap, prov, base) == 0) {
+                    var nr = catalog_record_new(prov, base);
+                    var prev = catalog_record_find(old, prov, base);
+                    if (prev != 0) {
+                        store64(nr + CAT_R_ENTRIES, cat_r_entries(prev));
+                        store64(nr + CAT_R_GOOD_MS, cat_r_good_ms(prev));
+                    }
+                    if (route_catalog_live(r) == 1) {
+                        var es = vec_new();
+                        var st = catalog_fetch_route(r, es);
+                        catalog_record_note(nr, st, es, clock_now_ms());
+                        asked = asked + 1;
+                        if (st != 200) { failed = failed + 1; }
+                        if (_cat_arena != 0) { reset_via(_cat_arena); }
+                    }
+                    total = total + cat_r_count(nr);
+                    vec_push(snap, nr);
+                }
+            }
+            i = i + 1;
+        }
+    }
+    catalog_publish(snap);
+    catalog_refresh_end(clock_now_ms());
+    var lsb = str_builder_new();
+    str_builder_add_cstr(lsb, "catalog: asked ");
+    str_builder_add_int(lsb, asked);
+    str_builder_add_cstr(lsb, " route(s), ");
+    str_builder_add_int(lsb, total);
+    str_builder_add_cstr(lsb, " model(s) listed live");
+    if (failed > 0) {
+        str_builder_add_cstr(lsb, ", ");
+        str_builder_add_int(lsb, failed);
+        str_builder_add_cstr(lsb, " route(s) did not answer with a model list (GET /v1/health/providers names which)");
+        hlog_warn(to_cstr(str_builder_build(lsb)));
+    } else {
+        hlog_info(to_cstr(str_builder_build(lsb)));
+    }
+    return total;
+}
+
+# Hand a refresh to a banked pool worker unless one is already running.
+fn catalog_kick() {
+    if (catalog_refresh_running() == 1) { return 0; }
+    var j = alloc(8);
+    store64(j, JOB_CATALOG_REFRESH);
+    wq_push(j);
+    return 1;
+}
+
+# The bankless timer: every minute, enqueue a refresh when one is due. It never does the TLS itself.
+fn _cat_timer_thread(arg) {
+    while (1 == 1) {
+        sleep_ms(60000);
+        if (catalog_due(clock_now_ms(), catalog_last_ms(), catalog_refresh_secs()) == 1) { catalog_kick(); }
+    }
+    return 0;
+}
+
+# Startup: the first refresh is enqueued (startup does not wait on a provider), and the timer starts when a
+# refresh interval is set. Call after pool_start (the job needs workers) and after signals_init (thread rule).
+fn catalog_start() {
+    catalog_kick();
+    if (_cat_timer_on == 0) {
+        if (catalog_refresh_secs() > 0) {
+            _cat_timer_on = 1;
+            thread_create(&_cat_timer_thread, 0);
+        }
+    }
+    return 0;
+}

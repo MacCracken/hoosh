@@ -9,16 +9,17 @@
 
 | | |
 |---|---|
-| **Version** | **2.7.1** (last rust-old parity item: provider TLS pinning/mTLS; release detail in the CHANGELOG) |
+| **Version** | **2.8.0** (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md); release detail in the CHANGELOG) |
 | **Toolchain** | Cyrius pin **6.6.6** (`cyrius.cyml`); `ai-hwaccel` **2.4.0**; vendored `bote-core` **3.3.13**, `majra` **2.9.1** |
-| **Binary** (x86_64 static ELF) | ~2.8 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
-| **Source** | ~13,200 lines / 34 files (`src/main.cyr` + 33 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 959 assertions (`tests/hoosh.tcyr`) |
+| **Binary** (x86_64 static ELF) | ~2.9 MB; same size under `CYRIUS_DCE=1` (DCE NOPs dead code in place) |
+| **Source** | ~15,600 lines / 38 files (`src/main.cyr` + 37 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 1192 assertions, 180 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
-| **Coverage** | symbol coverage 42% (`scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 43% (`scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
-| **ADRs** | 11 (`docs/decisions/`) |
+| **ADRs** | 12 (`docs/decisions/`) |
+| **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
 | **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
 
 ## 2.6.5 — errors stop being laundered into successes
@@ -46,11 +47,9 @@ the five byte-level JSON readers out of `provider.cyr`). The reason is mechanica
 reaches `_router`, a global defined in `main.cyr`, so it cannot be included by the test binary** — and
 untrusted-byte parsing is exactly what must be tested against the real implementation, not a mirror.
 
-⚠ **Not fixed here, and not hoosh's:** the vendored `lib/sandhi.cyr` in this toolchain snapshot silently
-drops whole SSE events at read boundaries, which is what made hoosh forward a tool call whose `id`/`name`
-frame never arrived. Fixed upstream in **sandhi 1.9.15**; it reaches hoosh when a cyrius release
-re-vendors the bundle. Filed as
-`cyrius/docs/development/issues/2026-08-27-revendor-sandhi-1.9.15-sse-event-loss.md`.
+✅ **Since closed:** the sandhi SSE event loss at read boundaries (what made hoosh forward a tool call whose
+`id`/`name` frame never arrived) was fixed in **sandhi 1.9.15**, which the cyrius 6.6.6 stdlib hoosh pins carries;
+2.8.0 adds a test that splits a `tool_use` start at every byte, and drops any orphan argument fragment besides.
 
 ## Active cycle — v2.5.x arc: COMPLETE
 

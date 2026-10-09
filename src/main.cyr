@@ -32,6 +32,9 @@ include "src/vendor/majra.cyr"
 # ================================================================
 
 include "src/lib/types.cyr"
+# 2.8.0: the live model catalog's pure half (parsers, snapshot, request shaping). Early, because pricing.cyr,
+# metadata.cyr and provider.cyr consult it; it reaches no hoosh module, so tests include it for real.
+include "src/lib/catalog.cyr"
 include "src/lib/dlp.cyr"
 include "src/lib/compression.cyr"
 include "src/lib/pricing.cyr"
@@ -47,13 +50,18 @@ include "src/lib/metrics.cyr"
 include "src/lib/trace.cyr"
 include "src/lib/auth.cyr"
 include "src/lib/http_server.cyr"
+include "src/lib/urlparse.cyr"      # 2.8.0: scheme-aware host/port (the remote health probe read localhost:80)
 include "src/lib/http_client.cyr"
 # 2.6.5: byte-level JSON field readers, lifted out of provider.cyr so the test binary can reach them
 # (provider.cyr references `_router`, a global defined below, so it cannot be included by tests).
 include "src/lib/jsonlite.cyr"
 # 2.6.5: the provider-error surface. BEFORE provider.cyr, which calls into it.
 include "src/lib/provider_err.cyr"
+# 2.8.0: finish reasons + stream usage, mapped from each provider's own words. After jsonlite/provider_err.
+include "src/lib/outcome.cyr"
 include "src/lib/provider.cyr"
+# 2.8.0: the live catalog's I/O half — asks each route for its models on a banked pool worker.
+include "src/lib/catalog_fetch.cyr"
 include "src/lib/compact.cyr"
 include "src/lib/audit.cyr"
 include "src/lib/storage.cyr"
@@ -116,6 +124,7 @@ fn _requires_post(path) {
     if (streq(path, "/v1/cost/estimate") == 1) { return 1; }
     if (streq(path, "/v1/cost/recommend") == 1) { return 1; }
     if (streq(path, "/v1/tools/call") == 1) { return 1; }
+    if (streq(path, "/v1/models/refresh") == 1) { return 1; }
     return 0;
 }
 
@@ -175,6 +184,7 @@ fn http_route(cfd, method, path, buf, buf_len) {
     if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }
     if (streq(path, "/v1/models") == 1) { return handle_models(cfd); }
     if (streq(path, "/v1/models/catalog") == 1) { return handle_models_catalog(cfd); }
+    if (streq(path, "/v1/models/refresh") == 1) { return handle_models_refresh(cfd); }
     if (streq(path, "/api/tags") == 1) { return handle_ollama_tags(cfd); }
     if (streq(path, "/v1/costs") == 1) { return handle_costs(cfd); }
     if (streq(path, "/v1/audit") == 1) { return handle_audit(cfd); }
@@ -227,6 +237,9 @@ fn http_route(cfd, method, path, buf, buf_len) {
         mutex_lock(_chat_lock);
         load_config(_config_path);
         mutex_unlock(_chat_lock);
+        # 2.8.0: a reload can add a route or change a key, so the catalog is asked again (enqueued — the reload
+        # answers now, and the old snapshot keeps serving until the new one is published).
+        catalog_kick();
         hlog_info("config reloaded from hoosh.cyml");
         var body = "{\"status\":\"reloaded\"}";
         return http_ok(cfd, body, strlen(body));
@@ -463,6 +476,11 @@ fn cmd_serve(port) {
     # first so the earliest requests route on measured state. No-op when
     # [server] health_check_interval_secs = 0.
     health_start();
+
+    # The live model catalog (2.8.0) — enqueues the first refresh for a worker (startup never waits on a
+    # provider) and starts the bankless refresh timer when [catalog] refresh_secs > 0. After pool_start: the
+    # refresh is a pool job.
+    catalog_start();
 
     # Periodic hardware re-detection (2.5.7) — no-op unless
     # [hardware] refresh_interval_secs is set.

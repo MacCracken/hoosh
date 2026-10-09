@@ -39,6 +39,10 @@ include "src/lib/http_server.cyr"
 include "src/lib/jsonlite.cyr"
 include "src/lib/compact.cyr"
 include "src/lib/provider_err.cyr"
+# 2.8.0: the live catalog's pure half and the finish/usage mapping — included for real, not mirrored.
+include "src/lib/catalog.cyr"
+include "src/lib/outcome.cyr"
+include "src/lib/urlparse.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -391,226 +395,11 @@ fn _compress(s) {
     return compress_ws_json(b, n);
 }
 
-# Per-token pricing (mirror of pricing.cyr).
-var _pricing_tbl = 0;
-var _pricing_n = 0;
-
-fn _pricing_add(arr, idx, key, in_s, out_s) {
-    var e = arr + idx * 24;
-    store64(e, key);
-    store64(e + 8, in_s);
-    store64(e + 16, out_s);
-    return 0;
-}
-
-fn _pricing_init() {
-    if (_pricing_tbl != 0) { return 0; }
-    var arr = alloc(16 * 24);
-    _pricing_add(arr, 0, "claude-opus-4", 15000, 75000);
-    _pricing_add(arr, 1, "claude-sonnet-4", 3000, 15000);
-    _pricing_add(arr, 2, "claude-3.5-haiku", 800, 4000);
-    _pricing_add(arr, 3, "claude-3-5-haiku", 800, 4000);
-    _pricing_add(arr, 4, "gpt-4o", 2500, 10000);
-    _pricing_add(arr, 5, "gpt-4o-mini", 150, 600);
-    _pricing_add(arr, 6, "o1", 15000, 60000);
-    _pricing_add(arr, 7, "o3-mini", 1100, 4400);
-    _pricing_add(arr, 8, "deepseek-chat", 270, 1100);
-    _pricing_add(arr, 9, "deepseek-coder", 140, 280);
-    _pricing_add(arr, 10, "deepseek-reasoner", 550, 2190);
-    _pricing_add(arr, 11, "grok-3", 3000, 15000);
-    _pricing_add(arr, 12, "grok-3-mini", 300, 500);
-    _pricing_add(arr, 13, "llama-3.3-70b", 590, 790);
-    _pricing_add(arr, 14, "llama-3.1-8b", 50, 80);
-    _pricing_add(arr, 15, "gemini-2.0-flash", 100, 400);
-    _pricing_tbl = arr;
-    _pricing_n = 16;
-    return 0;
-}
-
-fn _pricing_fallback(prov, out) {
-    var in_s = 0;
-    var out_s = 0;
-    if (provider_is_local(prov) == 0) {
-        if (prov == PROV_ANTHROPIC) { in_s = 3000; out_s = 15000; }
-        if (prov == PROV_OPENAI) { in_s = 2500; out_s = 10000; }
-        if (prov == PROV_DEEPSEEK) { in_s = 270; out_s = 1100; }
-        if (prov == PROV_GROQ) { in_s = 590; out_s = 790; }
-        if (prov == PROV_GROK) { in_s = 3000; out_s = 15000; }
-        if (prov == PROV_GOOGLE) { in_s = 100; out_s = 400; }
-        if (prov == PROV_MISTRAL) { in_s = 2000; out_s = 6000; }
-        if (prov == PROV_OPENROUTER) { in_s = 2500; out_s = 10000; }
-    }
-    store64(out, in_s);
-    store64(out + 8, out_s);
-    return 0;
-}
-
-fn pricing_lookup(model, prov, out) {
-    _pricing_init();
-    var ml = strlen(model);
-    var i = 0;
-    while (i < _pricing_n) {
-        var e = _pricing_tbl + i * 24;
-        if (streq(model, load64(e)) == 1) {
-            store64(out, load64(e + 8));
-            store64(out + 8, load64(e + 16));
-            return 0;
-        }
-        i = i + 1;
-    }
-    var best = 0 - 1;
-    var best_len = 0;
-    i = 0;
-    while (i < _pricing_n) {
-        var e = _pricing_tbl + i * 24;
-        var key = load64(e);
-        var kl = strlen(key);
-        if (kl <= ml) {
-            if (memeq(model, key, kl) == 1) {
-                if (kl > best_len) {
-                    best_len = kl;
-                    best = i;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    if (best >= 0) {
-        var be = _pricing_tbl + best * 24;
-        store64(out, load64(be + 8));
-        store64(out + 8, load64(be + 16));
-        return 0;
-    }
-    _pricing_fallback(prov, out);
-    return 0;
-}
-
-fn estimate_cost_micro(model, prov, in_tok, out_tok) {
-    var px = alloc(16);
-    pricing_lookup(model, prov, px);
-    return in_tok * load64(px) / 1000 + out_tok * load64(px + 8) / 1000;
-}
-
-# Model metadata + capability filter (mirror of metadata.cyr).
-enum ModelTier {
-    TIER_ECONOMY   = 0;
-    TIER_STANDARD  = 1;
-    TIER_PREMIUM   = 2;
-    TIER_REASONING = 3;
-}
-
-var _meta_tbl = 0;
-var _meta_n = 0;
-
-fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys) {
-    var e = arr + idx * 48;
-    store64(e, key);
-    store64(e + 8, ctx);
-    store64(e + 16, tier);
-    store64(e + 24, vision);
-    store64(e + 32, tools);
-    store64(e + 40, sys);
-    return 0;
-}
-
-fn _meta_init() {
-    if (_meta_tbl != 0) { return 0; }
-    var arr = alloc(24 * 48);
-    _meta_add(arr, 0, "claude-opus-4", 200000, TIER_PREMIUM, 1, 1, 1);
-    _meta_add(arr, 1, "claude-sonnet-4", 200000, TIER_STANDARD, 1, 1, 1);
-    _meta_add(arr, 2, "claude-3.5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 3, "claude-3-5-haiku", 200000, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 4, "gpt-4o", 128000, TIER_STANDARD, 1, 1, 1);
-    _meta_add(arr, 5, "gpt-4o-mini", 128000, TIER_ECONOMY, 1, 1, 1);
-    _meta_add(arr, 6, "o1", 200000, TIER_REASONING, 1, 1, 1);
-    _meta_add(arr, 7, "o3-mini", 200000, TIER_REASONING, 0, 1, 1);
-    _meta_add(arr, 8, "deepseek-chat", 64000, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 9, "deepseek-coder", 64000, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 10, "deepseek-reasoner", 64000, TIER_REASONING, 0, 1, 1);
-    _meta_add(arr, 11, "grok-3", 131072, TIER_PREMIUM, 0, 1, 1);
-    _meta_add(arr, 12, "grok-3-mini", 131072, TIER_STANDARD, 0, 1, 1);
-    _meta_add(arr, 13, "llama-3.3-70b", 128000, TIER_STANDARD, 0, 1, 1);
-    _meta_add(arr, 14, "llama-3.1-8b", 128000, TIER_ECONOMY, 0, 0, 1);
-    _meta_add(arr, 15, "gemini-2.0-flash", 1048576, TIER_ECONOMY, 1, 1, 1);
-    # 2.7.0 rows (src/lib/metadata.cyr), the ones the longest-prefix tests need.
-    _meta_add(arr, 16, "mistral", 32768, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 17, "mistral-nemo", 128000, TIER_ECONOMY, 0, 1, 1);
-    _meta_add(arr, 18, "o1-mini", 128000, TIER_REASONING, 0, 1, 1);
-    _meta_add(arr, 19, "o3", 200000, TIER_REASONING, 1, 1, 1);
-    _meta_add(arr, 20, "gpt-4.1", 1047576, TIER_STANDARD, 1, 1, 1);
-    _meta_add(arr, 21, "gpt-4.1-mini", 1047576, TIER_ECONOMY, 1, 1, 1);
-    _meta_add(arr, 22, "gemini-2.5-pro", 1048576, TIER_PREMIUM, 1, 1, 1);
-    _meta_add(arr, 23, "text-embedding-3-small", 8191, TIER_ECONOMY, 0, 0, 0);
-    _meta_tbl = arr;
-    _meta_n = 24;
-    return 0;
-}
-
-fn _meta_copy(e, out) {
-    store64(out, load64(e + 8));
-    store64(out + 8, load64(e + 16));
-    store64(out + 16, load64(e + 24));
-    store64(out + 24, load64(e + 32));
-    store64(out + 32, load64(e + 40));
-    return 0;
-}
-
-fn metadata_lookup(model, out) {
-    _meta_init();
-    var ml = strlen(model);
-    var i = 0;
-    while (i < _meta_n) {
-        var e = _meta_tbl + i * 48;
-        if (streq(model, load64(e)) == 1) {
-            _meta_copy(e, out);
-            return 1;
-        }
-        i = i + 1;
-    }
-    var best = 0 - 1;
-    var best_len = 0;
-    i = 0;
-    while (i < _meta_n) {
-        var e = _meta_tbl + i * 48;
-        var key = load64(e);
-        var kl = strlen(key);
-        if (kl <= ml) {
-            if (memeq(model, key, kl) == 1) {
-                if (kl > best_len) {
-                    best_len = kl;
-                    best = i;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    if (best >= 0) {
-        _meta_copy(_meta_tbl + best * 48, out);
-        return 1;
-    }
-    return 0;
-}
-
-fn classify_complexity(in_tok, uses_tools, has_vision) {
-    if (has_vision == 1) { return TIER_STANDARD; }
-    if (uses_tools == 1 && in_tok > 2000) { return TIER_STANDARD; }
-    if (in_tok > 10000) { return TIER_STANDARD; }
-    return TIER_ECONOMY;
-}
-
-fn meets_requirements(meta, min_tier, has_vision, uses_tools, has_system, total_tokens) {
-    var ctx = load64(meta);
-    var tier = load64(meta + 8);
-    var vision = load64(meta + 16);
-    var tools = load64(meta + 24);
-    var sys = load64(meta + 32);
-    if (tier < min_tier) { return 0; }
-    if (has_vision == 1 && vision == 0) { return 0; }
-    if (uses_tools == 1 && tools == 0) { return 0; }
-    if (has_system == 1 && sys == 0) { return 0; }
-    if (total_tokens > ctx) { return 0; }
-    return 1;
-}
+# Per-token pricing + model metadata: 2.8.0 includes the REAL pricing.cyr and metadata.cyr here (they were
+# mirrors, and the roadmap's "mirror drift" twice let src go wrong while the mirror stayed right — 2.5.6 pricing,
+# 2.5.7 audit). Both need only the Provider enum + provider_is_local above and catalog.cyr (included at the top).
+include "src/lib/pricing.cyr"
+include "src/lib/metadata.cyr"
 
 # Semantic cache (mirror of semantic.cyr).
 var _sem_enabled = 1;
@@ -3703,19 +3492,11 @@ enum AuditField {
     AE_MODEL = 32; AE_HASH = 40; AE_SIG = 48; AE_PREV = 56;
 }
 
-# 2.5.0: copy of _req_reasoning_effort (handlers.cyr) — the raw byte scan mapping OpenAI reasoning_effort to an
-# Anthropic thinking effort level (1=low/2=medium/3=high/0=none). A raw scan, NOT json_get, because clients put
-# reasoning_effort AFTER the nested `messages` array, which hoosh's flat json_parse cannot reach.
+# 2.5.0's _req_reasoning_effort mirror is gone: handlers.cyr's is a wrapper over catalog_req_effort (catalog.cyr,
+# included above), and this is the same wrapper, so the 2.5.0 assertions below run against the real scanner.
 fn _req_reasoning_effort(body_ptr, body_len) {
-    var j = _top_key_value(body_ptr, body_len, "\"reasoning_effort\"", 18);
-    if (j < 0) { return 0; }
-    if (j >= body_len || load8(body_ptr + j) != 34) { return 0; }
-    var p = body_ptr + j + 1;
-    var rem = body_len - j - 1;
-    if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { return 1; }
-    if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { return 2; }
-    if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { return 3; }
-    return 0;
+    var w = alloc(8);
+    return catalog_req_effort(body_ptr, body_len, w);
 }
 
 # ================================================================
@@ -3762,6 +3543,543 @@ fn _t_usage_block(ptok, ctok, cost_micro, provider) {
     }
     str_builder_add_cstr(sb, "}}");
     return str_builder_build(sb);
+}
+
+# ════════════════════════════════════════════════════════════════
+# 2.8.0 — the live model catalog, current-model request shaping, finish reasons, stream usage. One function per
+# group (main()'s scope already holds most short names); the parsed entries the later groups shape requests
+# from are module globals.
+# ════════════════════════════════════════════════════════════════
+var _t280_ca = 0;
+var _t280_an_es = 0;
+var _t280_e_o55 = 0;
+var _t280_e_s46 = 0;
+var _t280_e_h45 = 0;
+var _t280_e_bare = 0;
+var _t280_e_or = 0;
+var _t280_gg_es = 0;
+
+fn _t280_catalog_parse_anthropic() {
+    test_group("catalog_parse_anthropic");
+    # Trimmed from the live GET /v1/models answer of 2026-10-09: the fields hoosh keeps, plus two entries it
+    # must not keep (an id with a space, a numeric id). The page says has_more, so the cursor is last_id.
+    var an_body = "{\"data\":[{\"type\":\"model\",\"id\":\"claude-opus-5-5\",\"display_name\":\"Claude Opus 5.5\",\"created_at\":\"2026-09-21T16:24:00Z\",\"max_input_tokens\":1000000,\"max_tokens\":128000,\"capabilities\":{\"image_input\":{\"supported\":true},\"thinking\":{\"supported\":true,\"types\":{\"enabled\":{\"supported\":false},\"adaptive\":{\"supported\":true},\"disabled\":{\"supported\":false}}},\"effort\":{\"supported\":true,\"low\":{\"supported\":true},\"medium\":{\"supported\":true},\"high\":{\"supported\":true},\"xhigh\":{\"supported\":true},\"max\":{\"supported\":true}}}},{\"type\":\"model\",\"id\":\"claude-sonnet-4-6\",\"display_name\":\"Claude Sonnet 4.6\",\"max_input_tokens\":1000000,\"max_tokens\":128000,\"capabilities\":{\"image_input\":{\"supported\":true},\"thinking\":{\"supported\":true,\"types\":{\"enabled\":{\"supported\":true},\"adaptive\":{\"supported\":true},\"disabled\":{\"supported\":true}}},\"effort\":{\"supported\":true,\"low\":{\"supported\":true},\"medium\":{\"supported\":true},\"high\":{\"supported\":true},\"xhigh\":{\"supported\":false},\"max\":{\"supported\":true}}}},{\"type\":\"model\",\"id\":\"claude-haiku-4-5-20251001\",\"display_name\":\"Claude Haiku 4.5\",\"max_input_tokens\":200000,\"max_tokens\":64000,\"capabilities\":{\"image_input\":{\"supported\":true},\"thinking\":{\"supported\":true,\"types\":{\"enabled\":{\"supported\":true},\"adaptive\":{\"supported\":false},\"disabled\":{\"supported\":true}}},\"effort\":{\"supported\":false,\"low\":{\"supported\":false},\"medium\":{\"supported\":false},\"high\":{\"supported\":false},\"xhigh\":{\"supported\":false},\"max\":{\"supported\":false}}}},{\"type\":\"model\",\"id\":\"claude-opus-4-5-20251101\",\"max_input_tokens\":200000,\"max_tokens\":64000,\"capabilities\":{\"thinking\":{\"types\":{\"enabled\":{\"supported\":true},\"adaptive\":{\"supported\":false}}},\"effort\":{\"supported\":true,\"low\":{\"supported\":true},\"medium\":{\"supported\":true},\"high\":{\"supported\":true},\"xhigh\":{\"supported\":false},\"max\":{\"supported\":false}}}},{\"type\":\"model\",\"id\":\"claude with space\"},{\"type\":\"model\",\"id\":123},{\"type\":\"model\",\"id\":\"claude-bare\"}],\"has_more\":true,\"first_id\":\"claude-opus-5-5\",\"last_id\":\"claude-bare\"}";
+    _t280_ca = arena_allocator_growable(65536);
+    _t280_an_es = vec_new();
+    var an_more = alloc(8);
+    var an_last = alloc(8);
+    assert_eq(catalog_parse_anthropic(_t280_ca, an_body, strlen(an_body), _t280_an_es, an_more, an_last), 7,
+      "anthropic: the page held seven models");
+    assert_eq(vec_len(_t280_an_es), 5, "anthropic: an id with a space and a numeric id are dropped, five kept");
+    _t280_e_o55 = vec_get(_t280_an_es, 0);
+    assert_streq(cat_e_id(_t280_e_o55), "claude-opus-5-5", "anthropic: id");
+    assert_streq(cat_e_display(_t280_e_o55), "Claude Opus 5.5", "anthropic: display_name");
+    assert_eq(cat_e_ctx(_t280_e_o55), 1000000, "anthropic: max_input_tokens is the context window");
+    assert_eq(cat_e_maxout(_t280_e_o55), 128000, "anthropic: max_tokens is the output ceiling");
+    assert_eq(cat_e_vision(_t280_e_o55), 1, "anthropic: image_input -> vision");
+    assert_eq(cat_e_think(_t280_e_o55), CAT_THINK_ADAPTIVE, "anthropic: Opus 5.5 thinks adaptively only (disabled 400s)");
+    assert_eq(cat_e_effort(_t280_e_o55), 31, "anthropic: Opus 5.5 takes all five effort levels");
+    assert_eq(cat_e_source(_t280_e_o55), CATSRC_LIVE, "anthropic: entries are live");
+    _t280_e_s46 = vec_get(_t280_an_es, 1);
+    assert_eq(cat_e_think(_t280_e_s46), CAT_THINK_ADAPTIVE | CAT_THINK_ENABLED | CAT_THINK_DISABLE,
+      "anthropic: Sonnet 4.6 takes adaptive, a budget, and disabled");
+    assert_eq(cat_e_effort(_t280_e_s46), 1 | 2 | 4 | 16, "anthropic: Sonnet 4.6 has no xhigh (it 400s on it)");
+    _t280_e_h45 = vec_get(_t280_an_es, 2);
+    assert_eq(cat_e_think(_t280_e_h45), CAT_THINK_ENABLED | CAT_THINK_DISABLE, "anthropic: Haiku 4.5 takes only a budget");
+    assert_eq(cat_e_effort(_t280_e_h45), 0, "anthropic: Haiku 4.5 takes no effort parameter at all");
+    assert_eq(cat_e_ctx(_t280_e_h45), 200000, "anthropic: Haiku 4.5 is 200K");
+    _t280_e_bare = vec_get(_t280_an_es, 4);
+    assert_eq(cat_e_think(_t280_e_bare), 0 - 1, "anthropic: no capability tree -> thinking unknown");
+    assert_eq(cat_e_effort(_t280_e_bare), 0 - 1, "anthropic: no capability tree -> effort unknown");
+    assert_eq(cat_e_vision(_t280_e_bare), 0 - 1, "anthropic: no capability tree -> vision unknown");
+    assert_eq(load64(an_more), 1, "anthropic: has_more -> another page");
+    assert_streq(load64(an_last), "claude-bare", "anthropic: the cursor is last_id");
+    reset_via(_t280_ca);
+    var last_page = "{\"data\":[{\"id\":\"claude-z\"}],\"has_more\":false,\"last_id\":\"claude-z\"}";
+    var lp_es = vec_new();
+    assert_eq(catalog_parse_anthropic(_t280_ca, last_page, strlen(last_page), lp_es, an_more, an_last), 1, "anthropic: last page");
+    assert_eq(load64(an_more), 0, "anthropic: has_more false ends the walk");
+    assert_eq(load64(an_last), 0, "anthropic: no cursor on the last page");
+    assert_streq(cat_e_id(vec_get(_t280_an_es, 0)), "claude-opus-5-5",
+      "anthropic: kept entries own their bytes (they survive the arena reset)");
+    var not_list = "{\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}";
+    assert_eq(catalog_parse_anthropic(_t280_ca, not_list, strlen(not_list), lp_es, an_more, an_last), 0 - 1,
+      "anthropic: an error body is not a model list");
+    assert_eq(catalog_parse_anthropic(_t280_ca, "{\"data\":[", 9, lp_es, an_more, an_last), 0 - 1,
+      "anthropic: a truncated body is not a model list");
+
+    return 0;
+}
+
+fn _t280_catalog_parse_others() {
+    test_group("catalog_parse_others");
+    var gg_body = "{\"models\":[{\"name\":\"models/gemini-2.5-pro\",\"displayName\":\"Gemini 2.5 Pro\",\"inputTokenLimit\":1048576,\"outputTokenLimit\":65536,\"supportedGenerationMethods\":[\"generateContent\",\"countTokens\"]},{\"name\":\"models/text-embedding-004\",\"supportedGenerationMethods\":[\"embedContent\"]},{\"name\":\"gemini-bare\",\"supportedGenerationMethods\":[\"generateContent\"]}],\"nextPageToken\":\"tok123\"}";
+    _t280_gg_es = vec_new();
+    var gg_next = alloc(8);
+    assert_eq(catalog_parse_google(_t280_ca, gg_body, strlen(gg_body), _t280_gg_es, gg_next), 3, "google: three models on the page");
+    assert_eq(vec_len(_t280_gg_es), 2, "google: the embedding model (no generateContent) is not a chat model");
+    assert_streq(cat_e_id(vec_get(_t280_gg_es, 0)), "gemini-2.5-pro", "google: 'models/' is stripped from the name");
+    assert_eq(cat_e_ctx(vec_get(_t280_gg_es, 0)), 1048576, "google: inputTokenLimit");
+    assert_eq(cat_e_maxout(vec_get(_t280_gg_es, 0)), 65536, "google: outputTokenLimit");
+    assert_streq(cat_e_id(vec_get(_t280_gg_es, 1)), "gemini-bare", "google: a name without the prefix is kept as is");
+    assert_streq(load64(gg_next), "tok123", "google: nextPageToken is the cursor");
+    var oa_body = "{\"object\":\"list\",\"data\":[{\"id\":\"gpt-5.1\",\"object\":\"model\",\"owned_by\":\"system\"},{\"id\":\"text-embedding-3-large\"},{\"id\":\"whisper-1\"},{\"id\":\"gpt-4o-mini-tts\"},{\"id\":\"gpt-4o-transcribe\"},{\"id\":\"dall-e-3\"},{\"id\":\"gpt-image-1\"},{\"id\":\"omni-moderation-latest\"},{\"id\":\"gpt-realtime\"},{\"id\":\"gpt-4o-audio-preview\"},{\"id\":\"davinci-002\"},{\"id\":\"babbage-002\"},{\"id\":\"sora-2\"},{\"id\":\"o4-mini\"}]}";
+    var oa_es = vec_new();
+    assert_eq(catalog_parse_openai(_t280_ca, oa_body, strlen(oa_body), oa_es, 1), 14, "openai: fourteen ids listed");
+    assert_eq(vec_len(oa_es), 2, "openai: embeddings, speech, images, moderation, realtime/audio, old engines dropped");
+    assert_streq(cat_e_id(vec_get(oa_es, 0)), "gpt-5.1", "openai: chat model kept");
+    assert_streq(cat_e_id(vec_get(oa_es, 1)), "o4-mini", "openai: reasoning model kept");
+    var oa_all = vec_new();
+    assert_eq(catalog_parse_openai(_t280_ca, oa_body, strlen(oa_body), oa_all, 0), 14, "openai: unfiltered parse");
+    assert_eq(vec_len(oa_all), 14, "openai: filter = 0 keeps every id");
+    var or_body = "{\"data\":[{\"id\":\"anthropic/claude-opus-5-5\",\"name\":\"Anthropic: Claude Opus 5.5\",\"context_length\":1000000,\"pricing\":{\"prompt\":\"0.000004\",\"completion\":\"0.00002\"},\"architecture\":{\"input_modalities\":[\"text\",\"image\"]},\"top_provider\":{\"max_completion_tokens\":128000}},{\"id\":\"some/variable\",\"pricing\":{\"prompt\":\"-1\",\"completion\":\"-1\"}}]}";
+    var or_es = vec_new();
+    catalog_parse_openai(_t280_ca, or_body, strlen(or_body), or_es, 1);
+    _t280_e_or = vec_get(or_es, 0);
+    assert_eq(cat_e_ctx(_t280_e_or), 1000000, "openrouter: context_length");
+    assert_eq(cat_e_maxout(_t280_e_or), 128000, "openrouter: top_provider.max_completion_tokens");
+    assert_eq(cat_e_in_price(_t280_e_or), 4000, "openrouter: $0.000004/token = 4000 micro-USD per 1K");
+    assert_eq(cat_e_out_price(_t280_e_or), 20000, "openrouter: $0.00002/token = 20000 micro-USD per 1K");
+    assert_eq(cat_e_vision(_t280_e_or), 1, "openrouter: image input modality -> vision");
+    assert_eq(cat_e_in_price(vec_get(or_es, 1)), 0 - 1, "openrouter: a variable price (-1) is unknown, not negative");
+    var mi_body = "{\"data\":[{\"id\":\"mistral-medium-latest\",\"max_context_length\":131072,\"capabilities\":{\"completion_chat\":true,\"vision\":true}}]}";
+    var mi_es = vec_new();
+    catalog_parse_openai(_t280_ca, mi_body, strlen(mi_body), mi_es, 1);
+    assert_eq(cat_e_ctx(vec_get(mi_es, 0)), 131072, "mistral: max_context_length");
+    assert_eq(cat_e_vision(vec_get(mi_es, 0)), 1, "mistral: capabilities.vision");
+    var ol_body = "{\"models\":[{\"name\":\"qwen3:30b\",\"model\":\"qwen3:30b\"},{\"model\":\"llama3.2:3b\"}]}";
+    var ol_es = vec_new();
+    assert_eq(catalog_parse_ollama(_t280_ca, ol_body, strlen(ol_body), ol_es), 2, "ollama: two tags");
+    assert_streq(cat_e_id(vec_get(ol_es, 0)), "qwen3:30b", "ollama: name");
+    assert_streq(cat_e_id(vec_get(ol_es, 1)), "llama3.2:3b", "ollama: model when name is absent");
+    reset_via(_t280_ca);
+
+    return 0;
+}
+
+fn _t280_catalog_id_and_units() {
+    test_group("catalog_id_and_units");
+    assert_eq(catalog_id_ok("claude-opus-5-5"), 1, "id: a plain id");
+    assert_eq(catalog_id_ok("anthropic/claude-opus-5-5"), 1, "id: a vendor-prefixed id");
+    assert_eq(catalog_id_ok("qwen3:30b"), 1, "id: an Ollama tag");
+    assert_eq(catalog_id_ok(""), 0, "id: empty refused");
+    assert_eq(catalog_id_ok("a b"), 0, "id: a space refused");
+    assert_eq(catalog_id_ok("a\"b"), 0, "id: a quote refused (it would forge JSON)");
+    assert_eq(catalog_id_ok("a\\b"), 0, "id: a backslash refused");
+    assert_eq(catalog_id_ok("a\tb"), 0, "id: a control byte refused");
+    assert_eq(catalog_usd_per_token_to_micro_1k(str_from("0.000003")), 3000, "units: $3/M per token");
+    assert_eq(catalog_usd_per_token_to_micro_1k(str_from("0")), 0, "units: free");
+    assert_eq(catalog_usd_per_token_to_micro_1k(str_from("-1")), 0 - 1, "units: a negative is unknown");
+    assert_eq(catalog_usd_per_token_to_micro_1k(str_from("1.2.3")), 0 - 1, "units: two dots refused");
+    assert_eq(catalog_usd_per_token_to_micro_1k(0), 0 - 1, "units: absent");
+    assert_eq(catalog_usd_per_mtok_scaled("4.00"), 4000, "units: $4.00/M -> 4000");
+    assert_eq(catalog_usd_per_mtok_scaled("0.10"), 100, "units: $0.10/M -> 100");
+    assert_eq(catalog_usd_per_mtok_scaled("0.075"), 75, "units: three decimals kept");
+    assert_eq(catalog_usd_per_mtok_scaled("1.2345"), 1234, "units: a fourth decimal truncates");
+    assert_eq(catalog_usd_per_mtok_scaled("15"), 15000, "units: a bare integer");
+    assert_eq(catalog_usd_per_mtok_scaled(""), 0 - 1, "units: empty refused");
+    assert_eq(catalog_usd_per_mtok_scaled("$4"), 0 - 1, "units: a currency sign refused");
+
+    return 0;
+}
+
+fn _t280_catalog_thinking_plan() {
+    test_group("catalog_thinking_plan");
+    var plan = alloc(24);
+    catalog_thinking_plan(_t280_e_o55, 4, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_ADAPTIVE, "plan: Opus 5.5 -> adaptive");
+    assert_eq(load64(plan + 8), 4, "plan: Opus 5.5 takes xhigh as asked");
+    catalog_thinking_plan(_t280_e_s46, 4, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_ADAPTIVE, "plan: Sonnet 4.6 -> adaptive");
+    assert_eq(load64(plan + 8), 3, "plan: Sonnet 4.6 xhigh -> high (the measured 400: 'Supported levels: high, low, max, medium')");
+    catalog_thinking_plan(_t280_e_s46, 5, 16384, plan);
+    assert_eq(load64(plan + 8), 5, "plan: Sonnet 4.6 does take max");
+    catalog_thinking_plan(_t280_e_h45, 3, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_ENABLED, "plan: Haiku 4.5 -> a budget (adaptive 400s: 'not supported on this model')");
+    assert_eq(load64(plan + 8), 0, "plan: Haiku 4.5 gets no effort field");
+    assert_eq(load64(plan + 16), 8192, "plan: high -> an 8192 budget");
+    catalog_thinking_plan(vec_get(_t280_an_es, 3), 4, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_ENABLED, "plan: Opus 4.5 -> a budget");
+    assert_eq(load64(plan + 8), 3, "plan: Opus 4.5 takes effort, xhigh -> high");
+    catalog_thinking_plan(_t280_e_h45, 5, 4096, plan);
+    assert_eq(load64(plan + 16), 3072, "plan: the budget leaves 1024 of max_tokens for the answer");
+    catalog_thinking_plan(_t280_e_h45, 3, 1500, plan);
+    assert_eq(load64(plan), CAT_PLAN_NONE, "plan: no room for a 1024 budget -> no thinking, not a 400");
+    catalog_thinking_plan(0, 2, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_ADAPTIVE, "plan: a model the catalog never listed -> adaptive, as before 2.8.0");
+    assert_eq(load64(plan + 8), 2, "plan: ...with the level the client asked for");
+    catalog_thinking_plan(_t280_e_o55, 0, 16384, plan);
+    assert_eq(load64(plan), CAT_PLAN_NONE, "plan: no reasoning asked -> no thinking field");
+    assert_eq(catalog_effort_clamp(0 - 1, 4), 4, "clamp: unknown mask passes the level through");
+    assert_eq(catalog_effort_clamp(0, 4), 0, "clamp: a model without effort gets none");
+    assert_eq(catalog_effort_clamp(16, 2), 5, "clamp: only max supported -> the lowest above");
+    assert_eq(catalog_effort_clamp(1 | 4, 2), 1, "clamp: medium missing -> the nearest below");
+    var tsb = str_builder_new();
+    store64(plan, CAT_PLAN_ADAPTIVE); store64(plan + 8, 4); store64(plan + 16, 0);
+    catalog_add_thinking(tsb, plan);
+    assert_streq(to_cstr(str_builder_build(tsb)),
+      "\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"xhigh\"},",
+      "thinking: adaptive + display summarized + effort (Opus 4.7+ return EMPTY thinking without display)");
+    var tsb2 = str_builder_new();
+    store64(plan, CAT_PLAN_ENABLED); store64(plan + 8, 0); store64(plan + 16, 2048);
+    catalog_add_thinking(tsb2, plan);
+    assert_streq(to_cstr(str_builder_build(tsb2)),
+      "\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":2048,\"display\":\"summarized\"},",
+      "thinking: a budget, and no effort field when the model takes none");
+    var tsb3 = str_builder_new();
+    store64(plan, CAT_PLAN_NONE);
+    catalog_add_thinking(tsb3, plan);
+    assert_eq(str_len(str_builder_build(tsb3)), 0, "thinking: nothing for NONE");
+
+    return 0;
+}
+
+fn _t280_catalog_request_options() {
+    test_group("catalog_request_options");
+    var w = alloc(8);
+    var rq1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"reasoning_effort xhigh\"}],\"reasoning_effort\":\"xhigh\"}";
+    assert_eq(catalog_req_effort(rq1, strlen(rq1), w), 4, "effort: xhigh -> 4 (2.7.1: 0, thinking silently off)");
+    assert_streq(load64(w), "xhigh", "effort: the word is kept");
+    var rq2 = "{\"reasoning_effort\":\"max\"}";
+    assert_eq(catalog_req_effort(rq2, strlen(rq2), w), 5, "effort: max -> 5");
+    var rq3 = "{\"reasoning_effort\":\"minimal\"}";
+    assert_eq(catalog_req_effort(rq3, strlen(rq3), w), 1, "effort: minimal -> low for Anthropic");
+    assert_streq(load64(w), "minimal", "effort: ...but OpenAI gets 'minimal' itself");
+    var rq4 = "{\"reasoning_effort\":\"none\"}";
+    assert_eq(catalog_req_effort(rq4, strlen(rq4), w), 0, "effort: none -> no thinking");
+    assert_streq(load64(w), "none", "effort: ...and 'none' is still forwardable");
+    var rq5 = "{\"reasoning_effort\":\"maximum\"}";
+    assert_eq(catalog_req_effort(rq5, strlen(rq5), w), 0, "effort: an unknown word -> 0");
+    assert_eq(load64(w), 0, "effort: ...with no word");
+    var rq6 = "{\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[]}";
+    assert_eq(catalog_req_include_usage(rq6, strlen(rq6)), 1, "usage: include_usage true");
+    var rq7 = "{\"stream\":true,\"messages\":[],\"stream_options\": {\"include_usage\": false}}";
+    assert_eq(catalog_req_include_usage(rq7, strlen(rq7)), 0, "usage: include_usage false");
+    var rq8 = "{\"messages\":[{\"role\":\"user\",\"content\":\"{\\\"stream_options\\\":{\\\"include_usage\\\":true}}\"}]}";
+    assert_eq(catalog_req_include_usage(rq8, strlen(rq8)), 0, "usage: the words inside a message are not the option");
+    assert_eq(catalog_req_include_usage("{}", 2), 0, "usage: absent");
+
+    return 0;
+}
+
+fn _t280_catalog_snapshot() {
+    test_group("catalog_snapshot");
+    var r1 = catalog_record_new(PROV_ANTHROPIC, "https://api.anthropic.com");
+    catalog_record_note(r1, 200, _t280_an_es, 1000);
+    assert_eq(cat_r_count(r1), 5, "snapshot: a good answer fills the record");
+    assert_eq(cat_r_good_ms(r1), 1000, "snapshot: and dates it");
+    catalog_record_note(r1, 401, vec_new(), 2000);
+    assert_eq(cat_r_status(r1), 401, "snapshot: a rejected key is recorded");
+    assert_eq(cat_r_count(r1), 5, "snapshot: ...but the last good list is kept (a blip must not empty a picker)");
+    assert_eq(cat_r_checked(r1), 2000, "snapshot: the failed check is dated");
+    var r2 = catalog_record_new(PROV_GOOGLE, "https://generativelanguage.googleapis.com");
+    catalog_record_note(r2, 200, _t280_gg_es, 1500);
+    var snap = vec_new();
+    vec_push(snap, r1);
+    vec_push(snap, r2);
+    catalog_publish(snap);
+    assert_eq(catalog_find_on(PROV_ANTHROPIC, "https://api.anthropic.com", "claude-sonnet-4-6") == _t280_e_s46, 1,
+      "snapshot: find on the route that listed it");
+    assert_eq(catalog_find_on(PROV_ANTHROPIC, "https://other.example", "claude-sonnet-4-6"), 0,
+      "snapshot: another route never listed it");
+    assert_eq(catalog_find_any("gemini-2.5-pro") != 0, 1, "snapshot: find on any route");
+    assert_eq(catalog_find_any("claude-nope"), 0, "snapshot: unknown");
+    assert_eq(catalog_find_on(PROV_ANTHROPIC, "https://api.anthropic.com", "claude-haiku-4-5") == _t280_e_h45, 1,
+      "snapshot: an alias finds its dated snapshot (Anthropic lists claude-haiku-4-5-20251001)");
+    assert_eq(catalog_is_dated("claude-haiku-4-5-20251001", "claude-haiku-4-5"), 1, "dated: alias + 8 digits");
+    assert_eq(catalog_is_dated("claude-haiku-4-5-2025100", "claude-haiku-4-5"), 0, "dated: 7 digits is not a date");
+    assert_eq(catalog_is_dated("claude-haiku-4-5-latest01", "claude-haiku-4-5"), 0, "dated: letters are not a date");
+    assert_eq(catalog_is_dated("claude-haiku-4-50-2025100", "claude-haiku-4-5"), 0, "dated: a longer alias is not a match");
+    assert_eq(catalog_due(10000, 0, 60), 0, "due: never before the first refresh (startup owns it)");
+    assert_eq(catalog_due(70000, 10000, 60), 1, "due: an interval elapsed");
+    assert_eq(catalog_due(20000, 10000, 60), 0, "due: not yet");
+    assert_eq(catalog_due(999999, 10000, 0), 0, "due: interval 0 never refreshes on a timer");
+    assert_eq(catalog_refresh_begin(), 1, "single-flight: the first caller owns the refresh");
+    assert_eq(catalog_refresh_begin(), 0, "single-flight: a second is refused while it runs");
+    catalog_refresh_end(5000);
+    assert_eq(catalog_last_ms(), 5000, "single-flight: the end is dated");
+    assert_eq(catalog_refresh_begin(), 1, "single-flight: free again after the end");
+    catalog_refresh_end(5000);
+
+    return 0;
+}
+
+fn _t280_catalog_emit_entry() {
+    test_group("catalog_emit_entry");
+    var urls = vec_new();
+    vec_push(urls, "https://api.anthropic.com");
+    vec_push(urls, "https://q\"uote.example");
+    var esb = str_builder_new();
+    catalog_emit_entry(esb, _t280_e_s46, "anthropic", urls, 3000, 15000);
+    var ej = to_cstr(str_builder_build(esb));
+    assert_streq(ej, "{\"id\":\"claude-sonnet-4-6\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\",\"routes\":[\"https://api.anthropic.com\",\"https://q\\\"uote.example\"],\"display_name\":\"Claude Sonnet 4.6\",\"context_window\":1000000,\"max_output_tokens\":128000,\"capabilities\":{\"vision\":true,\"thinking\":[\"adaptive\",\"budget\"],\"effort\":[\"low\",\"medium\",\"high\",\"max\"]},\"pricing\":{\"input_micro_usd_per_1k\":3000,\"output_micro_usd_per_1k\":15000}}",
+      "emit: the 2.4.9 fields first, then source / routes / limits / capabilities / pricing; a quote in a url is escaped");
+    var esb2 = str_builder_new();
+    catalog_emit_entry(esb2, _t280_e_bare, "anthropic", 0, 0 - 1, 0 - 1);
+    assert_streq(to_cstr(str_builder_build(esb2)), "{\"id\":\"claude-bare\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\"}",
+      "emit: nothing unknown is written (omit-until-present)");
+
+    return 0;
+}
+
+fn _t280_catalog_metadata_and_pricing() {
+    test_group("catalog_metadata_and_pricing");
+    var md = alloc(40);
+    assert_eq(metadata_lookup("claude-opus-5-5", md), 1, "meta: Opus 5.5 is in the table");
+    assert_eq(load64(md), 1000000, "meta: Opus 5.5 is 1M (2.7.1 had no row; every Claude it knew was 200K)");
+    assert_eq(load64(md + 8), TIER_PREMIUM, "meta: Opus is premium");
+    assert_eq(metadata_lookup("claude-opus-4-5-20251101", md), 1, "meta: a dated id finds its family row");
+    assert_eq(load64(md), 200000, "meta: Opus 4.5 is 200K");
+    assert_eq(metadata_lookup("claude-3-5-sonnet-20241022", md), 0, "meta: a retired model is no longer known");
+    var lnew = vec_new();
+    var enew = catalog_entry_new("claude-next-9", CATSRC_LIVE);
+    store64(enew + CAT_E_CTX, 2000000);
+    store64(enew + CAT_E_VISION, 1);
+    vec_push(lnew, enew);
+    var rnew = catalog_record_new(PROV_ANTHROPIC, "https://api.anthropic.com");
+    catalog_record_note(rnew, 200, lnew, 9000);
+    var snew = vec_new();
+    vec_push(snew, rnew);
+    catalog_publish(snew);
+    assert_eq(metadata_lookup("claude-next-9", md), 1, "meta: a model only the provider knows is known (no rebuild)");
+    assert_eq(load64(md), 2000000, "meta: ...with the provider's own context window");
+    assert_eq(load64(md + 8), TIER_STANDARD, "meta: ...and the default tier");
+    var cfgv = vec_new();
+    var ecfg = catalog_entry_new("claude-next-9", CATSRC_CONFIG);
+    store64(ecfg + CAT_E_TIER, TIER_REASONING);
+    store64(ecfg + CAT_E_IN_PRICE, 7000);
+    store64(ecfg + CAT_E_OUT_PRICE, 35000);
+    vec_push(cfgv, ecfg);
+    catalog_config_set(cfgv);
+    metadata_lookup("claude-next-9", md);
+    assert_eq(load64(md + 8), TIER_REASONING, "meta: the operator's [[models]] tier wins");
+    assert_eq(load64(md), 2000000, "meta: ...over a provider that did not say it");
+    var listed_o4 = 1;
+    var listed_o55 = 0;
+    var mi2 = 0;
+    while (mi2 < metadata_count()) {
+        if (streq(metadata_key(mi2), "claude-opus-4") == 1) { listed_o4 = metadata_listed(mi2); }
+        if (streq(metadata_key(mi2), "claude-opus-5-5") == 1) { listed_o55 = metadata_listed(mi2); }
+        mi2 = mi2 + 1;
+    }
+    assert_eq(listed_o4, 0, "meta: the family prefix claude-opus-4 is never offered as an id (2.7.1 offered it)");
+    assert_eq(listed_o55, 1, "meta: claude-opus-5-5 is offered");
+    var px = alloc(16);
+    pricing_lookup("claude-opus-4-8", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 5000, "price: Opus 4.8 is $5/M (2.7.1's claude-opus-4 prefix billed it at $15)");
+    assert_eq(load64(px + 8), 25000, "price: Opus 4.8 is $25/M out");
+    pricing_lookup("claude-opus-4-20250514", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 15000, "price: the dated Opus 4.0 id still finds the $15 row");
+    pricing_lookup("claude-opus-4-5-20251101", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 5000, "price: dated Opus 4.5 -> $5");
+    pricing_lookup("claude-opus-5-5", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 4000, "price: Opus 5.5 -> $4 (2.7.1 fell to the $3 provider default)");
+    pricing_lookup("claude-fable-5-1", PROV_ANTHROPIC, px);
+    assert_eq(load64(px + 8), 50000, "price: Fable 5.1 -> $50/M out");
+    assert_eq(estimate_cost_micro("claude-haiku-5-5", PROV_ANTHROPIC, 100000, 1000), 10500,
+      "price: Haiku 5.5 at 100K input stays on $0.10/$0.50");
+    assert_eq(estimate_cost_micro("claude-haiku-5-5", PROV_ANTHROPIC, 100001, 1000), 52500,
+      "price: Haiku 5.5 past 100K input is $0.50/$2.50 for the whole request");
+    pricing_lookup("claude-next-9", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 7000, "price: the operator's [[models]] rate wins");
+    assert_eq(pricing_known("claude-next-9", PROV_ANTHROPIC, px), 1, "price: a configured rate is known");
+    catalog_config_set(vec_new());
+    assert_eq(pricing_known("claude-next-9", PROV_ANTHROPIC, px), 0, "price: an unpriced new model is not known...");
+    pricing_lookup("claude-next-9", PROV_ANTHROPIC, px);
+    assert_eq(load64(px), 3000, "price: ...and the cost tracker still falls back to the provider default");
+    assert_eq(pricing_known("anything", PROV_OLLAMA, px), 1, "price: local is known (free)");
+    assert_eq(load64(px), 0, "price: ...at 0");
+    var orl = vec_new();
+    vec_push(orl, _t280_e_or);
+    var ror = catalog_record_new(PROV_OPENROUTER, "https://openrouter.ai/api");
+    catalog_record_note(ror, 200, orl, 9000);
+    var sor = vec_new();
+    vec_push(sor, ror);
+    catalog_publish(sor);
+    pricing_lookup("anthropic/claude-opus-5-5", PROV_OPENROUTER, px);
+    assert_eq(load64(px + 8), 20000, "price: a provider that lists its prices (OpenRouter) is priced by them");
+    catalog_publish(vec_new());
+
+    return 0;
+}
+
+fn _t280_outcome_finish() {
+    test_group("outcome_finish");
+    assert_eq(outcome_finish_anthropic("end_turn"), FIN_STOP, "finish: end_turn");
+    assert_eq(outcome_finish_anthropic("max_tokens"), FIN_LENGTH, "finish: max_tokens -> length");
+    assert_eq(outcome_finish_anthropic("model_context_window_exceeded"), FIN_LENGTH, "finish: window exceeded -> length");
+    assert_eq(outcome_finish_anthropic("tool_use"), FIN_TOOL_CALLS, "finish: tool_use");
+    assert_eq(outcome_finish_anthropic("refusal"), FIN_CONTENT_FILTER, "finish: a classifier refusal -> content_filter");
+    assert_eq(outcome_finish_anthropic(""), FIN_NONE, "finish: none said");
+    assert_eq(outcome_finish_gemini("MAX_TOKENS"), FIN_LENGTH, "finish: gemini MAX_TOKENS");
+    assert_eq(outcome_finish_gemini("SAFETY"), FIN_CONTENT_FILTER, "finish: gemini SAFETY");
+    assert_eq(outcome_finish_gemini("STOP"), FIN_STOP, "finish: gemini STOP");
+    assert_eq(outcome_finish_openai("length"), FIN_LENGTH, "finish: openai length");
+    assert_eq(outcome_finish_openai("content_filter"), FIN_CONTENT_FILTER, "finish: openai content_filter");
+    assert_eq(outcome_finish_openai("function_call"), FIN_TOOL_CALLS, "finish: legacy function_call");
+    assert_eq(outcome_finish_final(FIN_STOP, 1), FIN_TOOL_CALLS, "final: calls carried -> tool_calls");
+    assert_eq(outcome_finish_final(FIN_LENGTH, 1), FIN_LENGTH, "final: a cut-off reply with a call stays length");
+    assert_eq(outcome_finish_final(FIN_CONTENT_FILTER, 0), FIN_CONTENT_FILTER, "final: a refusal stays a refusal");
+    assert_eq(outcome_finish_final(FIN_NONE, 0), FIN_STOP, "final: nothing said -> stop");
+    assert_streq(outcome_finish_name(FIN_CONTENT_FILTER), "content_filter", "finish: the wire word");
+
+    return 0;
+}
+
+fn _t280_outcome_stream_usage() {
+    test_group("outcome_stream_usage");
+    var oc = outcome_new();
+    assert_eq(outcome_has_usage(oc), 0, "usage: none before a frame");
+    var f1 = "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"usage\":{\"input_tokens\":25,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1}}}";
+    outcome_feed_anthropic(oc, f1, strlen(f1));
+    assert_eq(outcome_ptok(oc), 25, "usage: message_start input_tokens (not the cache_* counts beside it)");
+    var f2 = "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"output_tokens 99\"}}";
+    outcome_feed_anthropic(oc, f2, strlen(f2));
+    assert_eq(outcome_ctok(oc), 1, "usage: text that mentions output_tokens is not read as a count (the scanner needs a real key + colon)");
+    var f3 = "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4096}}";
+    outcome_feed_anthropic(oc, f3, strlen(f3));
+    assert_eq(outcome_ctok(oc), 4096, "usage: message_delta's cumulative output_tokens");
+    assert_eq(outcome_finish(oc), FIN_LENGTH, "usage: and its stop_reason");
+    assert_eq(outcome_has_usage(oc), 1, "usage: both counts known");
+    var oc2 = outcome_new();
+    var f4 = "{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}";
+    outcome_feed_openai(oc2, f4, strlen(f4));
+    assert_eq(outcome_finish(oc2), FIN_TOOL_CALLS, "usage: openai finish_reason");
+    assert_eq(outcome_has_usage(oc2), 0, "usage: no usage object yet");
+    var f5 = "{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":30,\"total_tokens\":150}}";
+    outcome_feed_openai(oc2, f5, strlen(f5));
+    assert_eq(outcome_ptok(oc2), 120, "usage: openai final chunk prompt_tokens");
+    assert_eq(outcome_ctok(oc2), 30, "usage: openai final chunk completion_tokens");
+    var oc3 = outcome_new();
+    var f6 = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":40,\"candidatesTokenCount\":10,\"thoughtsTokenCount\":200,\"totalTokenCount\":250}}";
+    outcome_feed_gemini(oc3, f6, strlen(f6));
+    assert_eq(outcome_ctok(oc3), 210, "usage: gemini thinking tokens are billed output");
+    assert_eq(outcome_finish(oc3), FIN_STOP, "usage: gemini finishReason");
+    var oc4 = outcome_new();
+    var f7 = "{\"model\":\"qwen3\",\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":11,\"eval_count\":64}";
+    outcome_feed_ollama(oc4, f7, strlen(f7));
+    assert_eq(outcome_ptok(oc4), 11, "usage: ollama prompt_eval_count");
+    assert_eq(outcome_ctok(oc4), 64, "usage: ollama eval_count");
+    assert_eq(outcome_finish(oc4), FIN_LENGTH, "usage: ollama done_reason length");
+    var oc5 = outcome_new();
+    var f8 = "{\"model\":\"qwen3\",\"message\":{\"content\":\"hi\"},\"done\":false}";
+    outcome_feed_ollama(oc5, f8, strlen(f8));
+    assert_eq(outcome_has_usage(oc5), 0, "usage: a mid-stream ollama line carries none");
+    var uc = to_cstr(outcome_usage_chunk("claude-opus-5-5", 120, 30, 1080, "anthropic"));
+    assert_eq(str_contains(str_from(uc), str_from("\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":30,\"total_tokens\":150,\"cost_micro_usd\":1080,\"provider\":\"anthropic\"}")), 1,
+      "chunk: the usage chunk is OpenAI's shape, with hoosh's cost and provider inside usage");
+    var sc = to_cstr(outcome_stop_chunk("m", FIN_CONTENT_FILTER));
+    assert_eq(str_contains(str_from(sc), str_from("\"delta\":{},\"finish_reason\":\"content_filter\"")), 1,
+      "chunk: the stop chunk carries the provider's reason (2.7.1 always said stop)");
+
+    return 0;
+}
+
+fn _t280_outcome_tool_guard() {
+    test_group("outcome_tool_guard");
+    var og = outcome_new();
+    assert_eq(outcome_tool_known(og, 1), 0, "guard: no start seen for block 1");
+    outcome_tool_started(og, 1);
+    assert_eq(outcome_tool_known(og, 1), 1, "guard: block 1 started");
+    assert_eq(outcome_tool_known(og, 2), 0, "guard: block 2 did not");
+    assert_eq(outcome_tools(og), 1, "guard: a started call counts as tools");
+    assert_eq(outcome_tool_known(og, 0 - 1), 0, "guard: a negative index is never known");
+    assert_eq(outcome_tool_known(og, 99), 0, "guard: an index past the mask is never known");
+    outcome_note_orphan(og);
+    assert_eq(outcome_orphans(og), 1, "guard: an orphan fragment is counted");
+
+    return 0;
+}
+
+fn _t280_sse_split_boundary() {
+    test_group("sse_split_boundary");
+    # The root cause of thoth 0.44.2's "headerless" tool calls, fixed in sandhi 1.9.15 (the stdlib both pin): a
+    # TCP read that split an event between its field line and the blank line ending it dropped the event. A
+    # content_block_start carrying a tool's id and name is fed through sandhi_sse_parse split at EVERY byte, the
+    # way the streaming caller does (keep the unconsumed tail, append the rest), and must arrive whole each time.
+    var ev = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01A\",\"name\":\"read_file\",\"input\":{}}}\n\n";
+    var evl = strlen(ev);
+    var whole = 0;
+    var cut = 1;
+    while (cut < evl) {
+        var rem = alloc(8);
+        var ev1 = sandhi_sse_parse(ev, cut, rem);
+        var got = vec_len(ev1);
+        var used = load64(rem);
+        var tail = alloc(evl + 1);
+        memcpy(tail, ev + used, evl - used);
+        var ev2 = sandhi_sse_parse(tail, evl - used, rem);
+        var got2 = vec_len(ev2);
+        if (got + got2 == 1) {
+            var evv = 0;
+            if (got == 1) { evv = vec_get(ev1, 0); } else { evv = vec_get(ev2, 0); }
+            var dd = sandhi_sse_event_data(evv);
+            if (str_contains(str_from(dd), str_from("\"name\":\"read_file\"")) == 1) { whole = whole + 1; }
+        }
+        cut = cut + 1;
+    }
+    assert_eq(whole, evl - 1, "sse: the tool_use start arrives whole at every split point");
+
+    return 0;
+}
+
+fn _t280_openai_extras() {
+    test_group("openai_extras");
+    assert_eq(catalog_reasoning_ok("openai", "o3"), 1, "reasoning: OpenAI o3 takes reasoning_effort");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-5.5"), 1, "reasoning: GPT-5.5");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-6-astra"), 1, "reasoning: GPT-6");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-5-chat-latest"), 0, "reasoning: the non-reasoning GPT-5 chat model does not");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-4o"), 0, "reasoning: GPT-4o 400s on it, so it is not sent");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-4.1-mini"), 0, "reasoning: GPT-4.1 neither");
+    assert_eq(catalog_reasoning_ok("grok", "grok-4.7"), 1, "reasoning: Grok 4.x");
+    assert_eq(catalog_reasoning_ok("grok", "grok-4.20-0309-non-reasoning"), 0, "reasoning: a -non-reasoning Grok does not");
+    assert_eq(catalog_reasoning_ok("deepseek", "deepseek-flash"), 1, "reasoning: DeepSeek");
+    assert_eq(catalog_reasoning_ok("groq", "openai/gpt-oss-120b"), 1, "reasoning: gpt-oss on Groq");
+    assert_eq(catalog_reasoning_ok("groq", "llama-3.3-70b-versatile"), 0, "reasoning: Llama on Groq does not");
+    assert_eq(catalog_reasoning_ok("ollama", "qwen3:30b"), 0, "reasoning: a local model is not assumed to");
+    var cv = vec_new();
+    var ce = catalog_entry_new("my-tuned-o", CATSRC_CONFIG);
+    store64(ce + CAT_E_REASON, 1);
+    vec_push(cv, ce);
+    var cg = catalog_entry_new("gpt-5.5", CATSRC_CONFIG);
+    store64(cg + CAT_E_REASON, 0);
+    vec_push(cv, cg);
+    catalog_config_set(cv);
+    assert_eq(catalog_reasoning_ok("openai", "my-tuned-o"), 1, "reasoning: the operator's reasoning = true wins");
+    assert_eq(catalog_reasoning_ok("openai", "gpt-5.5"), 0, "reasoning: ...and reasoning = false wins over the family");
+    catalog_config_set(vec_new());
+    var xs = str_builder_new();
+    catalog_add_openai_extras(xs, "xhigh", 1, 1);
+    assert_streq(to_cstr(str_builder_build(xs)), ",\"reasoning_effort\":\"xhigh\",\"stream_options\":{\"include_usage\":true}",
+      "extras: the client's word, verbatim, and the usage option");
+    var xs2 = str_builder_new();
+    catalog_add_openai_extras(xs2, "xhigh", 0, 0);
+    assert_eq(str_len(str_builder_build(xs2)), 0, "extras: nothing for a model that takes no reasoning_effort");
+    var xs3 = str_builder_new();
+    catalog_add_openai_extras(xs3, 0, 1, 0);
+    assert_eq(str_len(str_builder_build(xs3)), 0, "extras: nothing when the client asked for no reasoning");
+    assert_eq(estimate_cost_micro("gpt-5.5", PROV_OPENAI, 272000, 1000), 1390000, "price: GPT-5.5 at 272K input stays on $5/$30");
+    assert_eq(estimate_cost_micro("gpt-5.5", PROV_OPENAI, 272001, 1000), 2765010, "price: past 272K the whole request is 2x in / 1.5x out");
+    assert_eq(estimate_cost_micro("grok-4.7", PROV_GROK, 199999, 0), 399998, "price: Grok 4.7 below 200K");
+    assert_eq(estimate_cost_micro("grok-4.7", PROV_GROK, 200000, 0), 800000, "price: Grok 4.7 at 200K bills the higher tier");
+    assert_eq(estimate_cost_micro("gpt-5.4-mini-2026-03-05", PROV_OPENAI, 1000000, 0), 750000, "price: a dated id finds its family row");
+    return 0;
+}
+
+fn _t280_urlparse() {
+    test_group("urlparse_scheme");
+    assert_streq(url_host("https://api.anthropic.com"), "api.anthropic.com", "url: an https host (2.7.1 read 'localhost')");
+    assert_eq(url_port("https://api.anthropic.com"), 443, "url: https defaults to 443 (2.7.1 read 80)");
+    assert_streq(url_host("https://api.groq.com/openai"), "api.groq.com", "url: a host before a path");
+    assert_eq(url_port("https://api.groq.com/openai"), 443, "url: ...still 443");
+    assert_eq(url_port("https://gw.example:8443/v1"), 8443, "url: an explicit https port");
+    assert_streq(url_host("http://127.0.0.1:11434"), "127.0.0.1", "url: a local http host, unchanged");
+    assert_eq(url_port("http://127.0.0.1:11434"), 11434, "url: a local http port, unchanged");
+    assert_eq(url_port("http://localhost/x"), 80, "url: http defaults to 80, unchanged");
+    assert_streq(url_host("http://"), "localhost", "url: an empty host falls back to localhost, unchanged");
+    assert_streq(url_host("collector.local:4318"), "collector.local", "url: a bare host:port");
+    assert_eq(url_port("collector.local:4318"), 4318, "url: ...and its port");
+    return 0;
 }
 
 fn main() {
@@ -5506,8 +5824,9 @@ fn main() {
     assert_eq(estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000), 0,
       "pricing: local provider is zero-cost");
     # Exact haiku at 1M input = $0.80 = 800000 µ$.
-    assert_eq(estimate_cost_micro("claude-3.5-haiku", PROV_ANTHROPIC, 1000000, 0),
-      800000, "pricing: 1M tokens claude-3.5-haiku input = 800000 µ$");
+    # 2.8.0: claude-3.5-haiku was never an Anthropic id (and Haiku 3.5 retired 2026-02-19); the row is gone.
+    assert_eq(estimate_cost_micro("claude-haiku-4-5", PROV_ANTHROPIC, 1000000, 0),
+      1000000, "pricing: 1M tokens claude-haiku-4-5 input = 1000000 µ$ ($1.00/M)");
     # Cheaper model ranks below a pricier one (recommend ordering).
     var c_mini = estimate_cost_micro("gpt-4o-mini", PROV_OPENAI, 1000, 500);
     var c_4o = estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000, 500);
@@ -7414,6 +7733,22 @@ fn main() {
     assert_eq(_sse_is_error_event(ev_bare, d_bare, strlen(d_bare)), 1, "sse error detect: bare error frame recognised");
     assert_eq(str_contains(str_from(_sse_error_message(d_bare, strlen(d_bare))), str_from("no message")), 1,
       "sse error detect: a message-less error still reports SOMETHING rather than an empty string");
+
+    # 2.8.0 groups (defined above main)
+    _t280_catalog_parse_anthropic();
+    _t280_catalog_parse_others();
+    _t280_catalog_id_and_units();
+    _t280_catalog_thinking_plan();
+    _t280_catalog_request_options();
+    _t280_catalog_snapshot();
+    _t280_catalog_emit_entry();
+    _t280_catalog_metadata_and_pricing();
+    _t280_outcome_finish();
+    _t280_outcome_stream_usage();
+    _t280_outcome_tool_guard();
+    _t280_sse_split_boundary();
+    _t280_openai_extras();
+    _t280_urlparse();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

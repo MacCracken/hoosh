@@ -1,0 +1,1009 @@
+# catalog.cyr — the live model catalog (2.8.0).
+#
+# Through 2.7.1 the only list of models hoosh could offer was the table compiled into metadata.cyr, ported from
+# rust-old in mid-2025. GET /v1/models/catalog walked that table and kept the ids an enabled route's patterns
+# matched, so a gateway with an Anthropic route offered `claude-opus-4`, `claude-sonnet-4`, `claude-3.5-haiku`,
+# `claude-3-5-haiku`, `claude-3-5-sonnet` and `claude-3-haiku`. Measured against the live API on 2026-10-09, not
+# one of the six is an id Anthropic serves: two are family prefixes, never ids, `claude-3.5-haiku` never existed,
+# and the rest are retired. A client that picked from the catalog got a 404 from the provider every time, and no
+# model released after the table was written could appear at all without a source edit and a new hoosh.
+#
+# The catalog is now asked of the providers. Each enabled route whose `catalog` mode is "live" (the default for
+# every provider but OpenRouter, whose list is a marketplace of several hundred models) is listed with ITS OWN
+# credentials, and the answer is kept until the next refresh:
+#
+#   Anthropic    GET /v1/models?limit=1000     data[] with max_input_tokens, max_tokens and a capability tree —
+#                                              which thinking modes and effort levels each model accepts, so the
+#                                              request builder can stop sending a shape the model rejects
+#   Google       GET /v1beta/models            models[]; only those supporting generateContent
+#   OpenAI-like  GET /v1/models                data[].id, minus non-chat families (embeddings, speech, images)
+#   Ollama       GET /api/tags                 models[].name
+#
+# This file is the PURE half: the parsers, the entry and snapshot records, the lookups, the request-shaping
+# decision and the JSON a catalog entry is written as. It reaches nothing in types.cyr, route.cyr or main.cyr, so
+# the test binary includes it for real instead of mirroring it (the roadmap's "mirror drift" problem). The I/O —
+# which routes, their credentials, the pool job and the endpoints — is handlers.cyr's (catalog_refresh_*).
+#
+# Requires: string, str, vec, alloc, atomic (lib) and bayan (the JSON value parser).
+
+enum CatFamily {
+    CATFAM_OPENAI    = 0;    # GET /v1/models: {"data":[{"id":...}]}
+    CATFAM_ANTHROPIC = 1;    # GET /v1/models?limit=1000: data[] + capabilities, has_more / last_id pagination
+    CATFAM_GOOGLE    = 2;    # GET /v1beta/models: {"models":[{"name":"models/<id>",...}],"nextPageToken":...}
+    CATFAM_OLLAMA    = 3;    # GET /api/tags: {"models":[{"name":...}]}
+}
+
+# Where an entry came from. `live` is what the provider said; `config` is an operator's [[models]] block; `builtin`
+# is the compiled table, which is now only the fallback for a route that cannot be (or is not) asked.
+enum CatSource {
+    CATSRC_BUILTIN = 0;
+    CATSRC_LIVE    = 1;
+    CATSRC_CONFIG  = 2;
+}
+
+# Thinking modes a model accepts (a bitmask; -1 = not known). Anthropic declares each one per model.
+enum CatThink {
+    CAT_THINK_ADAPTIVE = 1;  # {"type":"adaptive"} + output_config.effort (Claude 4.6 and later)
+    CAT_THINK_ENABLED  = 2;  # {"type":"enabled","budget_tokens":N} (Claude 4.5 and earlier)
+    CAT_THINK_DISABLE  = 4;  # {"type":"disabled"} is accepted
+}
+
+# Effort levels. The LEVEL is what a request asks for (1..5); the MASK is what a model accepts, bit (level - 1).
+# A mask of 0 means the model takes no effort parameter at all; -1 means nobody said.
+enum CatEffort {
+    CAT_EFF_LOW    = 1;
+    CAT_EFF_MEDIUM = 2;
+    CAT_EFF_HIGH   = 3;
+    CAT_EFF_XHIGH  = 4;
+    CAT_EFF_MAX    = 5;
+}
+
+# Entry record. Unknown numbers are -1, unknown strings 0.
+enum CatEntryField {
+    CAT_E_ID        = 0;     # cstr — the id a client sends as "model"
+    CAT_E_DISPLAY   = 8;     # cstr — the provider's display name
+    CAT_E_CTX       = 16;    # context window (input tokens)
+    CAT_E_MAXOUT    = 24;    # output ceiling (tokens)
+    CAT_E_VISION    = 32;    # 1 / 0 / -1
+    CAT_E_THINK     = 40;    # CAT_THINK_* mask, -1 unknown
+    CAT_E_EFFORT    = 48;    # effort mask, 0 = no effort parameter, -1 unknown
+    CAT_E_SOURCE    = 56;    # CATSRC_*
+    CAT_E_CREATED   = 64;    # cstr — the provider's release timestamp
+    CAT_E_IN_PRICE  = 72;    # micro-USD per 1K input tokens (= hoosh's $/M x 1000), -1 unknown
+    CAT_E_OUT_PRICE = 80;    # micro-USD per 1K output tokens, -1 unknown
+    CAT_E_TIER      = 88;    # TIER_* from metadata.cyr, -1 unknown (config only)
+    CAT_E_LISTED    = 96;    # 1 = offered in /v1/models/catalog, 0 = known for lookups only
+    CAT_E_REASON    = 104;   # takes reasoning_effort on an OpenAI-compatible API: 1 / 0 / -1 unknown (config)
+    CAT_E_SIZE      = 112;
+}
+
+fn catalog_entry_new(id, source) {
+    var e = alloc(CAT_E_SIZE);
+    store64(e + CAT_E_ID, id);
+    store64(e + CAT_E_DISPLAY, 0);
+    store64(e + CAT_E_CTX, 0 - 1);
+    store64(e + CAT_E_MAXOUT, 0 - 1);
+    store64(e + CAT_E_VISION, 0 - 1);
+    store64(e + CAT_E_THINK, 0 - 1);
+    store64(e + CAT_E_EFFORT, 0 - 1);
+    store64(e + CAT_E_SOURCE, source);
+    store64(e + CAT_E_CREATED, 0);
+    store64(e + CAT_E_IN_PRICE, 0 - 1);
+    store64(e + CAT_E_OUT_PRICE, 0 - 1);
+    store64(e + CAT_E_TIER, 0 - 1);
+    store64(e + CAT_E_LISTED, 1);
+    store64(e + CAT_E_REASON, 0 - 1);
+    return e;
+}
+
+fn cat_e_id(e) { return load64(e + CAT_E_ID); }
+fn cat_e_display(e) { return load64(e + CAT_E_DISPLAY); }
+fn cat_e_ctx(e) { return load64(e + CAT_E_CTX); }
+fn cat_e_maxout(e) { return load64(e + CAT_E_MAXOUT); }
+fn cat_e_vision(e) { return load64(e + CAT_E_VISION); }
+fn cat_e_think(e) { return load64(e + CAT_E_THINK); }
+fn cat_e_effort(e) { return load64(e + CAT_E_EFFORT); }
+fn cat_e_source(e) { return load64(e + CAT_E_SOURCE); }
+fn cat_e_in_price(e) { return load64(e + CAT_E_IN_PRICE); }
+fn cat_e_out_price(e) { return load64(e + CAT_E_OUT_PRICE); }
+fn cat_e_tier(e) { return load64(e + CAT_E_TIER); }
+fn cat_e_listed(e) { return load64(e + CAT_E_LISTED); }
+fn cat_e_reason(e) { return load64(e + CAT_E_REASON); }
+
+# ── copying out of the parse arena ──
+# Provider bodies are parsed into a scratch arena that is reset after every route (see handlers.cyr), so nothing
+# an entry keeps may point into it. These copy onto the process heap.
+
+# A Str's bytes as a fresh NUL-terminated cstr, or 0 for a null Str.
+fn _cat_dup_str(s) {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    var c = alloc(n + 1);
+    if (c == 0) { return 0; }
+    memcpy(c, str_data(s), n);
+    store8(c + n, 0);
+    return c;
+}
+
+# A Str's bytes as a cstr, minus `skip` leading bytes when it starts with `prefix` (Google's "models/").
+fn _cat_dup_str_strip(s, prefix) {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    var pl = strlen(prefix);
+    if (n > pl && memeq(str_data(s), prefix, pl) == 1) {
+        var c = alloc(n - pl + 1);
+        if (c == 0) { return 0; }
+        memcpy(c, str_data(s) + pl, n - pl);
+        store8(c + n - pl, 0);
+        return c;
+    }
+    return _cat_dup_str(s);
+}
+
+# An id worth keeping: non-empty, at most 255 bytes, printable ASCII with no space, quote or backslash. A
+# provider's list is wire data, and an id is echoed into JSON, logs and a client's terminal; an id that fails
+# this is dropped rather than repaired (no provider in use issues one).
+fn catalog_id_ok(id) {
+    if (id == 0) { return 0; }
+    var n = strlen(id);
+    if (n == 0 || n > 255) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(id + i) & 255;
+        if (c <= 32 || c >= 127) { return 0; }
+        if (c == 34 || c == 92) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ── small readers over bayan values ──
+
+# The string at obj[key] as a fresh cstr, or 0.
+fn _cat_get_cstr(obj, key) {
+    return _cat_dup_str(bayan_json_v_str(bayan_json_v_obj_get(obj, key)));
+}
+
+# The integer at obj[key], or -1 when absent or not a number.
+fn _cat_get_int(obj, key) {
+    var v = bayan_json_v_obj_get(obj, key);
+    if (v == 0) { return 0 - 1; }
+    if (bayan_json_v_is_int(v) == 0 && bayan_json_v_is_float(v) == 0) { return 0 - 1; }
+    var n = bayan_json_v_int(v);
+    if (n < 0) { return 0 - 1; }
+    return n;
+}
+
+# obj[key].supported as 1 / 0, or -1 when obj[key] or its `supported` is absent.
+fn _cat_supported(obj, key) {
+    var o = bayan_json_v_obj_get(obj, key);
+    if (o == 0) { return 0 - 1; }
+    var s = bayan_json_v_obj_get(o, "supported");
+    if (s == 0) { return 0 - 1; }
+    if (bayan_json_v_is_bool(s) == 0) { return 0 - 1; }
+    return bayan_json_v_bool(s);
+}
+
+# Does array value `arr` hold the string `want`?
+fn _cat_arr_has(arr, want) {
+    var n = bayan_json_v_arr_len(arr);
+    var wl = strlen(want);
+    var i = 0;
+    while (i < n) {
+        var s = bayan_json_v_str(bayan_json_v_arr_get(arr, i));
+        if (s != 0) {
+            if (str_len(s) == wl && memeq(str_data(s), want, wl) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── Anthropic ──
+
+# Anthropic's capability tree (the Models API since March 2026) into the entry: image_input -> vision,
+# thinking.types.{adaptive,enabled,disabled} -> the think mask, effort.{low..max} -> the effort mask. Absent
+# trees leave the fields unknown, which the request builder reads as "send what the client asked".
+fn _cat_anthropic_caps(e, caps) {
+    if (caps == 0) { return 0; }
+    store64(e + CAT_E_VISION, _cat_supported(caps, "image_input"));
+    var th = bayan_json_v_obj_get(caps, "thinking");
+    if (th != 0) {
+        var types = bayan_json_v_obj_get(th, "types");
+        if (types != 0) {
+            var m = 0;
+            if (_cat_supported(types, "adaptive") == 1) { m = m | CAT_THINK_ADAPTIVE; }
+            if (_cat_supported(types, "enabled") == 1) { m = m | CAT_THINK_ENABLED; }
+            if (_cat_supported(types, "disabled") == 1) { m = m | CAT_THINK_DISABLE; }
+            store64(e + CAT_E_THINK, m);
+        }
+    }
+    var ef = bayan_json_v_obj_get(caps, "effort");
+    if (ef != 0) {
+        var sup = bayan_json_v_obj_get(ef, "supported");
+        if (sup != 0 && bayan_json_v_bool(sup) == 0) {
+            store64(e + CAT_E_EFFORT, 0);
+        } else {
+            var em = 0;
+            if (_cat_supported(ef, "low") == 1) { em = em | 1; }
+            if (_cat_supported(ef, "medium") == 1) { em = em | 2; }
+            if (_cat_supported(ef, "high") == 1) { em = em | 4; }
+            if (_cat_supported(ef, "xhigh") == 1) { em = em | 8; }
+            if (_cat_supported(ef, "max") == 1) { em = em | 16; }
+            store64(e + CAT_E_EFFORT, em);
+        }
+    }
+    return 0;
+}
+
+# Parse one Anthropic GET /v1/models page (parsed into allocator `a`) and push its entries onto `out`. Returns
+# how many models the page held, or -1 when the body is not an Anthropic list. Pagination: *more = 1 when
+# has_more, and *last receives the page's last_id (a heap cstr, or 0).
+fn catalog_parse_anthropic(a, body, len, out, more, last) {
+    store64(more, 0);
+    store64(last, 0);
+    var v = bayan_json_v_parse_buf_a(a, body, len);
+    var data = bayan_json_v_obj_get(v, "data");
+    if (bayan_json_v_is_arr(data) == 0) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(data);
+    var i = 0;
+    while (i < n) {
+        var m = bayan_json_v_arr_get(data, i);
+        var id = _cat_get_cstr(m, "id");
+        if (catalog_id_ok(id) == 1) {
+            var e = catalog_entry_new(id, CATSRC_LIVE);
+            store64(e + CAT_E_DISPLAY, _cat_get_cstr(m, "display_name"));
+            store64(e + CAT_E_CREATED, _cat_get_cstr(m, "created_at"));
+            store64(e + CAT_E_CTX, _cat_get_int(m, "max_input_tokens"));
+            store64(e + CAT_E_MAXOUT, _cat_get_int(m, "max_tokens"));
+            _cat_anthropic_caps(e, bayan_json_v_obj_get(m, "capabilities"));
+            vec_push(out, e);
+        }
+        i = i + 1;
+    }
+    var hm = bayan_json_v_obj_get(v, "has_more");
+    if (hm != 0 && bayan_json_v_bool(hm) == 1) {
+        var lid = _cat_get_cstr(v, "last_id");
+        if (catalog_id_ok(lid) == 1) {
+            store64(more, 1);
+            store64(last, lid);
+        }
+    }
+    return n;
+}
+
+# ── Google ──
+
+# Parse one Gemini GET /v1beta/models page. Only models that support generateContent are chat models (the list
+# also carries embedding and attributed-QA models). Returns the page's model count, or -1; *next receives
+# nextPageToken (a heap cstr, or 0).
+fn catalog_parse_google(a, body, len, out, next) {
+    store64(next, 0);
+    var v = bayan_json_v_parse_buf_a(a, body, len);
+    var models = bayan_json_v_obj_get(v, "models");
+    if (bayan_json_v_is_arr(models) == 0) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(models);
+    var i = 0;
+    while (i < n) {
+        var m = bayan_json_v_arr_get(models, i);
+        if (_cat_arr_has(bayan_json_v_obj_get(m, "supportedGenerationMethods"), "generateContent") == 1) {
+            var id = _cat_dup_str_strip(bayan_json_v_str(bayan_json_v_obj_get(m, "name")), "models/");
+            if (catalog_id_ok(id) == 1) {
+                var e = catalog_entry_new(id, CATSRC_LIVE);
+                store64(e + CAT_E_DISPLAY, _cat_get_cstr(m, "displayName"));
+                store64(e + CAT_E_CTX, _cat_get_int(m, "inputTokenLimit"));
+                store64(e + CAT_E_MAXOUT, _cat_get_int(m, "outputTokenLimit"));
+                vec_push(out, e);
+            }
+        }
+        i = i + 1;
+    }
+    var tok = _cat_get_cstr(v, "nextPageToken");
+    if (catalog_id_ok(tok) == 1) { store64(next, tok); }
+    return n;
+}
+
+# ── OpenAI-compatible ──
+
+# Families an OpenAI-compatible /v1/models lists beside its chat models: embeddings, speech in and out, images,
+# moderation, the realtime/audio endpoints and the retired completion engines. None of them answers
+# /v1/chat/completions, so a picker that offered them offered a 400. A substring match, documented in hoosh.cyml.
+fn _cat_has(s, needle) {
+    var sl = strlen(s);
+    var nl = strlen(needle);
+    var i = 0;
+    while (i + nl <= sl) {
+        if (memeq(s + i, needle, nl) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn catalog_openai_nonchat(id) {
+    if (_cat_has(id, "embed") == 1) { return 1; }
+    if (_cat_has(id, "whisper") == 1) { return 1; }
+    if (_cat_has(id, "tts") == 1) { return 1; }
+    if (_cat_has(id, "transcribe") == 1) { return 1; }
+    if (_cat_has(id, "dall-e") == 1) { return 1; }
+    if (_cat_has(id, "image") == 1) { return 1; }
+    if (_cat_has(id, "moderation") == 1) { return 1; }
+    if (_cat_has(id, "realtime") == 1) { return 1; }
+    if (_cat_has(id, "audio") == 1) { return 1; }
+    if (_cat_has(id, "davinci") == 1) { return 1; }
+    if (_cat_has(id, "babbage") == 1) { return 1; }
+    if (_cat_has(id, "sora") == 1) { return 1; }
+    return 0;
+}
+
+# A USD-per-TOKEN decimal string (OpenRouter's pricing.prompt, e.g. "0.000003") as micro-USD per 1K tokens
+# (3000). $/token x 1e9 = micro-USD per 1K tokens, so the decimal point moves nine places. Returns -1 for
+# anything that is not a plain non-negative decimal (OpenRouter marks a variable price "-1").
+fn catalog_usd_per_token_to_micro_1k(s) {
+    if (s == 0) { return 0 - 1; }
+    var n = str_len(s);
+    var p = str_data(s);
+    if (n == 0 || n > 40) { return 0 - 1; }
+    var whole = 0;
+    var frac = 0;
+    var fdig = 0;
+    var seen_dot = 0;
+    var digits = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i) & 255;
+        if (c == 46) {
+            if (seen_dot == 1) { return 0 - 1; }
+            seen_dot = 1;
+        } elif (c >= 48 && c <= 57) {
+            digits = digits + 1;
+            if (seen_dot == 0) {
+                if (whole > 1000000) { return 0 - 1; }
+                whole = whole * 10 + (c - 48);
+            } elif (fdig < 9) {
+                frac = frac * 10 + (c - 48);
+                fdig = fdig + 1;
+            }
+        } else {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    if (digits == 0) { return 0 - 1; }
+    while (fdig < 9) { frac = frac * 10; fdig = fdig + 1; }
+    return whole * 1000000000 + frac;
+}
+
+# Parse an OpenAI-compatible GET /v1/models body. `filter` = 1 drops the non-chat families above. Optional
+# fields some providers add are kept when present: OpenRouter's context_length, top_provider.max_completion_tokens,
+# pricing.{prompt,completion} and architecture.input_modalities; Mistral's max_context_length and
+# capabilities.vision. Returns the list's length, or -1.
+fn catalog_parse_openai(a, body, len, out, filter) {
+    var v = bayan_json_v_parse_buf_a(a, body, len);
+    var data = bayan_json_v_obj_get(v, "data");
+    if (bayan_json_v_is_arr(data) == 0) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(data);
+    var i = 0;
+    while (i < n) {
+        var m = bayan_json_v_arr_get(data, i);
+        var id = _cat_get_cstr(m, "id");
+        var keep = catalog_id_ok(id);
+        if (keep == 1 && filter == 1) {
+            if (catalog_openai_nonchat(id) == 1) { keep = 0; }
+        }
+        if (keep == 1) {
+            var e = catalog_entry_new(id, CATSRC_LIVE);
+            store64(e + CAT_E_DISPLAY, _cat_get_cstr(m, "name"));
+            var ctx = _cat_get_int(m, "context_length");
+            if (ctx < 0) { ctx = _cat_get_int(m, "max_context_length"); }
+            store64(e + CAT_E_CTX, ctx);
+            var tp = bayan_json_v_obj_get(m, "top_provider");
+            if (tp != 0) { store64(e + CAT_E_MAXOUT, _cat_get_int(tp, "max_completion_tokens")); }
+            var pr = bayan_json_v_obj_get(m, "pricing");
+            if (pr != 0) {
+                var pp = bayan_json_v_str(bayan_json_v_obj_get(pr, "prompt"));
+                var pc = bayan_json_v_str(bayan_json_v_obj_get(pr, "completion"));
+                store64(e + CAT_E_IN_PRICE, catalog_usd_per_token_to_micro_1k(pp));
+                store64(e + CAT_E_OUT_PRICE, catalog_usd_per_token_to_micro_1k(pc));
+            }
+            var caps = bayan_json_v_obj_get(m, "capabilities");
+            if (caps != 0) {
+                var vis = bayan_json_v_obj_get(caps, "vision");
+                if (bayan_json_v_is_bool(vis) == 1) { store64(e + CAT_E_VISION, bayan_json_v_bool(vis)); }
+            }
+            var arch = bayan_json_v_obj_get(m, "architecture");
+            if (arch != 0) {
+                store64(e + CAT_E_VISION, _cat_arr_has(bayan_json_v_obj_get(arch, "input_modalities"), "image"));
+            }
+            vec_push(out, e);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+# An operator's "USD per million tokens" ([[models]] input_per_mtok = "4.00", or a bare number) in hoosh's scaled
+# unit, $/M x 1000 (4000). Up to three decimal places count; a fourth and beyond are truncated. -1 for anything
+# that is not a plain non-negative decimal.
+fn catalog_usd_per_mtok_scaled(s) {
+    if (s == 0) { return 0 - 1; }
+    var n = strlen(s);
+    if (n == 0 || n > 24) { return 0 - 1; }
+    var whole = 0;
+    var frac = 0;
+    var fdig = 0;
+    var seen_dot = 0;
+    var digits = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i) & 255;
+        if (c == 46) {
+            if (seen_dot == 1) { return 0 - 1; }
+            seen_dot = 1;
+        } elif (c >= 48 && c <= 57) {
+            digits = digits + 1;
+            if (seen_dot == 0) {
+                if (whole > 1000000000) { return 0 - 1; }
+                whole = whole * 10 + (c - 48);
+            } elif (fdig < 3) {
+                frac = frac * 10 + (c - 48);
+                fdig = fdig + 1;
+            }
+        } else {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    if (digits == 0) { return 0 - 1; }
+    while (fdig < 3) { frac = frac * 10; fdig = fdig + 1; }
+    return whole * 1000 + frac;
+}
+
+# ── Ollama ──
+
+# Parse Ollama's GET /api/tags. Returns the list's length, or -1.
+fn catalog_parse_ollama(a, body, len, out) {
+    var v = bayan_json_v_parse_buf_a(a, body, len);
+    var models = bayan_json_v_obj_get(v, "models");
+    if (bayan_json_v_is_arr(models) == 0) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(models);
+    var i = 0;
+    while (i < n) {
+        var m = bayan_json_v_arr_get(models, i);
+        var id = _cat_get_cstr(m, "name");
+        if (id == 0) { id = _cat_get_cstr(m, "model"); }
+        if (catalog_id_ok(id) == 1) { vec_push(out, catalog_entry_new(id, CATSRC_LIVE)); }
+        i = i + 1;
+    }
+    return n;
+}
+
+# ── per-route records and the published snapshot ──
+#
+# A record holds one route's last answer. It is keyed by (provider, base_url) by CONTENT, like the cost records,
+# so a /v1/admin/reload — which builds fresh routes with fresh strings — finds the same record. A failed refresh
+# keeps the previous good entries: a provider blip must not empty a client's model picker.
+enum CatRecField {
+    CAT_R_PROV     = 0;      # provider kind (the glue's PROV_*)
+    CAT_R_BASE     = 8;      # cstr, owned by the record
+    CAT_R_STATUS   = 16;     # last fetch: HTTP status, 0 = never asked, -1 = no answer, -2 = not a model list
+    CAT_R_CHECKED  = 24;     # clock ms of the last fetch, 0 = never
+    CAT_R_ENTRIES  = 32;     # vec of entries from the last GOOD fetch, or 0
+    CAT_R_GOOD_MS  = 40;     # clock ms of the last good fetch, 0 = never
+    CAT_R_SIZE     = 48;
+}
+
+fn catalog_record_new(prov, base_url) {
+    var r = alloc(CAT_R_SIZE);
+    store64(r + CAT_R_PROV, prov);
+    var bl = strlen(base_url);
+    var b = alloc(bl + 1);
+    memcpy(b, base_url, bl);
+    store8(b + bl, 0);
+    store64(r + CAT_R_BASE, b);
+    store64(r + CAT_R_STATUS, 0);
+    store64(r + CAT_R_CHECKED, 0);
+    store64(r + CAT_R_ENTRIES, 0);
+    store64(r + CAT_R_GOOD_MS, 0);
+    return r;
+}
+
+fn cat_r_prov(r) { return load64(r + CAT_R_PROV); }
+fn cat_r_base(r) { return load64(r + CAT_R_BASE); }
+fn cat_r_status(r) { return load64(r + CAT_R_STATUS); }
+fn cat_r_checked(r) { return load64(r + CAT_R_CHECKED); }
+fn cat_r_entries(r) { return load64(r + CAT_R_ENTRIES); }
+fn cat_r_good_ms(r) { return load64(r + CAT_R_GOOD_MS); }
+
+fn cat_r_count(r) {
+    var es = load64(r + CAT_R_ENTRIES);
+    if (es == 0) { return 0; }
+    return vec_len(es);
+}
+
+# Fold one fetch into a record: a good answer (status 200 and entries != 0) replaces the entries; anything else
+# only updates the status and the time, keeping what the last good answer said.
+fn catalog_record_note(r, status, entries, now_ms) {
+    store64(r + CAT_R_STATUS, status);
+    store64(r + CAT_R_CHECKED, now_ms);
+    if (status == 200 && entries != 0) {
+        store64(r + CAT_R_ENTRIES, entries);
+        store64(r + CAT_R_GOOD_MS, now_ms);
+    }
+    return 0;
+}
+
+# The snapshot is a vec of records, PUBLISHED by one aligned pointer store: readers on the pool workers load it
+# once and see the old or the new vec, both whole (the allocator never frees, so an old one stays valid). Only the
+# refresh writes it, and the refresh is single-flight (catalog_refresh_begin).
+var _cat_snap = 0;
+
+fn catalog_snapshot() { return _cat_snap; }
+fn catalog_publish(v) { _cat_snap = v; return 0; }
+
+# The record for (prov, base_url) in snapshot `snap`, or 0.
+fn catalog_record_find(snap, prov, base_url) {
+    if (snap == 0) { return 0; }
+    var n = vec_len(snap);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(snap, i);
+        if (cat_r_prov(r) == prov) {
+            if (streq(cat_r_base(r), base_url) == 1) { return r; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Is `id` exactly `alias` + "-" + eight digits? Anthropic lists the 4.5 generation by snapshot id
+# (claude-haiku-4-5-20251001) while clients send the alias (claude-haiku-4-5); without this the alias found no
+# entry, and the request builder sent adaptive thinking — the shape Haiku 4.5 rejects.
+fn catalog_is_dated(id, alias) {
+    var al = strlen(alias);
+    if (strlen(id) != al + 9) { return 0; }
+    if (memeq(id, alias, al) == 0) { return 0; }
+    if (load8(id + al) != 45) { return 0; }
+    var i = al + 1;
+    while (i < al + 9) {
+        var c = load8(id + i);
+        if (c < 48 || c > 57) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The entry for `model` in a vec of entries, or 0: the exact id, else the dated snapshot of an alias.
+fn catalog_entries_find(es, model) {
+    if (es == 0 || model == 0) { return 0; }
+    var n = vec_len(es);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(es, i);
+        if (streq(cat_e_id(e), model) == 1) { return e; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        var e2 = vec_get(es, i);
+        if (catalog_is_dated(cat_e_id(e2), model) == 1) { return e2; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The live entry for `model` on the route (prov, base_url), or 0 when that route never listed it.
+fn catalog_find_on(prov, base_url, model) {
+    var r = catalog_record_find(_cat_snap, prov, base_url);
+    if (r == 0) { return 0; }
+    return catalog_entries_find(cat_r_entries(r), model);
+}
+
+# The first live entry for `model` on any route, or 0 — for the route-agnostic lookups (context window, price).
+fn catalog_find_any(model) {
+    var snap = _cat_snap;
+    if (snap == 0) { return 0; }
+    var n = vec_len(snap);
+    var i = 0;
+    while (i < n) {
+        var e = catalog_entries_find(cat_r_entries(vec_get(snap, i)), model);
+        if (e != 0) { return e; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── the operator's [[models]] blocks ──
+# Set by load_config; replaced whole on reload. They win over everything a provider or the compiled table says,
+# because they are the only source an operator controls.
+var _cat_cfg = 0;
+
+fn catalog_config_set(v) { _cat_cfg = v; return 0; }
+
+# An operator's block laid over what a provider said about the same model: a copy of `live` with every field the
+# block sets replacing the provider's, marked `config`. A block that only prices a model must not erase the
+# context window and capabilities the provider reported (the first live run showed exactly that).
+fn catalog_merge(cfg, live) {
+    if (live == 0) { return cfg; }
+    var e = alloc(CAT_E_SIZE);
+    memcpy(e, live, CAT_E_SIZE);
+    store64(e + CAT_E_SOURCE, CATSRC_CONFIG);
+    if (cat_e_display(cfg) != 0) { store64(e + CAT_E_DISPLAY, cat_e_display(cfg)); }
+    if (cat_e_ctx(cfg) > 0) { store64(e + CAT_E_CTX, cat_e_ctx(cfg)); }
+    if (cat_e_maxout(cfg) > 0) { store64(e + CAT_E_MAXOUT, cat_e_maxout(cfg)); }
+    if (cat_e_vision(cfg) >= 0) { store64(e + CAT_E_VISION, cat_e_vision(cfg)); }
+    if (cat_e_in_price(cfg) >= 0 && cat_e_out_price(cfg) >= 0) {
+        store64(e + CAT_E_IN_PRICE, cat_e_in_price(cfg));
+        store64(e + CAT_E_OUT_PRICE, cat_e_out_price(cfg));
+    }
+    if (cat_e_tier(cfg) >= 0) { store64(e + CAT_E_TIER, cat_e_tier(cfg)); }
+    if (cat_e_reason(cfg) >= 0) { store64(e + CAT_E_REASON, cat_e_reason(cfg)); }
+    store64(e + CAT_E_LISTED, cat_e_listed(cfg));
+    return e;
+}
+fn catalog_config() { return _cat_cfg; }
+fn catalog_config_find(model) { return catalog_entries_find(_cat_cfg, model); }
+
+# ── refresh scheduling ──
+
+# Seconds between refreshes ([catalog] refresh_secs). 0 = only at startup, on a reload and on
+# POST /v1/models/refresh. Six hours by default: model lists change on the order of weeks, each refresh is one
+# unbilled GET per route, and hoosh's arena never frees what the parse allocates beyond its scratch arena.
+var _cat_refresh_s = 21600;
+var _cat_last_ms = 0;
+var _cat_running = 0;
+
+fn catalog_configure(refresh_secs) {
+    if (refresh_secs >= 0) { _cat_refresh_s = refresh_secs; }
+    return 0;
+}
+fn catalog_refresh_secs() { return _cat_refresh_s; }
+fn catalog_last_ms() { return _cat_last_ms; }
+
+# Is a periodic refresh due at `now_ms`? Never before the first one has run (startup owns that), never while
+# one is running, and never with the interval at 0.
+fn catalog_due(now_ms, last_ms, interval_s) {
+    if (interval_s <= 0) { return 0; }
+    if (last_ms == 0) { return 0; }
+    if (now_ms - last_ms >= interval_s * 1000) { return 1; }
+    return 0;
+}
+
+# Single-flight: 1 = this caller owns the refresh, 0 = one is already running.
+fn catalog_refresh_begin() {
+    if (atomic_cas(&_cat_running, 0, 1) == 1) { return 1; }
+    return 0;
+}
+fn catalog_refresh_end(now_ms) {
+    _cat_last_ms = now_ms;
+    _cat_running = 0;
+    return 0;
+}
+fn catalog_refresh_running() { return _cat_running; }
+
+# ── request shaping: what thinking to send ──
+#
+# A client says how hard it wants the model to think (reasoning_effort, level 1..5). What each Claude model
+# ACCEPTS differs, and sending the wrong shape is a 400 — measured 2026-10-09: `{"type":"adaptive"}` on Claude
+# Haiku 4.5 ("adaptive thinking is not supported on this model"), effort `xhigh` on Claude Sonnet 4.6 ("Supported
+# levels: high, low, max, medium"). Until 2.8.0 hoosh sent adaptive + the level to every model. With the live
+# capability tree the request becomes what the model takes; without it (a model the provider did not list, or a
+# catalog not yet fetched) the request is what the client asked for, as before.
+enum CatPlanMode {
+    CAT_PLAN_NONE     = 0;   # no thinking field
+    CAT_PLAN_ADAPTIVE = 1;   # {"type":"adaptive","display":"summarized"} (+ effort)
+    CAT_PLAN_ENABLED  = 2;   # {"type":"enabled","budget_tokens":N,"display":"summarized"} (+ effort)
+}
+
+# budget_tokens per level for a model that only takes a thinking BUDGET. Anthropic requires 1024 <= budget <
+# max_tokens; these leave the answer room inside the 16384 hoosh asks for by default.
+fn _cat_budget_for(level) {
+    if (level <= 1) { return 2048; }
+    if (level == 2) { return 4096; }
+    if (level == 3) { return 8192; }
+    if (level == 4) { return 12288; }
+    return 16384;
+}
+
+# The level to send for `want` given a model's effort mask: the level itself when accepted, else the nearest
+# accepted level BELOW it, else the lowest accepted above it. 0 = send no effort (mask 0: the model has no effort
+# parameter). An unknown mask (-1) passes the level through.
+fn catalog_effort_clamp(mask, want) {
+    if (want <= 0) { return 0; }
+    if (mask < 0) { return want; }
+    if (mask == 0) { return 0; }
+    var l = want;
+    while (l >= 1) {
+        if ((mask & (1 << (l - 1))) != 0) { return l; }
+        l = l - 1;
+    }
+    l = want + 1;
+    while (l <= 5) {
+        if ((mask & (1 << (l - 1))) != 0) { return l; }
+        l = l + 1;
+    }
+    return 0;
+}
+
+fn catalog_effort_name(level) {
+    if (level == 1) { return "low"; }
+    if (level == 2) { return "medium"; }
+    if (level == 3) { return "high"; }
+    if (level == 4) { return "xhigh"; }
+    if (level == 5) { return "max"; }
+    return 0;
+}
+
+# Decide the thinking fields for one Anthropic request. `e` is the model's live entry (or 0), `level` the
+# client's effort (0 = none asked), `max_tokens` the request's output ceiling. Writes out[0] = CAT_PLAN_*,
+# out[8] = the effort level to send (0 = omit output_config.effort), out[16] = budget_tokens (ENABLED only).
+fn catalog_thinking_plan(e, level, max_tokens, out) {
+    store64(out, CAT_PLAN_NONE);
+    store64(out + 8, 0);
+    store64(out + 16, 0);
+    if (level <= 0) { return 0; }
+    if (e == 0 || cat_e_think(e) < 0) {
+        store64(out, CAT_PLAN_ADAPTIVE);
+        store64(out + 8, level);
+        return 0;
+    }
+    var think = cat_e_think(e);
+    var eff = catalog_effort_clamp(cat_e_effort(e), level);
+    if ((think & CAT_THINK_ADAPTIVE) != 0) {
+        store64(out, CAT_PLAN_ADAPTIVE);
+        store64(out + 8, eff);
+        return 0;
+    }
+    if ((think & CAT_THINK_ENABLED) != 0) {
+        var b = _cat_budget_for(level);
+        if (b > max_tokens - 1024) { b = max_tokens - 1024; }
+        if (b < 1024) { return 0; }          # no room to think inside this max_tokens: send no thinking
+        store64(out, CAT_PLAN_ENABLED);
+        store64(out + 8, eff);
+        store64(out + 16, b);
+        return 0;
+    }
+    return 0;                                # the model declares no thinking mode
+}
+
+# Append a plan's fields to an Anthropic /v1/messages body, each followed by a comma (the caller writes more
+# fields after them). Nothing for CAT_PLAN_NONE.
+fn catalog_add_thinking(sb, plan) {
+    var mode = load64(plan);
+    if (mode == CAT_PLAN_NONE) { return 0; }
+    if (mode == CAT_PLAN_ADAPTIVE) {
+        str_builder_add_cstr(sb, "\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},");
+    } else {
+        str_builder_add_cstr(sb, "\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
+        str_builder_add_int(sb, load64(plan + 16));
+        str_builder_add_cstr(sb, ",\"display\":\"summarized\"},");
+    }
+    var lvl = load64(plan + 8);
+    if (lvl > 0) {
+        str_builder_add_cstr(sb, "\"output_config\":{\"effort\":\"");
+        str_builder_add_cstr(sb, catalog_effort_name(lvl));
+        str_builder_add_cstr(sb, "\"},");
+    }
+    return 0;
+}
+
+# ── OpenAI-compatible request extras ──
+#
+# reasoning_effort was never forwarded on an OpenAI-compatible route (only the Anthropic builder read it), so a
+# client's reasoning setting was silently inert on o3 or GPT-5. It is now forwarded, VERBATIM, to a model that takes
+# it — and only then: GPT-4o and GPT-4.1 answer it with a 400 ("reasoning_effort is not supported with this
+# model"). Which models take it: the operator's [[models]] reasoning = true|false when set; else the families whose
+# providers document it (official pages, read 2026-10-09) — OpenAI's o-series, GPT-5 and GPT-6; xAI's Grok 4.x
+# (not the -non-reasoning variants) and Grok Build; DeepSeek's models; the gpt-oss models (Groq). Which VALUES each
+# takes varies by model and is the provider's to refuse (it says which in its 400, which hoosh forwards).
+
+fn _cat_prefix(s, p) {
+    var pl = strlen(p);
+    if (strlen(s) < pl) { return 0; }
+    return memeq(s, p, pl);
+}
+
+fn catalog_reasoning_ok(kind, model) {
+    if (model == 0 || kind == 0) { return 0; }
+    var ce = catalog_config_find(model);
+    if (ce != 0) {
+        if (cat_e_reason(ce) >= 0) { return cat_e_reason(ce); }
+    }
+    if (streq(kind, "openai") == 1) {
+        if (_cat_has(model, "-chat") == 1) { return 0; }    # gpt-5-chat-latest: the non-reasoning chat model
+        if (_cat_prefix(model, "o1") == 1 || _cat_prefix(model, "o3") == 1) { return 1; }
+        if (_cat_prefix(model, "o4") == 1) { return 1; }
+        if (_cat_prefix(model, "gpt-5") == 1 || _cat_prefix(model, "gpt-6") == 1) { return 1; }
+        return 0;
+    }
+    if (streq(kind, "grok") == 1) {
+        if (_cat_has(model, "non-reasoning") == 1) { return 0; }
+        if (_cat_prefix(model, "grok-4") == 1 || _cat_prefix(model, "grok-build") == 1) { return 1; }
+        return 0;
+    }
+    if (streq(kind, "deepseek") == 1) { return 1; }
+    if (streq(kind, "groq") == 1) {
+        if (_cat_prefix(model, "openai/gpt-oss") == 1) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# Append the extras to an OpenAI-compatible body, each led by a comma: reasoning_effort (the client's own word) when
+# the model takes it, and stream_options.include_usage on a stream whose provider documents it (OpenAI, DeepSeek) —
+# without it those providers send no usage on a stream, and hoosh metered the stream by its admission estimate.
+fn catalog_add_openai_extras(sb, word, reasoning_ok, include_usage) {
+    if (reasoning_ok == 1 && word != 0) {
+        str_builder_add_cstr(sb, ",\"reasoning_effort\":\"");
+        str_builder_add_cstr(sb, word);
+        str_builder_add_cstr(sb, "\"");
+    }
+    if (include_usage == 1) { str_builder_add_cstr(sb, ",\"stream_options\":{\"include_usage\":true}"); }
+    return 0;
+}
+
+# ── what the client asked for: reasoning_effort and stream_options ──
+#
+# Both live here rather than in handlers.cyr so the test binary runs the real scanners (the 2.5.0 effort parser
+# was a mirror in tests/hoosh.tcyr). Raw scans of the TOP-LEVEL keys (_top_key_value, jsonlite.cyr), because
+# clients put these after the nested `messages` array, which the flat json_parse cannot reach.
+
+# The client's reasoning_effort as a level: none -> 0, minimal / low -> 1, medium -> 2, high -> 3, xhigh -> 4,
+# max -> 5; absent or unknown -> 0 (no thinking), as before. *word receives the recognised word itself (a
+# static cstr) or 0, so an OpenAI-compatible reasoning model gets exactly what the client sent — "minimal" and
+# "none" are OpenAI words that mean nothing to Anthropic.
+fn catalog_req_effort(body, len, word) {
+    store64(word, 0);
+    var j = _top_key_value(body, len, "\"reasoning_effort\"", 18);
+    if (j < 0) { return 0; }
+    if (j >= len || load8(body + j) != 34) { return 0; }
+    var p = body + j + 1;
+    var rem = len - j - 1;
+    if (rem > 4 && memeq(p, "none", 4) == 1 && load8(p + 4) == 34) { store64(word, "none"); return 0; }
+    if (rem > 7 && memeq(p, "minimal", 7) == 1 && load8(p + 7) == 34) { store64(word, "minimal"); return 1; }
+    if (rem > 3 && memeq(p, "low", 3) == 1 && load8(p + 3) == 34) { store64(word, "low"); return 1; }
+    if (rem > 6 && memeq(p, "medium", 6) == 1 && load8(p + 6) == 34) { store64(word, "medium"); return 2; }
+    if (rem > 4 && memeq(p, "high", 4) == 1 && load8(p + 4) == 34) { store64(word, "high"); return 3; }
+    if (rem > 5 && memeq(p, "xhigh", 5) == 1 && load8(p + 5) == 34) { store64(word, "xhigh"); return 4; }
+    if (rem > 3 && memeq(p, "max", 3) == 1 && load8(p + 3) == 34) { store64(word, "max"); return 5; }
+    return 0;
+}
+
+# 1 when the request carries stream_options.include_usage = true — the client wants the final usage chunk.
+fn catalog_req_include_usage(body, len) {
+    var j = _top_key_value(body, len, "\"stream_options\"", 16);
+    if (j < 0) { return 0; }
+    if (j >= len || load8(body + j) != 123) { return 0; }
+    var e = _json_obj_end(body, len, j);
+    var k = _json_value_pos(body + j, e - j, "include_usage", 13);
+    if (k < 0) { return 0; }
+    if (j + k + 4 <= len && memeq(body + j + k, "true", 4) == 1) { return 1; }
+    return 0;
+}
+
+# ── the JSON a catalog entry is written as ──
+
+# Append `s` as the body of a JSON string. Ids are vetted by catalog_id_ok, but display names and base urls come
+# from config and providers: a quote or a control byte must not break the body (2.7.1 wrote base_url raw into
+# /v1/health/providers, and a quote in it made the whole answer unparseable).
+fn catalog_add_esc(sb, s) {
+    if (s == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i) & 255;
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c < 32 || c == 127) { str_builder_putc(sb, 32); }
+        else { str_builder_putc(sb, c); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _cat_add_bool(sb, b) {
+    if (b == 1) { str_builder_add_cstr(sb, "true"); } else { str_builder_add_cstr(sb, "false"); }
+    return 0;
+}
+
+# The capability object, or nothing when no capability is known (omit-until-present).
+fn _cat_add_caps(sb, e) {
+    var vis = cat_e_vision(e);
+    var think = cat_e_think(e);
+    var eff = cat_e_effort(e);
+    if (vis < 0 && think < 0 && eff < 0) { return 0; }
+    str_builder_add_cstr(sb, ",\"capabilities\":{");
+    var first = 1;
+    if (vis >= 0) {
+        str_builder_add_cstr(sb, "\"vision\":");
+        _cat_add_bool(sb, vis);
+        first = 0;
+    }
+    if (think >= 0) {
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"thinking\":[");
+        var tf = 1;
+        if ((think & CAT_THINK_ADAPTIVE) != 0) { str_builder_add_cstr(sb, "\"adaptive\""); tf = 0; }
+        if ((think & CAT_THINK_ENABLED) != 0) {
+            if (tf == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"budget\"");
+            tf = 0;
+        }
+        str_builder_add_cstr(sb, "]");
+        first = 0;
+    }
+    if (eff >= 0) {
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"effort\":[");
+        var ef = 1;
+        var l = 1;
+        while (l <= 5) {
+            if ((eff & (1 << (l - 1))) != 0) {
+                if (ef == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, "\"");
+                str_builder_add_cstr(sb, catalog_effort_name(l));
+                str_builder_add_cstr(sb, "\"");
+                ef = 0;
+            }
+            l = l + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+fn catalog_source_name(src) {
+    if (src == CATSRC_LIVE) { return "live"; }
+    if (src == CATSRC_CONFIG) { return "config"; }
+    return "builtin";
+}
+
+# One /v1/models/catalog element. The first three fields are the pre-2.8.0 shape, so a client that reads only
+# id / owned_by is unaffected. `routes` is a vec of base-url cstrs: every enabled route whose patterns match the
+# id, in router order — the routes router_select chooses among, so a client can join a model to the health of
+# the routes that would actually serve it. Prices are micro-USD per 1K tokens and are written only when known
+# (in_price / out_price >= 0).
+fn catalog_emit_entry(sb, e, owned_by, routes, in_price, out_price) {
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    catalog_add_esc(sb, cat_e_id(e));
+    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+    catalog_add_esc(sb, owned_by);
+    str_builder_add_cstr(sb, "\",\"source\":\"");
+    str_builder_add_cstr(sb, catalog_source_name(cat_e_source(e)));
+    str_builder_add_cstr(sb, "\"");
+    if (routes != 0) {
+        str_builder_add_cstr(sb, ",\"routes\":[");
+        var n = vec_len(routes);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            catalog_add_esc(sb, vec_get(routes, i));
+            str_builder_add_cstr(sb, "\"");
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+    }
+    if (cat_e_display(e) != 0) {
+        str_builder_add_cstr(sb, ",\"display_name\":\"");
+        catalog_add_esc(sb, cat_e_display(e));
+        str_builder_add_cstr(sb, "\"");
+    }
+    if (cat_e_ctx(e) > 0) {
+        str_builder_add_cstr(sb, ",\"context_window\":");
+        str_builder_add_int(sb, cat_e_ctx(e));
+    }
+    if (cat_e_maxout(e) > 0) {
+        str_builder_add_cstr(sb, ",\"max_output_tokens\":");
+        str_builder_add_int(sb, cat_e_maxout(e));
+    }
+    _cat_add_caps(sb, e);
+    if (in_price >= 0 && out_price >= 0) {
+        str_builder_add_cstr(sb, ",\"pricing\":{\"input_micro_usd_per_1k\":");
+        str_builder_add_int(sb, in_price);
+        str_builder_add_cstr(sb, ",\"output_micro_usd_per_1k\":");
+        str_builder_add_int(sb, out_price);
+        str_builder_add_cstr(sb, "}");
+    }
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}

@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.7.1";
+var HOOSH_VERSION = "2.8.0";
 
 # ================================================================
 # Error types
@@ -181,22 +181,40 @@ enum Strategy {
 # provider default. hoosh is multi-threaded, so these are strictly per-request;
 # a global would race.
 #
-#   +0  effort      0 none | 1 low | 2 medium | 3 high
+#   +0  effort      0 none | 1 low | 2 medium | 3 high | 4 xhigh | 5 max (2.8.0: 4 and 5)
 #   +8  max_tokens  0 = unset (leave it to the provider default)
 #   +16 temp_milli  GEN_UNSET = unset, else temperature x1000 (0..2000)
 #   +24 top_p_milli GEN_UNSET = unset, else top_p x1000 (0..1000)
+#   +32 effort_name the client's reasoning_effort word when hoosh knows it ("minimal", "none", "low" ... "max"),
+#                   else 0 — forwarded verbatim to an OpenAI-compatible reasoning model (2.8.0)
+#   +40 usage       1 = the client asked for stream_options.include_usage (2.8.0)
 #
 # Cyrius carries no floats here, so the fractional params are scaled ints and
 # re-rendered by _sb_add_milli on the way out.
 var GEN_UNSET = 0 - 1;
 
 fn genopts_new(effort, max_tokens, temp_milli, top_p_milli) {
-    var g = alloc(32);
+    var g = alloc(48);
     store64(g, effort);
     store64(g + 8, max_tokens);
     store64(g + 16, temp_milli);
     store64(g + 24, top_p_milli);
+    store64(g + 32, 0);
+    store64(g + 40, 0);
     return g;
+}
+
+fn gen_set_effort_name(g, name) { if (g != 0) { store64(g + 32, name); } return 0; }
+fn gen_set_usage(g, on) { if (g != 0) { store64(g + 40, on); } return 0; }
+
+fn gen_effort_name(g) {
+    if (g == 0) { return 0; }
+    return load64(g + 32);
+}
+
+fn gen_usage(g) {
+    if (g == 0) { return 0; }
+    return load64(g + 40);
 }
 
 # Accessors tolerate a 0 pointer so any caller that has no options (batch

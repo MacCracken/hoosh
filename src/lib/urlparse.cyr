@@ -1,0 +1,58 @@
+# urlparse.cyr — host and port out of a provider base url (2.8.0).
+# Requires: string (lib). Pure, so the test binary includes it for real.
+#
+# Until 2.8.0 these lived in http_client.cyr and assumed the scheme was "http://" (7 bytes), because the raw-socket
+# path they were written for is plaintext. The background health prober (2.5.5) reused them for REMOTE routes,
+# whose base urls are https: for "https://api.anthropic.com" the host scan started at the second '/' and stopped
+# at once — host "localhost" — and the port read 80. So every remote route's liveness probe was a TCP connect to
+# localhost:80: with nothing listening there (measured 2026-10-09) every remote route went "unhealthy" after three
+# sweeps while its requests succeeded; with something listening, every one read "healthy" whatever its real state
+# (what thoth's 2026-08-24 live session saw). Both now read the scheme: "https://" defaults to 443.
+
+# Index of the host's first byte: past "https://" or "http://", else 0 (a bare host[:port]).
+fn _url_host_start(url) {
+    if (url == 0) { return 0; }
+    var n = strlen(url);
+    if (n >= 8 && memeq(url, "https://", 8) == 1) { return 8; }
+    if (n >= 7 && memeq(url, "http://", 7) == 1) { return 7; }
+    return 0;
+}
+
+# The port of scheme://host[:port][/path]: the explicit one, else 443 for https and 80 for anything else.
+fn url_port(url) {
+    if (url == 0) { return 80; }
+    var start = _url_host_start(url);
+    var dflt = 80;
+    if (start == 8) { dflt = 443; }
+    var i = start;
+    while (load8(url + i) != 0) {
+        if (load8(url + i) == 58) { return atoi(url + i + 1); }
+        if (load8(url + i) == 47) { return dflt; }
+        i = i + 1;
+    }
+    return dflt;
+}
+
+# The host of scheme://host[:port][/path], as a fresh cstr. An empty host falls back to "localhost" (the historical
+# target of a malformed local url).
+fn url_host(url) {
+    var start = _url_host_start(url);
+    var i = start;
+    var c = 0;
+    if (url != 0) { c = load8(url + i); }
+    while (c != 0 && c != 58 && c != 47) {    # stop at ':' (port) or '/' (path)
+        i = i + 1;
+        c = load8(url + i);
+    }
+    var len = i - start;
+    if (len <= 0) {
+        var lh = alloc(10);
+        memcpy(lh, "localhost", 9);
+        store8(lh + 9, 0);
+        return lh;
+    }
+    var h = alloc(len + 1);
+    memcpy(h, url + start, len);
+    store8(h + len, 0);
+    return h;
+}

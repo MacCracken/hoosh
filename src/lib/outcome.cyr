@@ -1,0 +1,266 @@
+# outcome.cyr — how a completion ENDED, and what it used, as the provider said (2.8.0).
+# Requires: jsonlite.cyr (_json_value_pos, _json_extract_str, _json_extract_int), provider_err.cyr
+#           (sb_add_chat_head), string + str (lib). Nothing that reaches `_router`, so tests include it for real.
+#
+# Two things every OpenAI-compatible client reads off a completion, which hoosh did not carry through 2.7.1:
+#
+#  1. finish_reason. The buffered path wrote "tool_calls" or "stop"; a stream ended with "stop" every time. So a
+#     reply cut off at max_tokens read as finished, and a REFUSAL — Claude 5.x's safety classifiers answer HTTP
+#     200 with stop_reason "refusal" — read as the model choosing to say nothing. The provider's own reason is
+#     now mapped: length, tool_calls and content_filter reach the client.
+#  2. usage on a stream. Clients ask for it with stream_options.include_usage (thoth always does), and hoosh never
+#     sent it: no frame, so a client could not meter a streamed turn, and hoosh metered every stream by its
+#     admission ESTIMATE (handlers.cyr handle_chat), never by what the provider counted. Each provider's stream
+#     reports usage its own way; outcome_feed_* reads it, and the stream ends with a usage chunk when asked for.
+
+var FIN_NONE = 0 - 1;               # no reason seen yet
+
+enum OutcomeFinish {
+    FIN_STOP           = 0;
+    FIN_LENGTH         = 1;
+    FIN_TOOL_CALLS     = 2;
+    FIN_CONTENT_FILTER = 3;
+}
+
+fn outcome_finish_name(f) {
+    if (f == FIN_LENGTH) { return "length"; }
+    if (f == FIN_TOOL_CALLS) { return "tool_calls"; }
+    if (f == FIN_CONTENT_FILTER) { return "content_filter"; }
+    return "stop";
+}
+
+# Does p[0..len) contain `needle`?
+fn _oc_has(p, len, needle) {
+    var nl = strlen(needle);
+    var i = 0;
+    while (i + nl <= len) {
+        if (memeq(p + i, needle, nl) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _oc_is(s, want) {
+    if (s == 0) { return 0; }
+    return streq(s, want);
+}
+
+# Anthropic stop_reason: end_turn / stop_sequence / pause_turn finish normally; max_tokens and
+# model_context_window_exceeded cut the reply short; tool_use asks for tools; refusal is a classifier decline.
+fn outcome_finish_anthropic(raw) {
+    if (_oc_is(raw, "max_tokens") == 1) { return FIN_LENGTH; }
+    if (_oc_is(raw, "model_context_window_exceeded") == 1) { return FIN_LENGTH; }
+    if (_oc_is(raw, "tool_use") == 1) { return FIN_TOOL_CALLS; }
+    if (_oc_is(raw, "refusal") == 1) { return FIN_CONTENT_FILTER; }
+    if (raw == 0) { return FIN_NONE; }
+    if (strlen(raw) == 0) { return FIN_NONE; }
+    return FIN_STOP;
+}
+
+# Gemini finishReason: STOP, MAX_TOKENS, and a family of safety stops.
+fn outcome_finish_gemini(raw) {
+    if (_oc_is(raw, "MAX_TOKENS") == 1) { return FIN_LENGTH; }
+    if (_oc_is(raw, "SAFETY") == 1) { return FIN_CONTENT_FILTER; }
+    if (_oc_is(raw, "RECITATION") == 1) { return FIN_CONTENT_FILTER; }
+    if (_oc_is(raw, "BLOCKLIST") == 1) { return FIN_CONTENT_FILTER; }
+    if (_oc_is(raw, "PROHIBITED_CONTENT") == 1) { return FIN_CONTENT_FILTER; }
+    if (_oc_is(raw, "SPII") == 1) { return FIN_CONTENT_FILTER; }
+    if (_oc_is(raw, "IMAGE_SAFETY") == 1) { return FIN_CONTENT_FILTER; }
+    if (raw == 0) { return FIN_NONE; }
+    if (strlen(raw) == 0) { return FIN_NONE; }
+    return FIN_STOP;
+}
+
+# OpenAI-compatible finish_reason, and Ollama's done_reason, which uses the same words.
+fn outcome_finish_openai(raw) {
+    if (_oc_is(raw, "length") == 1) { return FIN_LENGTH; }
+    if (_oc_is(raw, "tool_calls") == 1) { return FIN_TOOL_CALLS; }
+    if (_oc_is(raw, "function_call") == 1) { return FIN_TOOL_CALLS; }
+    if (_oc_is(raw, "content_filter") == 1) { return FIN_CONTENT_FILTER; }
+    if (raw == 0) { return FIN_NONE; }
+    if (strlen(raw) == 0) { return FIN_NONE; }
+    return FIN_STOP;
+}
+
+# The finish to report for a completion that `tools` = 1 called tools in: OpenAI's contract is "tool_calls"
+# whenever the reply carries calls, whatever the provider's own word was; a length or a filter still wins,
+# because a cut-off or declined reply must not read as a clean request for tools.
+fn outcome_finish_final(f, tools) {
+    if (f == FIN_LENGTH || f == FIN_CONTENT_FILTER) { return f; }
+    if (tools == 1) { return FIN_TOOL_CALLS; }
+    if (f == FIN_NONE) { return FIN_STOP; }
+    return f;
+}
+
+# ── per-stream state ──
+#   +0  prompt tokens        -1 until a frame reports them
+#   +8  completion tokens    -1 until a frame reports them
+#   +16 finish               FIN_* (FIN_NONE until the provider says)
+#   +24 tools                1 once a tool call was forwarded
+#   +32 started              bitmask of Anthropic content-block indices whose tool_use START was forwarded (0..62)
+#   +40 orphans              input_json_delta fragments dropped because their block's start never was
+enum OutcomeField {
+    OC_PTOK    = 0;
+    OC_CTOK    = 8;
+    OC_FINISH  = 16;
+    OC_TOOLS   = 24;
+    OC_STARTED = 32;
+    OC_ORPHANS = 40;
+    OC_SIZE    = 48;
+}
+
+fn outcome_new() {
+    var st = alloc(OC_SIZE);
+    store64(st + OC_PTOK, 0 - 1);
+    store64(st + OC_CTOK, 0 - 1);
+    store64(st + OC_FINISH, FIN_NONE);
+    store64(st + OC_TOOLS, 0);
+    store64(st + OC_STARTED, 0);
+    store64(st + OC_ORPHANS, 0);
+    return st;
+}
+
+fn outcome_ptok(st) { return load64(st + OC_PTOK); }
+fn outcome_ctok(st) { return load64(st + OC_CTOK); }
+fn outcome_finish(st) { return load64(st + OC_FINISH); }
+fn outcome_tools(st) { return load64(st + OC_TOOLS); }
+fn outcome_orphans(st) { return load64(st + OC_ORPHANS); }
+fn outcome_note_tools(st) { store64(st + OC_TOOLS, 1); return 0; }
+
+# 1 when the provider reported both token counts.
+fn outcome_has_usage(st) {
+    if (load64(st + OC_PTOK) < 0) { return 0; }
+    if (load64(st + OC_CTOK) < 0) { return 0; }
+    return 1;
+}
+
+# The integer at `"key"` when the key is present (a frame without it leaves the count alone), else -1.
+fn _oc_int(data, dlen, key, keylen) {
+    if (_json_value_pos(data, dlen, key, keylen) < 0) { return 0 - 1; }
+    var n = _json_extract_int(data, dlen, key, keylen);
+    if (n < 0) { return 0 - 1; }
+    return n;
+}
+
+fn _oc_set_if(st, off, n) {
+    if (n >= 0) { store64(st + off, n); }
+    return 0;
+}
+
+# One Anthropic stream event. message_start carries the input tokens; message_delta the stop_reason and the
+# CUMULATIVE output tokens (newer API versions repeat the input count there too).
+fn outcome_feed_anthropic(st, data, dlen) {
+    var is_start = _oc_has(data, dlen, "\"message_start\"");
+    var is_delta = _oc_has(data, dlen, "\"message_delta\"");
+    if (is_start == 0 && is_delta == 0) { return 0; }
+    _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "input_tokens", 12));
+    _oc_set_if(st, OC_CTOK, _oc_int(data, dlen, "output_tokens", 13));
+    if (is_delta == 1) {
+        var f = outcome_finish_anthropic(_json_extract_str(data, dlen, "stop_reason", 11));
+        if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
+    }
+    return 0;
+}
+
+# One OpenAI-compatible stream chunk: a non-null finish_reason, and the usage object of the final chunk (sent when
+# the request carried stream_options.include_usage, or always by some providers).
+fn outcome_feed_openai(st, data, dlen) {
+    var f = outcome_finish_openai(_json_extract_str(data, dlen, "finish_reason", 13));
+    if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
+    if (_json_value_pos(data, dlen, "usage", 5) >= 0) {
+        _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "prompt_tokens", 13));
+        _oc_set_if(st, OC_CTOK, _oc_int(data, dlen, "completion_tokens", 17));
+    }
+    return 0;
+}
+
+# One Gemini stream chunk: usageMetadata is on every chunk, cumulative; thinking tokens (thoughtsTokenCount) are
+# billed as output, so they count as completion tokens.
+fn outcome_feed_gemini(st, data, dlen) {
+    var f = outcome_finish_gemini(_json_extract_str(data, dlen, "finishReason", 12));
+    if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
+    if (_json_value_pos(data, dlen, "usageMetadata", 13) >= 0) {
+        _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "promptTokenCount", 16));
+        var c = _oc_int(data, dlen, "candidatesTokenCount", 20);
+        var t = _oc_int(data, dlen, "thoughtsTokenCount", 18);
+        if (c >= 0) {
+            if (t > 0) { c = c + t; }
+            store64(st + OC_CTOK, c);
+        }
+    }
+    return 0;
+}
+
+# One Ollama NDJSON line: the final one ("done":true) carries prompt_eval_count / eval_count and done_reason.
+fn outcome_feed_ollama(st, line, len) {
+    if ((_oc_has(line, len, "\"done\":true") == 0) && (_oc_has(line, len, "\"done\": true") == 0)) { return 0; }
+    _oc_set_if(st, OC_PTOK, _oc_int(line, len, "prompt_eval_count", 17));
+    _oc_set_if(st, OC_CTOK, _oc_int(line, len, "eval_count", 10));
+    var f = outcome_finish_openai(_json_extract_str(line, len, "done_reason", 11));
+    if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
+    return 0;
+}
+
+# ── the Anthropic tool-call guard ──
+# A streamed Anthropic tool call is a content_block_start (id + name) followed by input_json_delta fragments of
+# its arguments, matched by content-block INDEX. If the start never reached hoosh — sandhi < 1.9.15 dropped it
+# whenever a TCP read split the event, and a malformed one is refused by _emit_anthropic_tool_delta — forwarding
+# the fragments hands the client arguments belonging to no call: thoth carried such a nameless call into its
+# history, the provider rejected every later round, and the conversation was dead (thoth 0.44.2). A fragment
+# for an index whose start was not forwarded is now dropped and counted.
+fn outcome_tool_started(st, idx) {
+    if (idx < 0 || idx > 62) { return 0; }
+    store64(st + OC_STARTED, load64(st + OC_STARTED) | (1 << idx));
+    store64(st + OC_TOOLS, 1);
+    return 0;
+}
+
+fn outcome_tool_known(st, idx) {
+    if (idx < 0 || idx > 62) { return 0; }
+    if ((load64(st + OC_STARTED) & (1 << idx)) != 0) { return 1; }
+    return 0;
+}
+
+fn outcome_note_orphan(st) {
+    store64(st + OC_ORPHANS, load64(st + OC_ORPHANS) + 1);
+    return 0;
+}
+
+# ── the chunks a stream ends with ──
+
+# The final content chunk: an empty delta and the finish reason.
+fn outcome_stop_chunk(model, finish) {
+    var sb = str_builder_new();
+    sb_add_chat_head(sb, "chat.completion.chunk");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"");
+    str_builder_add_cstr(sb, outcome_finish_name(finish));
+    str_builder_add_cstr(sb, "\"}]}");
+    return str_builder_build(sb);
+}
+
+# The usage chunk OpenAI sends last when stream_options.include_usage is set: no choices, the usage object. The
+# cost and the serving provider ride inside usage exactly as on the buffered response (2.5.12), so a client
+# summing either reconciles with /v1/costs.
+fn outcome_usage_chunk(model, ptok, ctok, cost_micro, provider) {
+    var sb = str_builder_new();
+    sb_add_chat_head(sb, "chat.completion.chunk");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[],\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok + ctok);
+    str_builder_add_cstr(sb, ",\"cost_micro_usd\":");
+    str_builder_add_int(sb, cost_micro);
+    if (provider != 0) {
+        str_builder_add_cstr(sb, ",\"provider\":\"");
+        str_builder_add_cstr(sb, provider);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
