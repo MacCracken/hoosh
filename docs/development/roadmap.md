@@ -193,3 +193,99 @@ flagged result across repeats before treating it as a regression.
 **Live verification.** `scripts/bench-live.sh` (opt-in, needs a running gateway and
 backend) measures end-to-end; its ~5 ms floor is `curl` process startup, not the
 gateway, so use it for relative comparisons only.
+
+---
+
+## Adopting cmdit (CLI parsing)
+
+A tier-2 ("verb tool") candidate from the 2026-06-25 ecosystem CLI review
+([agnosticos `planning/cmdit.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/cmdit.md)).
+**Demand-gated, not a forced sweep**: the natural moment is the next change to the CLI or
+to its test mirror.
+
+**What is hand-rolled** (surveyed 2026-10-14 in `src/main.cyr`; `lib/` and `src/vendor/`
+excluded; no `flags_` / `FLAG_ERR_`; `HOOSH_LOG` (`:1073`) is env, not argv):
+
+- **Three argv re-scanners:** `_flag_val` (`:961`, first-wins), `_flag_set` (`:985`) and
+  `_positional` (`:997`). `_positional` assumes every dash token but `--stream` takes a
+  value, so an unknown flag is silently ignored and eats the next positional, a dash-led
+  prompt is skipped, and `--` counts as a flag.
+- **`-c/--config`** is read globally (`:1080`), but the verb is always `argv(1)`
+  (`:1141`), so `hoosh -c f serve` fails with `unknown command: -c`.
+- **Verbs** (`:1139-1201`):
+  - no verb → `serve`; `serve` takes `-p/--port`, `--bind` or a bare positional port, and
+    silently ignores a bad port;
+  - `models` and `health` take `--server`; `bench <url> [count]` is missing from
+    `cmd_help`;
+  - `infer` takes `-m`, `--server`, `--stream` and 1–2 positionals;
+  - `info`; `help` / `--help` / `-h` work as `argv(1)` only; `version` / `--version`
+    print `hoosh v<HOOSH_VERSION>` to stdout.
+- **Every verb, help and version included, runs after config parse, `hw_init()` and
+  storage open** (`:1100-1135`). So `hoosh --help` exits 1 under a broken config, and
+  `hoosh serve --help` starts the gateway.
+- **Help and errors:** `cmd_help` (`:824-848`) is a stdout wall with per-verb rows, and
+  the header comment (`:4-8`) is stale. An unknown command (`:1203`) prints its text to
+  stderr and its newline to stdout, and exits 1.
+
+**Site → cmdit:**
+
+- [ ] **Top level:** `cmdit_str(h, 'c', "config", "hoosh.cyml", …)` + `cmdit_verb` × 8.
+  Call `cmdit_dispatch(h)` **before** `load_config`, so `-c` binds on either side of the
+  verb and help, version and usage errors exit before config, hardware and storage are
+  touched. `cmdit_verb_matched(h) < 0` → `serve`.
+- [ ] **Per-verb handles** (`cmdit_parse_verb`), then delete the three scanners:
+  - `serve`: `cmdit_int` `-p` + `cmdit_range(…, 1, 65535)`, `--bind`, at most 1
+    positional; `cmdit_seen` picks flag, positional or config port;
+  - `models` / `health`: `--server`;
+  - `infer`: `-m`, `--server`, `cmdit_bool` `--stream`; `_exact` 1 positional if `-m`
+    was seen, else 2;
+  - `bench`: 1..2 positionals.
+- [ ] **Version and help:** `CMDIT_VERSION` keeps the `hoosh v` + `HOOSH_VERSION`
+  print, because `cmdit_version` would need a `v`-prefixed string. `CMDIT_HELP` keeps
+  `cmd_help`; per-verb `cmdit_help(vh)` is new. Errors → `cmdit_print_error` +
+  `CMDIT_EXIT_USAGE`.
+
+**Gaps (none blocking):**
+
+- **Deliberate changes, for the CHANGELOG:**
+  - unknown flags, a missing value and a bad port become exit-2 errors
+    (`tests/hoosh.tcyr:6653` asserts today's silence on a missing value);
+  - repeated flags become last-wins;
+  - an unknown command exits 2, not 1;
+  - a dash-led prompt needs `--`.
+- **Help:** cmdit renders on stderr and has no renderer for `cmd_help`'s per-verb rows,
+  so `cmd_help` stays hand-written.
+- **`bench`:** cmdit cannot hide a verb, so a registered `bench` shows in the
+  unknown-command list and in completions. Accept that, or match it on
+  `cmdit_raw_argv` before dispatch.
+
+**cyrius.cyml:** `[deps].stdlib` already lists `args` and `io` (no `flags`). Add the
+block below. The 6.6.6 pin needs no move; the cmdit dist compiles on 6.6.2.
+
+```
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.3.0"
+modules = ["dist/cmdit.cyr"]
+```
+
+**Tests:**
+
+- [ ] **Replace the CLI mirror**, the drift shape *Test-suite structure* names, with
+  synthetic-argv cases on the pure `cmdit_dispatch_argv`. The mirror is in
+  `tests/hoosh.tcyr`:
+  - `:1102-1150` (`_t_flag_val` / `_t_positional`);
+  - `:1412-1425` (`_t_infer_args`);
+  - `:6633-6676` (`cli_flag_parsing` / `cli_positionals`);
+  - `:6950-6966` (`rustold_config_cli` infer).
+
+  Put the handle builder in an includable `src/lib/` module (the `urlparse.cyr` split)
+  and name it in the tcyr, so the suite drives the real table and
+  `scripts/coverage.sh` still counts it.
+- [ ] **Output-identity bar:** the only binary-level CLI check is `release.yml:55-56`.
+  Before migrating, capture stdout, stderr and exit code for every verb and error arm
+  (at least `README.md:97-113`'s invocations). Diff afterwards: only the deliberate
+  changes above may differ.
+
+References: cmdit `README.md` ("Verb dispatch", API reference),
+`docs/adr/0002-verb-dispatch.md`; stiva's `src/main.cyr` is the worked verb tool.
