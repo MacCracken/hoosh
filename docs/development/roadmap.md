@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.6 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.6 took nine
+**Current**: v2.9.7 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.7 took eleven
 modules' mirrors out of the tests. See the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
@@ -21,7 +21,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response cache and its key, the route records and router pickers, batch, the OTLP helpers, the config pickers,
+    response-cache key, the router pickers, the health state machine, batch, the OTLP helpers, the config pickers,
     the pool ring, `main.cyr`'s flag parser and hardware. A mirror can drift from `src/`
     while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit chain-link verification).
     2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
@@ -30,13 +30,12 @@ The bands are a plan, not a promise. Every item was checked against the code and
   - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
     `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
     `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
-    (2.9.5); `types.cyr` (2.9.6). `scripts/coverage.sh` prints the current list: 19 of 37 modules.
+    (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7). `scripts/coverage.sh` prints the current
+    list: 21 of 37 modules.
   - **Next candidates**, from a dependency scan in 2.9.6 (modules that need no hoosh module the tests lack):
-    - `route.cyr` (17 same-name copies in the test file) and `cache.cyr` (6). Compare and swap them as
-      compression and semantic were; the cache's TTL tests inject `now`, so they need adapting.
     - `http_client.cyr`: one collision (`_build_req_header`), plus sockets.
     - `events.cyr` needs the vendored majra bundle, and `hardware.cyr` the ai-hwaccel bundle, included too.
-  - **Blocked until split or until their dependencies are in:** `router.cyr` (route, hardware), `budget.cyr` /
+  - **Blocked until split or until their dependencies are in:** `router.cyr` (now only hardware), `budget.cyr` /
     `storage.cyr` / `audit.cyr` (each other), `retry.cyr` and `provider.cyr` (route, router, otlp, http_client),
     `pool.cyr` / `batch.cyr` / `otlp.cyr` (each other and provider), `health.cyr`, `catalog_fetch.cyr`, and
     `config.cyr` / `handlers.cyr`, which reach nearly everything. Their helpers move into includable modules one at

@@ -58,6 +58,11 @@ include "src/lib/compression.cyr"
 include "src/lib/semantic.cyr"
 # 2.9.5: W3C traceparent extraction / generation / the thread-local current id, for real (it was mirrored).
 include "src/lib/trace.cyr"
+# 2.9.7: route records (patterns, health record, catalog mode) and the response cache (TTL expiry, LRU,
+# the semantic-index cleanup), for real. Both replaced same-name copies that had drifted: a 64-byte route
+# without four fields, and a pre-TTL, pre-LRU cache that counted an eviction without evicting.
+include "src/lib/route.cyr"
+include "src/lib/cache.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -105,66 +110,8 @@ fn _build_req_header(buf, method, path, host, body_len, cap) {
 # Total: 64 bytes
 # ================================================================
 
-enum RouteField {
-    ROUTE_SIZE          = 64;
-    ROUTE_PROVIDER      = 0;
-    ROUTE_PRIORITY      = 8;
-    ROUTE_PATTERNS      = 16;
-    ROUTE_PATTERNS_N    = 24;
-    ROUTE_ENABLED       = 32;
-    ROUTE_BASE_URL      = 40;
-    ROUTE_API_KEY       = 48;
-    ROUTE_RATE_LIMIT    = 56;
-}
-
-fn route_new(prov, priority, base_url) {
-    var r = alloc(ROUTE_SIZE);
-    store64(r + ROUTE_PROVIDER, prov);
-    store64(r + ROUTE_PRIORITY, priority);
-    store64(r + ROUTE_PATTERNS, 0);
-    store64(r + ROUTE_PATTERNS_N, 0);
-    store64(r + ROUTE_ENABLED, 1);
-    store64(r + ROUTE_BASE_URL, base_url);
-    store64(r + ROUTE_API_KEY, 0);
-    store64(r + ROUTE_RATE_LIMIT, 0);
-    return r;
-}
-
-fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
-fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
-fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
-fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
-
-fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
-
 # Set model patterns as array of cstrings
-fn route_set_patterns(r, patterns, count) {
-    store64(r + ROUTE_PATTERNS, patterns);
-    store64(r + ROUTE_PATTERNS_N, count);
-    return 0;
-}
-
 # Check if a route matches a model name
-fn route_matches_model(r, model) {
-    var count = load64(r + ROUTE_PATTERNS_N);
-    if (count == 0) { return 1; }  # wildcard — matches all
-    var arr = load64(r + ROUTE_PATTERNS);
-    var i = 0;
-    while (i < count) {
-        var pattern = load64(arr + i * 8);
-        var plen = strlen(pattern);
-        # Check for trailing wildcard
-        if (plen > 0 && load8(pattern + plen - 1) == 42) {
-            # '*' = 42; prefix match
-            if (memeq(model, pattern, plen - 1) == 1) { return 1; }
-        } else {
-            if (streq(model, pattern) == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 # Find the first enabled route for a provider type (mirrors
 # handlers.cyr _router_find_provider, parameterized by routes array).
 fn _find_provider_route(routes, count, prov) {
@@ -1196,42 +1143,34 @@ fn _t_has_system(p, len) {
 
 
 # ── 2.5.5 health / circuit breaker mirrors ──
-# Mirror of the per-route health record in src/lib/route.cyr + health_record in
-# src/lib/health.cyr. `now` is injected so the state machine is exercised
-# without sleeping.
-var _T_UNHEALTHY_THRESHOLD = 3;
+# The per-route health record is route.cyr's own (2.9.7): _health_record_new, the HEALTH_* layout and
+# UNHEALTHY_THRESHOLD. health_record(), the state machine, lives in health.cyr, which needs provider / http_client
+# / events and is not includable yet, so it is still mirrored here, but over the REAL record and threshold, so a
+# change to either in src reaches this suite. `now` is injected so the state machine runs without sleeping.
 
-fn _t_health_new() {
-    var h = alloc(32);
-    store64(h, 1);          # healthy — optimistic until probed
-    store64(h + 8, 0);      # consecutive_failures
-    store64(h + 16, 0);     # last_check_ms
-    store64(h + 24, 0);     # last_error
-    return h;
-}
-
-# Returns 1 when this probe flipped the circuit, else 0.
+# Returns 1 when this probe flipped the circuit, else 0. Mirrors health.cyr health_record (minus its lock, log
+# line and event).
 fn _t_health_record(h, ok, now) {
-    var was = load64(h);
+    var was = load64(h + HEALTH_OK);
     var now_ok = was;
     if (ok == 1) {
-        store64(h + 8, 0);
-        store64(h + 24, 0);
+        store64(h + HEALTH_FAILS, 0);
+        store64(h + HEALTH_ERR, 0);
         now_ok = 1;
     } else {
-        var fails = load64(h + 8) + 1;
-        store64(h + 8, fails);
-        store64(h + 24, "probe failed");
-        if (fails >= _T_UNHEALTHY_THRESHOLD) { now_ok = 0; }
+        var fails = load64(h + HEALTH_FAILS) + 1;
+        store64(h + HEALTH_FAILS, fails);
+        store64(h + HEALTH_ERR, "probe failed");
+        if (fails >= UNHEALTHY_THRESHOLD) { now_ok = 0; }
     }
-    store64(h, now_ok);
-    store64(h + 16, now);
+    store64(h + HEALTH_OK, now_ok);
+    store64(h + HEALTH_CHECKED, now);
     if (now_ok != was) { return 1; }
     return 0;
 }
 
-fn _t_health_ok(h) { return load64(h); }
-fn _t_health_fails(h) { return load64(h + 8); }
+fn _t_health_ok(h) { return load64(h + HEALTH_OK); }
+fn _t_health_fails(h) { return load64(h + HEALTH_FAILS); }
 
 # Mirror of health_status_str — disabled outranks unhealthy.
 fn _t_health_status(enabled, healthy) {
@@ -2268,191 +2207,40 @@ fn budget_report(bgt, name, reserved, actual) {
 }
 
 # ================================================================
-# Cache — hashmap with TTL (simplified: no TTL eviction in test,
-#          tests TTL separately via chrono timestamps)
-# Layout: entries(8) max_entries(8) hits(8) misses(8) evictions(8) enabled(8)
-# Total: 48 bytes
+# Response cache: cache.cyr's own (2.9.7, included at the top). These readers only read its struct.
 # ================================================================
-
-enum CacheField {
-    CACHE_SIZE        = 48;
-    CACHE_ENTRIES     = 0;
-    CACHE_MAX         = 8;
-    CACHE_HITS        = 16;
-    CACHE_MISSES      = 24;
-    CACHE_EVICTIONS   = 32;
-    CACHE_ENABLED     = 40;
-}
-
-fn cache_new(max_entries, enabled) {
-    var c = alloc(CACHE_SIZE);
-    store64(c + CACHE_ENTRIES, map_new());
-    store64(c + CACHE_MAX, max_entries);
-    store64(c + CACHE_HITS, 0);
-    store64(c + CACHE_MISSES, 0);
-    store64(c + CACHE_EVICTIONS, 0);
-    store64(c + CACHE_ENABLED, enabled);
-    return c;
-}
-
-fn cache_get(c, key) {
-    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    var entries = load64(c + CACHE_ENTRIES);
-    var val = map_get(entries, key);
-    if (val == 0) {
-        store64(c + CACHE_MISSES, load64(c + CACHE_MISSES) + 1);
-        return 0;
-    }
-    store64(c + CACHE_HITS, load64(c + CACHE_HITS) + 1);
-    return val;
-}
-
-fn cache_insert(c, key, value) {
-    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    var entries = load64(c + CACHE_ENTRIES);
-    var max = load64(c + CACHE_MAX);
-    # Evict if at capacity (simple: just count eviction, hashmap handles it)
-    if (map_count(entries) >= max) {
-        store64(c + CACHE_EVICTIONS, load64(c + CACHE_EVICTIONS) + 1);
-    }
-    map_set(entries, key, value);
-    return 0;
-}
 
 fn cache_len(c) {
     return map_count(load64(c + CACHE_ENTRIES));
-}
-
-fn cache_clear(c) {
-    store64(c + CACHE_ENTRIES, map_new());
-    return 0;
 }
 
 fn cache_hits(c) { return load64(c + CACHE_HITS); }
 fn cache_misses(c) { return load64(c + CACHE_MISSES); }
 fn cache_evictions(c) { return load64(c + CACHE_EVICTIONS); }
 
-# ================================================================
-# 2.5.4 TTL cache — faithful mirror of src/lib/cache.cyr
-# ================================================================
-#
-# The simplified cache above predates TTL and models neither the entry struct
-# nor expiry; rather than churn the three groups that depend on its 2-arg shape,
-# this is a parallel mirror of the real thing. `now` is INJECTED so expiry is
-# exercised deterministically — the production code reads clock_now_ms(), but
-# the logic under test (age comparison + the dual counter bump) is identical.
-enum TtlCacheField {
-    TC_SIZE = 56; TC_ENTRIES = 0; TC_MAX = 8; TC_HITS = 16;
-    TC_MISSES = 24; TC_EVICTIONS = 32; TC_ENABLED = 40; TC_TTL_MS = 48;
-}
-var TC_ENTRY_SIZE = 24;
-
-fn _t_tc_new(max_entries, enabled, ttl_secs) {
-    var c = alloc(TC_SIZE);
-    store64(c + TC_ENTRIES, map_new());
-    store64(c + TC_MAX, max_entries);
-    store64(c + TC_HITS, 0);
-    store64(c + TC_MISSES, 0);
-    store64(c + TC_EVICTIONS, 0);
-    store64(c + TC_ENABLED, enabled);
-    var ttl_ms = 0;
-    if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
-    store64(c + TC_TTL_MS, ttl_ms);
-    return c;
-}
-
-fn _t_tc_entry_new(value, now) {
-    var e = alloc(TC_ENTRY_SIZE);
-    store64(e, value);
-    store64(e + 8, now);
-    store64(e + 16, now);
-    return e;
-}
-
-fn _t_tc_expired(c, entry, now) {
-    var ttl = load64(c + TC_TTL_MS);
-    if (ttl <= 0) { return 0; }
-    if (now - load64(entry + 16) >= ttl) { return 1; }
+# Time injection for the REAL cache (2.9.7). cache.cyr reads hoosh_now_ms(), which returns logging.cyr's
+# _coarse_now_ms once the coarse clock has started; setting both makes "now" whatever a test says, with no
+# sleeps. _t_clock_real() hands the clock back. These replaced a parallel TTL-cache mirror (_t_tc_*).
+fn _t_at(ms) {
+    _coarse_started = 1;
+    _coarse_now_ms = ms;
     return 0;
 }
-
-fn _t_tc_get(c, key, now) {
-    if (load64(c + TC_ENABLED) == 0) { return 0; }
-    var entry = map_get(load64(c + TC_ENTRIES), key);
-    if (entry == 0) {
-        store64(c + TC_MISSES, load64(c + TC_MISSES) + 1);
-        return 0;
-    }
-    if (_t_tc_expired(c, entry, now) == 1) {
-        map_delete(load64(c + TC_ENTRIES), key);
-        store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + 1);
-        store64(c + TC_MISSES, load64(c + TC_MISSES) + 1);
-        return 0;
-    }
-    store64(entry + 8, now);
-    store64(c + TC_HITS, load64(c + TC_HITS) + 1);
-    return load64(entry);
-}
-
-fn _t_tc_evict_expired(c, now) {
-    var ttl = load64(c + TC_TTL_MS);
-    if (ttl <= 0) { return 0; }
-    var m = load64(c + TC_ENTRIES);
-    var keys = map_keys(m);
-    var n = vec_len(keys);
-    var removed = 0;
-    var i = 0;
-    while (i < n) {
-        var k = vec_get(keys, i);
-        var entry = map_get(m, k);
-        if (entry != 0) {
-            if (_t_tc_expired(c, entry, now) == 1) {
-                map_delete(m, k);
-                removed = removed + 1;
-            }
-        }
-        i = i + 1;
-    }
-    if (removed > 0) {
-        store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + removed);
-    }
-    return removed;
-}
-
-fn _t_tc_len(c) { return map_count(load64(c + TC_ENTRIES)); }
-
-fn _t_tc_insert(c, key, value, now) {
-    if (load64(c + TC_ENABLED) == 0) { return 0; }
-    var m = load64(c + TC_ENTRIES);
-    var max = load64(c + TC_MAX);
-    if (map_count(m) >= max) {
-        _t_tc_evict_expired(c, now);
-        if (map_count(m) >= max) {
-            # LRU: drop the oldest last-access stamp.
-            var keys = map_keys(m);
-            var kn = vec_len(keys);
-            var oldest_key = 0;
-            var oldest = 0x7FFFFFFFFFFFFFFF;
-            var i = 0;
-            while (i < kn) {
-                var k = vec_get(keys, i);
-                var e = map_get(m, k);
-                if (e != 0) {
-                    if (load64(e + 8) < oldest) {
-                        oldest = load64(e + 8);
-                        oldest_key = k;
-                    }
-                }
-                i = i + 1;
-            }
-            if (oldest_key != 0) {
-                map_delete(m, oldest_key);
-                store64(c + TC_EVICTIONS, load64(c + TC_EVICTIONS) + 1);
-            }
-        }
-    }
-    map_set(m, key, _t_tc_entry_new(value, now));
+fn _t_clock_real() {
+    _coarse_started = 0;
     return 0;
+}
+fn _t_ins_at(c, key, value, ms) {
+    _t_at(ms);
+    return cache_insert(c, key, value);
+}
+fn _t_get_at(c, key, ms) {
+    _t_at(ms);
+    return cache_get(c, key);
+}
+fn _t_sweep_at(c, ms) {
+    _t_at(ms);
+    return cache_evict_expired(c);
 }
 
 # (2.9.3: the legacy pricing table + provider-name-keyed cost tracker mirror that stood here is gone.
@@ -3451,7 +3239,7 @@ fn main() {
     # ── Cache basic ───────────────────────────────────────────────
     test_group("cache");
 
-    var ca = cache_new(1000, 1);
+    var ca = cache_new(1000, 1, 0);
     cache_insert(ca, "key1", 42);
     assert_eq(cache_get(ca, "key1"), 42, "cache get hit");
     assert_eq(cache_get(ca, "missing"), 0, "cache get miss");
@@ -3461,19 +3249,18 @@ fn main() {
     # ── Cache disabled ────────────────────────────────────────────
     test_group("cache_disabled");
 
-    var cd = cache_new(1000, 0);
+    var cd = cache_new(1000, 0, 0);
     cache_insert(cd, "key", 99);
     assert_eq(cache_get(cd, "key"), 0, "disabled cache returns 0");
 
     # ── Cache clear ───────────────────────────────────────────────
     test_group("cache_clear");
 
-    var cc = cache_new(1000, 1);
+    var cc = cache_new(1000, 1, 0);
     cache_insert(cc, "a", 1);
     cache_insert(cc, "b", 2);
     assert_eq(cache_len(cc), 2, "cache len 2");
-    cache_clear(cc);
-    assert_eq(cache_len(cc), 0, "cache len 0 after clear");
+    # 2.9.7: a cache_clear assertion stood here; that function existed only in this file (src has none).
 
     # ── Cost tracker: local free ──────────────────────────────────
     test_group("cost_tracker");
@@ -4023,14 +3810,14 @@ fn main() {
 
     test_group("cache_stats_initial");
 
-    var cs = cache_new(1000, 1);
+    var cs = cache_new(1000, 1, 0);
     assert_eq(cache_hits(cs), 0, "initial: 0 hits");
     assert_eq(cache_misses(cs), 0, "initial: 0 misses");
     assert_eq(cache_evictions(cs), 0, "initial: 0 evictions");
 
     test_group("cache_stats_hit_miss");
 
-    var cs2 = cache_new(1000, 1);
+    var cs2 = cache_new(1000, 1, 0);
     cache_insert(cs2, "key", 42);
     cache_get(cs2, "key");      # hit
     cache_get(cs2, "missing");  # miss
@@ -4040,13 +3827,14 @@ fn main() {
 
     test_group("cache_eviction_at_capacity");
 
-    var cs3 = cache_new(3, 1);
+    var cs3 = cache_new(3, 1, 0);
     cache_insert(cs3, "a", 1);
     cache_insert(cs3, "b", 2);
     cache_insert(cs3, "c", 3);
-    # 4th insert triggers eviction counting
+    # 4th insert evicts (2.9.7: the real cache evicts; the copy only counted)
     cache_insert(cs3, "d", 4);
     assert_gte(cache_evictions(cs3), 1, "eviction counted at capacity");
+    assert_eq(cache_len(cs3), 3, "eviction: capacity is held at 3");
 
     # ================================================================
     # AUDIT CHAIN — HMAC-SHA256 linked entries, tamper detection
@@ -5617,65 +5405,117 @@ fn main() {
     # ── v2.5.4 cache expiry ──
     test_group("cache_ttl_expiry");
     # `[cache] ttl_secs = 300` shipped in hoosh.cyml since the port with nothing
-    # reading it, so a cached response was served as a hit FOREVER. Times are
-    # injected here (ms), so no sleeps.
-    var x_tc = _t_tc_new(100, 1, 3);          # 3 s TTL
-    _t_tc_insert(x_tc, "k", 42, 1000);
-    assert_eq(_t_tc_get(x_tc, "k", 1500), 42, "ttl: fresh entry hits");
-    assert_eq(load64(x_tc + TC_HITS), 1, "ttl: hit counted");
+    # reading it, so a cached response was served as a hit FOREVER. 2.9.7: the
+    # REAL cache.cyr, with time injected through the coarse clock (_t_at), so no sleeps.
+    var x_tc = cache_new(100, 1, 3);          # 3 s TTL
+    _t_ins_at(x_tc, "k", 42, 1000);
+    assert_eq(_t_get_at(x_tc, "k", 1500), 42, "ttl: fresh entry hits");
+    assert_eq(load64(x_tc + CACHE_HITS), 1, "ttl: hit counted");
     # Just under the deadline is still live; at/after it is gone.
-    assert_eq(_t_tc_get(x_tc, "k", 3999), 42, "ttl: 2999ms old still live");
-    assert_eq(_t_tc_get(x_tc, "k", 4000), 0, "ttl: exactly at TTL expires");
+    assert_eq(_t_get_at(x_tc, "k", 3999), 42, "ttl: 2999ms old still live");
+    assert_eq(_t_get_at(x_tc, "k", 4000), 0, "ttl: exactly at TTL expires");
     # Expiry counts BOTH ways — an eviction (it left the cache) and a miss (the
     # caller got nothing). rust-old's accounting; the two answer different
     # questions, and hit_rate stays honest only if the miss is recorded.
-    assert_eq(load64(x_tc + TC_EVICTIONS), 1, "ttl: expiry counted as eviction");
-    assert_eq(load64(x_tc + TC_MISSES), 1, "ttl: expiry counted as miss");
-    assert_eq(_t_tc_len(x_tc), 0, "ttl: expired entry removed from the map");
+    assert_eq(load64(x_tc + CACHE_EVICTIONS), 1, "ttl: expiry counted as eviction");
+    assert_eq(load64(x_tc + CACHE_MISSES), 1, "ttl: expiry counted as miss");
+    assert_eq(cache_len(x_tc), 0, "ttl: expired entry removed from the map");
     # A re-insert after expiry starts a fresh lifetime.
-    _t_tc_insert(x_tc, "k", 99, 5000);
-    assert_eq(_t_tc_get(x_tc, "k", 5500), 99, "ttl: re-inserted entry live again");
+    _t_ins_at(x_tc, "k", 99, 5000);
+    assert_eq(_t_get_at(x_tc, "k", 5500), 99, "ttl: re-inserted entry live again");
 
     test_group("cache_ttl_disabled");
     # ttl_secs = 0 means never expire — the pre-2.5.4 behavior, now explicit.
-    var x_tz = _t_tc_new(100, 1, 0);
-    _t_tc_insert(x_tz, "k", 7, 1000);
-    assert_eq(_t_tc_get(x_tz, "k", 999999999), 7, "ttl 0: entry never expires");
-    assert_eq(load64(x_tz + TC_EVICTIONS), 0, "ttl 0: no evictions");
+    var x_tz = cache_new(100, 1, 0);
+    _t_ins_at(x_tz, "k", 7, 1000);
+    assert_eq(_t_get_at(x_tz, "k", 999999999), 7, "ttl 0: entry never expires");
+    assert_eq(load64(x_tz + CACHE_EVICTIONS), 0, "ttl 0: no evictions");
     # A read must NOT extend the lifetime: TTL measures age from insert, not
     # from last access (that stamp is the separate LRU key).
-    var x_tr = _t_tc_new(100, 1, 3);
-    _t_tc_insert(x_tr, "k", 1, 1000);
-    _t_tc_get(x_tr, "k", 2000);               # touch — moves last_access only
-    _t_tc_get(x_tr, "k", 3000);               # touch again
-    assert_eq(_t_tc_get(x_tr, "k", 4000), 0, "ttl: reads do not extend lifetime");
+    var x_tr = cache_new(100, 1, 3);
+    _t_ins_at(x_tr, "k", 1, 1000);
+    _t_get_at(x_tr, "k", 2000);               # touch — moves last_access only
+    _t_get_at(x_tr, "k", 3000);               # touch again
+    assert_eq(_t_get_at(x_tr, "k", 4000), 0, "ttl: reads do not extend lifetime");
 
     test_group("cache_evict_expired_sweep");
-    var x_ts = _t_tc_new(100, 1, 3);
-    _t_tc_insert(x_ts, "old1", 1, 1000);
-    _t_tc_insert(x_ts, "old2", 2, 1000);
-    _t_tc_insert(x_ts, "new1", 3, 6000);
-    assert_eq(_t_tc_len(x_ts), 3, "sweep: three entries stored");
-    assert_eq(_t_tc_evict_expired(x_ts, 7000), 2, "sweep: two expired removed");
-    assert_eq(_t_tc_len(x_ts), 1, "sweep: the fresh entry survives");
-    assert_eq(load64(x_ts + TC_EVICTIONS), 2, "sweep: evictions credited");
+    var x_ts = cache_new(100, 1, 3);
+    _t_ins_at(x_ts, "old1", 1, 1000);
+    _t_ins_at(x_ts, "old2", 2, 1000);
+    _t_ins_at(x_ts, "new1", 3, 6000);
+    assert_eq(cache_len(x_ts), 3, "sweep: three entries stored");
+    assert_eq(_t_sweep_at(x_ts, 7000), 2, "sweep: two expired removed");
+    assert_eq(cache_len(x_ts), 1, "sweep: the fresh entry survives");
+    assert_eq(load64(x_ts + CACHE_EVICTIONS), 2, "sweep: evictions credited");
     # A sweep with nothing expired is a no-op.
-    assert_eq(_t_tc_evict_expired(x_ts, 7001), 0, "sweep: idempotent");
+    assert_eq(_t_sweep_at(x_ts, 7001), 0, "sweep: idempotent");
     # TTL off -> the sweep does nothing at all.
-    var x_tn = _t_tc_new(100, 1, 0);
-    _t_tc_insert(x_tn, "a", 1, 1000);
-    assert_eq(_t_tc_evict_expired(x_tn, 999999999), 0, "sweep: no-op when TTL off");
+    var x_tn = cache_new(100, 1, 0);
+    _t_ins_at(x_tn, "a", 1, 1000);
+    assert_eq(_t_sweep_at(x_tn, 999999999), 0, "sweep: no-op when TTL off");
 
     test_group("cache_capacity_prefers_expired");
     # At capacity, expired entries are reclaimed BEFORE evicting a live one —
     # otherwise a usable response is thrown away while corpses hold slots.
-    var x_tp = _t_tc_new(2, 1, 3);
-    _t_tc_insert(x_tp, "stale", 1, 1000);
-    _t_tc_insert(x_tp, "live", 2, 6000);
-    _t_tc_insert(x_tp, "new", 3, 6500);       # at capacity: "stale" is expired
-    assert_eq(_t_tc_len(x_tp), 2, "capacity: still two entries");
-    assert_eq(_t_tc_get(x_tp, "live", 6600), 2, "capacity: live entry retained");
-    assert_eq(_t_tc_get(x_tp, "new", 6600), 3, "capacity: new entry stored");
+    var x_tp = cache_new(2, 1, 3);
+    _t_ins_at(x_tp, "stale", 1, 1000);
+    _t_ins_at(x_tp, "live", 2, 6000);
+    _t_ins_at(x_tp, "new", 3, 6500);       # at capacity: "stale" is expired
+    assert_eq(cache_len(x_tp), 2, "capacity: still two entries");
+    assert_eq(_t_get_at(x_tp, "live", 6600), 2, "capacity: live entry retained");
+    assert_eq(_t_get_at(x_tp, "new", 6600), 3, "capacity: new entry stored");
+    # 2.9.7: the case plain LRU gets wrong. x expires but was READ after y was stored, so y is the least recently
+    # used; only the expired sweep keeps the live y. (In the case above the expired entry was also the LRU one, so
+    # skipping the sweep changed nothing and no test noticed.)
+    var x_tq = cache_new(2, 1, 3);
+    _t_ins_at(x_tq, "x", 1, 1000);
+    _t_ins_at(x_tq, "y", 2, 2000);
+    _t_get_at(x_tq, "x", 2500);               # x still live, read after y was stored
+    _t_ins_at(x_tq, "z", 3, 4100);            # full: x has expired (age 3100), y is live (age 2100)
+    assert_eq(_t_get_at(x_tq, "y", 4200), 2, "capacity: the live entry survives though it is the LRU one");
+    assert_eq(_t_get_at(x_tq, "z", 4200), 3, "capacity: and the new entry is stored");
+
+    test_group("route_real");
+    # 2.9.7: route.cyr's own records. A new route is healthy until probed (refusing traffic before the first probe
+    # would make startup an outage), asks its provider for a live catalog except OpenRouter (a marketplace of
+    # hundreds) and Whisper, and has no output cap, rate limiter or TLS policy until config sets them.
+    var rr = route_new(PROV_ANTHROPIC, 1, "https://api.anthropic.com");
+    assert_eq(route_healthy(rr), 1, "route: healthy until probed");
+    assert_eq(load64(route_health(rr) + HEALTH_FAILS), 0, "route: no failures yet");
+    assert_eq(route_catalog_live(rr), 1, "route: live catalog by default");
+    assert_eq(route_catalog_live(route_new(PROV_OPENROUTER, 1, "https://openrouter.ai/api")), 0,
+      "route: OpenRouter defaults to the static catalog");
+    assert_eq(route_catalog_live(route_new(PROV_WHISPER, 1, "http://localhost:9000")), 0,
+      "route: Whisper defaults to the static catalog");
+    assert_eq(route_max_tokens_limit(rr) + route_rate_limiter(rr) + route_tls_policy(rr), 0,
+      "route: no cap, limiter or policy until configured");
+    route_set_max_tokens_limit(rr, 4096);
+    assert_eq(route_max_tokens_limit(rr), 4096, "route: output cap set");
+    route_set_rate_limit(rr, 60);
+    assert_eq(route_rate_limiter(rr) != 0, 1, "route: a positive rpm attaches a limiter");
+    # An empty pattern matches nothing (src skips it); the copy this replaced matched it against an empty model.
+    var rpat = alloc(16);
+    store64(rpat, "");
+    store64(rpat + 8, "claude-*");
+    route_set_patterns(rr, rpat, 2);
+    assert_eq(route_matches_model(rr, ""), 0, "route: an empty pattern matches nothing");
+    assert_eq(route_matches_model(rr, "claude-haiku-4-5"), 1, "route: the prefix pattern still matches");
+
+    test_group("cache_lru_eviction");
+    # 2.9.7: with nothing expired, a full cache evicts the least recently USED entry: a read refreshes recency
+    # (it does not extend the TTL). Untested until the real module was included.
+    var x_lru = cache_new(3, 1, 0);
+    _t_ins_at(x_lru, "a", 1, 1000);
+    _t_ins_at(x_lru, "b", 2, 2000);
+    _t_ins_at(x_lru, "c", 3, 3000);
+    _t_get_at(x_lru, "a", 4000);              # a is now the most recently used
+    _t_ins_at(x_lru, "d", 4, 5000);           # full: b (last used at 2000) goes
+    assert_eq(cache_len(x_lru), 3, "lru: still three entries");
+    assert_eq(_t_get_at(x_lru, "b", 5100), 0, "lru: the least recently used entry was evicted");
+    assert_eq(_t_get_at(x_lru, "a", 5100), 1, "lru: a read kept a alive");
+    assert_eq(_t_get_at(x_lru, "d", 5100), 4, "lru: the new entry is stored");
+    assert_eq(cache_evictions(x_lru), 1, "lru: one eviction counted");
+    _t_clock_real();
 
     test_group("semantic_remove");
     # An expired response must take its embedding with it, or semantic_find
@@ -5704,7 +5544,7 @@ fn main() {
     test_group("health_circuit_breaker");
     # A route starts healthy: refusing traffic before the first probe would make
     # every startup a guaranteed outage.
-    var hh = _t_health_new();
+    var hh = _health_record_new();
     assert_eq(_t_health_ok(hh), 1, "health: starts optimistic");
     # One or two failures must NOT depool — a single blip is not an outage.
     assert_eq(_t_health_record(hh, 0, 1000), 0, "health: 1 failure, no flip");
@@ -5728,7 +5568,7 @@ fn main() {
     test_group("health_failures_must_be_consecutive");
     # Two failures, a success, then two more must NOT trip — the counter resets,
     # so an intermittent backend is not depooled by cumulative noise.
-    var hi2 = _t_health_new();
+    var hi2 = _health_record_new();
     _t_health_record(hi2, 0, 1000);
     _t_health_record(hi2, 0, 2000);
     _t_health_record(hi2, 1, 3000);

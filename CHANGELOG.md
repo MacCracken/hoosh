@@ -5,6 +5,80 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.7] — 2026-11-04
+
+**The tests run the real route records and response cache.** The test file's copies of both had drifted. The route
+copy was a 64-byte record, while `src/`'s is 96 bytes and holds four more fields. The cache copy predated TTL and
+LRU: it stored values directly, and at capacity it counted an eviction without evicting anything. No gateway code
+changed. **1291 assertions** (was 1274). fmt, lint, vet, deny, coverage (332/684, 48%; **21 of 37** modules included
+for real), the security scan and the four fuzz targets are clean.
+
+### Changed — `route.cyr` and `cache.cyr` are included for real
+
+`tests/hoosh.tcyr` includes both modules and drops their copies.
+- **The route record and its accessors:** the `RouteField` enum, `route_new`, `route_provider` / `_priority` /
+  `_enabled` / `_base_url`, `route_set_enabled`, `route_set_patterns` and `route_matches_model`.
+  - **Layout:** the copy's record was 64 bytes. `src/`'s is 96, adding the output cap, the health record, the TLS
+    policy and the catalog mode (`ROUTE_SIZE`).
+  - **Empty patterns:** the copy matched an empty pattern against an empty model name. `src/` skips empty patterns.
+- **The cache:** the `CacheField` enum, `cache_new`, `cache_get` and `cache_insert`.
+  - **Arguments:** `cache_new` takes a third argument, `ttl_secs`.
+  - **Behavior:** the copy stored values with no entry struct, never expired anything, and at capacity bumped the
+    eviction counter without evicting. `src/` keeps value, last-access and created stamps per entry, expires on read
+    (counting both an eviction and a miss, and dropping the semantic-index entry), and at capacity sweeps expired
+    entries before evicting the least recently used.
+  - **Ripple:** the six existing callers pass TTL 0. The capacity test now also asserts the cache holds at three
+    entries.
+- **The parallel TTL-cache mirror is gone.** `_t_tc_*` and its field enum duplicated the real cache so that time could
+  be injected. The real cache reads `hoosh_now_ms()`, which returns `logging.cyr`'s coarse-clock value once that clock
+  has started. So the tests now set time with `_t_at(ms)` (plus `_t_ins_at` / `_t_get_at` / `_t_sweep_at`) and give
+  the clock back with `_t_clock_real()`. Every TTL assertion passed unchanged against the real module: that mirror
+  had stayed faithful, while the plain cache copy had not.
+- **`cache_clear` existed only in the test file;** `src/` has none. Its assertion is gone. `cache_len` and the
+  hit/miss/eviction readers stay, as readers of the real struct.
+- **The per-route health record:** `_health_record_new`, the `HEALTH_*` layout and `UNHEALTHY_THRESHOLD` are now
+  `route.cyr`'s own. The state machine, `health_record`, lives in `health.cyr`, which cannot be included yet, so it
+  stays mirrored. The mirror now works on the real record and threshold.
+
+### Added — tests for behavior no test had reached
+
+- **`route_real`:**
+  - a new route is healthy until probed;
+  - it asks for a live catalog by default, except OpenRouter and Whisper;
+  - it has no output cap, rate limiter or TLS policy until configured, and the cap and limiter setters work;
+  - an empty pattern matches nothing, while a prefix pattern still matches.
+- **`cache_lru_eviction`:** with nothing expired, a full cache evicts the least recently used entry, and a read
+  refreshes recency.
+- **The capacity case plain LRU gets wrong:** an entry that has expired but was read after a live one was stored. Only
+  the expired sweep keeps the live entry.
+
+### Mutation-checked
+
+A copy of the tree was changed seven ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| an expired read not counted as a miss | 1 fails |
+| TTL measured from last access instead of creation | 5 fail |
+| LRU evicting the most recently used entry | 2 fail |
+| a full cache skipping the expired sweep | 1 fails |
+| an empty route pattern matching again | 1 fails |
+| OpenRouter defaulting to a live catalog | 1 fails |
+| `UNHEALTHY_THRESHOLD` 3 → 1 in `route.cyr` | 5 fail |
+
+The expired-sweep mutant first survived. In the existing capacity test the expired entry was also the
+least-recently-used one, so plain LRU evicted the same entry. The new capacity case above is what catches it.
+
+### Notes
+
+The test file is 160 lines shorter (7,072 → 6,912). Symbol coverage rose from 323 to 332 of 684. `router.cyr` now
+needs only `hardware.cyr` to be includable.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.6's apart from the version string. No benched path changed. The
+2026-11-04 rows in `bench-history.csv` after 2.9.6's are this release's mandatory run.
+
 ## [2.9.6] — 2026-11-04
 
 **The tests run on the real `types.cyr`.** It holds the shared types every other module builds on, and the test
