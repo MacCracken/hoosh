@@ -5,6 +5,129 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.9] — 2026-11-04
+
+**The tests run the real router and the real hardware module, on ai-hwaccel itself.** Their copies in the test file
+had drifted in six places. One src comment was stale and is corrected; no gateway code changed (the binary differs
+from 2.9.8's only in the version string). **1448 assertions** (was 1355) in 193 groups. All gates are clean: fmt,
+lint, vet, deny, coverage (369/684, 53%; **25 of 37** modules included for real), the security scan and the four
+fuzz targets.
+
+### Changed — `router.cyr` and `hardware.cyr` are included for real
+
+`tests/hoosh.tcyr` now includes three more files:
+- the vendored ai-hwaccel bundle (`lib/ai-hwaccel.cyr`), first among the non-stdlib includes, as in `src/main.cyr`;
+- `src/lib/hardware.cyr`;
+- `src/lib/router.cyr`.
+
+**The drifted copies, now gone:**
+- **The router** (`router_new`, `router_select`, `router_report_latency` and the `RouterField` enum).
+  - **Health:** the copy had no health filter. `src/` skips a depooled route, and serves the unfiltered set when
+    every candidate is down.
+  - **Unmeasured routes:** the copy ranked a route with no latency recorded as the slowest, so it was never tried.
+- **A second lowest-latency copy, `_t_ll_pick`,** ranked that route as 0 ms, so it always won.
+  - **What `src/` does:** it counts the route as `LAT_UNMEASURED_MS` (50 ms). It is tried while every measured route
+    is slower, and a route that fails (failures record no latency) cannot win every pick.
+  - **Effect on the old test:** `_t_ll_pick`'s "an untried route beats one measured at 50 ms" is false against `src/`,
+    where the tie keeps priority order.
+- **The builder mask:** the copy said ai-hwaccel has 17 detection backends; it has 18 since `agnos-gpu`.
+- **The simulator's shard count:** an inline greedy loop, written before the shared-RAM pool existed.
+- **ai-hwaccel's estimators:**
+  - the placement estimate's copy wrapped negative where ai-hwaccel now saturates;
+  - the training estimate's copy charged the optimizer 2x its base, where ai-hwaccel charges 7x (AdamW);
+  - the training estimate's copy also multiplied by 2^30 before dividing.
+
+**Also replaced:**
+- the copies of the available-VRAM arithmetic, the simulator's totals and `_sim_shared_part`;
+- a transcription of ai-hwaccel's `reg_total_accel_memory`;
+- the copied caps `SIM_MAX_DEVICE_BYTES` and `HW_MAX_MODEL_PARAMS`.
+
+The tests now build synthetic ai-hwaccel profiles and registries (`_t_prof`, `registry_from_profiles`) and call the
+real functions.
+
+**Two groups tested nothing real:** `hardware_unknown_sentinel` and `hardware_simulate_fits` did arithmetic on local
+variables. They now drive `hw_available_vram`, the telemetry writer and `hw_simulate_json`.
+
+The handlers' whole-number parser and requirement-match scan stay mirrored, because `handlers.cyr` cannot be
+included. They use the real caps now.
+
+### Fixed — a stale comment in `hardware.cyr`
+
+The comment above `HW_MAX_MODEL_PARAMS` described the 2.6.13 estimators: training at 5.5x its base, wrapping near
+8.4 × 10^14 parameters, so 8x headroom.
+- **Against ai-hwaccel 2.5.6:** placement and the simulator saturate, and training-estimate totals 10.5x its base.
+  Its bytes stay exact to about 4.4 × 10^17 parameters, over 4000 times the cap.
+- **The cap stays:** it keeps every answer a real byte count.
+- **Pinned by tests:** the `hardware_planner_caps` group checks each of these numbers against the real estimators.
+
+### Added — tests for behavior no test had reached
+
+- **`router_health`:**
+  - an unhealthy first choice is skipped;
+  - with every candidate down, priority order applies and a disabled route stays out;
+  - round robin rotates over the healthy routes only.
+- **`router_sort`:** `router_new` orders routes by priority and keeps the given order among equals.
+- **`router_select_local`** (DLP-confidential traffic): the route is never remote, disabled routes are skipped, it
+  answers 0 when no local route serves the model, and round robin works among the local routes.
+- **`router_select_hw`:**
+  - no hardware detected, or an unknown model size: the plain pick;
+  - a model that fits the free VRAM stays local, and 70B on an 8 GiB card goes remote;
+  - the VRAM reserve counts: a 7 GiB reserve sends a 1B model remote too;
+  - an unhealthy remote, or no remote serving the model, falls back to local;
+  - round robin applies among the remotes.
+- **`hardware_real`, with nothing detected:** not ready, INT4 suggested, no plan, `{"detected":false}`, `[]`, and a
+  placement error.
+- **`hardware_real`, on a synthetic host:**
+  - device, GPU and memory counts, and free VRAM;
+  - the summary's counts, best device and profiles, with an unavailable card listed as such and not counted as
+    capacity;
+  - telemetry that leaves out the CPU and writes `null` for anything a card did not report;
+  - placement that keeps the asked quantization, and lists cloud alternatives only when the model does not fit.
+- **`hardware_real`, settings and helpers:**
+  - a refresh inside the cache TTL does not re-probe, and no refresh thread starts when the interval is 0;
+  - negative `[hardware]` values leave settings alone;
+  - the data-file check finds both files from the repo root and counts both missing under another `data_dir`;
+  - `_hoosh_parse_model_params` reads sizes out of model names.
+- **The simulator:**
+  - `remove_count` drains accelerators, never the CPU;
+  - the snapshot's own `shards_required` agrees with `_sim_shards` over the shared pool, on the Apple and laptop
+    layouts.
+
+### Mutation-checked
+
+A copy of the tree was changed 34 ways, and every mutant is caught:
+
+| mutants | result |
+|---|---|
+| `router_select` without its health filter, or without the all-down fallback | 3 and 2 fail |
+| an unmeasured route at 0 ms; a latency tie going to the later route | 2 and 1 fail |
+| `router_new`'s sort unstable among equals; the EMA weights swapped | 2 fail each |
+| `router_select_hw` ignoring the fit, using total VRAM, or counting an unhealthy remote | 3, 1 and 1 fail |
+| no round robin in the remote or the local pick; `router_select_local` allowing remote routes | 1, 1 and 4 fail |
+| free VRAM subtracting -1, not floored at 0, or ignoring the reserve | 3, 2 and 4 fail |
+| disabling a backend toggling it; the last backend unreachable by name; a negative reserve applied | 1 fails each |
+| telemetry writing -1 or listing the CPU; the summary's `available` inverted | 3, 1 and 2 fail |
+| placement never listing cloud alternatives, or overriding the asked quantization | 1 and 2 fail |
+| a refresh ignoring the cache TTL | 2 fail |
+| the simulator dropping the shared pool, or counting system RAM toward `fits` | 13 and 1 fail |
+| shards in registry order; the pool spent per device | 5 and 3 fail |
+| `_sim_profiles` removing the CPU or sharing an added card; no clamp in `_sim_shared_part` | 2, 2 and 1 fail |
+| the model-size cap raised; the second data file not counted; `data_dir` not applied | 1 fails each |
+
+The TTL mutant first crashed the suite instead of failing an assertion. The test had not created the registry lock
+that `hw_init` makes at startup, so the mutant's re-probe reached a lock that did not exist. The test now creates it
+as startup does.
+
+### Notes
+
+- The test file is 7,341 lines (was 7,227). Symbol coverage rose from 344 to 369 of 684.
+- The bench binary differs from 2.9.8's by one byte, the version string. On a quiet machine all 25 benchmarks are
+  within 1 ns or 1% of 2.9.8's. A first run went alongside another workload's compiles (load 6.7) and doubled some
+  numbers on identical code, so it was discarded rather than recorded.
+- **No remaining module can be included as it stands.** Each one sits in a dependency cycle, so the next step is a
+  split (see the roadmap). The smallest: `health.cyr` needs only `route_is_remote` from `provider.cyr`, a route
+  predicate that could live in `route.cyr`.
+
 ## [2.9.8] — 2026-11-04
 
 **The tests run the real plaintext provider client and the real event bus.** The test file's copy of

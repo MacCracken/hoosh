@@ -479,9 +479,16 @@ fn _hw_cloud_alternatives(sb, model_params, quant) {
 
 # Largest model_params the planners accept (2.6.13): 10^14, 100 trillion. The
 # estimates multiply what they are given: placement and the simulator by bits per
-# weight (up to 32), training-estimate by 1863 and then by 2^30 per GiB. Training
-# runs out first, near 8.4 x 10^14 parameters (GPU DPO/RLHF totals 5.5x its base),
-# so the cap keeps 8x of headroom. training-estimate takes millions: 10^8.
+# weight (up to 32), training-estimate by 1863 and then by 2^30 per GiB.
+# training-estimate takes millions: 10^8.
+#
+# The headroom, rechecked in 2.9.9 against ai-hwaccel 2.5.6 (the tests pin each
+# number). Placement and the simulator saturate at i64 max instead of wrapping.
+# training-estimate's GPU DPO/RLHF total is 10.5x its base (AdamW's optimizer
+# state alone is 7x). Its bytes stay exact up to about 4.4 x 10^17 parameters,
+# over 4000 times this cap. The cap also keeps every answer a real byte count
+# rather than a saturated one. (2.6.13 measured the older estimators: 5.5x the
+# base, wrapping near 8.4 x 10^14, 8x headroom.)
 var HW_MAX_MODEL_PARAMS = 100000000000000;
 
 # Placement recommendation for a model

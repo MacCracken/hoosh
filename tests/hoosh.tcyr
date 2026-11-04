@@ -25,6 +25,9 @@ include "lib/sigil.cyr"
 # before tls) keeps the order correct. sys_* wrappers are still in scope.
 include "lib/assert.cyr"
 include "lib/sakshi.cyr"
+# 2.9.9: ai-hwaccel's single-file bundle, vendored into lib/ by `cyrius deps`, first among the non-stdlib
+# includes as in src/main.cyr. src/lib/hardware.cyr is built on it.
+include "lib/ai-hwaccel.cyr"
 include "src/vendor/bote-core.cyr"
 # 2.9.8: majra's pub/sub, which src/lib/events.cyr publishes to, at the same point src/main.cyr includes it.
 # It shares one name with types.cyr, the enum member ERR_NONE, which is 0 in both (see cyrius.cyml).
@@ -70,6 +73,10 @@ include "src/lib/cache.cyr"
 # _build_req_header that had drifted: it predated trace.cyr here and never wrote the traceparent header.
 include "src/lib/http_client.cyr"
 include "src/lib/events.cyr"
+# 2.9.9: hardware detection and planning, and the router, for real. The router replaced a copy that had
+# drifted: it had no health filter, and it ranked a route with no latency measured as the slowest.
+include "src/lib/hardware.cyr"
+include "src/lib/router.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -375,22 +382,6 @@ fn _t_strategy_from_str(s) {
     return 0;
 }
 
-# Mirror of src/lib/router.cyr lowest-latency pick (untried = 0 latency = explore,
-# else lowest EMA wins). `lats` is a vec of i64 latencies (0 = untried). Returns
-# the index of the chosen candidate.
-fn _t_ll_pick(lats) {
-    var n = vec_len(lats);
-    var best = 0;
-    var best_lat = 0x7FFFFFFFFFFFFFFF;
-    var k = 0;
-    while (k < n) {
-        var lat = vec_get(lats, k);
-        if (lat < best_lat) { best = k; best_lat = lat; }
-        k = k + 1;
-    }
-    return best;
-}
-
 # Mirror of src/lib/otlp.cyr _otlp_attr_int — OTLP/JSON int attribute (string val).
 fn _t_otlp_attr_int(sb, k, v) {
     str_builder_add_cstr(sb, "{\"key\":\"");
@@ -560,152 +551,145 @@ fn _t_positional(args, k) {
     return 0;
 }
 
-# ── 2.5.7 [hardware] mirrors ──
-# Mirror of src/lib/hardware.cyr's builder-mask and available-VRAM arithmetic.
-var _T_BACKEND_COUNT = 17;
-
-fn _t_builder_all() { return (1 << _T_BACKEND_COUNT) - 1; }
-fn _t_builder_is_enabled(mask, backend) { return (mask >> backend) & 1; }
-
-# Clear one backend's bit — what disabled_backends does per name.
-fn _t_builder_disable(mask, backend) { return mask & (0 - 1 - (1 << backend)); }
-
-# available = total_accel - in_use - reserve, floored at 0.
-fn _t_available_vram(total, used, reserve) {
-    var avail = total - used - reserve;
-    if (avail < 0) { return 0; }
-    return avail;
-}
-
-# ── 2.6.12 simulator shared-memory mirrors ──
-# Mirror of src/lib/hardware.cyr _sim_shared_part, the totals in _sim_snapshot, and
-# _sim_shards. They count shared system RAM ONCE, as ai-hwaccel 2.4.0's
-# reg_total_accel_memory does. A mirror device holds the four profile fields they
-# read: {is_cpu, available, memory_bytes, shared_mem}.
-fn _t_simdev(is_cpu, avail, mem, shared_mem) {
-    var d = alloc(32);
-    store64(d, is_cpu);
-    store64(d + 8, avail);
-    store64(d + 16, mem);
-    store64(d + 24, shared_mem);
-    return d;
-}
-
-# _sim_shared_part: clamp to memory_bytes first, then floor at 0.
-fn _t_sim_part(d) {
-    var part = load64(d + 24);
-    if (part > load64(d + 16)) { part = load64(d + 16); }
-    if (part < 0) { part = 0; }
-    return part;
-}
-
-# _sim_snapshot's total for one side (is_cpu 0 = accelerator_memory_bytes, 1 =
-# system_memory_bytes): each available device adds its memory minus its shared
-# part, then the largest shared part on that side is added once.
-fn _t_sim_total(devs, is_cpu) {
-    var total = 0;
-    var pool = 0;
-    var i = 0;
-    while (i < vec_len(devs)) {
-        var d = vec_get(devs, i);
-        i = i + 1;
-        if (load64(d + 8) != 1) { continue; }
-        if (load64(d) != is_cpu) { continue; }
-        var part = _t_sim_part(d);
-        total = total + load64(d + 16) - part;
-        if (part > pool) { pool = part; }
+# ── 2.9.9: fixtures for the real src/lib/hardware.cyr ──
+# hardware.cyr and ai-hwaccel are included for real since 2.9.9. These build synthetic ai-hwaccel profiles and
+# registries for it. They replaced copies of the builder mask, the available-VRAM arithmetic, the simulator's
+# totals and packing, and ai-hwaccel's reg_total_accel_memory.
+#
+# A CPU (is_cpu 1) or a CUDA card (0), available or not, `shared_mem` bytes of whose memory are system RAM: the
+# fields the simulator reads.
+var _t_prof_id = 0;
+fn _t_prof(is_cpu, avail, mem, shared_mem) {
+    var p = 0;
+    if (is_cpu == 1) { p = profile_cpu(mem); }
+    else {
+        _t_prof_id = _t_prof_id + 1;
+        p = profile_cuda(_t_prof_id, mem);
     }
-    return total + pool;
+    profile_set_available(p, avail);
+    profile_set_shared_mem(p, shared_mem);
+    return p;
 }
 
-# The accelerators' shared pool, which _sim_snapshot hands to _sim_shards.
+# The integer after `"key":` in the cstr `js` (the first occurrence), or -1 when the key is absent.
+fn _t_json_int(js, key) {
+    var pat = _t_cat(_t_cat("\"", key), "\":");
+    var pl = strlen(pat);
+    var n = strlen(js);
+    var i = 0;
+    while (i + pl <= n) {
+        if (memeq(js + i, pat, pl) == 1) {
+            var j = i + pl;
+            var neg = 0;
+            if (load8(js + j) == 45) { neg = 1; j = j + 1; }
+            var v = 0;
+            while (load8(js + j) >= 48 && load8(js + j) <= 57) { v = v * 10 + load8(js + j) - 48; j = j + 1; }
+            if (neg == 1) { return 0 - v; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn _t_sim_json(devs, model_params, quant) {
+    var sb = str_builder_new();
+    _sim_snapshot(sb, devs, model_params, quant);
+    return str_data(str_builder_build(sb));
+}
+
+# One side of the real _sim_snapshot's totals: is_cpu 0 reads accelerator_memory_bytes, 1 system_memory_bytes.
+fn _t_sim_total(devs, is_cpu) {
+    var js = _t_sim_json(devs, 0, QUANT_FP16);
+    if (is_cpu == 1) { return _t_json_int(js, "system_memory_bytes"); }
+    return _t_json_int(js, "accelerator_memory_bytes");
+}
+
+# The accelerators' shared pool _sim_snapshot hands to _sim_shards: the largest shared part among the available
+# accelerators, through the real _sim_shared_part. _sim_snapshot keeps it in a local, so the simulate tests check
+# that _sim_shards over this pool agrees with the snapshot's own shards_required.
 fn _t_sim_pool(devs) {
     var pool = 0;
     var i = 0;
     while (i < vec_len(devs)) {
         var d = vec_get(devs, i);
         i = i + 1;
-        if (load64(d + 8) != 1) { continue; }
-        if (load64(d) == 1) { continue; }
-        if (_t_sim_part(d) > pool) { pool = _t_sim_part(d); }
+        if (profile_available(d) != 1) { continue; }
+        if (profile_accel_type(d) == ACCEL_CPU) { continue; }
+        if (_sim_shared_part(d) > pool) { pool = _sim_shared_part(d); }
     }
     return pool;
 }
 
-# _sim_shards: largest capacity first, where a device holds its own memory plus
-# what is left of the shared pool, up to the part it can address. 0 = no fit.
-fn _t_sim_shards(devs, needed, pool) {
-    var n = vec_len(devs);
-    var used = alloc(n * 8 + 8);
-    var u = 0;
-    while (u < n) { store64(used + u * 8, 0); u = u + 1; }
-    var remaining = needed;
-    var shards = 0;
-    while (remaining > 0) {
-        var best = 0 - 1;
-        var best_cap = 0;
-        var best_take = 0;
-        var j = 0;
-        while (j < n) {
-            var d = vec_get(devs, j);
-            if (load64(used + j * 8) == 0 && load64(d + 8) == 1) {
-                if (load64(d) == 0) {
-                    var part = _t_sim_part(d);
-                    var take = part;
-                    if (take > pool) { take = pool; }
-                    var cap = load64(d + 16) - part + take;
-                    if (cap > best_cap) {
-                        best_cap = cap;
-                        best_take = take;
-                        best = j;
-                    }
-                }
-            }
-            j = j + 1;
-        }
-        if (best < 0) { break; }
-        store64(used + best * 8, 1);
-        pool = pool - best_take;
-        remaining = remaining - best_cap;
-        shards = shards + 1;
+# ai-hwaccel's own accelerator total over the same devices: what GET /v1/hardware reports.
+fn _t_reg_accel(devs) { return reg_total_accel_memory(registry_from_profiles(devs)); }
+
+# hw_available_vram over a one-card host: `total` bytes of VRAM with `used` in use (-1: the driver did not say),
+# `reserve` held back by [hardware] vram_reserve_bytes. A total of 0 is a CPU-only host.
+fn _t_vram(total, used, reserve) {
+    var devs = vec_new();
+    vec_push(devs, profile_cpu(68719476736));
+    if (total > 0) {
+        var c = profile_cuda(0, total);
+        profile_set_mem_used(c, used);
+        vec_push(devs, c);
     }
-    if (remaining > 0) { return 0; }
-    return shards;
+    var saved = _hw_registry;
+    _hw_registry = registry_from_profiles(devs);
+    hardware_configure(reserve, 0 - 1, 0 - 1);
+    var v = hw_available_vram();
+    _hw_registry = saved;
+    hardware_configure(0, 0 - 1, 0 - 1);
+    return v;
 }
 
-# ai-hwaccel 2.4.0 reg_total_accel_memory, transcribed as written (its
-# shared_mem == 0 fast path included). GET /v1/hardware reports it as
-# accel_memory_bytes, and the simulator's `original` has to agree with it.
-fn _t_reg_total_accel_memory(devs) {
-    var total = 0;
-    var pool = 0;
+# The JSON a hardware.cyr writer puts into a fresh builder, as a cstr. `which`: 0 hw_summary_json,
+# 1 hw_telemetry_json.
+fn _t_hw_json(which) {
+    var sb = str_builder_new();
+    if (which == 0) { hw_summary_json(sb); } else { hw_telemetry_json(sb); }
+    return str_data(str_builder_build(sb));
+}
+
+# Offset of the first `pat` in the cstr `s`, or -1.
+fn _t_find(s, pat) {
+    var pl = strlen(pat);
+    var n = strlen(s);
     var i = 0;
-    while (i < vec_len(devs)) {
-        var d = vec_get(devs, i);
+    while (i + pl <= n) {
+        if (memeq(s + i, pat, pl) == 1) { return i; }
         i = i + 1;
-        if (load64(d + 8) != 1) { continue; }
-        if (load64(d) == 1) { continue; }
-        if (load64(d + 24) == 0) {
-            total = total + load64(d + 16);
-            continue;
-        }
-        var part = load64(d + 24);
-        if (part > load64(d + 16)) { part = load64(d + 16); }
-        if (part < 0) { part = 0; }
-        if (part > pool) { pool = part; }
-        total = total + load64(d + 16) - part;
     }
-    return total + pool;
+    return 0 - 1;
+}
+
+# total_bytes for a GPU DPO training estimate of `params_m` million parameters, as training-estimate writes it.
+fn _t_train_bytes(params_m) {
+    var sb = str_builder_new();
+    training_to_json(sb, estimate_training_memory(params_m, TRAIN_DPO, TARGET_GPU));
+    return _t_json_int(str_data(str_builder_build(sb)), "total_bytes");
+}
+
+# The real lowest-latency pick between http://ll-a (priority 1) and http://ll-b (priority 2), each with the
+# latency given recorded, or none when it is -1.
+fn _t_ll_pick2(lat_a, lat_b) {
+    var ra = route_new(PROV_OLLAMA, 1, "http://ll-a");
+    var rb = route_new(PROV_LLAMACPP, 2, "http://ll-b");
+    var rs = alloc(16);
+    store64(rs, ra);
+    store64(rs + 8, rb);
+    var rt = router_new(rs, 2, STRAT_LOWEST_LATENCY);
+    if (lat_a >= 0) { router_report_latency(rt, "http://ll-a", lat_a); }
+    if (lat_b >= 0) { router_report_latency(rt, "http://ll-b", lat_b); }
+    return router_select(rt, "m");
 }
 
 # ── 2.6.13 hardware whole-number input mirrors ──
 # Mirror of src/lib/handlers.cyr _hw_blank, _hw_num_byte, _hw_whole_bounded and
 # _hw_json_whole. handle_hw_simulate parses model_params and add_devices'
 # memory_bytes with them, handle_hw_placement model_params, and handle_hw_training
-# model_params_m; _hw_out_of_range words the 400 from the cap. The caps mirror
-# SIM_MAX_DEVICE_BYTES and HW_MAX_MODEL_PARAMS in src/lib/hardware.cyr.
-var _T_SIM_MAX_DEVICE_BYTES = 72057594037927936;
-var _T_HW_MAX_MODEL_PARAMS = 100000000000000;
+# model_params_m; _hw_out_of_range words the 400 from the cap. The caps are hardware.cyr's own
+# SIM_MAX_DEVICE_BYTES and HW_MAX_MODEL_PARAMS (copied here until 2.9.9).
 
 fn _t_hw_blank(c) {
     if (c == 32 || c == 9 || c == 13 || c == 10) { return 1; }
@@ -757,7 +741,7 @@ fn _t_whole(cs, cap) { return _t_hw_whole_bounded(cs, strlen(cs), cap); }
 fn _t_mem_token(cs) {
     var k = 0;
     while (load8(cs + k) != 0 && _t_hw_num_byte(load8(cs + k)) == 1) { k = k + 1; }
-    return _t_hw_whole_bounded(cs, k, _T_SIM_MAX_DEVICE_BYTES);
+    return _t_hw_whole_bounded(cs, k, SIM_MAX_DEVICE_BYTES);
 }
 
 # The pre-2.6.13 arithmetic: the memory_bytes digit loop, and str_to_int, which
@@ -771,22 +755,6 @@ fn _t_naive_digits(cs) {
         i = i + 1;
     }
     return v;
-}
-
-# ai-hwaccel's estimates, to show the caps' headroom. quant_model_bytes_with_overhead
-# (placement, simulate): params x bits / 8, plus 20%.
-fn _t_model_bytes_oh(params, bits) {
-    var raw = params * bits / 8;
-    return raw + raw / 5;
-}
-
-# estimate_training_memory's base (GiB x1000) and its largest total in bytes, as
-# _est_field writes it: GPU DPO/RLHF, model 2x + optimizer 2x + activations 1.5x.
-fn _t_train_base(params_m) { return params_m * 1863 / 1000; }
-fn _t_train_total_bytes(params_m) {
-    var base = _t_train_base(params_m);
-    var total = base * 2 + base * 2 + base * 3 / 2;
-    return total * 1073741824 / 1000;
 }
 
 # ── 2.6.13 requirement-match snapshot mirror ──
@@ -1963,111 +1931,6 @@ fn _gemini_url_stream(base, model, key) {
         str_builder_add_cstr(sb, key);
     }
     return str_cstr(str_builder_build(sb));
-}
-
-# ================================================================
-# Router — priority-sorted route list + selection
-# Layout: routes_ptr(8) route_count(8) strategy(8) rr_index(8) latencies_ptr(8)
-# Total: 40 bytes
-# ================================================================
-
-enum RouterField {
-    ROUTER_SIZE      = 40;
-    ROUTER_ROUTES    = 0;
-    ROUTER_COUNT     = 8;
-    ROUTER_STRATEGY  = 16;
-    ROUTER_RR_IDX    = 24;
-    ROUTER_LATENCIES = 32;
-}
-
-fn router_new(routes, count, strategy) {
-    var rt = alloc(ROUTER_SIZE);
-    store64(rt + ROUTER_ROUTES, routes);
-    store64(rt + ROUTER_COUNT, count);
-    store64(rt + ROUTER_STRATEGY, strategy);
-    store64(rt + ROUTER_RR_IDX, 0);
-    store64(rt + ROUTER_LATENCIES, map_new());
-    # Sort by priority (insertion sort — small N)
-    var i = 1;
-    while (i < count) {
-        var key = load64(routes + i * 8);
-        var kp = route_priority(key);
-        var j = i - 1;
-        while (j >= 0) {
-            if (route_priority(load64(routes + j * 8)) <= kp) { break; }
-            store64(routes + (j + 1) * 8, load64(routes + j * 8));
-            j = j - 1;
-        }
-        store64(routes + (j + 1) * 8, key);
-        i = i + 1;
-    }
-    return rt;
-}
-
-# Select best provider for a model. Returns route ptr or 0 (not found).
-fn router_select(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
-    var strategy = load64(rt + ROUTER_STRATEGY);
-
-    # Build candidates list (enabled + matches model)
-    var cand = alloc(count * 8);
-    var cn = 0;
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1 && route_matches_model(r, model) == 1) {
-            store64(cand + cn * 8, r);
-            cn = cn + 1;
-        }
-        i = i + 1;
-    }
-
-    if (cn == 0) { return 0; }
-
-    if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) {
-        return load64(cand);
-    }
-
-    if (strategy == STRAT_ROUND_ROBIN) {
-        var idx = load64(rt + ROUTER_RR_IDX);
-        store64(rt + ROUTER_RR_IDX, idx + 1);
-        return load64(cand + (idx % cn) * 8);
-    }
-
-    if (strategy == STRAT_LOWEST_LATENCY) {
-        var lat_map = load64(rt + ROUTER_LATENCIES);
-        var best = load64(cand);
-        var best_lat = 0x7FFFFFFFFFFFFFFF;
-        var j = 0;
-        while (j < cn) {
-            var c = load64(cand + j * 8);
-            var url = route_base_url(c);
-            var lat = map_get(lat_map, url);
-            if (lat == 0) { lat = 0x7FFFFFFFFFFFFFFF; }
-            if (lat < best_lat) {
-                best = c;
-                best_lat = lat;
-            }
-            j = j + 1;
-        }
-        return best;
-    }
-
-    return load64(cand);
-}
-
-fn router_report_latency(rt, base_url, latency_ms) {
-    var lat_map = load64(rt + ROUTER_LATENCIES);
-    var old = map_get(lat_map, base_url);
-    if (old == 0) {
-        map_set(lat_map, base_url, latency_ms);
-    } else {
-        # EMA: (old * 7 + new * 3) / 10
-        var avg = (old * 7 + latency_ms * 3) / 10;
-        map_set(lat_map, base_url, avg);
-    }
-    return 0;
 }
 
 # ================================================================
@@ -5510,17 +5373,15 @@ fn main() {
     assert_eq(_t_strategy_from_str("lowest-latency"), 2, "strat: lowest-latency → 2");
     assert_eq(_t_strategy_from_str("direct"), 3, "strat: direct → 3");
     assert_eq(_t_strategy_from_str("bogus"), 0, "strat: unknown → priority");
-    # Lowest-latency: an untried candidate (lat 0) is explored over a tried one.
-    var llv1 = vec_new();
-    vec_push(llv1, 50);    # cand 0: 50ms (tried)
-    vec_push(llv1, 0);     # cand 1: untried → explore
-    assert_eq(_t_ll_pick(llv1), 1, "ll: untried candidate explored");
-    # All tried → lowest wins.
-    var llv2 = vec_new();
-    vec_push(llv2, 80);
-    vec_push(llv2, 15);
-    vec_push(llv2, 40);
-    assert_eq(_t_ll_pick(llv2), 1, "ll: lowest latency wins");
+    # Lowest-latency, on the real router (2.9.9). A route with no latency recorded counts as LAT_UNMEASURED_MS:
+    # it is tried while every measured route is slower, and loses to one measured faster. The copy this replaced
+    # ranked it 0 ms, and since a failed forward records no latency, a route that never succeeded won every pick.
+    assert_streq(route_base_url(_t_ll_pick2(80, 0 - 1)), "http://ll-b", "ll: unmeasured is tried over a slow route");
+    assert_streq(route_base_url(_t_ll_pick2(15, 0 - 1)), "http://ll-a", "ll: a fast measured route beats unmeasured");
+    assert_streq(route_base_url(_t_ll_pick2(LAT_UNMEASURED_MS, 0 - 1)), "http://ll-a",
+      "ll: a tie keeps priority order");
+    assert_streq(route_base_url(_t_ll_pick2(80, 40)), "http://ll-b", "ll: both measured, the lower wins");
+    assert_streq(route_base_url(_t_ll_pick2(15, 40)), "http://ll-a", "ll: ...either way round");
 
     # ── v2.5.1 parity closeout: bind / body cap / multi-token auth ──
     test_group("config_str_array");
@@ -6063,90 +5924,109 @@ fn main() {
     assert_streq(_t_positional(pc, 1), "p", "pos: second positional intact");
 
     test_group("hardware_disabled_backends");
-    # disabled_backends clears one bit per named backend; everything else keeps
-    # probing. All 17 backends are enabled by default.
-    var hmask = _t_builder_all();
-    assert_eq(_t_builder_is_enabled(hmask, 0), 1, "hw: cuda enabled by default");
-    assert_eq(_t_builder_is_enabled(hmask, 1), 1, "hw: rocm enabled by default");
-    hmask = _t_builder_disable(hmask, 0);
-    assert_eq(_t_builder_is_enabled(hmask, 0), 0, "hw: cuda disabled");
-    assert_eq(_t_builder_is_enabled(hmask, 1), 1, "hw: rocm untouched");
-    # Disabling two leaves the rest alone.
-    hmask = _t_builder_disable(hmask, 3);
-    assert_eq(_t_builder_is_enabled(hmask, 3), 0, "hw: vulkan disabled");
-    assert_eq(_t_builder_is_enabled(hmask, 2), 1, "hw: apple still enabled");
-    # Disabling the same backend twice is idempotent, not a toggle.
-    hmask = _t_builder_disable(hmask, 0);
-    assert_eq(_t_builder_is_enabled(hmask, 0), 0, "hw: disable is idempotent");
+    # disabled_backends clears one bit per named backend; everything else keeps probing. Every backend ai-hwaccel
+    # has is enabled by default, and every one is reachable by its name. (The copy this replaced counted 17
+    # backends; ai-hwaccel has 18 since agnos-gpu.)
+    var hbk = 0;
+    var hb_ok = 0;
+    while (hbk < AIHW_BACKEND_COUNT) {
+        if (builder_is_enabled(builder_all(), hbk) == 1 && _hw_backend_from_name(backend_name(hbk)) == hbk) {
+            hb_ok = hb_ok + 1;
+        }
+        hbk = hbk + 1;
+    }
+    assert_eq(hb_ok, AIHW_BACKEND_COUNT, "hw: every backend enabled by default and found by name");
+    assert_eq(_hw_backend_from_name("quantum"), 0 - 1, "hw: an unknown name maps to no backend");
+    var hnames = alloc(24);
+    store64(hnames, "cuda");
+    store64(hnames + 8, "vulkan");
+    store64(hnames + 16, "quantum");
+    var hmask = hardware_configure_backends(hnames, 3);
+    assert_eq(builder_is_enabled(hmask, BACKEND_CUDA), 0, "hw: cuda disabled");
+    assert_eq(builder_is_enabled(hmask, BACKEND_VULKAN), 0, "hw: vulkan disabled");
+    assert_eq(builder_is_enabled(hmask, BACKEND_ROCM), 1, "hw: rocm untouched");
+    assert_eq(builder_is_enabled(hmask, BACKEND_APPLE), 1, "hw: apple untouched");
+    assert_eq(hmask, builder_all() - (1 << BACKEND_CUDA) - (1 << BACKEND_VULKAN),
+      "hw: exactly two bits cleared; the unknown name is ignored");
+    assert_eq(_hw_builder_mask, hmask, "hw: detection uses the configured mask");
+    # Naming a backend twice disables it, it does not toggle it back on.
+    store64(hnames + 8, "cuda");
+    hmask = hardware_configure_backends(hnames, 2);
+    assert_eq(builder_is_enabled(hmask, BACKEND_CUDA), 0, "hw: disable is idempotent");
+    _hw_builder_mask = 0 - 1;
 
     test_group("hardware_unknown_sentinel");
     # ai-hwaccel reports -1 for "the driver did not tell us". Subtracting that
     # from a VRAM total ADDS a byte, and emitting it as JSON makes a consumer
     # graph a spike at minus one. Unknown must read as 0 for arithmetic and
     # null on the wire.
-    var s9_mu_known = 180809728;
-    var s9_mu_unknown = 0 - 1;
-    var s9_used_total = 0;
-    if (s9_mu_known > 0) { s9_used_total = s9_used_total + s9_mu_known; }
-    if (s9_mu_unknown > 0) { s9_used_total = s9_used_total + s9_mu_unknown; }
-    assert_eq(s9_used_total, 180809728, "sentinel: -1 contributes 0, not -1");
-    # The naive version was off by exactly one byte per unknown device.
-    assert_eq(s9_mu_known + s9_mu_unknown, 180809727, "sentinel: naive sum is off by one");
+    var s9_known = profile_cuda(0, 25769803776);
+    profile_set_mem_used(s9_known, 180809728);
+    var s9_unknown = profile_cuda(1, 25769803776);
+    var s9_devs = vec_new();
+    vec_push(s9_devs, profile_cpu(68719476736));
+    vec_push(s9_devs, s9_known);
+    vec_push(s9_devs, s9_unknown);
+    assert_eq(profile_mem_used(s9_unknown), 0 - 1, "sentinel: ai-hwaccel's unknown is -1");
+    _hw_registry = registry_from_profiles(s9_devs);
+    assert_eq(hw_available_vram(), 51539607552 - 180809728, "sentinel: -1 contributes 0, not -1");
+    var s9_tel = _t_hw_json(1);
+    assert_eq(_t_has(s9_tel, strlen(s9_tel), "\"memory_used_bytes\":180809728,"), 1, "sentinel: a known value is sent");
+    assert_eq(_t_has(s9_tel, strlen(s9_tel), "\"memory_used_bytes\":null,"), 1,
+      "sentinel: unknown is null on the wire");
+    assert_eq(_t_has(s9_tel, strlen(s9_tel), "-1"), 0, "sentinel: no -1 anywhere in the telemetry");
+    _hw_registry = 0;
 
     test_group("hardware_simulate_fits");
-    # `fits` is an ACCELERATOR question. Folding system RAM into the total made
-    # a 70B model "fit" a box with 7.5 GB of VRAM and 64 GB of RAM.
-    var s9_accel_mem = 7516192768;
-    var s9_sys_mem = 64165371904;
-    var s9_need70 = 42000000000;
-    assert_eq(s9_need70 <= s9_accel_mem, 0, "sim: 70B does not fit 7.5GB of VRAM");
-    assert_eq(s9_need70 <= s9_accel_mem + s9_sys_mem, 1, "sim: folding in RAM would say it fits");
-    # After adding two 24 GiB cards it genuinely fits.
-    var s9_added = 25769803776 + 25769803776;
-    assert_eq(s9_need70 <= s9_accel_mem + s9_added, 1, "sim: fits after adding two cards");
+    # `fits` is an ACCELERATOR question. Folding system RAM into the total made a 70B model "fit" a box with
+    # 7.5 GB of VRAM and 64 GB of RAM. Through the real POST /v1/hardware/simulate writer (2.9.9).
+    var s9_need70 = reg_estimate_memory(70000000000, QUANT_INT4);
+    assert_eq(s9_need70, 42000000000, "sim: 70B at INT4 needs 42 GB, overhead included");
+    var s9_box = vec_new();
+    vec_push(s9_box, profile_cpu(64165371904));
+    vec_push(s9_box, profile_cuda(0, 7516192768));
+    _hw_registry = registry_from_profiles(s9_box);
+    var s9_add = vec_new();
+    vec_push(s9_add, 25769803776);
+    vec_push(s9_add, 25769803776);
+    var s9_sb = str_builder_new();
+    hw_simulate_json(s9_sb, 70000000000, QUANT_INT4, 0, s9_add);
+    var s9_js = str_data(str_builder_build(s9_sb));
+    var s9_cut = _t_find(s9_js, "\"simulated\":");
+    assert_eq(s9_cut > 0, 1, "sim: original, then simulated");
+    var s9_sim = s9_js + s9_cut;
+    assert_eq(_t_json_int(s9_js, "accelerator_memory_bytes"), 7516192768, "sim: original accelerator memory");
+    assert_eq(_t_json_int(s9_js, "system_memory_bytes"), 64165371904, "sim: system RAM reported apart");
+    assert_eq(_t_has(s9_js, s9_cut, "\"fits\":false"), 1, "sim: 70B does not fit 7.5 GB of VRAM, RAM or not");
+    assert_eq(_t_json_int(s9_js, "shards_required"), 0, "sim: no shards for what does not fit");
+    assert_eq(_t_json_int(s9_sim, "accelerator_count"), 3, "sim: two cards added to the one");
+    assert_eq(_t_has(s9_sim, strlen(s9_sim), "\"fits\":true"), 1, "sim: fits after adding two 24 GiB cards");
+    assert_eq(_t_json_int(s9_sim, "shards_required"), 2, "sim: on the two new cards, not all three");
+    assert_eq(_t_json_int(s9_js, "added_devices"), 2, "sim: added_devices echoed");
+    # remove_count drains accelerators, never the CPU.
+    s9_sb = str_builder_new();
+    hw_simulate_json(s9_sb, 70000000000, QUANT_INT4, 1, vec_new());
+    s9_js = str_data(str_builder_build(s9_sb));
+    s9_sim = s9_js + _t_find(s9_js, "\"simulated\":");
+    assert_eq(_t_json_int(s9_sim, "device_count"), 1, "sim: removing one leaves the CPU");
+    assert_eq(_t_json_int(s9_sim, "accelerator_count"), 0, "sim: ...and no accelerator");
+    assert_eq(_t_json_int(s9_sim, "system_memory_bytes"), 64165371904, "sim: the CPU's RAM is still counted");
+    _hw_registry = 0;
 
     test_group("hardware_simulate_shards");
-    # Shards are counted LARGEST-FIRST: a planner packs the biggest cards, so
-    # counting in registry order overstated the span (4 devices when the two new
-    # 24 GiB cards alone suffice).
+    # Shards are counted LARGEST-FIRST: a planner packs the biggest cards, so counting in registry order overstated
+    # the span (4 devices when the two new 24 GiB cards alone suffice). The real _sim_shards since 2.9.9; the inline
+    # copy here predated the shared-RAM pool.
     var s9_sv = vec_new();
-    vec_push(s9_sv, 3221225472);      # 3 GiB
-    vec_push(s9_sv, 4294967296);      # 4 GiB
-    vec_push(s9_sv, 25769803776);     # 24 GiB
-    vec_push(s9_sv, 25769803776);     # 24 GiB
-    # Greedy largest-first over `s9_need70`.
-    var s9_rem = s9_need70;
-    var s9_shards = 0;
-    var s9_mask = vec_new();
-    var s9_z = 0;
-    while (s9_z < vec_len(s9_sv)) { vec_push(s9_mask, 0); s9_z = s9_z + 1; }
-    while (s9_rem > 0) {
-        var s9_bi = 0 - 1;
-        var s9_bm = 0;
-        var s9_q = 0;
-        while (s9_q < vec_len(s9_sv)) {
-            if (vec_get(s9_mask, s9_q) == 0) {
-                if (vec_get(s9_sv, s9_q) > s9_bm) { s9_bm = vec_get(s9_sv, s9_q); s9_bi = s9_q; }
-            }
-            s9_q = s9_q + 1;
-        }
-        if (s9_bi < 0) { break; }
-        vec_set(s9_mask, s9_bi, 1);
-        s9_rem = s9_rem - s9_bm;
-        s9_shards = s9_shards + 1;
-    }
-    assert_eq(s9_shards, 2, "sim: 70B spans the two 24GiB cards, not all four");
-    assert_eq(s9_rem <= 0, 1, "sim: greedy pack satisfies the requirement");
-    # Registry-order counting would have taken all four.
-    var s9_order_rem = s9_need70;
-    var s9_order_shards = 0;
-    var s9_oi = 0;
-    while (s9_oi < vec_len(s9_sv) && s9_order_rem > 0) {
-        s9_order_rem = s9_order_rem - vec_get(s9_sv, s9_oi);
-        s9_order_shards = s9_order_shards + 1;
-        s9_oi = s9_oi + 1;
-    }
-    assert_eq(s9_order_shards, 4, "sim: registry order overstates the span");
+    vec_push(s9_sv, _t_prof(0, 1, 3221225472, 0));     # 3 GiB
+    vec_push(s9_sv, _t_prof(0, 1, 4294967296, 0));     # 4 GiB
+    vec_push(s9_sv, _t_prof(0, 1, 25769803776, 0));    # 24 GiB
+    vec_push(s9_sv, _t_prof(0, 1, 25769803776, 0));    # 24 GiB
+    assert_eq(_sim_shards(s9_sv, s9_need70, 0), 2, "sim: 70B spans the two 24GiB cards, not all four");
+    assert_eq(3221225472 + 4294967296 + 25769803776 < s9_need70, 1, "sim: registry order would need all four");
+    assert_eq(_sim_shards(s9_sv, 25769803776, 0), 1, "sim: one card's worth packs onto one card");
+    assert_eq(_sim_shards(s9_sv, 59055800320, 0), 4, "sim: exactly the total takes every card");
+    assert_eq(_sim_shards(s9_sv, 59055800321, 0), 0, "sim: one byte over the total does not pack");
 
     test_group("hardware_simulate_shared_memory");
     # 2.6.12: _sim_snapshot counts shared system RAM once, like ai-hwaccel's
@@ -6155,100 +6035,108 @@ fn main() {
     # made that 52 GiB of accelerator memory.
     var shg = 1073741824;
     var sha = vec_new();
-    vec_push(sha, _t_simdev(1, 1, 48 * shg, 48 * shg));   # CPU
-    vec_push(sha, _t_simdev(0, 1, 48 * shg, 48 * shg));   # Metal GPU
-    vec_push(sha, _t_simdev(0, 1, 4 * shg, 4 * shg));     # Neural Engine
+    vec_push(sha, _t_prof(1, 1, 48 * shg, 48 * shg));   # CPU
+    vec_push(sha, _t_prof(0, 1, 48 * shg, 48 * shg));   # Metal GPU
+    vec_push(sha, _t_prof(0, 1, 4 * shg, 4 * shg));     # Neural Engine
     assert_eq(_t_sim_total(sha, 0), 48 * shg, "sim shared: Apple accelerators hold the 48 GiB once");
-    assert_eq(_t_sim_total(sha, 0), _t_reg_total_accel_memory(sha),
+    assert_eq(_t_sim_total(sha, 0), _t_reg_accel(sha),
       "sim shared: Apple total matches reg_total_accel_memory");
     assert_eq(_t_sim_total(sha, 1), 48 * shg, "sim shared: system RAM counted once");
     # The old sum said 52 GiB, so a 50 GiB model "fit".
     var sh_need50 = 50 * shg;
     assert_eq(sh_need50 <= 48 * shg + 4 * shg, 1, "sim shared: the per-device sum said 50 GiB fits");
     assert_eq(sh_need50 <= _t_sim_total(sha, 0), 0, "sim shared: 50 GiB does not fit 48 GiB of RAM");
-    assert_eq(_t_sim_shards(sha, 40 * shg, _t_sim_pool(sha)), 1, "sim shared: 40 GiB packs onto the GPU");
-    assert_eq(_t_sim_shards(sha, sh_need50, _t_sim_pool(sha)), 0, "sim shared: 50 GiB does not pack");
+    assert_eq(_sim_shards(sha, 40 * shg, _t_sim_pool(sha)), 1, "sim shared: 40 GiB packs onto the GPU");
+    assert_eq(_sim_shards(sha, sh_need50, _t_sim_pool(sha)), 0, "sim shared: 50 GiB does not pack");
 
     # Intel Core Ultra laptop with an 8 GiB NVIDIA card. The Vulkan iGPU's 16 GiB
     # heap and the NPU's 2 GiB are both system RAM; the card's memory is its own.
     var shl = vec_new();
-    vec_push(shl, _t_simdev(1, 1, 32 * shg, 32 * shg));   # CPU
-    vec_push(shl, _t_simdev(0, 1, 8 * shg, 0));           # CUDA card
-    vec_push(shl, _t_simdev(0, 1, 16 * shg, 16 * shg));   # Vulkan iGPU
-    vec_push(shl, _t_simdev(0, 1, 2 * shg, 2 * shg));     # Intel NPU
+    vec_push(shl, _t_prof(1, 1, 32 * shg, 32 * shg));   # CPU
+    vec_push(shl, _t_prof(0, 1, 8 * shg, 0));           # CUDA card
+    vec_push(shl, _t_prof(0, 1, 16 * shg, 16 * shg));   # Vulkan iGPU
+    vec_push(shl, _t_prof(0, 1, 2 * shg, 2 * shg));     # Intel NPU
     assert_eq(_t_sim_total(shl, 0), 24 * shg, "sim shared: dedicated 8 GiB + the 16 GiB pool once");
-    assert_eq(_t_sim_total(shl, 0), _t_reg_total_accel_memory(shl),
+    assert_eq(_t_sim_total(shl, 0), _t_reg_accel(shl),
       "sim shared: laptop total matches reg_total_accel_memory");
     assert_eq(_t_sim_total(shl, 1), 32 * shg, "sim shared: laptop system RAM");
 
     # GH200: 96 GiB of HBM plus the Grace CPU's 480 GiB, which is marked shared.
     var shh = vec_new();
-    vec_push(shh, _t_simdev(1, 1, 480 * shg, 480 * shg));
-    vec_push(shh, _t_simdev(0, 1, 576 * shg, 480 * shg));
+    vec_push(shh, _t_prof(1, 1, 480 * shg, 480 * shg));
+    vec_push(shh, _t_prof(0, 1, 576 * shg, 480 * shg));
     assert_eq(_t_sim_total(shh, 0), 576 * shg, "sim shared: GH200 keeps HBM + Grace memory");
-    assert_eq(_t_sim_total(shh, 0), _t_reg_total_accel_memory(shh), "sim shared: GH200 matches");
+    assert_eq(_t_sim_total(shh, 0), _t_reg_accel(shh), "sim shared: GH200 matches");
 
     # Discrete cards share nothing, so the total is the plain sum it always was.
     var shd = vec_new();
-    vec_push(shd, _t_simdev(1, 1, 64 * shg, 64 * shg));
-    vec_push(shd, _t_simdev(0, 1, 3 * shg, 0));
-    vec_push(shd, _t_simdev(0, 1, 4 * shg, 0));
-    vec_push(shd, _t_simdev(0, 1, 24 * shg, 0));
-    vec_push(shd, _t_simdev(0, 1, 24 * shg, 0));
+    vec_push(shd, _t_prof(1, 1, 64 * shg, 64 * shg));
+    vec_push(shd, _t_prof(0, 1, 3 * shg, 0));
+    vec_push(shd, _t_prof(0, 1, 4 * shg, 0));
+    vec_push(shd, _t_prof(0, 1, 24 * shg, 0));
+    vec_push(shd, _t_prof(0, 1, 24 * shg, 0));
     assert_eq(_t_sim_total(shd, 0), 55 * shg, "sim shared: discrete-only total is the plain sum");
-    assert_eq(_t_sim_total(shd, 0), _t_reg_total_accel_memory(shd), "sim shared: discrete matches");
-    assert_eq(_t_sim_shards(shd, s9_need70, 0), 2, "sim shared: 70B still spans the two 24 GiB cards");
+    assert_eq(_t_sim_total(shd, 0), _t_reg_accel(shd), "sim shared: discrete matches");
+    assert_eq(_sim_shards(shd, s9_need70, 0), 2, "sim shared: 70B still spans the two 24 GiB cards");
 
     # Unavailable profiles are skipped, as ai-hwaccel's totals skip them. An 80 GiB
     # card that cannot run anything is not capacity.
     var shu = vec_new();
-    vec_push(shu, _t_simdev(1, 1, 64 * shg, 64 * shg));
-    vec_push(shu, _t_simdev(0, 1, 8 * shg, 0));
-    vec_push(shu, _t_simdev(0, 0, 80 * shg, 0));
+    vec_push(shu, _t_prof(1, 1, 64 * shg, 64 * shg));
+    vec_push(shu, _t_prof(0, 1, 8 * shg, 0));
+    vec_push(shu, _t_prof(0, 0, 80 * shg, 0));
     assert_eq(_t_sim_total(shu, 0), 8 * shg, "sim shared: unavailable card adds nothing");
-    assert_eq(_t_sim_total(shu, 0), _t_reg_total_accel_memory(shu), "sim shared: unavailable matches");
-    assert_eq(_t_sim_shards(shu, 9 * shg, _t_sim_pool(shu)), 0, "sim shared: unavailable card not packed");
+    assert_eq(_t_sim_total(shu, 0), _t_reg_accel(shu), "sim shared: unavailable matches");
+    assert_eq(_sim_shards(shu, 9 * shg, _t_sim_pool(shu)), 0, "sim shared: unavailable card not packed");
 
     # The clamp: shared_mem above memory_bytes counts as all of it, below 0 as none.
-    assert_eq(_t_sim_part(_t_simdev(0, 1, 8 * shg, 20 * shg)), 8 * shg, "sim shared: part clamps to memory");
-    assert_eq(_t_sim_part(_t_simdev(0, 1, 4 * shg, 0 - 5)), 0, "sim shared: negative part floors at 0");
+    assert_eq(_sim_shared_part(_t_prof(0, 1, 8 * shg, 20 * shg)), 8 * shg, "sim shared: part clamps to memory");
+    assert_eq(_sim_shared_part(_t_prof(0, 1, 4 * shg, 0 - 5)), 0, "sim shared: negative part floors at 0");
     var shc = vec_new();
-    vec_push(shc, _t_simdev(0, 1, 8 * shg, 20 * shg));
-    vec_push(shc, _t_simdev(0, 1, 4 * shg, 0 - 5));
-    assert_eq(_t_sim_total(shc, 0), _t_reg_total_accel_memory(shc), "sim shared: clamped totals match");
+    vec_push(shc, _t_prof(0, 1, 8 * shg, 20 * shg));
+    vec_push(shc, _t_prof(0, 1, 4 * shg, 0 - 5));
+    assert_eq(_t_sim_total(shc, 0), _t_reg_accel(shc), "sim shared: clamped totals match");
 
     # _sim_shards spends the pool once. Two hypothetical 2 GiB cards on the Apple
     # box make 52 GiB, and a 52 GiB model needs the GPU and both cards. The old
     # loop took the GPU (48) and then the Neural Engine (4), RAM the GPU already
     # covers, and reported 2.
     var sha2 = vec_new();
-    vec_push(sha2, _t_simdev(1, 1, 48 * shg, 48 * shg));
-    vec_push(sha2, _t_simdev(0, 1, 48 * shg, 48 * shg));
-    vec_push(sha2, _t_simdev(0, 1, 4 * shg, 4 * shg));
-    vec_push(sha2, _t_simdev(0, 1, 2 * shg, 0));   # added cards share nothing
-    vec_push(sha2, _t_simdev(0, 1, 2 * shg, 0));
+    vec_push(sha2, _t_prof(1, 1, 48 * shg, 48 * shg));
+    vec_push(sha2, _t_prof(0, 1, 48 * shg, 48 * shg));
+    vec_push(sha2, _t_prof(0, 1, 4 * shg, 4 * shg));
+    vec_push(sha2, _t_prof(0, 1, 2 * shg, 0));   # added cards share nothing
+    vec_push(sha2, _t_prof(0, 1, 2 * shg, 0));
     var sh_t2 = _t_sim_total(sha2, 0);
     assert_eq(sh_t2, 52 * shg, "sim shared: Apple + two 2 GiB cards = 52 GiB");
-    assert_eq(_t_sim_shards(sha2, 52 * shg, _t_sim_pool(sha2)), 3, "sim shared: 52 GiB spans GPU + both cards");
+    assert_eq(_sim_shards(sha2, 52 * shg, _t_sim_pool(sha2)), 3, "sim shared: 52 GiB spans GPU + both cards");
     assert_eq(48 * shg + 4 * shg >= 52 * shg, 1, "sim shared: the old loop 'held' it on GPU + NE");
     # With both on one accounting, `fits` and packing agree at the boundary.
-    assert_eq(_t_sim_shards(sha2, sh_t2, _t_sim_pool(sha2)) > 0, 1, "sim shared: need == total packs");
-    assert_eq(_t_sim_shards(sha2, sh_t2 + 1, _t_sim_pool(sha2)), 0, "sim shared: one byte over does not");
-    assert_eq(_t_sim_shards(shl, 24 * shg, _t_sim_pool(shl)), 2, "sim shared: laptop total packs iGPU + card");
+    assert_eq(_sim_shards(sha2, sh_t2, _t_sim_pool(sha2)) > 0, 1, "sim shared: need == total packs");
+    assert_eq(_sim_shards(sha2, sh_t2 + 1, _t_sim_pool(sha2)), 0, "sim shared: one byte over does not");
+    assert_eq(_sim_shards(shl, 24 * shg, _t_sim_pool(shl)), 2, "sim shared: laptop total packs iGPU + card");
+    # _t_sim_pool is the pool _sim_snapshot computes for itself: the snapshot's own shards_required agrees.
+    assert_eq(_t_json_int(_t_sim_json(sha, 70000000000, QUANT_INT4), "shards_required"), 1,
+      "sim shared: the snapshot packs 70B INT4 onto the Apple GPU");
+    assert_eq(_sim_shards(sha, s9_need70, _t_sim_pool(sha)), 1, "sim shared: ...as _sim_shards over the pool does");
+    assert_eq(_t_json_int(_t_sim_json(shl, 30000000000, QUANT_INT4), "shards_required"), 2,
+      "sim shared: the snapshot packs 18 GB onto the laptop's iGPU + card");
+    assert_eq(_sim_shards(shl, reg_estimate_memory(30000000000, QUANT_INT4), _t_sim_pool(shl)), 2,
+      "sim shared: ...as _sim_shards over the pool does");
 
     # Why _sim_profiles pins an added card's shared_mem to 0: marked shared, a
     # 24 GiB card would fold into the 48 GiB pool and add nothing.
     var sha3 = vec_new();
-    vec_push(sha3, _t_simdev(0, 1, 48 * shg, 48 * shg));
-    vec_push(sha3, _t_simdev(0, 1, 24 * shg, 0));
+    vec_push(sha3, _t_prof(0, 1, 48 * shg, 48 * shg));
+    vec_push(sha3, _t_prof(0, 1, 24 * shg, 0));
     assert_eq(_t_sim_total(sha3, 0), 72 * shg, "sim shared: an added card adds its memory");
-    store64(vec_get(sha3, 1) + 24, 24 * shg);
+    profile_set_shared_mem(vec_get(sha3, 1), 24 * shg);
     assert_eq(_t_sim_total(sha3, 0), 48 * shg, "sim shared: a shared added card would vanish");
 
     test_group("hardware_whole_number_inputs");
     # 2.6.13: _hw_whole_bounded and _hw_json_whole replace str_to_int and the raw
     # digit loop for model_params, model_params_m and add_devices' memory_bytes.
-    var wc = _T_SIM_MAX_DEVICE_BYTES;
+    var wc = SIM_MAX_DEVICE_BYTES;
     assert_eq(_t_whole("25769803776", wc), 25769803776, "whole: a 24 GiB card parses");
     assert_eq(_t_whole("72057594037927936", wc), wc, "whole: the cap itself is accepted");
     assert_eq(_t_whole("72057594037927937", wc), 0 - 2, "whole: one past the cap is out of range");
@@ -6293,19 +6181,25 @@ fn main() {
     test_group("hardware_planner_caps");
     # SIM_MAX_DEVICE_BYTES: 64 added cards at the cap total 2^62, which leaves 2^62
     # of headroom for the detected devices before the snapshot totals could wrap.
-    assert_eq(64 * _T_SIM_MAX_DEVICE_BYTES, 4611686018427387904, "caps: 64 cards at the cap = 2^62");
-    assert_eq(64 * _T_SIM_MAX_DEVICE_BYTES + 4611686018427387903 > 0, 1, "caps: + 2^62-1 more does not wrap");
+    assert_eq(64 * SIM_MAX_DEVICE_BYTES, 4611686018427387904, "caps: 64 cards at the cap = 2^62");
+    assert_eq(64 * SIM_MAX_DEVICE_BYTES + 4611686018427387903 > 0, 1, "caps: + 2^62-1 more does not wrap");
     # The old failure: two 9e18 cards parsed but summed to a negative total.
     assert_eq(9000000000000000000 + 9000000000000000000 < 0, 1, "caps: two 9e18 cards wrapped negative");
-    # HW_MAX_MODEL_PARAMS: the estimates stay exact at the cap...
-    assert_eq(_t_model_bytes_oh(_T_HW_MAX_MODEL_PARAMS, 32), 480000000000000, "caps: fp32 estimate at the cap");
-    assert_eq(_t_train_total_bytes(_T_HW_MAX_MODEL_PARAMS / 1000000), 1100209559961600,
-      "caps: training's largest total at the cap");
-    # ...and wrapped negative at the values that used to get through.
-    assert_eq(_t_model_bytes_oh(3000000000000000000, 16) < 0, 1, "caps: 3e18 fp16 estimate wrapped");
-    assert_eq(_t_train_base(9000000000000000) < 0, 1, "caps: 9e15 M params wrapped the training base");
-    # Training runs out near 8.4e8 M params; nine times the cap already wraps.
-    assert_eq(_t_train_total_bytes(900000000) < 0, 1, "caps: 9e8 M params wraps the training total");
+    # HW_MAX_MODEL_PARAMS, against ai-hwaccel's real estimators (2.9.9; the copies here were older versions). At the
+    # cap the estimates are exact.
+    assert_eq(reg_estimate_memory(HW_MAX_MODEL_PARAMS, QUANT_NONE), 480000000000000, "caps: fp32 estimate at the cap");
+    var tcap = estimate_training_memory(HW_MAX_MODEL_PARAMS / 1000000, TRAIN_DPO, TARGET_GPU);
+    assert_eq(est_total_x1000(tcap), 1956150000, "caps: training's largest total at the cap, GiB x1000");
+    assert_eq(_t_train_bytes(HW_MAX_MODEL_PARAMS / 1000000), 2100400069017600, "caps: ...in bytes");
+    # The placement estimate no longer wraps past the cap: ai-hwaccel saturates it. 3e18 at FP16 used to go negative.
+    assert_eq(reg_estimate_memory(3000000000000000000, QUANT_FP16), 7200000000000000000, "caps: 3e18 fp16 is exact");
+    assert_eq(reg_estimate_memory(9000000000000000000, QUANT_NONE), HW_I64_MAX, "caps: past i64 it saturates");
+    # Training still wraps, but far past the cap: GPU DPO/RLHF totals 10.5x its base (the AdamW optimizer alone is
+    # 7x), and the bytes stay exact to about 4.4e11 M params, over 4000 times the cap.
+    assert_eq(_t_train_bytes(400000000000) > 0, 1, "caps: training bytes exact at 4e11 M params");
+    assert_eq(_t_train_bytes(500000000000) < 0, 1, "caps: training bytes wrap by 5e11 M params");
+    assert_eq(est_total_x1000(estimate_training_memory(9000000000000000, TRAIN_DPO, TARGET_GPU)) < 0, 1,
+      "caps: 9e15 M params wraps the training base");
 
     test_group("hardware_requirement_snapshot");
     # 2.6.13: handle_hw_requirement_match takes the count and every profile from
@@ -6591,18 +6485,238 @@ fn main() {
     # Placement compared against TOTAL accelerator memory before 2.5.7, which
     # assumes an idle, exclusively-owned card. Available subtracts what devices
     # report in use, then the configured reserve.
-    assert_eq(_t_available_vram(24000, 0, 0), 24000, "vram: idle card, no reserve");
-    assert_eq(_t_available_vram(24000, 8000, 0), 16000, "vram: in-use subtracted");
-    assert_eq(_t_available_vram(24000, 8000, 4000), 12000, "vram: reserve subtracted too");
+    assert_eq(_t_vram(24000, 0, 0), 24000, "vram: idle card, no reserve");
+    assert_eq(_t_vram(24000, 8000, 0), 16000, "vram: in-use subtracted");
+    assert_eq(_t_vram(24000, 8000, 4000), 12000, "vram: reserve subtracted too");
     # A reserve larger than what is free floors at 0 rather than going negative
     # and reading as a huge unsigned budget.
-    assert_eq(_t_available_vram(24000, 20000, 8000), 0, "vram: over-reserved floors at 0");
-    assert_eq(_t_available_vram(0, 0, 1000), 0, "vram: no accelerator floors at 0");
+    assert_eq(_t_vram(24000, 20000, 8000), 0, "vram: over-reserved floors at 0");
+    assert_eq(_t_vram(0, 0, 1000), 0, "vram: no accelerator floors at 0");
     # The case the reserve exists for: fits the card, does not fit what is free.
     var need = 2400;
     assert_eq(need <= 24000, 1, "vram: model fits the card");
-    assert_eq(need <= _t_available_vram(24000, 20000, 2000), 0,
+    assert_eq(need <= _t_vram(24000, 20000, 2000), 0,
       "vram: same model does NOT fit available -> overcommit prevented");
+
+    # ── 2.9.9: router.cyr for real — health, order, local-only, hardware-aware ──
+    test_group("router_health");
+    # A depooled route is skipped while a healthy one can serve; the copy this replaced had no health filter.
+    var rh1 = route_new(PROV_OLLAMA, 1, "http://rh-1");
+    var rh2 = route_new(PROV_LLAMACPP, 2, "http://rh-2");
+    var rh3 = route_new(PROV_VLLM, 3, "http://rh-3");
+    var rhs = alloc(24);
+    store64(rhs, rh1);
+    store64(rhs + 8, rh2);
+    store64(rhs + 16, rh3);
+    var rhrt = router_new(rhs, 3, STRAT_PRIORITY);
+    store64(route_health(rh1) + HEALTH_OK, 0);
+    assert_eq(router_select(rhrt, "m"), rh2, "health: an unhealthy first choice is skipped");
+    # Every candidate down: serve the unfiltered set in priority order rather than 404 every request.
+    store64(route_health(rh2) + HEALTH_OK, 0);
+    store64(route_health(rh3) + HEALTH_OK, 0);
+    assert_eq(router_select(rhrt, "m"), rh1, "health: all down, priority order ignores health");
+    # A disabled route stays out even then.
+    route_set_enabled(rh1, 0);
+    assert_eq(router_select(rhrt, "m"), rh2, "health: all down still skips a disabled route");
+    route_set_enabled(rh1, 1);
+    # Round robin rotates over the healthy routes only.
+    store64(route_health(rh1) + HEALTH_OK, 1);
+    store64(route_health(rh3) + HEALTH_OK, 1);
+    var rhrr = router_new(rhs, 3, STRAT_ROUND_ROBIN);
+    var rh_a = router_select(rhrr, "m");
+    var rh_b = router_select(rhrr, "m");
+    var rh_c = router_select(rhrr, "m");
+    assert_eq(rh_a != rh2 && rh_b != rh2 && rh_c != rh2, 1, "health: round robin never picks the unhealthy route");
+    assert_eq(rh_a != rh_b && rh_a == rh_c, 1, "health: round robin alternates the two healthy routes");
+
+    test_group("router_sort");
+    # router_new sorts the routes by priority, keeping the given order among equals.
+    var rs3 = route_new(PROV_OLLAMA, 3, "http://rs-3");
+    var rs1 = route_new(PROV_LLAMACPP, 1, "http://rs-1");
+    var rs2 = route_new(PROV_VLLM, 2, "http://rs-2");
+    var rs1b = route_new(PROV_LOCALAI, 1, "http://rs-1b");
+    var rss = alloc(32);
+    store64(rss, rs3);
+    store64(rss + 8, rs1);
+    store64(rss + 16, rs2);
+    store64(rss + 24, rs1b);
+    var rsrt = router_new(rss, 4, STRAT_PRIORITY);
+    assert_eq(load64(rss) == rs1 && load64(rss + 8) == rs1b, 1, "sort: priority 1 first, in the given order");
+    assert_eq(load64(rss + 16) == rs2 && load64(rss + 24) == rs3, 1, "sort: then 2, then 3");
+    assert_eq(router_select(rsrt, "m"), rs1, "sort: priority selection takes the lowest number");
+
+    test_group("router_select_local");
+    # DLP-confidential content stays on local backends: remote routes are never candidates.
+    var rlr = route_new(PROV_OPENAI, 1, "https://rl-remote");
+    var rl1 = route_new(PROV_OLLAMA, 2, "http://rl-1");
+    var rl2 = route_new(PROV_LLAMACPP, 3, "http://rl-2");
+    var rls = alloc(24);
+    store64(rls, rlr);
+    store64(rls + 8, rl1);
+    store64(rls + 16, rl2);
+    var rlrt = router_new(rls, 3, STRAT_PRIORITY);
+    assert_eq(router_select(rlrt, "m"), rlr, "local: the plain pick is the remote route");
+    assert_eq(router_select_local(rlrt, "m"), rl1, "local: the local pick is the first local route");
+    route_set_enabled(rl1, 0);
+    assert_eq(router_select_local(rlrt, "m"), rl2, "local: a disabled local route is skipped");
+    route_set_enabled(rl2, 0);
+    assert_eq(router_select_local(rlrt, "m"), 0, "local: no local route, no answer (never the remote)");
+    route_set_enabled(rl1, 1);
+    route_set_enabled(rl2, 1);
+    var rlrr = router_new(rls, 3, STRAT_ROUND_ROBIN);
+    var rlx_a = router_select_local(rlrr, "m");
+    var rlx_b = router_select_local(rlrr, "m");
+    assert_eq(rlx_a != rlx_b && rlx_a != rlr && rlx_b != rlr, 1, "local: round robin over the local routes");
+
+    test_group("router_select_hw");
+    # A model that does not fit the free VRAM goes to a remote route when one can serve it.
+    var rwl = route_new(PROV_OLLAMA, 1, "http://rw-local");
+    var rwr = route_new(PROV_OPENAI, 2, "https://rw-remote");
+    var rws = alloc(16);
+    store64(rws, rwl);
+    store64(rws + 8, rwr);
+    var rwrt = router_new(rws, 2, STRAT_PRIORITY);
+    assert_eq(router_select_hw(rwrt, "m", 70000000000), rwl, "hw route: no hardware detected, plain priority");
+    var rw_devs = vec_new();
+    vec_push(rw_devs, profile_cpu(68719476736));
+    vec_push(rw_devs, profile_cuda(0, 8589934592));
+    _hw_registry = registry_from_profiles(rw_devs);
+    assert_eq(router_select_hw(rwrt, "m", 0), rwl, "hw route: unknown model size, plain priority");
+    assert_eq(router_select_hw(rwrt, "m", 1000000000), rwl, "hw route: a 1B model fits 8 GiB, stays local");
+    assert_eq(router_select_hw(rwrt, "m", 70000000000), rwr, "hw route: 70B does not fit, goes remote");
+    # It is the FREE VRAM that counts: a 7 GiB reserve leaves 1 GiB, and the 1B model (2.4 GB) goes remote too.
+    hardware_configure(7516192768, 0 - 1, 0 - 1);
+    assert_eq(router_select_hw(rwrt, "m", 1000000000), rwr, "hw route: the reserve is honoured");
+    hardware_configure(0, 0 - 1, 0 - 1);
+    # No healthy remote can serve it: try the local backend rather than refuse.
+    store64(route_health(rwr) + HEALTH_OK, 0);
+    assert_eq(router_select_hw(rwrt, "m", 70000000000), rwl, "hw route: remote unhealthy, falls back to local");
+    store64(route_health(rwr) + HEALTH_OK, 1);
+    var rwpat = alloc(8);
+    store64(rwpat, "gpt-*");
+    route_set_patterns(rwr, rwpat, 1);
+    assert_eq(router_select_hw(rwrt, "llama-70b", 70000000000), rwl,
+      "hw route: no remote serves this model, falls back to local");
+    # Among remotes the strategy still applies.
+    var rwr2 = route_new(PROV_ANTHROPIC, 3, "https://rw-remote-2");
+    var rwr3 = route_new(PROV_GROQ, 4, "https://rw-remote-3");
+    var rws2 = alloc(24);
+    store64(rws2, rwl);
+    store64(rws2 + 8, rwr2);
+    store64(rws2 + 16, rwr3);
+    var rwrr = router_new(rws2, 3, STRAT_ROUND_ROBIN);
+    var rw_a = router_select_hw(rwrr, "m", 70000000000);
+    var rw_b = router_select_hw(rwrr, "m", 70000000000);
+    assert_eq(rw_a != rw_b && rw_a != rwl && rw_b != rwl, 1, "hw route: round robin over the remote routes");
+    _hw_registry = 0;
+
+    # ── 2.9.9: hardware.cyr for real — no hardware, a synthetic host, refresh, data files ──
+    test_group("hardware_real");
+    assert_eq(hw_ready(), 0, "hw: not ready before detection");
+    assert_eq(hw_device_count(), 0, "hw: no devices before detection");
+    assert_eq(hw_suggest_quant(70000000000), QUANT_INT4, "hw: with nothing detected, suggest INT4");
+    assert_eq(hw_plan(70000000000, QUANT_INT4), 0, "hw: no plan without hardware");
+    assert_eq(hw_available_vram(), 0, "hw: no VRAM without hardware");
+    assert_eq(hw_has_fast_interconnect(), 0, "hw: no interconnect without hardware");
+    assert_streq(_t_hw_json(0), "{\"detected\":false}", "hw: summary says not detected");
+    assert_streq(_t_hw_json(1), "[]", "hw: telemetry is an empty list");
+    var hrsb = str_builder_new();
+    hw_placement_json(hrsb, 70000000000, 0);
+    assert_streq(str_data(str_builder_build(hrsb)), "{\"error\":\"no hardware detected\"}", "hw: placement says why");
+    # A host with a 24 GiB card reporting telemetry, a 16 GiB card reporting none, and 64 GiB of RAM.
+    var hr_big = profile_cuda(0, 25769803776);
+    profile_set_mem_used(hr_big, 8589934592);
+    profile_set_mem_free(hr_big, 17179869184);
+    profile_set_gpu_util(hr_big, 37);
+    profile_set_temp_c(hr_big, 61);
+    var hr_devs = vec_new();
+    vec_push(hr_devs, profile_cpu(68719476736));
+    vec_push(hr_devs, hr_big);
+    vec_push(hr_devs, profile_cuda(1, 17179869184));
+    _hw_registry = registry_from_profiles(hr_devs);
+    assert_eq(hw_ready(), 1, "hw: ready once a registry is in");
+    assert_eq(hw_device_count(), 3, "hw: three devices, the CPU included");
+    assert_eq(hw_gpu_count(), 2, "hw: two GPUs");
+    assert_eq(hw_accel_memory(), 42949672960, "hw: 40 GiB of accelerator memory");
+    assert_eq(hw_available_vram(), 42949672960 - 8589934592, "hw: free VRAM is total minus the reported use");
+    var hr_sum = _t_hw_json(0);
+    var hr_sl = strlen(hr_sum);
+    assert_eq(_t_has(hr_sum, hr_sl,
+        "{\"detected\":true,\"devices\":3,\"accelerators\":2,\"accel_memory_bytes\":42949672960,"),
+      1, "hw: summary counts");
+    assert_eq(_t_has(hr_sum, hr_sl,
+        "\"best_device\":{\"type\":\"CUDA GPU\",\"family\":\"GPU\",\"memory_bytes\":25769803776}"),
+      1, "hw: the best device is the first of the top-ranked kind");
+    assert_eq(_t_has(hr_sum, hr_sl,
+        "{\"type\":\"CPU\",\"family\":\"CPU\",\"memory_bytes\":68719476736,\"available\":true}"),
+      1, "hw: the CPU is listed among the profiles");
+    var hr_tel = _t_hw_json(1);
+    var hr_tl = strlen(hr_tel);
+    assert_eq(_t_has(hr_tel, hr_tl, "\"device\":\"CPU\""), 0, "hw: telemetry leaves out the CPU");
+    assert_eq(_t_has(hr_tel, hr_tl,
+        "{\"device\":\"CUDA GPU\",\"device_id\":0,\"memory_bytes\":25769803776,\"memory_used_bytes\":8589934592,"),
+      1, "hw: telemetry for the reporting card");
+    assert_eq(_t_has(hr_tel, hr_tl,
+        "\"memory_free_bytes\":17179869184,\"utilization_percent\":37,\"temperature_c\":61}"), 1,
+      "hw: ...its free memory, utilization and temperature");
+    assert_eq(_t_has(hr_tel, hr_tl,
+        "\"memory_used_bytes\":null,\"memory_free_bytes\":null,\"utilization_percent\":null,\"temperature_c\":null}"),
+      1, "hw: null for everything the other card did not report");
+    # Placement: a 1B model fits what is free and needs no cloud; 70B does not, and gets cloud alternatives.
+    hrsb = str_builder_new();
+    hw_placement_json(hrsb, 1000000000, 0);
+    var hr_pl = str_data(str_builder_build(hrsb));
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"fits_available\":true"), 1, "hw: 1B fits the free VRAM");
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"cloud_alternatives\":[]}"), 1, "hw: ...so no cloud alternatives");
+    assert_eq(_t_json_int(hr_pl, "available_vram_bytes"), 42949672960 - 8589934592, "hw: placement's free VRAM");
+    hrsb = str_builder_new();
+    hw_placement_json(hrsb, 70000000000, QUANT_FP16);
+    hr_pl = str_data(str_builder_build(hrsb));
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"quantization\":\"FP16\""), 1, "hw: the asked quantization is kept");
+    assert_eq(_t_json_int(hr_pl, "memory_required_bytes"), 168000000000, "hw: 70B at FP16 needs 168 GB");
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"fits_single_device\":false"), 1, "hw: not on one card");
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"fits_available\":false"), 1, "hw: not in the free VRAM");
+    assert_eq(_t_has(hr_pl, strlen(hr_pl), "\"cloud_alternatives\":[{\"name\":"), 1,
+      "hw: cloud alternatives listed when it does not fit");
+    # An unavailable card is listed as such and is not capacity.
+    var hr_dead = profile_cuda(2, 85899345920);
+    profile_set_available(hr_dead, 0);
+    vec_push(hr_devs, hr_dead);
+    _hw_registry = registry_from_profiles(hr_devs);
+    assert_eq(hw_accel_memory(), 42949672960, "hw: an unavailable 80 GiB card adds nothing");
+    hr_sum = _t_hw_json(0);
+    assert_eq(_t_has(hr_sum, strlen(hr_sum), "\"memory_bytes\":85899345920,\"available\":false}"), 1,
+      "hw: ...and is listed as unavailable");
+    # A refresh inside cache_ttl_secs does not re-probe (detection shells out to nvidia-smi and friends). The lock
+    # is the one hw_init creates at startup, before any refresh can run.
+    if (_hw_lock == 0) { _hw_lock = mutex_new(); }
+    var hr_reg = _hw_registry;
+    _hw_last_detect_ms = clock_now_ms();
+    assert_eq(hw_refresh(), 0, "hw: a refresh inside the TTL is skipped");
+    assert_eq(_hw_registry, hr_reg, "hw: ...and keeps the registry");
+    assert_eq(hw_refresh_start(), 0, "hw: no refresh thread when refresh_interval_secs is 0");
+    _hw_registry = 0;
+    # [hardware] settings: a negative value leaves a setting alone.
+    hardware_configure(4096, 30, 60);
+    assert_eq(hardware_reserve_bytes() == 4096 && hardware_refresh_interval() == 30 && hardware_cache_ttl() == 60, 1,
+      "hw: configure sets all three");
+    hardware_configure(0 - 1, 0 - 1, 0 - 1);
+    assert_eq(hardware_reserve_bytes() == 4096 && hardware_refresh_interval() == 30 && hardware_cache_ttl() == 60, 1,
+      "hw: negative values keep them");
+    hardware_configure(0, 0, 300);
+    # The data files: found in the working directory, missing (both counted) under a directory without data/.
+    assert_eq(hw_check_data_files(), 0, "hw: both data files found from the repo root");
+    hardware_configure_data_dir("/nonexistent-hoosh-test-dir");
+    assert_eq(hw_check_data_files(), 2, "hw: both reported missing under a directory without data/");
+    hardware_configure_data_dir(0);
+    assert_eq(hw_check_data_files(), 0, "hw: unsetting data_dir goes back to the working directory");
+    # Model size from a name, for routing without a size in the request.
+    assert_eq(_hoosh_parse_model_params("llama-70b"), 70000000000, "hw: llama-70b is 70B");
+    assert_eq(_hoosh_parse_model_params("Mistral-7B-Instruct"), 7000000000, "hw: an upper-case B");
+    assert_eq(_hoosh_parse_model_params("llama3.1:405b"), 405000000000, "hw: 405B after a tag colon");
+    assert_eq(_hoosh_parse_model_params("gpt-4o"), 0, "hw: no size in the name is unknown");
+    assert_eq(_hoosh_parse_model_params("bert-base"), 0, "hw: a b that starts a word is not a size");
+    assert_eq(_hoosh_parse_model_params("model-10000b"), 0, "hw: an implausible size is unknown");
 
     test_group("compact_system_detect_whitespace");
     # The pre-2.5.7 detector was the compact literal `"role":"system"`. Virtually

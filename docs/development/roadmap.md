@@ -8,8 +8,8 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.8 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.8 put
-thirteen modules under test for real (twelve replaced mirrors; `events.cyr` had no tests). See the CHANGELOG.
+**Current**: v2.9.9 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.9 put
+fifteen modules under test for real (fourteen replaced mirrors; `events.cyr` had no tests). See the CHANGELOG.
 **Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
@@ -22,8 +22,8 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response-cache key, the router pickers, the health state machine, batch, the OTLP helpers, the config pickers,
-    the pool ring, `main.cyr`'s flag parser and hardware. A mirror can drift from `src/`
+    response-cache key, the health state machine, batch, the OTLP helpers, the config pickers, the pool ring,
+    `main.cyr`'s flag parser, and the handlers' parsers. A mirror can drift from `src/`
     while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit chain-link verification).
     2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
     way) and 2.9.4 six (the compression scans' old escape check and return shape, pre-model semantic entries, a
@@ -32,14 +32,20 @@ The bands are a plan, not a promise. Every item was checked against the code and
     `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
     `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
     (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7); `http_client.cyr` and `events.cyr`, with
-    the majra bundle (2.9.8). `scripts/coverage.sh` prints the current list: 23 of 37 modules.
-  - **Next candidates**, from a dependency scan in 2.9.8 (modules that need no hoosh module the tests lack):
-    - `hardware.cyr`, with the vendored ai-hwaccel bundle (`lib/ai-hwaccel.cyr`) included too;
-    - then `router.cyr`, which needs only `hardware.cyr`.
-  - **Blocked until split or until their dependencies are in:** `provider.cyr` (router, otlp); `health.cyr` and
-    `retry.cyr` (only provider); `budget.cyr` / `storage.cyr` / `audit.cyr` (each other); `pool.cyr` /
-    `batch.cyr` / `otlp.cyr` / `catalog_fetch.cyr` (each other and provider); and `config.cyr` / `handlers.cyr`,
-    which reach nearly everything. Their helpers move into includable modules one at
+    the majra bundle (2.9.8); `hardware.cyr`, with the ai-hwaccel bundle, and `router.cyr` (2.9.9).
+    `scripts/coverage.sh` prints the current list: 25 of 37 modules.
+  - **Every module left is in a dependency cycle** (scan of 2.9.9), so each needs a split first. The symbols that
+    close each cycle:
+    - `health.cyr` needs only `route_is_remote` from `provider.cyr`. That is a route predicate, so moving it into
+      `route.cyr` frees `health.cyr` and retires the health state-machine mirror. **The smallest next step.**
+    - `retry.cyr` needs `provider_forward` / `provider_forward_stream`, so it waits on `provider.cyr`.
+    - `provider.cyr` needs only `otlp_enqueue_inference_span`. `otlp.cyr` needs `provider.cyr`'s `_remote_arena`
+      and `pool.cyr`'s `wq_push` / `job_otlp_export`, and `pool.cyr` reaches `batch`, `catalog_fetch` and
+      `handlers`. A span hook set by `main.cyr`, or splitting the enqueue out of `otlp.cyr`, would free
+      `provider.cyr`, the largest mirror left (27 same-name copies).
+    - `budget.cyr` / `storage.cyr` / `audit.cyr`: `storage_budget_set`, `budget_get_pool`, `storage_audit_insert`
+      and `AUDIT_ENTRY_SIZE`.
+    - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
     a time (the `urlparse.cyr` split), or wait for the modules above.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
