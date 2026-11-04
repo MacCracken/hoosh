@@ -5,6 +5,107 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.13] — 2026-11-04
+
+**Fixed: SIGTERM is no longer ignored after a config reload.** Two audit-persistence bugs are fixed too, and
+`budget.cyr` and `storage.cyr` now run for real in the tests. **1424 assertions** in 157 groups. All gates are
+clean: fmt, lint, vet, deny, coverage (382/686, 55%; **29 of 37** modules included for real), the security scan,
+the four fuzz targets, and the new shutdown smoke test.
+
+### Fixed — a reloaded gateway could ignore SIGTERM
+
+- **How it was found:** a test gateway from earlier in the release work was still running eleven hours after its
+  25-second `timeout`. A plain `kill` did not stop it either.
+- **Reproduced:** start with `-p 18131` and a config naming `port = 8088`, `POST /v1/admin/reload`, then SIGTERM. The
+  log says "shutdown requested, draining" and the process keeps running. Without the reload it exits at once.
+- **The cause:**
+  1. A reload re-ran the `[server]` section and set `_http_port` to the config's 8088. The listener stayed on 18131.
+  2. On SIGTERM, `_sig_thread` set the shutdown flag and woke the blocked `accept()` by connecting to
+     `127.0.0.1:_http_port`, which reached nothing. The accept loop never woke.
+  3. `_sig_thread` had already returned, so every later SIGINT/SIGTERM was blocked with no reader. Only SIGKILL
+     stopped the process. A service manager's stop would hang until it escalated.
+- **The fix, three parts, each enough by itself:**
+  - `cmd_serve` records the listener as actually bound, and `_sig_thread` calls `shutdown()` on it. That wakes a
+    blocked `accept()` on Linux whatever address it is bound to.
+  - The wake-up connect stays as a fallback, aimed at the bound address and port (loopback for `0.0.0.0`).
+  - A reload no longer rewrites `[server] bind` and `port`, which only take effect at startup.
+- **Also:** `_sig_thread` keeps reading after the first signal. A second SIGINT/SIGTERM during the drain now exits
+  at once. This path is not exercised by a live test: a half-sent request does not hold the drain, and I could not
+  make the drain hang from outside.
+
+### Added — `scripts/shutdown-smoke.sh`, run in CI
+
+`main.cyr` cannot be linked into the unit tests, so the script runs the real binary. It covers three cases:
+- a plain SIGTERM;
+- SIGTERM after a reload to a config naming another port;
+- SIGTERM on a `0.0.0.0` listener.
+
+Each case must exit by itself within 8 s and log "shutdown: complete". `timeout -k` stands behind every process,
+so a regression fails the script instead of leaving a gateway behind. CI runs it after the build ("Shutdown smoke").
+
+**Checked against real builds:**
+- 2.9.12 fails the reload case, still running 8 s after SIGTERM, and 2.9.13 passes all three.
+- Removing any one of the three parts still passes.
+- Removing all three fails.
+
+Shutdown broke once before, in 2.5.11, with no test noticing.
+
+### Fixed — two audit-persistence bugs, found with a real patra database
+
+- **A restored chain never shrank to `max_entries`.**
+  - **The bug:** `storage_restore_audit` loads every stored row, and `audit_record` evicts one entry per new
+    record, so memory was bounded by the table, not by the setting.
+  - **The fix:** the restore now keeps the newest `max_entries` and sets the chain's anchor (2.9.12) to the last
+    dropped entry's hash, so the trimmed chain verifies.
+- **An entry with no provider or model failed verification after a restart.**
+  - **The bug:** the entry hash adds `":provider"` only when the provider is not 0. patra has no NULL, so a 0 was
+    written as `""` and read back as `""`, and the recomputed hash no longer matched.
+  - **The fix:** a 0 provider or model is now written as a one-byte marker (`\x01`, which no provider or model name
+    contains) and read back as 0.
+  - **What stays the same:** `""` still round-trips as `""`, so chains already stored with an empty model, such as
+    `admin.costs_reset`'s, keep verifying. Rows written before 2.9.13 with a 0 still restore as `""`, as they did.
+
+### Changed — `budget.cyr` and `storage.cyr` are included for real
+
+`tests/hoosh.tcyr` includes `budget.cyr`, `audit.cyr` and `storage.cyr` in `src/main.cyr`'s order. 2.9.12's stand-in
+for `storage_audit_insert` is gone.
+
+**The budget copy is gone too,** including four functions `src/` does not have:
+- `pool_can_reserve`, `pool_release`, `budget_check` and `budget_report`;
+- the handlers release with `pool_commit(p, n, 0)` and check with `pool_available`, and the tests now do the same;
+- the four field readers stay as readers of the real struct.
+
+**New tests:**
+- **`storage_roundtrip`,** on a real patra database in `/tmp`, removed afterwards:
+  - three audit entries written through and restored: they verify, ids continue, and a new record extends the
+    chain;
+  - a smaller `max_entries` trims to the newest rows and still verifies;
+  - a 0 and a `""` provider each come back as written;
+  - a pool's used count is persisted as one row per pool and restored.
+- **`token_pool`:** an overspent pool reports 0 available, not a negative number.
+
+### Mutation-checked
+
+| mutant | result |
+|---|---|
+| `pool_reserve` accepting a negative amount; `pool_available` without its floor at 0 | 3 and 1 fail |
+| `pool_commit` not releasing the reservation, or not persisting | 5 and 2 fail |
+| `budget_reserve` on a missing pool | crashes |
+| restore without the trim, or trimming without setting the anchor | 2 and 1 fail |
+| the none marker not written, or not read back | 2 fail each |
+| the restore not continuing the ids; a budget write keeping the old row; a restore not applying `used` | 1 fails each |
+
+**The first-round survivor:** the `pool_available` floor survived, because no test overspent a pool. The overspend
+assertion above catches it now. Every mutant is caught.
+
+### Notes
+
+- The test file is 6,693 lines (was 6,712). Symbol coverage is 382 of 686; the storage marker added two functions.
+- **Benchmarks:** the bench file is unchanged, and its binary differs from 2.9.12's only in the version digit. At
+  load 1.45 the 25 rows' median move against 2.9.12 is 0.0%. All are within −5% and +6%, except
+  `work_queue_push_pop` at 10 → 9 ns, a one-nanosecond rounding step.
+- **Next:** the `provider.cyr` / `otlp.cyr` split. It is the largest mirror left, and `retry.cyr` follows it.
+
 ## [2.9.12] — 2026-11-04
 
 **Fixed: an audit chain past `max_entries` no longer reports itself as tampered.** The bug turned up when the tests

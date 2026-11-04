@@ -369,6 +369,9 @@ fn cmd_serve(port) {
 
     var lr_t, lr_v = sock_listen(sfd, 128);
     if (is_err_result(lr_t) == 1) { println("error: failed to listen"); return 1; }
+    _listen_fd = sfd;
+    _listen_addr = _http_bind;
+    _listen_port = _http_port;
 
     # Ignore SIGPIPE (2.4.13): hoosh runs its OWN accept loop and writes SSE chunks with bare `sys_write`
     # (MSG_NOSIGNAL-less), so a client that disconnects MID-STREAM — e.g. thoth's Esc-interrupt aborting a streaming
@@ -875,6 +878,16 @@ fn cmd_help() {
 var _shutdown = 0;
 var _sigfd = 0 - 1;
 
+# The listener as actually bound (2.9.13): set once by cmd_serve, read by _sig_thread to wake the accept loop.
+# _http_port / _http_bind are the configured values, and a config reload rewrote them (config.cyr) while the
+# socket stayed where it was. _sig_thread's wake-up connect went to 127.0.0.1:_http_port, so after a reload to a
+# config whose port differed from the listener's (`-p 18104` with `port = 8088`), SIGTERM logged "shutdown
+# requested", the connect reached nothing, accept() never woke, and the thread had already returned: every later
+# SIGINT/SIGTERM sat blocked with no reader, and only SIGKILL stopped the gateway.
+var _listen_fd = 0 - 1;
+var _listen_addr = 0;
+var _listen_port = 0;
+
 # How long to let queued work finish after the listener closes. Long enough for
 # an in-flight inference to answer, short enough that Ctrl-C still feels prompt.
 var SHUTDOWN_DRAIN_MS = 5000;
@@ -900,17 +913,26 @@ fn _sig_thread(arg) {
                 hlog_warn("signal: config reload failed, keeping the running config");
             }
         } else {
+            if (_shutdown == 1) {
+                # 2.9.13: a second SIGINT/SIGTERM while the first is draining stops the process at once. The
+                # thread used to return after the first signal, so a second one was blocked with no reader.
+                hlog_warn("signal: second shutdown signal, exiting without waiting for the drain");
+                sys_exit_group(1);
+            }
             hlog_info("signal: shutdown requested, draining");
             _shutdown = 1;
-            # Nudge the accept loop out of its blocking accept() by connecting to
-            # ourselves; it re-checks _shutdown on wake.
+            # Wake the accept loop out of its blocking accept(); it re-checks _shutdown on wake. shutdown() on the
+            # listening socket does that on Linux whatever address it is bound to. The self-connect stays as a
+            # fallback, aimed at the address and port the listener actually bound (loopback for INADDR_ANY).
+            if (_listen_fd >= 0) { sock_shutdown(_listen_fd, 2); }
+            var wake_addr = _listen_addr;
+            if (wake_addr == 0) { wake_addr = 0x0100007F; }
             var sfd_r_t, sfd_r_v = tcp_socket();
             if (is_ok(sfd_r_t) == 1) {
                 var s = sfd_r_v;
-                net_connect_nb(s, 0x0100007F, _http_port, 500);
+                net_connect_nb(s, wake_addr, _listen_port, 500);
                 sock_close(s);
             }
-            return 0;
         }
     }
     return 0;

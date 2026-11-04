@@ -83,10 +83,13 @@ include "src/lib/router.cyr"
 include "src/lib/health.cyr"
 var _router = 0;
 # 2.9.12: the HMAC-linked audit chain, for real. It replaced inline chains that hashed only the message and checked
-# links with their own loop. audit.cyr writes each entry through to storage.cyr, which cannot be included yet
-# (storage and audit need each other); with persistence off that call does nothing, and this stand-in does the same.
-fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev, ehash) { return 0; }
+# links with their own loop.
+# 2.9.13: token budgets and persistence, for real, in src/main.cyr's order. budget.cyr replaced a copy with four
+# functions src does not have; storage.cyr replaced 2.9.12's stand-in for its audit write-through. Persistence is
+# off (_storage = 0) except inside the storage_roundtrip group, which opens a real patra database in /tmp.
+include "src/lib/budget.cyr"
 include "src/lib/audit.cyr"
+include "src/lib/storage.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -1910,115 +1913,15 @@ fn _gemini_url_stream(base, model, key) {
 }
 
 # ================================================================
-# Token pool
-# Layout: name(8) capacity(8) used(8) reserved(8)
-# Total: 32 bytes
+# Token pools and budgets: budget.cyr's own (2.9.13, included at the top). These readers only read its struct. The
+# copy that stood here also had pool_can_reserve, pool_release, budget_check and budget_report, which src does not:
+# the handlers release with pool_commit(p, n, 0) and check with pool_available, and the tests now do the same.
 # ================================================================
-
-enum PoolField {
-    POOL_SIZE     = 32;
-    POOL_NAME     = 0;
-    POOL_CAPACITY = 8;
-    POOL_USED     = 16;
-    POOL_RESERVED = 24;
-}
-
-fn pool_new(name, capacity) {
-    var p = alloc(POOL_SIZE);
-    store64(p + POOL_NAME, name);
-    store64(p + POOL_CAPACITY, capacity);
-    store64(p + POOL_USED, 0);
-    store64(p + POOL_RESERVED, 0);
-    return p;
-}
 
 fn pool_name(p) { return load64(p + POOL_NAME); }
 fn pool_capacity(p) { return load64(p + POOL_CAPACITY); }
 fn pool_used(p) { return load64(p + POOL_USED); }
 fn pool_reserved(p) { return load64(p + POOL_RESERVED); }
-
-fn pool_available(p) {
-    var cap = load64(p + POOL_CAPACITY);
-    var used = load64(p + POOL_USED);
-    var resv = load64(p + POOL_RESERVED);
-    var taken = used + resv;
-    if (taken > cap) { return 0; }
-    return cap - taken;
-}
-
-fn pool_can_reserve(p, tokens) {
-    if (pool_available(p) >= tokens) { return 1; }
-    return 0;
-}
-
-fn pool_reserve(p, tokens) {
-    # Mirrors src/lib/budget.cyr (2.6.7 negative clamp).
-    if (tokens < 0) { return 0; }
-    if (pool_can_reserve(p, tokens) == 0) { return 0; }
-    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
-    return 1;
-}
-
-fn pool_commit(p, reserved, actual) {
-    # Mirrors src/lib/budget.cyr (2.6.7 negative clamp). The src version also
-    # calls storage_budget_set, which this harness does not link.
-    if (reserved < 0) { reserved = 0; }
-    if (actual < 0) { actual = 0; }
-    var resv = load64(p + POOL_RESERVED);
-    if (resv >= reserved) {
-        store64(p + POOL_RESERVED, resv - reserved);
-    } else {
-        store64(p + POOL_RESERVED, 0);
-    }
-    var used = load64(p + POOL_USED) + actual;
-    if (used < 0) { used = 0; }
-    store64(p + POOL_USED, used);
-    return 0;
-}
-
-fn pool_release(p, tokens) {
-    var resv = load64(p + POOL_RESERVED);
-    if (resv >= tokens) {
-        store64(p + POOL_RESERVED, resv - tokens);
-    } else {
-        store64(p + POOL_RESERVED, 0);
-    }
-    return 0;
-}
-
-# ================================================================
-# Token budget — hashmap of pools by name
-# ================================================================
-
-fn budget_new() { return map_new(); }
-
-fn budget_add_pool(bgt, p) {
-    map_set(bgt, pool_name(p), p);
-    return 0;
-}
-
-fn budget_get_pool(bgt, name) {
-    return map_get(bgt, name);
-}
-
-fn budget_check(bgt, name, tokens) {
-    var p = map_get(bgt, name);
-    if (p == 0) { return 0; }
-    return pool_can_reserve(p, tokens);
-}
-
-fn budget_reserve(bgt, name, tokens) {
-    var p = map_get(bgt, name);
-    if (p == 0) { return 0; }
-    return pool_reserve(p, tokens);
-}
-
-fn budget_report(bgt, name, reserved, actual) {
-    var p = map_get(bgt, name);
-    if (p == 0) { return 0; }
-    pool_commit(p, reserved, actual);
-    return 0;
-}
 
 # ================================================================
 # Response cache: cache.cyr's own (2.9.7, included at the top). These readers only read its struct.
@@ -3234,19 +3137,27 @@ fn main() {
     assert_eq(pool_used(tp), 350, "pool used after commit");
     assert_eq(pool_reserved(tp), 0, "pool reserved after commit");
     assert_eq(pool_available(tp), 650, "pool available after commit");
+    # A completion can use more than was reserved, so used can pass capacity: available floors at 0 rather than
+    # going negative (GET /v1/tokens/pools reports it).
+    var ovp = pool_new("over", 1000);
+    pool_reserve(ovp, 900);
+    pool_commit(ovp, 900, 1200);
+    assert_eq(pool_used(ovp), 1200, "pool: an overspend is recorded in full");
+    assert_eq(pool_available(ovp), 0, "pool: available floors at 0 once used passes capacity");
 
     # ── Token pool over budget ────────────────────────────────────
     test_group("token_pool_over_budget");
 
     var op = pool_new("small", 100);
-    assert(pool_can_reserve(op, 200) == 0, "cannot reserve over capacity");
+    assert(pool_reserve(op, 200) == 0, "cannot reserve over capacity");
+    assert_eq(pool_reserved(op), 0, "a refused reserve takes nothing");
 
     # ── Token pool release ────────────────────────────────────────
     test_group("token_pool_release");
 
     var rp = pool_new("release", 1000);
     pool_reserve(rp, 500);
-    pool_release(rp, 500);
+    pool_commit(rp, 500, 0);   # a release is a commit of nothing, as the handlers do it
     assert_eq(pool_reserved(rp), 0, "reserved 0 after release");
     assert_eq(pool_available(rp), 1000, "available restored after release");
 
@@ -3256,9 +3167,10 @@ fn main() {
     var bgt = budget_new();
     budget_add_pool(bgt, pool_new("default", 10000));
     budget_add_pool(bgt, pool_new("agent-1", 5000));
-    assert(budget_check(bgt, "default", 8000) == 1, "default can reserve 8k");
-    assert(budget_check(bgt, "agent-1", 8000) == 0, "agent-1 cannot reserve 8k");
-    assert(budget_check(bgt, "nonexistent", 1) == 0, "nonexistent pool fails");
+    assert(pool_available(budget_get_pool(bgt, "default")) >= 8000, "default can reserve 8k");
+    assert(pool_available(budget_get_pool(bgt, "agent-1")) < 8000, "agent-1 cannot reserve 8k");
+    assert_eq(budget_get_pool(bgt, "nonexistent"), 0, "nonexistent pool fails");
+    assert_eq(budget_reserve(bgt, "nonexistent", 1), 0, "reserving from a nonexistent pool fails");
 
     # ── Budget reserve + report ───────────────────────────────────
     test_group("budget_reserve_report");
@@ -3266,10 +3178,79 @@ fn main() {
     var bgt2 = budget_new();
     budget_add_pool(bgt2, pool_new("pool", 1000));
     assert(budget_reserve(bgt2, "pool", 500) == 1, "budget reserve 500");
-    budget_report(bgt2, "pool", 500, 420);
+    pool_commit(budget_get_pool(bgt2, "pool"), 500, 420);
     var bp = budget_get_pool(bgt2, "pool");
     assert_eq(pool_used(bp), 420, "budget used 420");
     assert_eq(pool_reserved(bp), 0, "budget reserved 0");
+
+    # ── 2.9.13: storage.cyr for real — persistence round trips through a real patra database ──
+    test_group("storage_roundtrip");
+    # Off by default: every entry point is a no-op.
+    assert_eq(storage_audit_insert(1, 2, "e", "info", "m", 0, 0, "s", "p", "h"), 0,
+      "storage: off, a write-through does nothing");
+    assert_eq(storage_restore_budgets(budget_new()), 0, "storage: off, nothing restored");
+    patra_init();
+    var st_path = _t_cat(_t_line("/tmp/hoosh-tcyr-", sys_getpid(), ""), ".db");
+    var st_wal = _t_cat(st_path, ".wal");
+    sys_unlink(st_path);
+    sys_unlink(st_wal);
+    _storage = storage_open(st_path);
+    assert_eq(_storage != 0, 1, "storage: a database opens");
+    # Audit: three entries written through, then a fresh chain restored from disk.
+    var st_c = audit_chain_new("k", 1, 100);
+    audit_record(st_c, "inference.request", "info", "one", "ollama", "llama3");
+    audit_record(st_c, "inference.request", "info", "two", "openai", "gpt-4o");
+    audit_record(st_c, "admin.costs_reset", "warn", "three", "admin", "");
+    # A provider or model of 0 ("none") is not the same as "": the entry hash adds ":provider" only for a non-zero
+    # one. patra has no NULL, and through 2.9.12 a 0 came back from disk as "", so such an entry verified until a
+    # restart and failed after it. Its own database, so the counts below stay three.
+    var nn_path = _t_cat(st_path, ".none");
+    sys_unlink(nn_path);
+    var nn_saved = _storage;
+    _storage = storage_open(nn_path);
+    var nn_c = audit_chain_new("k", 1, 100);
+    audit_record(nn_c, "e", "info", "no provider, no model", 0, 0);
+    audit_record(nn_c, "e", "info", "empty provider and model", "", "");
+    var nn_r = audit_chain_new("k", 1, 100);
+    assert_eq(storage_restore_audit(nn_r), 2, "storage: both rows restored");
+    assert_eq(audit_verify(nn_r), 1, "storage: an entry without provider or model verifies after a restore");
+    assert_eq(load64(load64(nn_r + 24) + 40), 0, "storage: a 0 provider comes back as 0");
+    assert_streq(load64(load64(nn_r + 32) + 40), "", "storage: an empty provider comes back empty");
+    patra_close(_storage);
+    _storage = nn_saved;
+    sys_unlink(nn_path);
+    sys_unlink(_t_cat(nn_path, ".wal"));
+    var st_r = audit_chain_new("k", 1, 100);
+    assert_eq(storage_restore_audit(st_r), 3, "storage: three audit rows restored");
+    assert_eq(audit_count(st_r), 3, "storage: the restored chain holds them");
+    assert_eq(audit_verify(st_r), 1, "storage: the restored chain verifies");
+    assert_eq(load64(st_r + 56), 4, "storage: new records continue at id 4");
+    assert_streq(load64(st_r + 16), load64(st_c + 16), "storage: the restored last hash is the one written");
+    audit_record(st_r, "inference.request", "info", "four", "ollama", "llama3");
+    assert_eq(audit_verify(st_r), 1, "storage: a record after a restore extends the chain");
+    # 2.9.13: a chain with a smaller max_entries keeps only the newest rows, and still verifies.
+    var st_small = audit_chain_new("k", 1, 2);
+    assert_eq(storage_restore_audit(st_small), 4, "storage: all four rows read");
+    assert_eq(audit_count(st_small), 2, "storage: trimmed to max_entries");
+    assert_streq(load64(load64(st_small + 24) + 32), "three", "storage: the newest two kept");
+    assert_eq(audit_verify(st_small), 1, "storage: the trimmed chain verifies");
+    # Budgets: a commit writes the pool's used count, one row per pool; a fresh budget restores it.
+    var st_b = budget_new();
+    var st_p = pool_new("team", 10000);
+    budget_add_pool(st_b, st_p);
+    pool_reserve(st_p, 500);
+    pool_commit(st_p, 500, 420);
+    pool_reserve(st_p, 100);
+    pool_commit(st_p, 100, 80);
+    var st_b2 = budget_new();
+    var st_p2 = pool_new("team", 10000);
+    budget_add_pool(st_b2, st_p2);
+    assert_eq(storage_restore_budgets(st_b2), 1, "storage: one budget row per pool");
+    assert_eq(pool_used(st_p2), 500, "storage: the restored pool's used count");
+    patra_close(_storage);
+    _storage = 0;
+    sys_unlink(st_path);
+    sys_unlink(st_wal);
 
     # ── Cache basic ───────────────────────────────────────────────
     test_group("cache");

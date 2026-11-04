@@ -235,8 +235,10 @@ fn load_config(path) {
     var srv_secs = bayan_toml_get_sections_by_cstr(sections, "server");
     if (vec_len(srv_secs) > 0) {
         var srv = toml_section_pairs(vec_get(srv_secs, 0));
+        # bind and port apply at startup only: a reload cannot move the listener. 2.9.13: a reload used to rewrite
+        # them anyway, which aimed SIGTERM's wake-up connection at the wrong port (see main.cyr _listen_fd).
         var port_str = bayan_toml_get_by_cstr(srv, "port");
-        if (port_str != 0) { _http_port = str_to_int(port_str); }
+        if (port_str != 0 && _listen_fd < 0) { _http_port = str_to_int(port_str); }
         var strat_str = bayan_toml_get_by_cstr(srv, "strategy");
         if (strat_str != 0) { _route_strategy = strategy_from_str(to_cstr(strat_str)); }
         # Listen address. Was parsed by NO ONE before 2.5.1 — hoosh.cyml shipped
@@ -244,7 +246,7 @@ fn load_config(path) {
         # listened on every interface regardless of what the config claimed.
         # "0.0.0.0" packs to 0 (INADDR_ANY); host_addr also accepts a hostname.
         var bind_str = bayan_toml_get_by_cstr(srv, "bind");
-        if (bind_str != 0) { _http_bind = host_addr(to_cstr(bind_str)); }
+        if (bind_str != 0 && _listen_fd < 0) { _http_bind = host_addr(to_cstr(bind_str)); }
         # 2.5.5: background health-probe cadence. 0 disables probing, which
         # leaves every route optimistically healthy (pre-2.5.5 behavior).
         var hci_str = bayan_toml_get_by_cstr(srv, "health_check_interval_secs");

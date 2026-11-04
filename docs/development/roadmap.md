@@ -33,19 +33,18 @@ The bands are a plan, not a promise. Every item was checked against the code and
     `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
     (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7); `http_client.cyr` and `events.cyr`, with
     the majra bundle (2.9.8); `hardware.cyr`, with the ai-hwaccel bundle, and `router.cyr` (2.9.9); `health.cyr`,
-    after `route_is_remote` moved into `route.cyr` (2.9.10); `audit.cyr`, through a stand-in for the one
-    `storage.cyr` call it makes (2.9.12). `scripts/coverage.sh` prints the current list: 27 of 37 modules.
-  - **Every module left is in a dependency cycle** (scan of 2.9.12), so each needs a split first. The symbols that
+    after `route_is_remote` moved into `route.cyr` (2.9.10); `audit.cyr` (2.9.12); `budget.cyr` and `storage.cyr`
+    (2.9.13; the persistence tests use a real patra database in `/tmp`). `scripts/coverage.sh` prints the current
+    list: 29 of 37 modules.
+  - **Every module left is in a dependency cycle** (scan of 2.9.13), so each needs a split first. The symbols that
     close each cycle:
     - `retry.cyr` needs `provider_forward` / `provider_forward_stream`, so it waits on `provider.cyr`.
     - `provider.cyr` needs only `otlp_enqueue_inference_span`. `otlp.cyr` needs `provider.cyr`'s `_remote_arena`
       and `pool.cyr`'s `wq_push` / `job_otlp_export`, and `pool.cyr` reaches `batch`, `catalog_fetch` and
       `handlers`. A span hook set by `main.cyr`, or splitting the enqueue out of `otlp.cyr`, would free
       `provider.cyr`, the largest mirror left (27 same-name copies).
-    - `budget.cyr` needs only `storage_budget_set`, a write-through that does nothing with persistence off.
-      `audit.cyr` came in on the same footing in 2.9.12, with a stand-in for `storage_audit_insert`. The same
-      stand-in would free `budget.cyr` and retire the test file's token-pool mirror. **The easiest next step.**
-      `storage.cyr` itself needs `budget_get_pool` and patra.
+    - **Next:** the `provider.cyr` / `otlp.cyr` split above. It is the largest mirror left, and `retry.cyr` follows
+      it.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
@@ -55,10 +54,6 @@ The bands are a plan, not a promise. Every item was checked against the code and
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
     `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header says so
     since 2.9.5.
-- **A restored audit chain larger than `max_entries` stays larger.** `storage_restore_audit` loads every stored
-  row, and `audit_record` evicts one entry per new record, so the in-memory chain never shrinks back to
-  `max_entries`. It still verifies (2.9.12), but its memory is bounded by the table, not by the setting. Trim to the
-  newest `max_entries` on restore, setting the chain's anchor to the last dropped entry's hash.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

@@ -37,6 +37,31 @@ fn _rs_dup_str(rs, row, col) {
     return out;
 }
 
+# An audit entry's provider and model may be 0 ("none"), and the entry hash tells 0 from "": audit.cyr adds
+# ":provider" only when it is not 0. patra has no NULL, and through 2.9.12 a 0 was written as "" and read back as "",
+# so such an entry verified until a restart and failed after it. A 0 is now written as this one-byte marker, \x01,
+# which no provider or model name contains, and read back as 0. Rows written before 2.9.13 still hold "" and restore
+# as "", as they did.
+var _st_none = 0;
+fn _st_none_marker() {
+    if (_st_none == 0) {
+        var z = alloc(2);
+        store8(z, 1);
+        store8(z + 1, 0);
+        _st_none = z;
+    }
+    return _st_none;
+}
+
+# _rs_dup_str for an optional field: the "none" marker reads back as 0.
+fn _rs_dup_opt(rs, row, col) {
+    var p = patra_result_get_str(rs, row, col);
+    if (p != 0) {
+        if (load8(p) == 1 && load8(p + 1) == 0) { return 0; }
+    }
+    return _rs_dup_str(rs, row, col);
+}
+
 # Copy a result-set TEXT cell (chain-paged) to a fresh buffer.
 fn _rs_dup_text(db, rs, row, col) {
     var len = patra_result_get_text_len(rs, row, col);
@@ -111,8 +136,12 @@ fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, pre
     store64(types + 32, COL_TEXT);
     store64(bptrs + 32, msg);
     store64(blens + 32, strlen(msg));
-    _ins_str(types, sptrs, slens, 5, provider);
-    _ins_str(types, sptrs, slens, 6, model);
+    var prov_s = provider;
+    if (prov_s == 0) { prov_s = _st_none_marker(); }
+    var model_s = model;
+    if (model_s == 0) { model_s = _st_none_marker(); }
+    _ins_str(types, sptrs, slens, 5, prov_s);
+    _ins_str(types, sptrs, slens, 6, model_s);
     _ins_str(types, sptrs, slens, 7, sig);
     _ins_str(types, sptrs, slens, 8, prev);
     _ins_str(types, sptrs, slens, 9, ehash);
@@ -141,8 +170,8 @@ fn storage_restore_audit(chain) {
         store64(e + 16, _rs_dup_str(rs, i, 2));
         store64(e + 24, _rs_dup_str(rs, i, 3));
         store64(e + 32, _rs_dup_text(_storage, rs, i, 4));
-        store64(e + 40, _rs_dup_str(rs, i, 5));
-        store64(e + 48, _rs_dup_str(rs, i, 6));
+        store64(e + 40, _rs_dup_opt(rs, i, 5));
+        store64(e + 48, _rs_dup_opt(rs, i, 6));
         store64(e + 56, _rs_dup_str(rs, i, 7));
         store64(e + 64, _rs_dup_str(rs, i, 8));
         store64(e + 72, _rs_dup_str(rs, i, 9));
@@ -159,6 +188,17 @@ fn storage_restore_audit(chain) {
     }
     store64(chain + 56, maxid + 1);
     patra_result_free(rs);
+    # 2.9.13: keep only the newest max_entries, as audit_record would have. Every stored row was loaded, and
+    # audit_record evicts just one entry per new record, so a chain restored from a larger table never shrank back
+    # to its setting: memory was bounded by the table, not by [audit] max_entries. Each dropped entry's hash becomes
+    # the chain's anchor, so the newest kept entry's link still verifies (audit.cyr, offset 64).
+    var max = load64(chain + 48);
+    while (load64(chain + 40) > max && load64(chain + 24) != 0) {
+        var head = load64(chain + 24);
+        store64(chain + 64, load64(head + 72));
+        store64(chain + 24, load64(head + 80));
+        store64(chain + 40, load64(chain + 40) - 1);
+    }
     return n;
 }
 

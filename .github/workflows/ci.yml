@@ -101,6 +101,13 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/hoosh | grep -q "7f45 4c46"
 
+      - name: Shutdown smoke
+        # 2.9.13: SIGTERM must stop a real gateway: plainly, after a config reload, and on a 0.0.0.0 listener.
+        # Through 2.9.12 a reload to a config naming another port left the gateway ignoring SIGTERM entirely, and
+        # 2.5.11 once broke shutdown too; main.cyr cannot be linked into the unit tests, so this runs the binary.
+        timeout-minutes: 2
+        run: ./scripts/shutdown-smoke.sh build/hoosh
+
       - name: Test suite
         # 2.9.4: the suite runs in ~2 s. Some regressions HANG it instead of failing an assertion (the
         # embedding parser's no-progress guard and exponent clamp: their tests loop forever without them),
