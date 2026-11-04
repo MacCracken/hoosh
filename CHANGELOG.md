@@ -5,6 +5,82 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.17] — 2026-11-04
+
+**bote 3.8.9, and `/v1/batch` reads only its top-level `async` and `requests`.** The batch fix turned up when
+`batch.cyr`'s pure helpers moved into `reqparse.cyr` and the tests started running them. Three copies of those
+helpers are gone from the test file, plus a fourth for a lane pool the gateway has not had since 2.9.1. **1495
+assertions** in 160 groups. All gates are clean: fmt, lint, vet, deny, coverage (388/686, 56%; 33 of 39 modules
+included for real), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — dependencies
+
+- **bote-core 3.8.3 → 3.8.9,** the latest release; 3.8.10 is tagged but not yet released.
+  - **What the six releases bring:**
+    - JSON Schema judged more fully (`const`, `enum`, `uniqueItems`, type arrays, `prefixItems`, `contains`,
+      `propertyNames`, `dependentRequired`, `allOf` / `anyOf` / `oneOf` / `not` / `if`-`then`-`else`), with a
+      budget per judgement;
+    - tool names held to the spec's 1–128 characters of `A-Z a-z 0-9 _ - .`;
+    - security and correctness fixes from an independent review of each release.
+  - **What `/v1/tools/*` clients see:** a JSON-RPC message that names a key twice is now refused (`-32600 invalid
+    request: a key named twice`); 2.9.16 accepted it and used the first. Checked live against both binaries: an
+    ordinary `tools/call` answers identically.
+  - **Re-synced** with `scripts/sync-bote.sh 3.8.9`, whose default tag moves to 3.8.9. The public API hoosh uses is
+    unchanged; only bote's internal helpers were added or changed.
+- **Unchanged, already the latest releases:** ai-hwaccel 2.5.6, majra 2.13.0 and cyrius 6.7.18.
+
+### Fixed — `/v1/batch` read the first `async` and `requests` anywhere in the body
+
+Both helpers' comments said "top-level", but both scanned the raw body and took the first match, the bug 2.6.9
+fixed for the chat handlers' keys:
+- **`async`:**
+  - a batch item carrying its own `"async": true` made the whole batch asynchronous;
+  - a nested `"async": false` ahead of the top-level `true` kept it synchronous.
+- **`requests`:**
+  - a space before the colon (`"requests" : [`) made the batch unreadable;
+  - a nested `"requests"` key ahead of the real one was taken as the batch.
+
+Both now go through `_top_key_value`, which is depth- and string-aware, as the handlers' keys do.
+
+### Changed — `batch.cyr`'s pure helpers moved into `reqparse.cyr`
+
+- **What moved:** `_batch_extract_requests`, `_batch_split`, `_batch_is_async`, `_batch_status_name` and the
+  `BATCH_*` status values (the last two together, since the names need the values). `batch.cyr` keeps the async
+  registry and the handlers.
+- **The tests run them now.** Of the test file's copies, three were identical to `src/`. The status-name copy did
+  not know `BATCH_FAILED` (2.6.7) and called it "cancelled".
+- **Also gone:** `_t_lane_acquire` / `_t_lane_release` and the `batch_lanes` group (8 assertions). They copied a
+  CAS lane allocator that `batch.cyr` and `pool.cyr` have not had since sigil took over crypto lanes in 2.9.1.
+- **New assertions:**
+  - "failed" status;
+  - an item's own `async` is ignored, and a nested `false` does not hide the top-level `true`;
+  - a space before the colon is fine, and a nested `requests` key is not the batch;
+  - a `requests` that is a string or an object is no batch.
+
+### Mutation-checked
+
+| mutant | result |
+|---|---|
+| `_batch_is_async` back to the raw scan; `true` not required | 3 and 1 fail |
+| `BATCH_FAILED` unnamed | 1 fails |
+| `_batch_extract_requests` accepting a non-array, or counting brackets inside strings | 2 and 1 fail |
+| `_batch_split` splitting nested objects | 1 fails |
+
+**The first-round survivor:** the non-array mutant survived, because no test sent `"requests"` as a string or an
+object. Those cases were added. Every mutant is caught.
+
+### Notes
+
+- The test file is 5,978 lines (was 6,101).
+- **Benchmarks,** at load 1.5. The median move against 2.9.16 is 0.0%. Three rows moved, checked by alternating the
+  2.9.16 and 2.9.17 bench binaries over three rounds; they differ in the bote bundle:
+  - `mcp_tools_call` 4.91–4.94 → 5.10–5.12 µs (+~180 ns): bote's stricter message checks, as its notes predict;
+  - `mcp_tools_list` 3.15–3.22 → 3.03–3.05 µs, faster;
+  - `cache_insert` 83–85 → 90 ns. Nothing in it changed: the bote bundle, compiled ahead of it, grew by ~1,750 lines
+    and moved it. It is a layout effect like 2.9.10's.
+- **What the test file still mirrors:** `config.cyr`'s pickers (3), `main.cyr`'s flag parser (2), `pool.cyr`'s ring
+  (1), and two pieces of `handlers.cyr`. `config.cyr` is next.
+
 ## [2.9.16] — 2026-11-04
 
 **Fixed: an empty `tools` array is no longer forwarded.** The test file's copy of `_extract_tools` had hidden this

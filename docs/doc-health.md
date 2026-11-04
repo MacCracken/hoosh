@@ -6,11 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.16**: CHANGELOG, README stats, state, the roadmap's mirror list,
-> `architecture/overview.md`'s `reqparse.cyr` row). Earlier the same day: **v2.9.15**, **v2.9.14**
-> (`architecture/overview.md`'s module map for the `otlp.cyr` / `otlp_export.cyr` split), **v2.9.13**
-> (`scripts/shutdown-smoke.sh` and its CI step), **v2.9.12** (the audit-restore item), **v2.9.11** (the roadmap's
-> layout item), **v2.9.10**, **v2.9.9** (the `HW_MAX_MODEL_PARAMS` comment in `hardware.cyr`), **v2.9.8**,
+> **Last refresh**: 2026-11-04 (**v2.9.17**: CHANGELOG, README stats, state's toolchain row for bote 3.8.9, the
+> roadmap's mirror list, `architecture/overview.md`'s `reqparse.cyr` row). Earlier the same day: **v2.9.16**,
+> **v2.9.15**, **v2.9.14** (`architecture/overview.md`'s module map for the `otlp.cyr` / `otlp_export.cyr` split),
+> **v2.9.13** (`scripts/shutdown-smoke.sh` and its CI step), **v2.9.12** (the audit-restore item), **v2.9.11** (the
+> roadmap's layout item), **v2.9.10**, **v2.9.9** (the `HW_MAX_MODEL_PARAMS` comment in `hardware.cyr`), **v2.9.8**,
 > **v2.9.7**, **v2.9.6** (the dependency scan), **v2.9.5**, **v2.9.4**, **v2.9.3** (the pooling measurement, the
 > sandhi TLS-allocator item), **v2.9.2** (README *Hardware data files*; the roadmap re-banded; the rust-old
 > retirement carried out), **v2.9.1** (cyrius 6.7.18; ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the

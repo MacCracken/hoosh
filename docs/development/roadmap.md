@@ -42,11 +42,10 @@ The bands are a plan, not a promise. Every item was checked against the code and
       `wq_push` and job constructors, and `pool.cyr` dispatches into `handlers.cyr`.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
-  - **What the test file still mirrors** (2.9.16): `batch.cyr`'s request splitter and lane pool (5),
-    `config.cyr`'s pickers (3), `main.cyr`'s flag parser (2), `pool.cyr`'s ring (1), and from `handlers.cyr`
-    only the usage block of `_chat_completion_body` and the requirement-match scan. 2.9.16 split its pure request
-    helpers into `reqparse.cyr`. **Next:** the same for `batch.cyr`'s request splitter, then `config.cyr`'s
-    pickers.
+  - **What the test file still mirrors** (2.9.17): `config.cyr`'s pickers (3), `main.cyr`'s flag parser (2),
+    `pool.cyr`'s ring (1), and from `handlers.cyr` only the usage block of `_chat_completion_body` and the
+    requirement-match scan. 2.9.16 and 2.9.17 moved the handlers' and `batch.cyr`'s pure request helpers into
+    `reqparse.cyr`. **Next:** `config.cyr`'s pickers.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
     modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as

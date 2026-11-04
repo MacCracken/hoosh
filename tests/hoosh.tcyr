@@ -178,131 +178,6 @@ fn _etools(s) {
     return o;
 }
 
-# Mirror of src/lib/batch.cyr _batch_extract_requests — locate the raw
-# "requests" array (incl. brackets) in a request body. Returns [ptr,len] or 0.
-fn _t_batch_extract_requests(body_ptr, body_len) {
-    var i = 0;
-    while (i < body_len - 11) {
-        if (memeq(body_ptr + i, "\"requests\":", 11) == 1) {
-            i = i + 11;
-            while (i < body_len && load8(body_ptr + i) == 32) { i = i + 1; }
-            if (i < body_len && load8(body_ptr + i) == 91) {
-                var depth = 1;
-                var start = i;
-                i = i + 1;
-                while (i < body_len && depth > 0) {
-                    var ch = load8(body_ptr + i);
-                    if (ch == 34) {
-                        i = i + 1;
-                        while (i < body_len) {
-                            if (load8(body_ptr + i) == 34) { break; }
-                            if (load8(body_ptr + i) == 92) { i = i + 1; }
-                            i = i + 1;
-                        }
-                    } else {
-                        if (ch == 91) { depth = depth + 1; }
-                        if (ch == 93) { depth = depth - 1; }
-                    }
-                    i = i + 1;
-                }
-                var out = alloc(16);
-                store64(out, body_ptr + start);
-                store64(out + 8, i - start);
-                return out;
-            }
-            return 0;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Mirror of src/lib/batch.cyr _batch_split — split the array (incl. brackets)
-# into top-level object slices. String-escape + nesting aware.
-fn _t_batch_split(arr_ptr, arr_len) {
-    var items = vec_new();
-    var i = 0;
-    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
-    if (i >= arr_len) { return items; }
-    i = i + 1;
-    var depth = 0;
-    var start = 0 - 1;
-    while (i < arr_len) {
-        var ch = load8(arr_ptr + i);
-        if (ch == 34) {
-            i = i + 1;
-            while (i < arr_len) {
-                var c2 = load8(arr_ptr + i);
-                if (c2 == 92) { i = i + 2; } else {
-                    if (c2 == 34) { break; }
-                    i = i + 1;
-                }
-            }
-            i = i + 1;
-        } else {
-            if (ch == 123 || ch == 91) {
-                if (depth == 0 && start < 0) { start = i; }
-                depth = depth + 1;
-                i = i + 1;
-            } else {
-                if (ch == 125 || ch == 93) {
-                    depth = depth - 1;
-                    i = i + 1;
-                    if (depth < 0) { break; }
-                    if (depth == 0 && start >= 0) {
-                        var slc = alloc(16);
-                        store64(slc, arr_ptr + start);
-                        store64(slc + 8, i - start);
-                        vec_push(items, slc);
-                        start = 0 - 1;
-                    }
-                } else {
-                    i = i + 1;
-                }
-            }
-        }
-    }
-    return items;
-}
-
-# Mirror of src/lib/batch.cyr _batch_is_async — detects top-level "async":true.
-fn _t_batch_is_async(body, len) {
-    var i = 0;
-    while (i < len - 7) {
-        if (memeq(body + i, "\"async\"", 7) == 1) {
-            var j = i + 7;
-            while (j < len && (load8(body + j) == 32 || load8(body + j) == 58)) { j = j + 1; }
-            if (j + 4 <= len && memeq(body + j, "true", 4) == 1) { return 1; }
-            return 0;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Mirror of src/lib/batch.cyr _batch_status_name.
-fn _t_batch_status_name(s) {
-    if (s == 0) { return "queued"; }
-    if (s == 1) { return "running"; }
-    if (s == 2) { return "completed"; }
-    return "cancelled";
-}
-
-# Mirror of src/lib/batch.cyr's lane-pool core (single-threaded, no spin) — the
-# CAS allocate/free over a fixed slot array. lanes = alloc(7*8) of 0/1.
-fn _t_lane_acquire(lanes, n) {
-    var i = 0;
-    while (i < n) {
-        if (atomic_cas(lanes + i * 8, 0, 1) == 1) { return i + 1; }
-        i = i + 1;
-    }
-    return 0;
-}
-fn _t_lane_release(lanes, lane) {
-    atomic_store(lanes + (lane - 1) * 8, 0);
-    return 0;
-}
-
 # 2.9.5: one slot of metrics.cyr's OWN latency histogram (not a mirror: it reads the real storage, laid out
 # PROV_COUNT x (NLAT_BUCKETS + 1), the last slot per provider being the overflow).
 fn _t_lat_slot(prov, b) {
@@ -3702,9 +3577,9 @@ fn main() {
     # Body with nested array + a string value containing } and ] — the splitter
     # must treat those as inside-string, not structural.
     var bbody = "{\"meta\":1,\"requests\":[{\"a\":1},{\"b\":[2,3]},{\"c\":\"}]x\"}]}";
-    var barr = _t_batch_extract_requests(bbody, strlen(bbody));
+    var barr = _batch_extract_requests(bbody, strlen(bbody));
     assert_eq(barr != 0, 1, "batch: requests array located");
-    var bitems = _t_batch_split(load64(barr), load64(barr + 8));
+    var bitems = _batch_split(load64(barr), load64(barr + 8));
     assert_eq(vec_len(bitems), 3, "batch: split yields 3 items");
     # Item 0 = {"a":1}
     var b0 = vec_get(bitems, 0);
@@ -3718,44 +3593,47 @@ fn main() {
     assert_eq(_cmp_substr(load64(b2), load64(b2 + 8), "}]x", 3) >= 0, 1, "batch: item2 string brackets intact");
     # No "requests" key → 0.
     var bnone = "{\"model\":\"x\"}";
-    assert_eq(_t_batch_extract_requests(bnone, strlen(bnone)), 0, "batch: missing requests → 0");
+    assert_eq(_batch_extract_requests(bnone, strlen(bnone)), 0, "batch: missing requests → 0");
     # Empty array → 0 items.
-    var bempty = _t_batch_split("[]", 2);
+    var bempty = _batch_split("[]", 2);
     assert_eq(vec_len(bempty), 0, "batch: empty array → 0 items");
 
     # ── Async batch (mode detection + status names) ───────────────
     test_group("batch_async");
     var ba1 = "{\"async\":true,\"requests\":[]}";
-    assert_eq(_t_batch_is_async(ba1, strlen(ba1)), 1, "async: compact true detected");
+    assert_eq(_batch_is_async(ba1, strlen(ba1)), 1, "async: compact true detected");
     var ba2 = "{\"async\": true, \"requests\":[]}";
-    assert_eq(_t_batch_is_async(ba2, strlen(ba2)), 1, "async: spaced true detected");
+    assert_eq(_batch_is_async(ba2, strlen(ba2)), 1, "async: spaced true detected");
     var ba3 = "{\"async\":false,\"requests\":[]}";
-    assert_eq(_t_batch_is_async(ba3, strlen(ba3)), 0, "async: false → sync");
+    assert_eq(_batch_is_async(ba3, strlen(ba3)), 0, "async: false → sync");
     var ba4 = "{\"requests\":[]}";
-    assert_eq(_t_batch_is_async(ba4, strlen(ba4)), 0, "async: absent → sync");
-    assert_streq(_t_batch_status_name(0), "queued", "async: status 0=queued");
-    assert_streq(_t_batch_status_name(1), "running", "async: status 1=running");
-    assert_streq(_t_batch_status_name(2), "completed", "async: status 2=completed");
-    assert_streq(_t_batch_status_name(3), "cancelled", "async: status 3=cancelled");
-
-    # ── Crypto-lane pool (allocate / free / reuse) ────────────────
-    test_group("batch_lanes");
-    var lanes = alloc(7 * 8);
-    var li = 0;
-    while (li < 7) { store64(lanes + li * 8, 0); li = li + 1; }
-    assert_eq(_t_lane_acquire(lanes, 7), 1, "lanes: first acquire → 1");
-    assert_eq(_t_lane_acquire(lanes, 7), 2, "lanes: second acquire → 2");
-    assert_eq(_t_lane_acquire(lanes, 7), 3, "lanes: third acquire → 3");
-    _t_lane_release(lanes, 2);
-    assert_eq(_t_lane_acquire(lanes, 7), 2, "lanes: reuses freed lane 2");
-    # Exhaust the pool, then a release frees exactly one slot.
-    _t_lane_acquire(lanes, 7);
-    _t_lane_acquire(lanes, 7);
-    _t_lane_acquire(lanes, 7);
-    _t_lane_acquire(lanes, 7);
-    assert_eq(_t_lane_acquire(lanes, 7), 0, "lanes: full pool → 0 (would block)");
-    _t_lane_release(lanes, 5);
-    assert_eq(_t_lane_acquire(lanes, 7), 5, "lanes: free then acquire → 5");
+    assert_eq(_batch_is_async(ba4, strlen(ba4)), 0, "async: absent → sync");
+    assert_streq(_batch_status_name(0), "queued", "async: status 0=queued");
+    assert_streq(_batch_status_name(1), "running", "async: status 1=running");
+    assert_streq(_batch_status_name(2), "completed", "async: status 2=completed");
+    assert_streq(_batch_status_name(3), "cancelled", "async: status 3=cancelled");
+    # 2.9.17: the real names, and BATCH_FAILED (2.6.7), which the copy here did not know and called "cancelled".
+    assert_streq(_batch_status_name(BATCH_FAILED), "failed", "async: a batch that could not start is failed");
+    assert_eq(BATCH_QUEUED == 0 && BATCH_RUNNING == 1 && BATCH_COMPLETED == 2 && BATCH_CANCELLED == 3, 1,
+      "async: the status values the names above assume");
+    # 2.9.17: only the TOP-LEVEL "async" counts (the scan used to take the first one anywhere).
+    var ba5 = "{\"requests\":[{\"model\":\"m\",\"async\":true}]}";
+    assert_eq(_batch_is_async(ba5, strlen(ba5)), 0, "async: an item's own async does not make the batch async");
+    var ba6 = "{\"requests\":[{\"async\":false}],\"async\":true}";
+    assert_eq(_batch_is_async(ba6, strlen(ba6)), 1, "async: a nested false does not hide the top-level true");
+    # The same for "requests": whitespace before the colon is fine, and a nested key is not the batch.
+    var br1 = "{\"requests\" : [{\"model\":\"m\"}]}";
+    var br1a = _batch_extract_requests(br1, strlen(br1));
+    assert_eq(br1a != 0 && load64(br1a + 8) == 15, 1, "batch: a space before the colon is fine");
+    var br2 = "{\"meta\":{\"requests\":[1]},\"requests\":[{\"model\":\"a\"},{\"model\":\"b\"}]}";
+    var br2a = _batch_extract_requests(br2, strlen(br2));
+    assert_eq(vec_len(_batch_split(load64(br2a), load64(br2a + 8))), 2,
+      "batch: a nested requests key is not the batch");
+    # "requests" must be an array: anything else is no batch, not a span to split.
+    var br3 = "{\"requests\":\"[{}]\"}";
+    assert_eq(_batch_extract_requests(br3, strlen(br3)), 0, "batch: a string named requests is not the batch");
+    var br4 = "{\"requests\":{\"a\":[1]}}";
+    assert_eq(_batch_extract_requests(br4, strlen(br4)), 0, "batch: an object named requests is not the batch");
 
     # ── Observability: latency buckets + traceparent extraction ───
     test_group("observability");

@@ -37,16 +37,8 @@ fn _batch_atomic_add(ptr, delta) {
 
 # ── Async batch state (POST /v1/batch async + GET /v1/batch/{id}) ──────
 #
-# Status values (stored atomically at BS_STATUS).
-var BATCH_QUEUED    = 0;
-var BATCH_RUNNING   = 1;
-var BATCH_COMPLETED = 2;
-var BATCH_CANCELLED = 3;
-# 2.6.7: terminal state for a batch whose coordinator thread could not be
-# spawned. Without it such a batch sat at BATCH_QUEUED forever — the client
-# polled "queued" with null results and _batch_evict_terminal, which skips
-# non-terminal batches, could never reclaim the slot.
-var BATCH_FAILED    = 4;
+# Status values (stored atomically at BS_STATUS): BATCH_QUEUED .. BATCH_FAILED live in reqparse.cyr since
+# 2.9.17, beside _batch_status_name, which names them.
 
 # BatchState layout (64 bytes). completed/failed/status/cancel are written by
 # the background runner + read by the accept thread serving GET — accessed
@@ -128,15 +120,6 @@ fn batch_state_new(id, total) {
     store64(bs + BS_RESULTS, results);
     store64(bs + BS_REQS, reqs);
     return bs;
-}
-
-# Status name for JSON output.
-fn _batch_status_name(s) {
-    if (s == BATCH_QUEUED) { return "queued"; }
-    if (s == BATCH_RUNNING) { return "running"; }
-    if (s == BATCH_COMPLETED) { return "completed"; }
-    if (s == BATCH_FAILED) { return "failed"; }
-    return "cancelled";
 }
 
 # Background runner thread (arg = BatchState). Enqueues one job per item into the
@@ -233,21 +216,6 @@ fn _batch_evict_terminal() {
     return 0;
 }
 
-# True if the request opts into async mode via a top-level "async": true.
-fn _batch_is_async(body, len) {
-    var i = 0;
-    while (i < len - 7) {
-        if (memeq(body + i, "\"async\"", 7) == 1) {
-            var j = i + 7;
-            while (j < len && (load8(body + j) == 32 || load8(body + j) == 58)) { j = j + 1; }
-            if (j + 4 <= len && memeq(body + j, "true", 4) == 1) { return 1; }
-            return 0;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 # GET /v1/batch/{id} — progress snapshot. Reads BatchState atomics + write-once
 # result slots (a pending item shows status:null,body:null).
 fn handle_batch_get(cfd, id) {
@@ -307,94 +275,6 @@ fn handle_batch_cancel(cfd, id) {
     str_builder_add_cstr(sb, "\",\"status\":\"cancelling\"}");
     var body = str_builder_build(sb);
     return http_ok(cfd, to_cstr(body), str_len(body));
-}
-
-# Locate the raw "requests" array (including its surrounding [ ]) in the body.
-# Returns alloc(16) [ptr, len] or 0 if absent / not an array. Mirrors
-# _extract_messages' depth scan.
-fn _batch_extract_requests(body_ptr, body_len) {
-    var i = 0;
-    while (i < body_len - 11) {
-        if (memeq(body_ptr + i, "\"requests\":", 11) == 1) {
-            i = i + 11;
-            while (i < body_len && load8(body_ptr + i) == 32) { i = i + 1; }
-            if (i < body_len && load8(body_ptr + i) == 91) {
-                var depth = 1;
-                var start = i;
-                i = i + 1;
-                while (i < body_len && depth > 0) {
-                    var ch = load8(body_ptr + i);
-                    if (ch == 34) {
-                        i = i + 1;
-                        while (i < body_len) {
-                            if (load8(body_ptr + i) == 34) { break; }
-                            if (load8(body_ptr + i) == 92) { i = i + 1; }
-                            i = i + 1;
-                        }
-                    } else {
-                        if (ch == 91) { depth = depth + 1; }
-                        if (ch == 93) { depth = depth - 1; }
-                    }
-                    i = i + 1;
-                }
-                var out = alloc(16);
-                store64(out, body_ptr + start);
-                store64(out + 8, i - start);
-                return out;
-            }
-            return 0;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Split the raw array (incl. surrounding [ ]) into top-level object slices.
-# Returns a vec of alloc(16) [ptr, len]. String-escape and nesting aware.
-fn _batch_split(arr_ptr, arr_len) {
-    var items = vec_new();
-    var i = 0;
-    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
-    if (i >= arr_len) { return items; }
-    i = i + 1;
-    var depth = 0;
-    var start = 0 - 1;
-    while (i < arr_len) {
-        var ch = load8(arr_ptr + i);
-        if (ch == 34) {
-            i = i + 1;
-            while (i < arr_len) {
-                var c2 = load8(arr_ptr + i);
-                if (c2 == 92) { i = i + 2; } else {
-                    if (c2 == 34) { break; }
-                    i = i + 1;
-                }
-            }
-            i = i + 1;
-        } else {
-            if (ch == 123 || ch == 91) {
-                if (depth == 0 && start < 0) { start = i; }
-                depth = depth + 1;
-                i = i + 1;
-            } else {
-                if (ch == 125 || ch == 93) {
-                    depth = depth - 1;
-                    i = i + 1;
-                    if (depth < 0) { break; }
-                    if (depth == 0 && start >= 0) {
-                        var slc = alloc(16);
-                        store64(slc, arr_ptr + start);
-                        store64(slc + 8, i - start);
-                        vec_push(items, slc);
-                        start = 0 - 1;
-                    }
-                } else {
-                    i = i + 1;
-                }
-            }
-        }
-    }
-    return items;
 }
 
 # POST /v1/batch — run a batch of chat requests concurrently.
