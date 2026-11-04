@@ -73,6 +73,8 @@ Each of these is a decision, not an omission.
 
 ## Deleting `rust-old/`
 
+**Done in 2.9.2** (2026-11-04): steps 1–4 below were carried out; the tree is in git history at tag 2.7.1.
+
 Nothing in the build, CI, scripts, tests, fuzz targets or coverage reads `rust-old/`; every reference is
 a comment or a document. After 2.7.1 is tagged:
 

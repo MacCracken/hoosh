@@ -237,6 +237,10 @@ fn http_route(cfd, method, path, buf, buf_len) {
         mutex_lock(_chat_lock);
         load_config(_config_path);
         mutex_unlock(_chat_lock);
+        # 2.9.2: load_config re-applied [hardware] data_dir and dropped ai-hwaccel's
+        # cached pricing rows, so a replaced cloud_pricing.json is read on the next
+        # /v1/hardware/cost. Re-check that both data files are still there.
+        hw_check_data_files();
         # 2.8.0: a reload can add a route or change a key, so the catalog is asked again (enqueued — the reload
         # answers now, and the old snapshot keeps serving until the new one is published).
         catalog_kick();
@@ -373,6 +377,11 @@ fn cmd_serve(port) {
     # this guard inside `sandhi_server_run`, which our hand-rolled loop bypasses; call its proven portable helper
     # (rt_sigaction SIGPIPE→SIG_IGN) once here so a dead peer yields an EPIPE write error instead of a crash.
     _sandhi_server_ignore_sigpipe();
+
+    # 2.9.2: say so at startup when ai-hwaccel's data files are not where it will
+    # look ([hardware] data_dir / AI_HWACCEL_DATA_DIR / the working directory),
+    # instead of answering the hardware endpoints with silent empty lists.
+    hw_check_data_files();
 
     # 2.5.11: auth is fail-open by design — no configured tokens means allow all
     # (rust-old behaved the same, and it is the right default for a loopback
@@ -866,20 +875,6 @@ fn cmd_help() {
 var _shutdown = 0;
 var _sigfd = 0 - 1;
 
-# Terminate the whole PROCESS, not just this thread.
-#
-# The stdlib's sys_exit is SYS_EXIT (60), which on Linux exits only the CALLING
-# THREAD despite its "terminate process" comment — with the 7 pool workers plus
-# the health/OTLP/signal threads running, returning from main left hoosh alive
-# and unkillable-looking after a clean shutdown. It never showed before 2.5.8
-# because the accept loop simply never returned. exit_group is the correct call;
-# the stdlib has the SYS_EXIT_GROUP constant but no wrapper, so this is hoosh's
-# local one — the single place a bare syscall appears, pending an upstream
-# sys_exit_group.
-fn hoosh_exit_process(code) {
-    syscall(SYS_EXIT_GROUP, code);
-    return 0;
-}
 # How long to let queued work finish after the listener closes. Long enough for
 # an in-flight inference to answer, short enough that Ctrl-C still feels prompt.
 var SHUTDOWN_DRAIN_MS = 5000;
@@ -900,6 +895,7 @@ fn _sig_thread(arg) {
             mutex_unlock(_chat_lock);
             if (ok == 1) {
                 hlog_info("signal: config reloaded");
+                hw_check_data_files();                  # 2.9.2: as /v1/admin/reload does
             } else {
                 hlog_warn("signal: config reload failed, keeping the running config");
             }
@@ -1207,6 +1203,10 @@ fn main() {
 }
 
 var r = main();
-# exit_group, not sys_exit: hoosh is multi-threaded, and SYS_EXIT would retire
-# only this thread and leave the process running. See hoosh_exit_process.
-hoosh_exit_process(r);
+# Terminate the whole PROCESS, not just this thread. The stdlib's sys_exit is
+# SYS_EXIT, which on Linux exits only the CALLING thread: with the 7 pool workers
+# plus the health/OTLP/signal threads running, returning from main left hoosh
+# alive after a clean shutdown (2.5.8 – 2.5.10). sys_exit_group (lib/syscalls,
+# cyrius 6.5.6+) is exit_group(2). 2.5.11 – 2.9.1 carried a local copy,
+# hoosh_exit_process, the one bare syscall in src/.
+sys_exit_group(r);

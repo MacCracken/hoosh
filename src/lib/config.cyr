@@ -534,6 +534,18 @@ fn load_config(path) {
     # config is parsed on the reload path, so disabled_backends takes effect at
     # the next hw_init/hw_refresh.
     var hw_secs = bayan_toml_get_sections_by_cstr(sections, "hardware");
+    # 2.9.2: data_dir — where ai-hwaccel finds data/cloud_pricing.json and
+    # data/models.json. Applied on every load, so an absent key (or a removed one,
+    # on reload) means $AI_HWACCEL_DATA_DIR, then the working directory.
+    var hw_data_dir = 0;
+    if (vec_len(hw_secs) > 0) {
+        var hdp = toml_section_pairs(vec_get(hw_secs, 0));
+        var dd_str = bayan_toml_get_by_cstr(hdp, "data_dir");
+        if (dd_str != 0) {
+            if (str_len(dd_str) > 0) { hw_data_dir = to_cstr(dd_str); }
+        }
+    }
+    hardware_configure_data_dir(hw_data_dir);
     if (vec_len(hw_secs) > 0) {
         var hp = toml_section_pairs(vec_get(hw_secs, 0));
         var vr = 0 - 1;

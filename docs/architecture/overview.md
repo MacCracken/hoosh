@@ -5,7 +5,7 @@
 >
 > **Name**: Hoosh (Persian: هوش) — intelligence, the word for AI. Part of the
 > [AGNOS](https://github.com/MacCracken/agnosticos) ecosystem; ported from Rust
-> (`rust-old/` kept for reference).
+> (the Rust tree, `rust-old/`, was removed in 2.9.2; it stays in git history at tag 2.7.1).
 
 ---
 

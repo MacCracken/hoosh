@@ -2365,7 +2365,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         var surl = _remote_stream_url(route, model);
         var hdrs = _provider_headers(route);
         var ctx = alloc(48);          # 2.6.5: +32 = "an error frame was already sent to the client"
-        store64(ctx, cfd);
+        store64(ctx, cfd);            # keep the client fd FIRST: http_sse_idle_keepalive reads ctx[0] (2.9.2)
         store64(ctx + 8, model);
         store64(ctx + 16, route_provider(route));
         store64(ctx + 24, 0);

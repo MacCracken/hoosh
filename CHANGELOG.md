@@ -5,6 +5,91 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.2] — 2026-11-04
+
+**Quick wins from the 2026-11-04 roadmap review.** Five fixes, none of which changes an API:
+- remote streams send keep-alives;
+- an installed gateway finds its hardware data files, and says so when it cannot;
+- a refused MCP tool registration is logged;
+- the archived Rust tree is removed;
+- the last two bare syscalls go through the stdlib.
+
+Same toolchain and dependencies as 2.9.1. **1215 assertions** (was 1205). fmt, lint, vet, deny, coverage (299/683),
+the security scan and the four fuzz targets are clean.
+
+### Added — remote SSE keep-alive
+
+- **The problem.** A local stream has sent `: keep-alive` after every 15 s of backend silence since 2.7.0, so a proxy's
+  idle timeout (nginx and most load balancers: 60 s) does not cut a stream while a model loads or thinks. A remote
+  stream could not, because sandhi gave hoosh no turn while the upstream was quiet.
+- **The fix.** sandhi 1.10.5 added the hook hoosh filed for on 2026-09-25 (`sandhi_http_options_idle_ms` /
+  `_idle_cb`). `_remote_stream_opts` now sets it, with `SSE_KEEPALIVE_S`, to the new `http_sse_idle_keepalive`
+  (`http_server.cyr`). That callback writes the same comment to the client fd in the stream ctx.
+- **A client that has gone stops the stream.** The callback returns 0 when the write fails, and sandhi then stops
+  the stream. Before, the stream kept its worker until the upstream wrote again or the 300 s `read_ms` passed.
+- **Verified live over TLS.** A route pointed at a local HTTPS upstream, trusted through `tls_pinned_certs`, sent
+  SSE headers and then stayed silent for 20 s:
+  - 2.9.2 sent `: keep-alive` at 15.5 s and the content at 20.5 s;
+  - 2.9.0 sent nothing for the full 20 s;
+  - with 40 s of silence and a client that left at 17 s, hoosh held no upstream connection by 33 s, and the upstream's
+    next write hit a broken pipe.
+- Tests: `remote_sse_keepalive`, 5 assertions on a real pipe, covering a live client, a gone client and no ctx.
+
+### Fixed — hardware data files on an installed gateway
+
+- **The problem.** ai-hwaccel reads `data/cloud_pricing.json` (POST `/v1/hardware/cost`) and `data/models.json`
+  (POST `/v1/hardware/models`, `/v1/hardware/compatible-models`) at run time. hoosh never told it where they were,
+  so they resolved against the working directory or `AI_HWACCEL_DATA_DIR`, which nothing documented. The release
+  shipped only the binary. So an installed gateway answered those endpoints with empty lists and logged nothing.
+- **`[hardware] data_dir`** (new) is the directory that contains `data/`. It is passed to ai-hwaccel's
+  `data_dir_set` on every config load. When unset, ai-hwaccel tries `$AI_HWACCEL_DATA_DIR`, then the working
+  directory, as before.
+- **A startup WARN.** `hoosh serve` checks both files, and so does each reload (`/v1/admin/reload` and SIGHUP). A
+  missing file is named with the path tried, the endpoints it affects, and the two ways to fix it.
+- **Reload picks up new data.** A reload re-applies `data_dir` and drops ai-hwaccel's cached pricing rows, so a
+  replaced `cloud_pricing.json` is read on the next request. Removing the key falls back as above.
+- **The release ships the data.** `release.yml` packages both files as `hoosh-<version>-data.tar.gz` (extracting to
+  `data/`) and lists it in `SHA256SUMS`.
+- **Verified live:**
+  - Started outside a checkout, the gateway logged both WARNs and recommended 0 instances.
+  - With `data_dir`, or with the env var, it recommended 5.
+  - Reloads removing and restoring the key moved it from 5 to 0 (WARNs) and back to 5.
+  - A simulated release, with the binary and the extracted tarball elsewhere, answered both endpoints.
+- README (*Hardware data files*) and the sample `hoosh.cyml` document the key and the env var.
+
+### Fixed — a refused MCP tool registration is logged
+
+- **The problem.** `mcp_init` ignored what `dispatcher_register_tool` returned. Since bote 3.4.8, registration checks
+  the definition (`registry_check_tool_def`), so a refused tool would just be missing from `tools/list`. bote logs
+  most refusals itself, but not a bad name, which `validate_tool_name` refuses before the check.
+- **The fix.** The new `mcp_register_tool` returns 1 or 0, and logs every refusal as `mcp: tool registration
+  refused: <name> - <bote's reason>`.
+- **Tests use the real module.** `tests/hoosh.tcyr` now includes `src/lib/mcp.cyr` instead of mirroring its echo
+  handler, and drives `mcp_init` itself. That is one mirror fewer, the roadmap's drift item. New assertions check
+  that a bad name and a non-object `inputSchema` are refused (0) and not registered, and that a valid second tool
+  registers (1).
+
+### Changed — `rust-old/` removed
+
+The archived Rust implementation (74 files) is deleted, as [rust-old-retirement.md](docs/development/rust-old-retirement.md)
+planned once 2.7.1 was tagged. Nothing in the build, CI, scripts, tests, fuzz targets or coverage read it. The tree
+stays in git history at tag **2.7.1**, and the `rust-old <file>:<line>` provenance comments in `src/` and this
+CHANGELOG refer to it there. README, `docs/architecture/overview.md`, the retirement document and `docs/index.md`
+say so in the past tense.
+
+### Changed — no bare syscalls left in `src/`
+
+- **`main.cyr` exits through the stdlib's `sys_exit_group`.** That replaces the local `hoosh_exit_process` that 2.5.11
+  added. The roadmap listed the wrapper as missing upstream, but cyrius has shipped it since 6.5.6, with an identical
+  body. Verified live: a SIGTERM drains and exits all 12 threads with status 0.
+- **`otlp.cyr`'s span timestamps use chrono's `clock_epoch_ns`.** That replaces a local `syscall(228, …)`. On Linux it
+  is the same `CLOCK_REALTIME` read, and it also covers macOS, Windows and AGNOS.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.1's apart from the embedded version string. No benched path changed, so
+no A/B was run. The 2026-11-04 rows in `bench-history.csv` after 2.9.1's are this release's mandatory run.
+
 ## [2.9.1] — 2026-11-04
 
 **Toolchain and dependency refresh to the latest releases.** cyrius 6.7.9 → 6.7.18, `ai-hwaccel` 2.4.2 → 2.5.6,

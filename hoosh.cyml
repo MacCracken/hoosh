@@ -51,7 +51,13 @@ health_check_interval_secs = 30
 # failing at the backend. refresh_interval_secs re-detects periodically (0 =
 # detect once at startup); cache_ttl_secs is how stale a snapshot may get before
 # a wake actually re-probes — detection shells out, so this bounds subprocesses.
+# data_dir (2.9.2) is the directory that CONTAINS data/cloud_pricing.json and
+# data/models.json, which POST /v1/hardware/cost, POST /v1/hardware/models and
+# /v1/hardware/compatible-models read. Unset: $AI_HWACCEL_DATA_DIR, then the
+# working directory. A release ships them as hoosh-<version>-data.tar.gz; serve
+# warns at startup when either file is not found.
 # [hardware]
+# data_dir = "/opt/hoosh"
 # disabled_backends = ["cuda", "rocm"]
 # vram_reserve_bytes = 2147483648
 # refresh_interval_secs = 0

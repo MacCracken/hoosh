@@ -20,14 +20,13 @@ var _otlp_head = 0;
 var _otlp_count = 0;
 var _otlp_lock = 0;
 var _otlp_started = 0;
-var CLOCK_REALTIME_ID = 0;     # clock_gettime clock id (chrono uses 228 + an id)
 
 # Unix-epoch nanoseconds (OTLP timestamps are wall-clock, unlike clock_now_ns
-# which is CLOCK_MONOTONIC). Mirrors chrono's syscall(228, <clock>, &ts) shape.
+# which is CLOCK_MONOTONIC). chrono's clock_epoch_ns is the same CLOCK_REALTIME
+# read on Linux and also covers macOS, Windows and agnos; through 2.9.1 this was
+# a local raw syscall(228, ...).
 fn _otlp_epoch_ns() {
-    var ts[16];
-    syscall(228, CLOCK_REALTIME_ID, &ts);
-    return load64(&ts) * 1000000000 + load64(&ts + 8);
+    return clock_epoch_ns();
 }
 
 # Path component of "http://host:port/path" (the first '/' after the host:port).

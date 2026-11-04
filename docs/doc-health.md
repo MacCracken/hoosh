@@ -6,10 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.1**: CHANGELOG, state, README, roadmap, overview, CLAUDE.md, ADR 011 (a 2.9.1
-> update: the crypto-bank constraint is gone) and ADR 012 touched for the cyrius 6.7.18 / ai-hwaccel 2.5.6 / bote-core
-> 3.8.3 / majra 2.13.0 refresh). Earlier the same day: **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and
-> **v2.8.2** (cyrius 6.6.20); before that 2026-10-09 (**v2.8.1**).
+> **Last refresh**: 2026-11-04 (**v2.9.2**: CHANGELOG, README (*Hardware data files*, stats), state, roadmap (re-banded,
+> then 2.9.2's quick wins removed as shipped), overview, index and the rust-old retirement document (the tree is
+> gone)). Earlier the same day: **v2.9.1** (cyrius 6.7.18; ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9;
+> the zugot-recipe step dropped) and **v2.8.2** (cyrius 6.6.20); before that 2026-10-09 (**v2.8.1**).
 > The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the rust-old parity arc), when every doc below was
 > re-read against the source.
 >
@@ -55,10 +55,10 @@ type: state
 | `benchmarks.md` | 🟢 Auto-generated — 25 benches | `bench-history.sh` |
 | `docs/index.md` | 🟢 Fresh — all 11 ADRs + doc-health linked | 2026-07-23 re-read |
 | `docs/architecture/overview.md` | 🟢 Fresh — module map, data flow, endpoints | 2026-07-23 sweep |
-| `docs/development/roadmap.md` | 🟢 Fresh — **forward-only**; shipped work lives in the CHANGELOG | 2026-07-23 rewrite |
+| `docs/development/roadmap.md` | 🟢 Fresh — **forward-only**, banded by release (2.9.x, 2.10.x–2.12.x, unscheduled, upstream-gated); every item re-checked against code and upstream; 2.9.2's quick wins shipped and left it | 2026-11-04 re-band |
 | `docs/development/state.md` | 🟢 Fresh — v2.5.11 + arc retrospective | 2026-07-23 sweep |
 | `docs/development/rust-old-parity-review.md` | 🟢 Point-in-time — the 2026-07-22 parity diff that drove the arc; not rewritten as items shipped | 2026-07-22 |
-| `docs/development/rust-old-retirement.md` | 🟢 Fresh — the 2.7.0 parity check, known non-ports, deletion checklist | 2026-09-25 |
+| `docs/development/rust-old-retirement.md` | 🟢 Fresh — the 2.7.0 parity check, known non-ports, deletion checklist (carried out in 2.9.2) | 2026-11-04 |
 | `docs/development/performance.md` | 🟢 Fresh — bench-system guide → benchmarks.md | 2026-07-23 re-read |
 | `docs/doc-health.md` | 🟢 This file | 2026-07-23 rewrite |
 

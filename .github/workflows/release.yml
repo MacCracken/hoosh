@@ -59,7 +59,14 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           cp build/hoosh "hoosh-${TAG}-x86_64-linux"
-          sha256sum "hoosh-${TAG}-x86_64-linux" > SHA256SUMS
+          # 2.9.2: the hardware endpoints read ai-hwaccel's data files at run time
+          # (POST /v1/hardware/cost, POST /v1/hardware/models, /compatible-models).
+          # Ship them beside the binary: extract the tarball anywhere and point
+          # [hardware] data_dir (or AI_HWACCEL_DATA_DIR) at the directory that
+          # CONTAINS data/.
+          test -s data/cloud_pricing.json && test -s data/models.json
+          tar -czf "hoosh-${TAG}-data.tar.gz" data/cloud_pricing.json data/models.json
+          sha256sum "hoosh-${TAG}-x86_64-linux" "hoosh-${TAG}-data.tar.gz" > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -67,4 +74,5 @@ jobs:
           generate_release_notes: true
           files: |
             hoosh-*-x86_64-linux
+            hoosh-*-data.tar.gz
             SHA256SUMS

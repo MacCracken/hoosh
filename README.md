@@ -19,7 +19,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.3 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 1205 assertions, 181 groups, 0 failures |
+| **Tests** | 1215 assertions, 182 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -248,14 +248,27 @@ tokens = "your-secret-token"
 # Opt-in: OpenTelemetry OTLP/JSON span export to a collector
 # [[telemetry]]
 # otlp_endpoint = "http://localhost:4318/v1/traces"
+
+# Hardware planning data (cloud pricing + model catalogue for /v1/hardware/*):
+# the directory that CONTAINS data/. Unset: $AI_HWACCEL_DATA_DIR, then the cwd.
+# [hardware]
+# data_dir = "/opt/hoosh"
 ```
+
+**Hardware data files.** `POST /v1/hardware/cost`, `POST /v1/hardware/models` and
+`/v1/hardware/compatible-models` read `data/cloud_pricing.json` and `data/models.json`
+(vendored from ai-hwaccel) at run time. A release ships them as
+`hoosh-<version>-data.tar.gz` beside the binary: extract it, for example into
+`/opt/hoosh`, and set `[hardware] data_dir = "/opt/hoosh"` or
+`AI_HWACCEL_DATA_DIR=/opt/hoosh`. A source checkout run from the repo root needs
+neither. `hoosh serve` logs a warning when either file is missing.
 
 ---
 
 ## Testing
 
 ```bash
-# Run tests (1205 assertions across 181 groups)
+# Run tests (1215 assertions across 182 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)
@@ -284,7 +297,7 @@ observability (latency buckets, traceparent extraction, OTLP path/attribute JSON
 
 ## Rust reference
 
-The original Rust implementation (v1.3.0, 22,956 lines) is preserved in `rust-old/` as the reference the port was measured against. The parity closeout arc (v2.5.1–v2.5.11) worked through a full behavioral diff of that tree; see [the parity review](docs/development/rust-old-parity-review.md) for what was found and [CHANGELOG.md](CHANGELOG.md) for what shipped.
+The original Rust implementation (v1.3.0, 22,956 lines) was kept in `rust-old/` as the reference the port was measured against, and removed in 2.9.2. It stays in git history at tag **2.7.1** (`git show 2.7.1:rust-old/src/main.rs`), which is what the `rust-old <file>:<line>` provenance comments in `src/` refer to. The parity closeout arc (v2.5.1–v2.5.11) worked through a full behavioral diff of that tree; see [the parity review](docs/development/rust-old-parity-review.md) for what was found and [CHANGELOG.md](CHANGELOG.md) for what shipped.
 
 ---
 

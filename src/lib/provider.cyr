@@ -303,6 +303,11 @@ fn _remote_stream_opts(route) {
     sandhi_http_options_read_ms(o, REMOTE_READ_MS);
     sandhi_http_options_write_ms(o, REMOTE_READ_MS);
     sandhi_http_options_max_response_bytes(o, REMOTE_MAX_BYTES);
+    # 2.9.2: a quiet upstream gets the same keep-alive comment as a local one,
+    # every SSE_KEEPALIVE_S (http_sse_idle_keepalive). Until sandhi 1.10.5 added
+    # the idle hook, a remote stream gave hoosh no turn while it was silent.
+    sandhi_http_options_idle_ms(o, SSE_KEEPALIVE_S * 1000);
+    sandhi_http_options_idle_cb(o, &http_sse_idle_keepalive);
     var pol = route_tls_policy(route);
     if (pol != 0) { sandhi_http_options_tls_policy(o, pol); }
     return o;

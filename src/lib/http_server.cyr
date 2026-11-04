@@ -112,6 +112,18 @@ fn http_sse_comment(cfd, text) {
     return 0;
 }
 
+# Remote-stream keep-alive (2.9.2). sandhi calls this after every idle_ms of
+# upstream silence (sandhi_http_options_idle_ms / _idle_cb, sandhi 1.10.5+) with
+# the stream callback's ctx, whose first word is the client fd (handlers.cyr's
+# remote SSE ctx). It sends the comment the local path sends. Returns 1 to keep
+# waiting, or 0 to stop the stream when the client is gone. read_ms still bounds
+# the longest silence the stream accepts.
+fn http_sse_idle_keepalive(ctx, silent_ms) {
+    if (ctx == 0) { return 0; }
+    if (http_sse_comment(load64(ctx), "keep-alive") < 0) { return 0; }
+    return 1;
+}
+
 fn http_sse_done(cfd) {
     sys_write(cfd, "data: [DONE]\n\n", 14);
     return 0;

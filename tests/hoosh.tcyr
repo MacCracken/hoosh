@@ -43,6 +43,9 @@ include "src/lib/provider_err.cyr"
 include "src/lib/catalog.cyr"
 include "src/lib/outcome.cyr"
 include "src/lib/urlparse.cyr"
+# 2.9.2: the MCP wiring (tool registration, the echo handler) is tested against the REAL module; its
+# needs (bote-core, http_server, logging) are all included above. It replaced the _mcp_echo mirror.
+include "src/lib/mcp.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -672,16 +675,6 @@ fn _cmp_substr(p, plen, needle, nlen) {
         i = i + 1;
     }
     return 0 - 1;
-}
-
-# Mirror of src/lib/mcp.cyr's _hoosh_tool_echo — bote tool handler ABI
-# fn(args_cstr, claims) -> result_cstr. Echoes args as MCP text content.
-fn _mcp_echo(args, claims) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
-    if (args != 0) { _json_emit_escaped(sb, args); }
-    str_builder_add_cstr(sb, "\"}],\"isError\":false}");
-    return str_data(str_builder_build(sb));
 }
 
 # Mirror of src/lib/batch.cyr _batch_extract_requests — locate the raw
@@ -6015,13 +6008,21 @@ fn main() {
     # Exercises the real bote-core registry/dispatcher/codec that
     # src/lib/mcp.cyr drives behind /v1/tools/list + /v1/tools/call.
     test_group("mcp_tools");
-    var mcp_reg = tool_registry_new();
-    var mcp_disp = dispatcher_new(mcp_reg);
-    var mcp_sch = schema_new("object", vec_new(), vec_new());
-    var mcp_td = tool_def_new("bote_echo", "Echo the provided arguments", mcp_sch);
-    dispatcher_register_tool(mcp_disp, mcp_td, &_mcp_echo);
+    # mcp_init is src/lib/mcp.cyr's own: the registry and dispatcher the gateway serves.
+    var mcp_disp = mcp_init();
+    var mcp_reg = dispatcher_registry(mcp_disp);
     assert_eq(registry_len(mcp_reg), 1, "mcp: registry holds one tool");
     assert_eq(registry_contains(mcp_reg, "bote_echo"), 1, "mcp: registry contains bote_echo");
+    # 2.9.2: a definition bote refuses is reported (0, and a WARN), not silently dropped.
+    var mcp_bad = tool_def_new("bad name!", "a name bote refuses", schema_new("object", vec_new(), vec_new()));
+    assert_eq(mcp_register_tool(mcp_disp, mcp_bad, &_hoosh_tool_echo), 0, "mcp: a refused tool reports 0");
+    var mcp_arr = schema_new("array", vec_new(), vec_new());
+    var mcp_nos = tool_def_new("no_schema_type", "an inputSchema that is not an object", mcp_arr);
+    assert_eq(mcp_register_tool(mcp_disp, mcp_nos, &_hoosh_tool_echo), 0, "mcp: a non-object inputSchema is refused");
+    assert_eq(registry_len(mcp_reg), 1, "mcp: refused tools are not registered");
+    var mcp_ok = tool_def_new("hoosh_test_tool", "a valid second tool", schema_new("object", vec_new(), vec_new()));
+    assert_eq(mcp_register_tool(mcp_disp, mcp_ok, &_hoosh_tool_echo), 1, "mcp: a valid tool reports 1");
+    assert_eq(registry_len(mcp_reg), 2, "mcp: and is registered");
 
     # tools/list — the request src/lib/mcp.cyr synthesizes for GET.
     var mcp_lst = codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", mcp_disp, 0);
@@ -7121,6 +7122,27 @@ fn main() {
     assert_eq(memeq(kpb, ": keep-alive\n\n", 14), 1, "keepalive: an SSE comment line");
     sys_close(kprd);
     sys_close(kpwr);
+
+    test_group("remote_sse_keepalive");
+    # 2.9.2: http_sse_idle_keepalive (http_server.cyr, the real one) is sandhi's
+    # idle_cb for a remote stream. ctx[0] is the client fd; 1 keeps waiting, 0
+    # stops the stream. The gateway ignores SIGPIPE at startup, so a gone client
+    # is an EPIPE write; ignore it here too.
+    signal_ignore(13);
+    var rkf = alloc(16);
+    sys_pipe(rkf);
+    var rkrd = load64(rkf) & 0xFFFFFFFF;
+    var rkwr = (load64(rkf) >> 32) & 0xFFFFFFFF;
+    var rkctx = alloc(48);
+    store64(rkctx, rkwr);
+    assert_eq(http_sse_idle_keepalive(rkctx, 15000), 1, "remote keepalive: a live client keeps the stream");
+    var rkb = alloc(32);
+    assert_eq(sys_read(rkrd, rkb, 32), 14, "remote keepalive: 14 bytes");
+    assert_eq(memeq(rkb, ": keep-alive\n\n", 14), 1, "remote keepalive: the local path's comment line");
+    sys_close(rkrd);
+    assert_eq(http_sse_idle_keepalive(rkctx, 30000), 0, "remote keepalive: a gone client stops the stream");
+    sys_close(rkwr);
+    assert_eq(http_sse_idle_keepalive(0, 15000), 0, "remote keepalive: no ctx stops the stream");
 
     test_group("rustold_hw_numbers");
     # handle_hw_models_post / _hw_model_info and _hw_cloud_alternatives (placement)

@@ -70,6 +70,48 @@ fn hardware_configure(vram_reserve, refresh_secs, cache_ttl_secs) {
     return 0;
 }
 
+# ── Data files (2.9.2) ──
+# ai-hwaccel reads data/cloud_pricing.json (POST /v1/hardware/cost) and data/models.json
+# (POST /v1/hardware/models, /compatible-models) through data_file_path(rel): the
+# [hardware] data_dir key when set, else $AI_HWACCEL_DATA_DIR, else the working
+# directory. Either way it is the directory that CONTAINS data/. Through 2.9.1
+# hoosh never set it and the release shipped only the binary, so an installed
+# gateway answered those endpoints with empty lists and said nothing.
+#
+# Called on every config load (startup and /v1/admin/reload), so removing the key
+# on reload falls back to the env var and the working directory. `dir` is a cstr,
+# or 0 for unset. Also drops ai-hwaccel's cached pricing rows (cached per path
+# since 2.5.5), so a reload picks up a replaced cloud_pricing.json.
+fn hardware_configure_data_dir(dir) {
+    data_dir_set(dir);
+    cloud_pricing_reload();
+    return 0;
+}
+
+# 0 when the data file `rel` is readable where ai-hwaccel will look; otherwise
+# warns, naming the path tried and what is missing because of it, and returns 1.
+fn _hw_check_data_file(rel, effect) {
+    var path = data_file_path(rel);
+    if (file_exists(path) == 1) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "hardware: data file not found: ");
+    str_builder_add_cstr(sb, path);
+    str_builder_add_cstr(sb, " (");
+    str_builder_add_cstr(sb, effect);
+    str_builder_add_cstr(sb, "); set [hardware] data_dir or AI_HWACCEL_DATA_DIR to the directory that contains data/");
+    hlog_warn(str_data(str_builder_build(sb)));
+    return 1;
+}
+
+# Check both data files; returns how many are missing. Run at serve startup and
+# after a reload, never per request.
+fn hw_check_data_files() {
+    var missing = _hw_check_data_file("data/cloud_pricing.json", "POST /v1/hardware/cost will recommend no instances");
+    missing = missing + _hw_check_data_file("data/models.json",
+      "POST /v1/hardware/models and /v1/hardware/compatible-models will find no models");
+    return missing;
+}
+
 # Detect hardware and populate the global registry, with ai-hwaccel's SERIAL
 # detector (see _hw_detect for why not the threaded one). Runs once from main,
 # before any thread is spawned; hw_refresh re-runs the same detection later.

@@ -31,6 +31,30 @@ fn _hoosh_tool_echo(args, claims) {
     return str_data(str_builder_build(sb));
 }
 
+# Register one tool on `disp`. Returns 1 when it registered, 0 when bote refused it.
+#
+# 2.9.2: the result used to be ignored, so a refused tool was simply missing from
+# tools/list. Since bote 3.4.8, registration checks the definition (name syntax, an
+# "object" inputSchema, property and required entries; registry_check_tool_def).
+# bote logs most refusals itself, but not a bad name, which validate_tool_name
+# refuses earlier, so every refusal is logged here under hoosh's own prefix.
+fn mcp_register_tool(disp, td, handler_fp) {
+    var err = dispatcher_register_tool(disp, td, handler_fp);
+    if (err == 0) { return 1; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "mcp: tool registration refused: ");
+    var name = 0;
+    if (td != 0) { name = tool_def_name(td); }
+    if (name != 0) { str_builder_add_cstr(sb, name); } else { str_builder_add_cstr(sb, "(no name)"); }
+    var why = bote_err_reason(err);
+    if (why != 0) {
+        str_builder_add_cstr(sb, " - ");
+        str_builder_add_cstr(sb, why);
+    }
+    hlog_warn(str_data(str_builder_build(sb)));
+    return 0;
+}
+
 # Build the registry + dispatcher and register the built-in tools.
 # Idempotent: a second call rebuilds (only invoked once from cmd_serve).
 fn mcp_init() {
@@ -43,7 +67,7 @@ fn mcp_init() {
     var td = tool_def_new("bote_echo",
       "Echo the provided arguments back as text content",
       schema);
-    dispatcher_register_tool(disp, td, &_hoosh_tool_echo);
+    mcp_register_tool(disp, td, &_hoosh_tool_echo);
     _mcp_dispatcher = disp;
     return disp;
 }

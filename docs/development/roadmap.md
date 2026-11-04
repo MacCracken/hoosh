@@ -8,148 +8,138 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.1. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
-complete** — the port is at behavioral parity with the archived Rust reference and
-past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 and 2.7.1 closed what remained
-([rust-old-retirement.md](rust-old-retirement.md)).
+**Current**: v2.9.2 (cyrius 6.7.18). The 2.9.2 quick wins shipped; see the CHANGELOG. **Next**: the 2.9.x patches
+and 2.10.0 below.
+
+The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
+- **2.9.x patches** fix things without changing what a client sees.
+- **2.10.x and later minors** add features or change answers.
 
 ---
 
-## Open work
+## 2.9.x — later patches *(fixes, no API change)*
 
-### Memory — per-request arena  *(highest priority)*
+- **Test-suite mirror drift, module by module.**
+  - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
+    response-cache key, compression, the semantic cache, batch, metrics, the trace and OTLP helpers, the config and
+    router pickers, the pool ring, DLP custom patterns, `main.cyr`'s flag parser and hardware. A mirror can drift
+    from `src/` while both stay green. That has happened twice: v2.5.6 pricing order and v2.5.7 audit chain-link
+    verification, and both times the mirror was right and `src/` was wrong.
+  - **The fix:** include each module for real, as `pricing.cyr`, `metadata.cyr`, `catalog.cyr`, `outcome.cyr`,
+    `urlparse.cyr` and (since 2.9.2) `mcp.cyr` already are. Where a helper lives in a module that needs the whole
+    server (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One
+    or two modules per patch.
+  - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift.
+- **Connection pooling for remote TLS** (`sandhi_http_options_pool`; policy-bound requests bypass it). The case worth
+  doing is reusing remote TLS handshakes. Measure the handshake share of a remote request first. A local loopback
+  connect is ≪ inference latency.
 
-hoosh's allocator **never frees**. v2.5.11 removed the dominant per-connection
-64 KiB allocation (measured: ~128 MB → 2.0 MB of growth over 2000 requests), but
-**~1 KiB per request still accumulates** — response string building
-(`str_builder`, `to_cstr`, path parsing). At 100 req/s that is ~360 MB/hour, so it
-is still an eventual OOM on a long-lived gateway, just a slower one.
+---
 
-Point fixes will not close this. It needs a **per-request arena with
-mark/release**: take a mark when a request starts, release it when the response is
-written. `alloc_reset` exists but cannot be called per request as-is — the response
-cache, audit chain, cost records, routes and health records all live in the same
-arena and must survive the request that created them. The design work is deciding
-what is request-scoped versus process-scoped and enforcing that split.
+## 2.10.x — memory and accounting
 
-Until then, treat a hoosh instance as needing a periodic restart under sustained
-load, and measure with `scripts/` + `/proc/<pid>/status` rather than assuming.
+### 2.10.0 — per-request arena *(highest priority)*
 
-### Current-model requests — what 2.8.0 left
+hoosh's allocator **never frees**.
+- v2.5.11 removed the dominant per-connection 64 KiB allocation: over 2000 requests, growth fell from ~128 MB to
+  2.0 MB.
+- **~1 KiB per request still accumulates**, from response building (`str_builder`, `to_cstr`, path parsing). At
+  100 req/s that is ~360 MB/hour, still an eventual OOM on a long-lived gateway, only a slower one.
 
-- **An OpenAI Responses API path.** gpt-6-astra and gpt-6.1-sol take no function calling on Chat Completions
-  (OpenAI serves their tools through `/v1/responses` only), so a tool-using client cannot drive them through hoosh.
-  Translate a tool-carrying request for those models to the Responses shape and back.
-- **Multimodal content parts.** `content` is read as a string and a plain message passes through verbatim
-  (`provider.cyr`), so an OpenAI `image_url` part is never translated to Anthropic `image` / Gemini `inline_data`.
-  The catalog now knows each model's vision bit. This is thoth's F10 (image input) gate.
+Point fixes will not close this. It needs a **per-request arena with mark/release**: take a mark when a request
+starts, and release it once the response is written.
+- `alloc_reset` cannot run per request as it stands. The response cache, audit chain, cost records, routes and
+  health records live in the same arena, and they must outlive the request that created them.
+- The design work is deciding what is request-scoped and what is process-scoped, then enforcing that split. Write
+  an ADR first.
+- The 2.8.0 catalog fetch's reusable arena is a small working precedent.
+
+Until then, a hoosh instance needs a periodic restart under sustained load. Measure with `/proc/<pid>/status` rather
+than assuming.
+
+### Then, in any order
+
+- **Cache tokens.** Anthropic reports `cache_creation_input_tokens` / `cache_read_input_tokens`, OpenAI reports
+  `prompt_tokens_details.cached_tokens`, and every provider prices cached input lower. hoosh counts none of them, so
+  a cached prompt is costed at the full input rate.
+- **`POST /v1/cost/recommend` over the live catalog.**
+  - **Today:** `handle_cost_recommend` ranks only exact-model route patterns and skips every pattern that ends in
+    `*`. So a gateway whose routes are all `claude-*`-style answers 404 ("no capable exact-model route"), and a
+    model a provider lists but no pattern names is never recommended.
+  - **Change:** rank each route's catalog entries instead. `metadata_lookup` and `estimate_cost_micro` already read
+    their live context window, vision bit and price.
+  - agnosai's B33 (choosing a model per tier from the catalog) can use it.
+- **Configurable worker pool** (`[server] workers`).
+  - `WORKER_COUNT = 7` came from sigil's 8 crypto banks. Since sigil 3.13.14 (2.9.1) lanes come from a pool of 64
+    per operation ([ADR 011](../decisions/011-multithreaded-accept-loop.md#update-291-the-crypto-bank-constraint-is-gone)).
+  - **Change:** make the pool size a config key, bounded well under 64. Benchmark contention on `_chat_lock` before
+    raising the default.
+
+---
+
+## 2.11.x — requests for current models
+
 - **Thinking on Gemini and Ollama.** `reasoning_effort` maps to Anthropic's thinking and is forwarded to
-  OpenAI-compatible reasoning models; Gemini's `generationConfig.thinkingConfig` and Ollama's `think` are not mapped.
-- **Cache tokens.** Anthropic reports `cache_creation_input_tokens` / `cache_read_input_tokens` and every provider
-  prices cached input lower; hoosh counts neither, so a cached prompt is costed at the full input rate.
-- **`POST /v1/cost/recommend` over the live catalog.** It ranks only routes' exact-model patterns
-  (`handle_cost_recommend` skips every pattern ending in `*`), so a gateway whose routes are all `claude-*`-style
-  answers it 404 ("no capable exact-model route"), and a model a provider lists but no pattern names is never
-  recommended. Rank each route's catalog entries instead: `metadata_lookup` and `estimate_cost_micro` already read
-  their live context window, vision bit and price. agnosai's B33 (choosing a model per tier from the catalog)
-  can use it.
-- **AGNOS build.** There is no `hoosh_agnos` build in CI or `scripts/` (the one on disk downstream is 2.4.11) —
-  thoth's v1.0 gate 1 rung 2 (a real turn against the spine on AGNOS) waits on it. A follow-up, by the
-  maintainer's call.
+  OpenAI-compatible reasoning models. Gemini's `generationConfig.thinkingConfig` and Ollama's `think` are not
+  mapped. This is the smallest of the three; start here.
+- **Multimodal content parts.** `content` is read as a string, and a plain message passes through verbatim
+  (`provider.cyr`). So an OpenAI `image_url` part is never translated to Anthropic `image` or Gemini `inline_data`.
+  The catalog already knows each model's vision bit. This is the gate for thoth's F10 (image input).
+- **An OpenAI Responses API path.** gpt-6-astra and gpt-6.1-sol accept no function calling on Chat Completions;
+  OpenAI serves their tools only through `/v1/responses`. So a tool-using client cannot drive them through hoosh.
+  Translate a tool-carrying request for those models into the Responses shape and back. This is the largest of the
+  three.
 
-### Observability
+---
 
-- **Nested OTLP spans** — provider-forward / cache / retry child spans under the
-  inference span. Extends 2.3.5.
-- **OTLP/protobuf** — the standard wire format. *Upstream-gated* on a cyrius
-  protobuf lib (proposed:
-  `cyrius/docs/development/proposals/2026-06-10-protobuf-lib.md`).
+## 2.12.x — tools and observability
 
-### Retire `rust-old/` *(after 2.7.1 is tagged)*
+- **szál's MCP tools.** No longer upstream-gated.
+  - **What szál delivered:** szál 2.2.0 (2026-09-25) shipped everything hoosh filed for: `szal_` renames, a consumer
+    bundle (`dist/szal-mcp.cyr`) with no vendored libraries inside, and `szal_register_into(dispatcher)`.
+  - **What is left:**
+    1. **The toolchain.** szál 2.2.0 pins cyrius 6.6.6 and predates bote 3.4.8's registration checks, which bote's
+       own audit says szál's schemas pass. Wait for a szál release on 6.7.x, or prove that 2.2.0 compiles clean on
+       hoosh's pin.
+    2. **An allow-list.** The tool groups include `file`, `git`, `net`, `process` and `system`, so a gateway must not
+       expose them by default. Add a per-group allow-list (`[mcp] tools = [...]`, empty by default), and require
+       `[[auth]]` for anything beyond pure groups such as `json`, `math` and `hash`.
+    3. **The wiring.** Vendor the bundle at `src/vendor/szal-mcp.cyr` and call `szal_register_into` in `mcp_init`.
+       The transport does not change ([ADR 005](../decisions/005-mcp-via-bote.md)).
+- **Nested OTLP spans.** Provider-forward, cache and retry child spans under the inference span, extending 2.3.5.
+- **OTLP/protobuf**, the standard wire format. It is no longer upstream-gated: cyrius ships `lib/protobuf.cyr`
+  (`pb_tag`, `pb_write_varint`, …). Encode the existing OTLP/JSON document's fields as
+  `ExportTraceServiceRequest`.
 
-2.7.0 and 2.7.1 closed the last parity gaps with the archived Rust tree. Delete `rust-old/` once 2.7.1 is
-tagged; [rust-old-retirement.md](rust-old-retirement.md) has the checklist and the list of
-deliberate non-ports, so nothing needs the Rust tree afterwards.
+---
 
-### Test-suite structure
+## Unscheduled *(maintainer's call or demand-gated)*
 
-- **Mirror drift is unguarded for most of the suite.** `tests/hoosh.tcyr` still
-  re-implements much of what it tests — the response-cache key, compression, the
-  semantic cache, batch, metrics, the trace and OTLP helpers, the config and router
-  pickers, the pool ring, DLP custom patterns, `main.cyr`'s flag parser and
-  hardware — rather than including it, so src and a mirror can diverge while both
-  stay internally consistent and the suite stays green. That has happened twice
-  (v2.5.6 pricing local-provider ordering, v2.5.7 audit chain-link verification;
-  in both the mirror was right and src was wrong). `scripts/coverage.sh` is a
-  floor against *unwatched* code, not against drift. A `src/lib/` module can be
-  included for real when its own includes allow — `pricing.cyr`, `metadata.cyr`,
-  `catalog.cyr`, `outcome.cyr` and `urlparse.cyr` are — so the fix goes module by
-  module: include each, and move a helper that lives in a module needing the whole
-  server (`handlers.cyr`, `main.cyr`) into one that does not, as `urlparse.cyr` was
-  split out of `http_client.cyr`.
-- **Split `tests/hoosh.tcyr` / `hoosh.bcyr` into per-topic units** — only if the
-  suite keeps growing. Currently workable as single files.
+- **cmdit adoption.** See [Adopting cmdit](#adopting-cmdit-cli-parsing) below. It changes CLI behavior on purpose
+  (exit codes, last-wins flags), so it ships in a minor.
+- **AGNOS build.** There is no `hoosh_agnos` build in CI or `scripts/`; the one on disk downstream is 2.4.11. thoth's
+  v1.0 gate 1, rung 2 (a real turn against the spine on AGNOS) waits on it.
+- **Split `tests/hoosh.tcyr` / `hoosh.bcyr` into per-topic units**, only if the suite keeps growing.
+- **Threaded hardware detector** *(parked)*.
+  - **Why hoosh stays serial:** the threaded path lists sysfs backends (ROCm, Intel NPU, AMD XDNA, TPU, …) before
+    the CLI ones (CUDA, Gaudi, Neuron, Vulkan, oneAPI, Apple). `requirement-match` reports the *first* matching
+    profile, and `simulate`'s `remove_count` drops the *first* N accelerators, so their answers would change on
+    mixed hosts.
+  - **Little to gain:** serial takes 22.5 ms and threaded 21.2 ms on the dev host, and since ai-hwaccel 2.5.x the
+    threaded path runs the vendor tools one at a time.
+  - **When to revisit:** only if startup time matters. Make those two consumers order-independent first.
+    `_hw_detect` in `src/lib/hardware.cyr` has the details.
 
-### MCP tools (szál) — *upstream-gated*
+---
 
-`/v1/tools/list` + `/v1/tools/call` are live, but the registry holds only a
-`bote_echo` smoke tool. szál's Cyrius port is done (2.1.2, 54 tools on the same
-bote API), but it has no dist bundle yet, and its own names collide with upstream
-majra, bote-core and hoosh (`STEP_*` with different values, `step_result_new` and
-`cache_new` with different arities). Filed 2026-09-25 as
-`szal/docs/development/issues/2026-09-25-hoosh-consumer-bundle.md`, which asks for
-`szal_` renames, a bundle without the vendored libraries, and a
-register-into-an-existing-dispatcher entry point. Then vendor it at
-`src/vendor/szal-mcp.cyr` and register the tools in `mcp_init` next to `bote_echo`,
-with no transport changes. ([ADR 005](../decisions/005-mcp-via-bote.md).)
+## Upstream-gated
 
-### Upstream-gated (sandhi)
-
-- **Remote SSE keep-alive** — local streams send `: keep-alive` every 15 s of
-  silence (2.7.0); remote streams cannot, because `sandhi_http_stream` gives the
-  caller no turn while the upstream is quiet. Filed 2026-09-25 as
-  `sandhi/docs/development/issues/2026-09-25-http-stream-no-idle-hook.md`
-  (proposes `sandhi_http_options_idle_ms` / `_idle_cb`).
-- **Connection pooling** — no longer upstream-gated: sandhi has
-  `sandhi_http_options_pool` (policy-bound requests bypass it). The high-value case
-  is remote TLS-handshake reuse; adopt it when that cost shows up. (Local loopback
-  connect ≪ inference latency, so the local path has low ROI.)
-
-### Hardware detection — threaded detector *(low priority)*
-
-No longer upstream-gated. ai-hwaccel 2.3.25 fixed the post-pass bug that moved
-2.5.9 to the serial detector, and 2.6.12 checked the fix on ai-hwaccel 2.4.0. The
-serial and threaded registries match except in profile order. hoosh still runs
-the serial detector for two reasons:
-
-- **Profile order.** The threaded path lists the sysfs backends (ROCm, Intel NPU,
-  AMD XDNA, TPU, …) before the CLI ones (CUDA, Gaudi, Neuron, Vulkan, oneAPI,
-  Apple). `POST /v1/hardware/requirement-match` reports the *first* matching
-  profile and `/v1/hardware/simulate`'s `remove_count` drops the *first* N
-  accelerators, so their answers would change on mixed hosts. An Intel NPU +
-  NVIDIA laptop would report `Intel NPU` for `any-accelerator` instead of the GPU.
-- **Little to gain.** Serial takes 22.5 ms and threaded 21.2 ms on the dev host
-  (medians of 15 alternated rounds). `vulkaninfo` is ~20 ms of either, and threads
-  cannot split a single probe.
-
-Revisit only if startup time matters on hosts with several slow probes
-(nvidia-smi and vulkaninfo together). The precondition is making those two
-consumers order-independent, or sorting profiles into serial order after
-detection. `_hw_detect` in `src/lib/hardware.cyr` has the details.
-
-### Upstream-gated (cyrius)
-
-- **`cyrius coverage` reports on the vendored stdlib, not the local repo** — filed
-  as `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`,
-  proposing a local-repo default with `--full` and `--min <pct>`. hoosh gates on
+- **cyrius — `cyrius coverage` reports on the vendored stdlib, not the local repo.** Still open:
+  `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`. hoosh gates on
   `scripts/coverage.sh` meanwhile.
-- **No `sys_exit_group` wrapper** — `sys_exit` is `SYS_EXIT` (thread exit) despite
-  a "terminate process" doc comment, which left hoosh alive after a clean shutdown
-  until 2.5.11 added a local `hoosh_exit_process`. Replace when upstream provides
-  one.
-- **`clock_now_ms()` has no vDSO path** — it is a raw `syscall(228)` measuring
-  **1.351 µs**, which dominated every hot path until 2.5.11 worked around it with
-  a coarse ticker. A vDSO route would let the workaround be removed.
+- **cyrius — `clock_now_ms()` has no vDSO path.** It is a raw clock syscall, measured at 1.351 µs. That dominated
+  every hot path until 2.5.11 worked around it with a coarse ticker. A vDSO route would let the ticker go.
+  `lib/chrono.cyr` at 6.7.18 still has none.
 
 ---
 
@@ -178,17 +168,23 @@ and `/v1/audio/speech` will not be ported here.
 
 ## Process notes
 
-**Toolchain bumps.** On each pin bump, wipe `lib/` and run a clean
-`cyrius lib sync` + `cyrius deps`, then the full CI step order, before trusting a
-local build — a stale `lib/` masks stdlib module renames (6.1.27 merged
-`bigint`/`toml`/`json` → `bayan`). Compiler strictness also tightens: 6.2.11 turned
-duplicate same-scope `var` declarations into a hard error.
+**Toolchain bumps.**
+- Remove `lib/*.cyr`, but not `lib/unicode/`, which is tracked. Then run a clean `cyrius lib sync` + `cyrius deps`
+  and CI's full step order before trusting a local build. A stale `lib/` hides stdlib renames: 6.1.27 merged
+  `bigint`/`toml`/`json` into `bayan`.
+- When a git dependency's tag changes, regenerate `cyrius.lock` from empty. 6.6.20+ keeps the old tag's `commit`
+  line beside the new one.
+- Grep the build for `undefined` and `deprecated`. CI fails on neither: an undefined function compiles to a trap.
+- New compiler and linter strictness lands with pins: 6.2.11 duplicate `var`s, 6.7.3's lone `!`, 6.7.18's
+  write-length lint.
 
-**Benchmarks are a release gate.** CI runs `./scripts/bench-history.sh` and fails
-the build if the suite does not run. `bench-history.csv` is the record. Two
-benchmarks (`estimate_tokens_per_provider`, `pool_available`) sit at single-digit
-nanoseconds where 1 ns of timer quantization reads as a >10% swing — check a
-flagged result across repeats before treating it as a regression.
+**Benchmarks are a release gate.**
+- CI runs `./scripts/bench-history.sh` and fails the build if the suite does not run. `bench-history.csv` is the
+  record.
+- Two benchmarks (`estimate_tokens_per_provider`, `pool_available`) sit at single-digit nanoseconds, where 1 ns of
+  timer quantization reads as a >10% swing.
+- For a toolchain A/B, build both bench binaries and alternate them for at least 7 rounds. To attribute a moved row,
+  compare symbol maps (`CYRIUS_SYMS=<path>`): unchanged function bytes with a shifted 64-byte offset is placement.
 
 **Live verification.** `scripts/bench-live.sh` (opt-in, needs a running gateway and
 backend) measures end-to-end; its ~5 ms floor is `curl` process startup, not the
@@ -203,8 +199,8 @@ A tier-2 ("verb tool") candidate from the 2026-06-25 ecosystem CLI review
 **Demand-gated, not a forced sweep**: the natural moment is the next change to the CLI or
 to its test mirror.
 
-**What is hand-rolled** (surveyed 2026-10-14 in `src/main.cyr`; `lib/` and `src/vendor/`
-excluded; no `flags_` / `FLAG_ERR_`; `HOOSH_LOG` (`:1073`) is env, not argv):
+**What is hand-rolled** (surveyed 2026-10-14 in `src/main.cyr`, line numbers re-checked 2026-11-04; `lib/` and
+`src/vendor/` excluded; no `flags_` / `FLAG_ERR_`; `HOOSH_LOG` (`:1073`) is env, not argv):
 
 - **Three argv re-scanners:** `_flag_val` (`:961`, first-wins), `_flag_set` (`:985`) and
   `_positional` (`:997`). `_positional` assumes every dash token but `--stream` takes a
@@ -259,20 +255,19 @@ excluded; no `flags_` / `FLAG_ERR_`; `HOOSH_LOG` (`:1073`) is env, not argv):
   unknown-command list and in completions. Accept that, or match it on
   `cmdit_raw_argv` before dispatch.
 
-**cyrius.cyml:** `[deps].stdlib` already lists `args` and `io` (no `flags`). Add the
-block below. The cmdit dist compiles on 6.6.2; re-check it on the current pin (6.7.18: a lone `!` is now an operator and
-`trait` / `const` / `true` / `false` / `do` / `dyn` are reserved) before adding the block.
+**cyrius.cyml:** `[deps].stdlib` already lists `args` and `io` (no `flags`). Add the block below. cmdit 1.5.0 pins
+cyrius 6.7.18, hoosh's pin; check its 1.3.0 → 1.5.0 changelog against the API names above before adopting.
 
 ```
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
-tag = "1.3.0"
+tag = "1.5.0"
 modules = ["dist/cmdit.cyr"]
 ```
 
 **Tests:**
 
-- [ ] **Replace the CLI mirror**, the drift shape *Test-suite structure* names, with
+- [ ] **Replace the CLI mirror**, the drift shape *2.9.x — Test-suite mirror drift* names, with
   synthetic-argv cases on the pure `cmdit_dispatch_argv`. The mirror is in
   `tests/hoosh.tcyr`:
   - `:1102-1150` (`_t_flag_val` / `_t_positional`);
