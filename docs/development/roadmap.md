@@ -22,8 +22,8 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response-cache key, batch, the OTLP helpers, the config pickers, the pool ring, `main.cyr`'s flag parser, and
-    the handlers' parsers. A mirror can drift from `src/` while both stay green. That has happened twice (v2.5.6
+    response-cache key, batch, the config pickers, the pool ring, `main.cyr`'s flag parser, and the handlers'
+    parsers. A mirror can drift from `src/` while both stay green. That has happened twice (v2.5.6
     pricing order, v2.5.7 audit chain-link verification).
     2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
     way) and 2.9.4 six (the compression scans' old escape check and return shape, pre-model semantic entries, a
@@ -34,17 +34,13 @@ The bands are a plan, not a promise. Every item was checked against the code and
     (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7); `http_client.cyr` and `events.cyr`, with
     the majra bundle (2.9.8); `hardware.cyr`, with the ai-hwaccel bundle, and `router.cyr` (2.9.9); `health.cyr`,
     after `route_is_remote` moved into `route.cyr` (2.9.10); `audit.cyr` (2.9.12); `budget.cyr` and `storage.cyr`
-    (2.9.13; the persistence tests use a real patra database in `/tmp`). `scripts/coverage.sh` prints the current
-    list: 29 of 37 modules.
-  - **Every module left is in a dependency cycle** (scan of 2.9.13), so each needs a split first. The symbols that
-    close each cycle:
-    - `retry.cyr` needs `provider_forward` / `provider_forward_stream`, so it waits on `provider.cyr`.
-    - `provider.cyr` needs only `otlp_enqueue_inference_span`. `otlp.cyr` needs `provider.cyr`'s `_remote_arena`
-      and `pool.cyr`'s `wq_push` / `job_otlp_export`, and `pool.cyr` reaches `batch`, `catalog_fetch` and
-      `handlers`. A span hook set by `main.cyr`, or splitting the enqueue out of `otlp.cyr`, would free
-      `provider.cyr`, the largest mirror left (27 same-name copies).
-    - **Next:** the `provider.cyr` / `otlp.cyr` split above. It is the largest mirror left, and `retry.cyr` follows
-      it.
+    (2.9.13; the persistence tests use a real patra database in `/tmp`); `otlp.cyr` and `provider.cyr`, after
+    `otlp.cyr`'s I/O half moved to `otlp_export.cyr` (2.9.14). `scripts/coverage.sh` prints the current list: 31
+    of 38 modules.
+  - **Where the rest stand** (scan of 2.9.14):
+    - **`retry.cyr` needs nothing the tests lack** since `provider.cyr` came in. **The next step.**
+    - `pool.cyr`, `batch.cyr`, `catalog_fetch.cyr` and `otlp_export.cyr` form one cycle through `pool.cyr`'s
+      `wq_push` and job constructors, and `pool.cyr` dispatches into `handlers.cyr`.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server

@@ -48,7 +48,7 @@ Provider forward ── provider.cyr
     │
     ▼
 Audit chain (HMAC-SHA256) │ Metrics (Prometheus) │ Events (majra) │ OTLP spans
-    ── audit.cyr            ── metrics.cyr          ── events.cyr   ── otlp.cyr
+    ── audit.cyr            ── metrics.cyr          ── events.cyr   ── otlp.cyr + otlp_export.cyr
 Cost accumulation per (provider, base_url) ── pricing.cyr
    └─ 2.5.12: cost_record returns the micro-USD it accumulated; the chat
       response reports that same value as usage.cost_micro_usd, so a client's
@@ -82,7 +82,8 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring |
-| `otlp.cyr` | OpenTelemetry OTLP/JSON span export (opt-in) — local `http` + remote `https` (worker-routed TLS) |
+| `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring, span and batch JSON |
+| `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms |
 | `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry + semantic (embedding cosine) cache |

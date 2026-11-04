@@ -5,6 +5,101 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.14] — 2026-11-04
+
+**The tests run the real provider forward path and OTLP span ring.** Splitting `otlp.cyr` broke the cycle that kept
+`provider.cyr` out of the tests, and the gateway binary is byte-identical. The test file's 26 copies of
+`provider.cyr` are gone; several had drifted. **1458 assertions** in 159 groups. All gates are clean: fmt, lint,
+vet, deny, coverage (378/686, 55%; **31 of 38** modules included for real), the security scan, the four fuzz targets
+and the shutdown smoke test.
+
+### Changed — `otlp.cyr` split into a pure half and an I/O half
+
+- **Why:** `provider.cyr` enqueues one span per request through `otlp_enqueue_inference_span` and needed nothing
+  else from `otlp.cyr`. But `otlp.cyr` also held the exporter, which needs `pool.cyr` (`wq_push`,
+  `job_otlp_export`) and `provider.cyr`'s scratch arena. That made a cycle no test could include.
+- **The split,** as `catalog.cyr` / `catalog_fetch.cyr` already are:
+  - `otlp.cyr` keeps the settings, the span ring, and the span and batch JSON;
+  - the new `otlp_export.cyr` takes `_otlp_post`, the exporter thread and `otlp_init`.
+- **No behavior change:** `src/main.cyr` includes `otlp_export.cyr` right after `otlp.cyr`, so the functions compile
+  in the same order. The gateway binary is byte-identical to 2.9.13's tree rebuilt at version 2.9.14.
+
+### Changed — `provider.cyr` and `otlp.cyr` are included for real
+
+The test file's 26 same-name copies of `provider.cyr` functions are gone. The four wrappers that feed the real
+functions cstr literals (`_ollm`, `_ollc`, `_conv`, `_antc`) stay. Eight call sites moved to the real signatures,
+passing 0 for tools, generation options and the catalog entry.
+
+**Where the copies had drifted:**
+- **`_json_span_end`:** the copy decided whether a quote was escaped by looking at the byte before it, so `"a\\"`
+  (an escaped backslash, then the closing quote) ran past the string's end. `src/` lets a backslash consume the
+  next byte.
+- **`_build_anthropic_body_x`:** the copy had the pre-2.5.2 four-argument signature and a hard-coded
+  `"max_tokens":4096`. `src/` takes the request's `max_tokens`, its sampling, its tools and the catalog's thinking
+  plan.
+- **`_build_gemini_body`:** the copy sent no tools.
+- **`extract_gemini_tokens`:** the copy ignored `thoughtsTokenCount`, which Gemini bills as output and `src/` adds
+  since 2.8.0.
+- **The three token extractors:** they packed counts inline. `src/` uses `_pack_tokens`, which clamps each to
+  0..2^32-1.
+
+**Two mirrors went too:**
+- **`_t_remote_opts`:** it stored the deadlines itself. Its group now reads the real `_remote_stream_opts` /
+  `_remote_http_opts_for` back through sandhi's getters.
+- **`_t_otlp_path` and `_t_otlp_attr_int`,** replaced by the real functions. The OTLP "scheme detection" assertions
+  only compared literals with `memeq`; they now call `_otlp_is_https`.
+
+### Added — tests for behavior no test had reached
+
+- **`otlp_spans`,** on the real ring, without the exporter thread so nothing is POSTed:
+  - disabled is a no-op, and a reload that clears the endpoint stops enqueueing although the ring stays allocated;
+  - a span carries the current trace and span ids, the provider, the escaped model, latency and tokens as OTLP/JSON
+    int strings, and status 1 for success, 2 for failure;
+  - it starts `latency_ms` before it ends;
+  - the batch wraps the spans in one ResourceSpans document;
+  - the ring wraps.
+- **`provider_real`:**
+  - `_pack_tokens` packs, clamps a negative count to 0 and saturates a count past 32 bits;
+  - Gemini thinking tokens are billed as output;
+  - `_json_span_end` handles an escaped backslash before a quote and an escaped quote inside a string;
+  - the Anthropic body takes `max_tokens` from the request and converts OpenAI tools to `input_schema` tools;
+  - the Gemini body converts them to `functionDeclarations`.
+- **The options group now checks more:** the keep-alive hook and its interval on streams, the 8 MiB response cap,
+  and that both builders carry a route's TLS policy.
+
+### Mutation-checked
+
+A copy of the tree was changed 15 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| `_pack_tokens` without its clamp or its saturation | 1 fails each |
+| Gemini thinking tokens dropped; the Gemini body without tools | 1 fails each |
+| `_json_span_end` not skipping escaped bytes | 1 fails |
+| the Anthropic body ignoring the request's `max_tokens` | 1 fails |
+| stream options without the idle hook, or with a total deadline; request options losing the TLS policy | 1 fails each |
+| `otlp_enqueue_inference_span` ignoring a cleared endpoint | 1 fails |
+| span status inverted; a span starting when it ends; the model unescaped | 2, 1 and 1 fail |
+| the batch without commas between spans; `_otlp_is_https` inverted | 1 and 2 fail |
+
+**First-round survivors, now caught:**
+- **`_json_span_end` without its escape handling** passed the escaped-backslash case alone, because with no escape
+  handling at all that string still ends at the right quote. The escaped-quote case is what needs the skip.
+- **The cleared-endpoint check** was only reachable once the ring was allocated. Both cases were added.
+
+### Notes
+
+- **The test file shrank by 592 lines** (6,693 → 6,101).
+- **Symbol coverage moved 382 → 378,** the name-based artifact `scripts/coverage.sh` describes:
+  - seven `provider.cyr` internals (`_emit_tool_call`, `_json_arr_span` and others) and one `jsonlite.cyr` helper
+    were counted only because the deleted copies named them;
+  - they still run, through their real callers;
+  - the OTLP functions and `_pack_tokens` are newly counted.
+- **Benchmarks:** the bench file is unchanged, and its binary differs from 2.9.13's only in the version digit. At
+  load 2.2 (the machine never got quieter within 30 minutes) the 25 rows' median move against 2.9.13 is +0.3%. All
+  are within −6% and +4%, except `pool_available` at 4 → 5 ns, a one-nanosecond step.
+- **Next:** `retry.cyr` needs nothing the tests lack now. The roadmap has the rest.
+
 ## [2.9.13] — 2026-11-04
 
 **Fixed: SIGTERM is no longer ignored after a config reload.** Two audit-persistence bugs are fixed too, and

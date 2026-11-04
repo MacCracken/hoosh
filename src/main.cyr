@@ -72,6 +72,7 @@ include "src/lib/batch.cyr"
 include "src/lib/events.cyr"
 include "src/lib/health.cyr"
 include "src/lib/otlp.cyr"
+include "src/lib/otlp_export.cyr"   # 2.9.14: the I/O half, split so provider.cyr needs only the pure one
 include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/config.cyr"

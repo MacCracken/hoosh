@@ -10,6 +10,13 @@
 # POSTs every OTLP_BATCH_MS. Spans correlate via the 2.3.4 traceparent's trace-id
 # + span-id. Only a localhost http:// collector is supported in this release
 # (the common sidecar); remote/https is a follow-up. #skip-lint
+#
+# 2.9.14: this file is the pure half, as catalog.cyr is for catalog_fetch.cyr: the
+# settings, the span ring, span and batch JSON. The I/O half (the POST, the exporter
+# thread, otlp_init) is otlp_export.cyr. provider.cyr enqueues a span per request
+# and needed nothing else from here, but the I/O half needs pool.cyr and
+# provider.cyr's scratch arena, which made provider.cyr part of a cycle no test
+# could include. Requires: trace.cyr, bote-core (_json_emit_escaped), chrono.
 
 var _otlp_endpoint = 0;        # cstr "http://host:port/path", or 0 = disabled
 var _otlp_service = "hoosh";
@@ -118,83 +125,4 @@ fn _otlp_build_batch(frags, n) {
 fn _otlp_is_https() {
     if (_otlp_endpoint == 0) { return 0; }
     return memeq(_otlp_endpoint, "https", 5);
-}
-
-# POST an OTLP/JSON body to the collector. Best-effort, ignores the response.
-# https:// → sandhi (DNS + TLS); this path only ever runs on a pool worker
-# (the exporter thread routes https POSTs through the queue). Local http:// →
-# raw socket (the exporter posts these directly).
-fn _otlp_post(body, blen) {
-    if (_otlp_is_https() == 1) {
-        var h = sandhi_headers_new();
-        sandhi_headers_add(h, "Content-Type", "application/json");
-        # 2.9.3: in the worker's scratch arena (provider.cyr _remote_arena): the response is ignored, and
-        # through 2.9.2 each export kept its connection, TLS state and receive buffer on the heap for good.
-        sandhi_http_post_a(_remote_arena(), _otlp_endpoint, h, body, blen);
-        return 0;
-    }
-    var path = _otlp_path(_otlp_endpoint);
-    var _sr_t, _sr_v = tcp_socket();
-    if (is_ok(_sr_t) == 0) { return 0; }
-    var fd = _sr_v;
-    var _cr_t, _cr_v = sock_connect(fd, host_addr(url_host(_otlp_endpoint)), url_port(_otlp_endpoint));
-    if (is_ok(_cr_t) == 0) { sock_close(fd); return 0; }
-    var hdr = str_builder_new();
-    str_builder_add_cstr(hdr, "POST ");
-    str_builder_add_cstr(hdr, path);
-    str_builder_add_cstr(hdr, " HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ");
-    str_builder_add_int(hdr, blen);
-    str_builder_add_cstr(hdr, "\r\nConnection: close\r\n\r\n");
-    var hc = to_cstr(str_builder_build(hdr));
-    sys_write(fd, hc, strlen(hc));
-    sys_write(fd, body, blen);
-    var rbuf = alloc(512);
-    var n = 1;
-    while (n > 0) { n = sys_read(fd, rbuf, 512); }
-    sys_close(fd);
-    return 0;
-}
-
-# Background exporter: drain the ring + POST every OTLP_BATCH_MS.
-fn _otlp_exporter_thread(arg) {
-    var snapshot = alloc(OTLP_RING_MAX * 8);
-    while (1 == 1) {
-        sleep_ms(OTLP_BATCH_MS);
-        mutex_lock(_otlp_lock);
-        var n = _otlp_count;
-        if (n > OTLP_RING_MAX) { n = OTLP_RING_MAX; }
-        var i = 0;
-        while (i < n) {
-            var idx = (_otlp_head - n + i) % OTLP_RING_MAX;
-            store64(snapshot + i * 8, load64(_otlp_spans + idx * 8));
-            i = i + 1;
-        }
-        _otlp_count = 0;
-        mutex_unlock(_otlp_lock);
-        if (n > 0) {
-            var doc = _otlp_build_batch(snapshot, n);
-            # Route an https POST through the work queue so a worker does the TLS.
-            # Through 2.9.0 that was required: TLS needed a sigil crypto bank, which
-            # this exporter thread did not own. Since sigil 3.13.14 any thread can
-            # (pool.cyr); the routing is unchanged. Local http is posted directly.
-            if (_otlp_is_https() == 1) {
-                wq_push(job_otlp_export(str_data(doc), str_len(doc)));
-            } else {
-                _otlp_post(str_data(doc), str_len(doc));
-            }
-        }
-    }
-    return 0;
-}
-
-fn otlp_init() {
-    if (_otlp_endpoint == 0) { return 0; }
-    if (_otlp_started == 1) { return 0; }
-    _otlp_spans = alloc(OTLP_RING_MAX * 8);
-    var i = 0;
-    while (i < OTLP_RING_MAX) { store64(_otlp_spans + i * 8, 0); i = i + 1; }
-    _otlp_lock = mutex_new();
-    _otlp_started = 1;
-    thread_create(&_otlp_exporter_thread, 0);
-    return 0;
 }
