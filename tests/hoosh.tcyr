@@ -26,6 +26,10 @@ include "lib/sigil.cyr"
 include "lib/assert.cyr"
 include "lib/sakshi.cyr"
 include "src/vendor/bote-core.cyr"
+# 2.9.6: the shared types, for real, first among hoosh modules as src/main.cyr orders them: the HooshErr /
+# Provider / Strategy enums, error and provider helpers, generation options, _sb_add_milli / _sb_add_sampling,
+# status_retryable. They replaced the test file's own copies of all of it.
+include "src/lib/types.cyr"
 include "src/lib/logging.cyr"
 # 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
 # needs only sys_write), so the response-header path is tested against the REAL
@@ -56,110 +60,9 @@ include "src/lib/semantic.cyr"
 include "src/lib/trace.cyr"
 
 # ================================================================
-# Error types — error code + HTTP status mapping
+# Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
+# included for real at the top (2.9.6). This section held the test file's own copies of its enums and helpers.
 # ================================================================
-
-# Error codes (enum — zero gvar cost)
-enum HooshErr {
-    ERR_PROVIDER       = 1;
-    ERR_MODEL_NOT_FOUND = 2;
-    ERR_RATE_LIMITED   = 3;
-    ERR_BUDGET_EXCEEDED = 4;
-    ERR_NO_PROVIDER    = 5;
-    ERR_TIMED_OUT      = 6;
-    ERR_CACHE          = 7;
-    ERR_DLP_BLOCKED    = 8;
-    ERR_HTTP           = 9;
-    ERR_INTERNAL       = 10;
-}
-
-fn error_http_status(code) {
-    if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
-    if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
-    if (code == ERR_TIMED_OUT) { return 408; }
-    if (code == ERR_DLP_BLOCKED) { return 403; }
-    if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
-    if (code == ERR_HTTP) { return 502; }
-    return 500;
-}
-
-fn error_is_retryable(code) {
-    if (code == ERR_RATE_LIMITED || code == ERR_TIMED_OUT) { return 1; }
-    if (code == ERR_PROVIDER || code == ERR_CACHE) { return 1; }
-    return 0;
-}
-
-fn error_code_str(code) {
-    if (code == ERR_MODEL_NOT_FOUND) { return "model_not_found"; }
-    if (code == ERR_NO_PROVIDER) { return "no_provider"; }
-    if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
-    if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
-    if (code == ERR_TIMED_OUT) { return "timeout"; }
-    if (code == ERR_CACHE) { return "cache_error"; }
-    if (code == ERR_PROVIDER) { return "provider_error"; }
-    if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
-    if (code == ERR_HTTP) { return "upstream_error"; }
-    return "internal_error";
-}
-
-# ================================================================
-# Provider types
-# ================================================================
-
-enum Provider {
-    PROV_OLLAMA     = 0;
-    PROV_LLAMACPP   = 1;
-    PROV_SYNAPSE    = 2;
-    PROV_LMSTUDIO   = 3;
-    PROV_LOCALAI    = 4;
-    PROV_OPENAI     = 5;
-    PROV_ANTHROPIC  = 6;
-    PROV_DEEPSEEK   = 7;
-    PROV_MISTRAL    = 8;
-    PROV_GOOGLE     = 9;
-    PROV_GROQ       = 10;
-    PROV_GROK       = 11;
-    PROV_OPENROUTER = 12;
-    PROV_WHISPER    = 13;
-    PROV_VLLM       = 14;
-    PROV_TENSORRT   = 15;
-    PROV_ONNX       = 16;
-    PROV_COUNT      = 17;
-}
-
-fn provider_is_local(prov) {
-    if (prov == PROV_OLLAMA) { return 1; }
-    if (prov == PROV_LLAMACPP) { return 1; }
-    if (prov == PROV_SYNAPSE) { return 1; }
-    if (prov == PROV_LMSTUDIO) { return 1; }
-    if (prov == PROV_LOCALAI) { return 1; }
-    if (prov == PROV_WHISPER) { return 1; }
-    if (prov == PROV_VLLM) { return 1; }
-    if (prov == PROV_TENSORRT) { return 1; }
-    if (prov == PROV_ONNX) { return 1; }
-    return 0;
-}
-
-fn provider_name(prov) {
-    if (prov == PROV_OLLAMA) { return "ollama"; }
-    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
-    if (prov == PROV_SYNAPSE) { return "synapse"; }
-    if (prov == PROV_LMSTUDIO) { return "lmstudio"; }
-    if (prov == PROV_LOCALAI) { return "localai"; }
-    if (prov == PROV_OPENAI) { return "openai"; }
-    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
-    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
-    if (prov == PROV_MISTRAL) { return "mistral"; }
-    if (prov == PROV_GOOGLE) { return "google"; }
-    if (prov == PROV_GROQ) { return "groq"; }
-    if (prov == PROV_GROK) { return "grok"; }
-    if (prov == PROV_OPENROUTER) { return "openrouter"; }
-    if (prov == PROV_WHISPER) { return "whisper"; }
-    if (prov == PROV_VLLM) { return "vllm"; }
-    if (prov == PROV_TENSORRT) { return "tensorrt"; }
-    if (prov == PROV_ONNX) { return "onnx"; }
-    return "unknown";
-}
 
 
 fn _build_req_header(buf, method, path, host, body_len, cap) {
@@ -193,17 +96,6 @@ fn _build_req_header(buf, method, path, host, body_len, cap) {
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     return pos;
-}
-
-# ================================================================
-# Routing strategy
-# ================================================================
-
-enum Strategy {
-    STRAT_PRIORITY       = 0;
-    STRAT_ROUND_ROBIN    = 1;
-    STRAT_LOWEST_LATENCY = 2;
-    STRAT_DIRECT         = 3;
 }
 
 # ================================================================
@@ -613,25 +505,12 @@ fn _t_wq_pop() {
     return j;
 }
 
-# ── 2.5.2 request-path fidelity mirrors ──
-# Mirror of src/lib/types.cyr GEN_UNSET / _sb_add_milli / _sb_add_sampling.
-var _T_GEN_UNSET = 0 - 1;
-
-fn _t_sb_add_milli(sb, v) {
-    str_builder_add_int(sb, v / 1000);
-    var frac = v % 1000;
-    if (frac == 0) { return 0; }
-    str_builder_add_cstr(sb, ".");
-    if (frac < 100) { str_builder_add_cstr(sb, "0"); }
-    if (frac < 10) { str_builder_add_cstr(sb, "0"); }
-    while (frac % 10 == 0) { frac = frac / 10; }
-    str_builder_add_int(sb, frac);
-    return 0;
-}
+# ── 2.5.2 request-path fidelity ──
+# 2.9.6: GEN_UNSET, _sb_add_milli and _sb_add_sampling are types.cyr's own; the helpers below only render them.
 
 fn _t_milli_str(v) {
     var sb = str_builder_new();
-    _t_sb_add_milli(sb, v);
+    _sb_add_milli(sb, v);
     return str_cstr(str_builder_build(sb));
 }
 
@@ -657,7 +536,7 @@ fn _t_req_num_milli(body_ptr, body_len, key, keylen) {
                 digits = digits + 1;
                 j = j + 1;
             }
-            if (digits == 0) { return _T_GEN_UNSET; }
+            if (digits == 0) { return GEN_UNSET; }
             var frac = 0;
             var scale = 100;
             if (j < body_len && load8(body_ptr + j) == 46) {
@@ -676,7 +555,7 @@ fn _t_req_num_milli(body_ptr, body_len, key, keylen) {
         }
         i = i + 1;
     }
-    return _T_GEN_UNSET;
+    return GEN_UNSET;
 }
 
 # Mirror of src/lib/handlers.cyr _json_array_count — objects at depth 1.
@@ -1367,65 +1246,11 @@ fn _t_probe_path(prov) {
     return "/v1/models";
 }
 
-# ── 2.5.3 provider correctness mirrors ──
-# Mirror of src/lib/types.cyr status_retryable — 408/429/5xx retryable.
-fn _t_status_retryable(st) {
-    if (st == 408 || st == 429) { return 1; }
-    if (st >= 500) { return 1; }
-    if (st >= 400) { return 0; }
-    return 1;
-}
-
-# Mirror of src/lib/types.cyr provider_default_url for the remote providers
-# whose base URL carries a path prefix.
-fn _t_default_url(prov) {
-    if (prov == 10) { return "https://api.groq.com/openai"; }
-    if (prov == 12) { return "https://openrouter.ai/api"; }
-    if (prov == 6) { return "https://api.anthropic.com"; }
-    return "http://localhost:8080";
-}
-
-# Mirror of src/lib/types.cyr _sb_add_sampling — the ollama=1 branch nests the
+# types.cyr's own _sb_add_sampling, rendered to a cstr (2.9.6; it was mirrored). The ollama=1 branch nests the
 # knobs under `options` and renames the cap to num_predict.
 fn _t_sampling_str(gen_mt, gen_tp, gen_pp, ollama) {
     var sb = str_builder_new();
-    if (gen_mt <= 0 && gen_tp == _T_GEN_UNSET && gen_pp == _T_GEN_UNSET) {
-        return str_cstr(str_builder_build(sb));
-    }
-    if (ollama == 1) {
-        str_builder_add_cstr(sb, ",\"options\":{");
-        var first = 1;
-        if (gen_tp != _T_GEN_UNSET) {
-            str_builder_add_cstr(sb, "\"temperature\":");
-            _t_sb_add_milli(sb, gen_tp);
-            first = 0;
-        }
-        if (gen_pp != _T_GEN_UNSET) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "\"top_p\":");
-            _t_sb_add_milli(sb, gen_pp);
-            first = 0;
-        }
-        if (gen_mt > 0) {
-            if (first == 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "\"num_predict\":");
-            str_builder_add_int(sb, gen_mt);
-        }
-        str_builder_add_cstr(sb, "}");
-        return str_cstr(str_builder_build(sb));
-    }
-    if (gen_mt > 0) {
-        str_builder_add_cstr(sb, ",\"max_tokens\":");
-        str_builder_add_int(sb, gen_mt);
-    }
-    if (gen_tp != _T_GEN_UNSET) {
-        str_builder_add_cstr(sb, ",\"temperature\":");
-        _t_sb_add_milli(sb, gen_tp);
-    }
-    if (gen_pp != _T_GEN_UNSET) {
-        str_builder_add_cstr(sb, ",\"top_p\":");
-        _t_sb_add_milli(sb, gen_pp);
-    }
+    _sb_add_sampling(sb, genopts_new(0, gen_mt, gen_tp, gen_pp), ollama);
     return str_cstr(str_builder_build(sb));
 }
 
@@ -3375,12 +3200,10 @@ fn main() {
     assert_eq(error_http_status(ERR_HTTP), 502, "http -> 502");
     assert_eq(error_http_status(ERR_INTERNAL), 500, "internal -> 500");
 
-    assert(error_is_retryable(ERR_RATE_LIMITED) == 1, "rate_limited retryable");
-    assert(error_is_retryable(ERR_TIMED_OUT) == 1, "timeout retryable");
-    assert(error_is_retryable(ERR_PROVIDER) == 1, "provider retryable");
-    assert(error_is_retryable(ERR_MODEL_NOT_FOUND) == 0, "model_not_found not retryable");
-    assert(error_is_retryable(ERR_BUDGET_EXCEEDED) == 0, "budget not retryable");
-    assert(error_is_retryable(ERR_DLP_BLOCKED) == 0, "dlp not retryable");
+    # 2.9.6: six error_is_retryable assertions stood here. That function existed only in this file (a port of
+    # rust-old's HooshError::is_retryable); src has none. Production decides retries from the provider's HTTP status
+    # (types.cyr status_retryable, tested in "status_retryable" below).
+    assert_eq(error_http_status(ERR_NONE), 500, "none -> 500 (not a failure code; never rendered)");
 
     assert_streq(error_code_str(ERR_MODEL_NOT_FOUND), "model_not_found", "code_str model");
     assert_streq(error_code_str(ERR_NO_PROVIDER), "no_provider", "code_str no_prov");
@@ -3388,6 +3211,47 @@ fn main() {
     assert_streq(error_code_str(ERR_BUDGET_EXCEEDED), "budget_exceeded", "code_str budget");
     assert_streq(error_code_str(ERR_TIMED_OUT), "timeout", "code_str timeout");
     assert_streq(error_code_str(ERR_INTERNAL), "internal_error", "code_str internal");
+
+    # ── 2.9.6: types.cyr's own helpers that no test had reached ──
+    test_group("types_real");
+    # Every provider's canonical name parses back to it, so a [[providers]] type written the way hoosh prints it
+    # always loads; and its default base URL is https exactly when the provider is remote.
+    var tpi = 0;
+    var tp_rt = 1;
+    var tp_url = 1;
+    while (tpi < PROV_COUNT) {
+        if (provider_parse(provider_name(tpi)) != tpi) { tp_rt = 0; }
+        var tpu = provider_default_url(tpi);
+        var tp_https = memeq(tpu, "https://", 8);
+        if (provider_is_local(tpi) == 1) {
+            if (memeq(tpu, "http://localhost:", 17) == 0) { tp_url = 0; }
+        } else {
+            if (tp_https == 0) { tp_url = 0; }
+        }
+        tpi = tpi + 1;
+    }
+    assert_eq(tp_rt, 1, "types: provider_parse(provider_name(p)) == p for all 17");
+    assert_eq(tp_url, 1, "types: default URL is https for remote, http://localhost for local, for all 17");
+    assert_eq(provider_parse("OpenAi"), PROV_OPENAI, "types: provider names are case-insensitive");
+    assert_eq(provider_parse("TensorRT-LLM"), PROV_TENSORRT, "types: tensorrt-llm alias");
+    assert_eq(provider_parse("trtllm"), PROV_TENSORRT, "types: trtllm alias");
+    assert_eq(provider_parse("onnxruntime"), PROV_ONNX, "types: onnxruntime alias");
+    assert_eq(provider_parse("gpt"), 0 - 1, "types: an unknown provider -> -1");
+    assert_streq(_to_lower("MiXeD-Case_9"), "mixed-case_9", "types: _to_lower folds only A-Z");
+    # Generation options: accessors on a real struct, and the documented defaults on a 0 pointer (batch / CLI paths).
+    var tg = genopts_new(3, 512, 700, 950);
+    assert_eq(gen_effort(tg), 3, "genopts: effort");
+    assert_eq(gen_max_tokens(tg), 512, "genopts: max_tokens");
+    assert_eq(gen_temp(tg), 700, "genopts: temperature x1000");
+    assert_eq(gen_top_p(tg), 950, "genopts: top_p x1000");
+    assert_eq(gen_effort_name(tg), 0, "genopts: no effort name until set");
+    gen_set_effort_name(tg, "xhigh");
+    gen_set_usage(tg, 1);
+    assert_streq(gen_effort_name(tg), "xhigh", "genopts: effort name set");
+    assert_eq(gen_usage(tg), 1, "genopts: include_usage set");
+    assert_eq(gen_effort(0) + gen_max_tokens(0) + gen_usage(0) + gen_effort_name(0), 0, "genopts: 0 pointer -> zeros");
+    assert_eq(gen_temp(0), GEN_UNSET, "genopts: 0 pointer -> temperature unset");
+    assert_eq(gen_top_p(0), GEN_UNSET, "genopts: 0 pointer -> top_p unset");
 
     # ── Provider types ───────────────────────────────────────────
     test_group("provider_types");
@@ -5639,7 +5503,7 @@ fn main() {
     assert_eq(_t_req_num_milli(rn3, strlen(rn3), "\"temperature\":", 14), 0,
       "num: explicit 0 is a value, not unset");
     var rn4 = "{\"model\":\"m\"}";
-    assert_eq(_t_req_num_milli(rn4, strlen(rn4), "\"temperature\":", 14), _T_GEN_UNSET,
+    assert_eq(_t_req_num_milli(rn4, strlen(rn4), "\"temperature\":", 14), GEN_UNSET,
       "num: absent -> GEN_UNSET");
     var rn5 = "{\"top_p\": 0.95}";
     assert_eq(_t_req_num_milli(rn5, strlen(rn5), "\"top_p\":", 8), 950,
@@ -5700,30 +5564,30 @@ fn main() {
     test_group("status_retryable");
     # rust-old gated backoff on is_retryable; the port retried everything and
     # spent the full ~30 s schedule proving a 400 was still a 400.
-    assert_eq(_t_status_retryable(400), 0, "retry: 400 permanent");
-    assert_eq(_t_status_retryable(401), 0, "retry: 401 permanent");
-    assert_eq(_t_status_retryable(403), 0, "retry: 403 permanent");
-    assert_eq(_t_status_retryable(404), 0, "retry: 404 permanent");
-    assert_eq(_t_status_retryable(422), 0, "retry: 422 permanent");
+    assert_eq(status_retryable(400), 0, "retry: 400 permanent");
+    assert_eq(status_retryable(401), 0, "retry: 401 permanent");
+    assert_eq(status_retryable(403), 0, "retry: 403 permanent");
+    assert_eq(status_retryable(404), 0, "retry: 404 permanent");
+    assert_eq(status_retryable(422), 0, "retry: 422 permanent");
     # 408/429 are the two 4xx worth another attempt.
-    assert_eq(_t_status_retryable(408), 1, "retry: 408 retryable");
-    assert_eq(_t_status_retryable(429), 1, "retry: 429 retryable");
-    assert_eq(_t_status_retryable(500), 1, "retry: 500 retryable");
-    assert_eq(_t_status_retryable(502), 1, "retry: 502 retryable");
-    assert_eq(_t_status_retryable(503), 1, "retry: 503 retryable");
+    assert_eq(status_retryable(408), 1, "retry: 408 retryable");
+    assert_eq(status_retryable(429), 1, "retry: 429 retryable");
+    assert_eq(status_retryable(500), 1, "retry: 500 retryable");
+    assert_eq(status_retryable(502), 1, "retry: 502 retryable");
+    assert_eq(status_retryable(503), 1, "retry: 503 retryable");
 
     test_group("groq_base_url");
     # Groq's OpenAI-compatible surface is under /openai — without the prefix
     # every request builds .../v1/chat/completions and 404s.
-    assert_streq(_t_default_url(10), "https://api.groq.com/openai", "groq: /openai prefix present");
+    assert_streq(provider_default_url(10), "https://api.groq.com/openai", "groq: /openai prefix present");
     # Concatenation with the chat path must yield Groq's real endpoint.
     var gsb = str_builder_new();
-    str_builder_add_cstr(gsb, _t_default_url(10));
+    str_builder_add_cstr(gsb, provider_default_url(10));
     str_builder_add_cstr(gsb, "/v1/chat/completions");
     assert_streq(str_cstr(str_builder_build(gsb)),
       "https://api.groq.com/openai/v1/chat/completions", "groq: full URL correct");
     # OpenRouter's existing /api prefix must be unaffected.
-    assert_streq(_t_default_url(12), "https://openrouter.ai/api", "groq fix: openrouter untouched");
+    assert_streq(provider_default_url(12), "https://openrouter.ai/api", "groq fix: openrouter untouched");
 
     test_group("ollama_native_sampling");
     # Ollama's /api/chat ignores top-level temperature/max_tokens — it reads
@@ -5736,18 +5600,18 @@ fn main() {
       ",\"max_tokens\":512,\"temperature\":0.7,\"top_p\":0.9",
       "openai-compat: flat top-level fields");
     # Partial sets must not emit a dangling comma inside options.
-    assert_streq(_t_sampling_str(0, 700, _T_GEN_UNSET, 1),
+    assert_streq(_t_sampling_str(0, 700, GEN_UNSET, 1),
       ",\"options\":{\"temperature\":0.7}", "ollama: temperature only");
-    assert_streq(_t_sampling_str(256, _T_GEN_UNSET, _T_GEN_UNSET, 1),
+    assert_streq(_t_sampling_str(256, GEN_UNSET, GEN_UNSET, 1),
       ",\"options\":{\"num_predict\":256}", "ollama: num_predict only");
     # Nothing set -> nothing emitted, so the body stays byte-identical to a
     # pre-2.5.2 request.
-    assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 1), "",
+    assert_streq(_t_sampling_str(0, GEN_UNSET, GEN_UNSET, 1), "",
       "ollama: no params -> no options object");
-    assert_streq(_t_sampling_str(0, _T_GEN_UNSET, _T_GEN_UNSET, 0), "",
+    assert_streq(_t_sampling_str(0, GEN_UNSET, GEN_UNSET, 0), "",
       "openai-compat: no params -> nothing emitted");
     # temperature 0 must still emit for Ollama.
-    assert_streq(_t_sampling_str(0, 0, _T_GEN_UNSET, 1),
+    assert_streq(_t_sampling_str(0, 0, GEN_UNSET, 1),
       ",\"options\":{\"temperature\":0}", "ollama: temperature 0 emitted");
 
     # ── v2.5.4 cache expiry ──
@@ -6515,13 +6379,13 @@ fn main() {
     # handle_hw_models_post / _hw_model_info and _hw_cloud_alternatives (placement)
     # print rust-old's float fields from ai-hwaccel's fixed-point ones.
     var hsb = str_builder_new();
-    _t_sb_add_milli(hsb, 8030);                 # params_b_x1000
+    _sb_add_milli(hsb, 8030);                 # params_b_x1000
     str_builder_add_cstr(hsb, " ");
-    _t_sb_add_milli(hsb, 4412 * 10);            # headroom x100
+    _sb_add_milli(hsb, 4412 * 10);            # headroom x100
     str_builder_add_cstr(hsb, " ");
-    _t_sb_add_milli(hsb, 9832 * 10);            # price x100
+    _sb_add_milli(hsb, 9832 * 10);            # price x100
     str_builder_add_cstr(hsb, " ");
-    _t_sb_add_milli(hsb, 70000);
+    _sb_add_milli(hsb, 70000);
     assert_streq(to_cstr(str_builder_build(hsb)), "8.03 44.12 98.32 70", "hw: fixed-point to JSON numbers");
 
     test_group("rustold_provider_tls");

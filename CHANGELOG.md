@@ -5,6 +5,80 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.6] — 2026-11-04
+
+**The tests run on the real `types.cyr`.** It holds the shared types every other module builds on, and the test
+file had kept a copy of nearly all of it: the error, provider and strategy enums, the error and provider helpers,
+the sampling renderers and the retry classifier. No gateway code changed. **1274 assertions** (was 1261; six dead
+ones removed, 19 added). fmt, lint, vet, deny, coverage (323/684, 47%; **19 of 37** modules included for real), the
+security scan and the four fuzz targets are clean.
+
+### Changed — `types.cyr` is included for real
+
+- **Ordering.** `tests/hoosh.tcyr` includes it right after the vendored bote-core, first among hoosh's modules, as
+  `src/main.cyr` orders them.
+- **Removed:** the test file's own copies of
+  - the `HooshErr`, `Provider` and `Strategy` enums;
+  - `error_http_status`, `error_code_str`, `provider_is_local` and `provider_name`;
+  - `_T_GEN_UNSET`, `_t_sb_add_milli`, `_t_status_retryable` and `_t_default_url`.
+- **Kept as thin helpers:** `_t_milli_str` and `_t_sampling_str` now render the real `_sb_add_milli` and
+  `_sb_add_sampling` (through `genopts_new`) instead of copying them.
+- **What the comparison found**, checked before switching:
+  - The `Provider` and `Strategy` enums matched value for value. `HooshErr` matched apart from `ERR_NONE = 0`,
+    which the copy lacked.
+  - `error_http_status`, `error_code_str`, `provider_name`, `status_retryable` and `_sb_add_milli` were identical.
+    `provider_is_local` and the sampling renderer were the same logic written differently.
+  - **`provider_default_url`:** the copy covered three providers, by bare number (10, 12, 6). The real one covers
+    all 17 by enum name.
+  - **`error_is_retryable`:** six assertions tested a function that existed only in the test file, a port of rust-old's
+    `HooshError::is_retryable`. `src/` has none; production decides retries from the provider's HTTP status
+    (`status_retryable`, tested in `status_retryable`). The assertions are gone. One asserting `ERR_NONE`'s mapping
+    takes their place.
+
+### Added — tests for `types.cyr` code no test had reached
+
+`types_real`:
+- **Two invariants over all 17 providers:**
+  - `provider_parse(provider_name(p)) == p`, so a `[[providers]] type` written the way hoosh prints it always loads;
+  - the default base URL is `https://` exactly for the remote providers, and `http://localhost:` for the local ones.
+- **`provider_parse`:** names are case-insensitive, the `tensorrt-llm`, `trtllm` and `onnxruntime` aliases work, and
+  an unknown name gives -1.
+- **`_to_lower`** folds only A–Z.
+- **The generation-options accessors** (`genopts_new`, `gen_effort` / `_max_tokens` / `_temp` / `_top_p`,
+  `gen_set_effort_name`, `gen_set_usage`) on a real struct, and the documented defaults on a 0 pointer, the batch and
+  CLI paths: zeros, and `GEN_UNSET` for the sampling values.
+
+### Mutation-checked
+
+A copy of the tree was changed seven ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| the `trtllm` alias dropped from `provider_parse` | 1 fails |
+| Groq's default URL loses its `/openai` prefix | 2 fail |
+| 408 treated as permanent by `status_retryable` | 1 fails |
+| Ollama's output cap rendered as `max_tokens`, not `num_predict` | 2 fail |
+| vLLM no longer counted as local | 2 fail |
+| a timeout mapped to 504 instead of 408 | 1 fails |
+| Grok's canonical name changed so it no longer parses back | 1 fails |
+
+### Notes
+
+The test file is 136 lines shorter (7,208 → 7,072). Symbol coverage rose from 312 to 323 of 684.
+
+A dependency scan of the 18 modules still mirrored shows five that need no hoosh module the tests lack:
+- `route.cyr` (17 same-name copies) and `cache.cyr` (6) can be compared and swapped as compression and semantic
+  were;
+- `http_client.cyr` (one collision, plus sockets) needs nothing more;
+- `events.cyr` needs the vendored majra bundle, and `hardware.cyr` the ai-hwaccel bundle.
+
+The rest need a split or their dependencies first. The roadmap lists them.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.5's apart from the version string. No benched path changed. The
+2026-11-04 rows in `bench-history.csv` after 2.9.5's are this release's mandatory run.
+
 ## [2.9.5] — 2026-11-04
 
 **The tests run the real trace and metrics code, and the coverage script describes the suite as it is now.** These
