@@ -15,14 +15,14 @@
 
 include "lib/ai-hwaccel.cyr"
 
-# MCP protocol core (bote 3.4.10) — self-contained JSON-RPC 2.0 registry/
+# MCP protocol core (bote 3.8.3) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
 # via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
 # cyrius resolves transitively and that collide with the agnos stdlib —
 # see cyrius.cyml). Powers /v1/tools/list + /v1/tools/call via src/lib/mcp.cyr.
 include "src/vendor/bote-core.cyr"
 
-# majra pub/sub (majra 2.12.0) — provider event bus, self-contained distlib
+# majra pub/sub (majra 2.13.0) — provider event bus, self-contained distlib
 # bundle committed under src/vendor/ (same rationale as bote-core). Powers the
 # event bus in src/lib/events.cyr.
 include "src/vendor/majra.cyr"
@@ -60,7 +60,7 @@ include "src/lib/provider_err.cyr"
 # 2.8.0: finish reasons + stream usage, mapped from each provider's own words. After jsonlite/provider_err.
 include "src/lib/outcome.cyr"
 include "src/lib/provider.cyr"
-# 2.8.0: the live catalog's I/O half — asks each route for its models on a banked pool worker.
+# 2.8.0: the live catalog's I/O half — asks each route for its models on a pool worker.
 include "src/lib/catalog_fetch.cyr"
 include "src/lib/compact.cyr"
 include "src/lib/audit.cyr"
@@ -381,7 +381,7 @@ fn cmd_serve(port) {
     if (_http_bind != 0x0100007F) {
         if (vec_len(_auth_tokens) == 0) {
             hlog_warn("SECURITY: listening off-loopback with NO auth tokens — every caller is allowed");
-            sys_write(2, "WARNING: bound to a non-loopback address with no [[auth]] tokens.\n", 65);
+            sys_write(2, "WARNING: bound to a non-loopback address with no [[auth]] tokens.\n", 66);
             sys_write(2, "         Every client on the network can use this gateway.\n", 59);
         }
     }
@@ -437,8 +437,8 @@ fn cmd_serve(port) {
     # Per-provider latency histogram storage (Prometheus /metrics).
     metrics_latency_init();
 
-    # Install the accept thread's thread-local block once (slot 0 = sigil crypto
-    # bank, slot 1 = traceparent). Idempotent + shared with the batch path.
+    # Install the accept thread's thread-local block once (sigil's lane slot,
+    # slot 1 = traceparent). Idempotent + shared with the batch path.
     crypto_tls_main_init();
 
     # Signals — MUST come before EVERY thread_create below.
@@ -466,19 +466,19 @@ fn cmd_serve(port) {
     # so workers never see the fallback path.
     coarse_clock_start();
 
-    # Unified worker pool (v2.4.0): WORKER_COUNT banked threads drain the work
-    # queue. crypto_tls_main_init() above readied the bank scratch; pool_start
-    # spawns the workers, each owning a crypto bank. Batch items share this pool.
+    # Unified worker pool (v2.4.0): WORKER_COUNT threads drain the work queue.
+    # crypto_tls_main_init() above installed main's thread-local block; pool_start
+    # spawns the workers. Batch items share this pool.
     pool_start();
 
-    # Background provider health probing (2.5.5) — one bankless thread keeps the
+    # Background provider health probing (2.5.5) — one thread keeps the
     # per-route health records that router_select consults. Probes once inline
     # first so the earliest requests route on measured state. No-op when
     # [server] health_check_interval_secs = 0.
     health_start();
 
     # The live model catalog (2.8.0) — enqueues the first refresh for a worker (startup never waits on a
-    # provider) and starts the bankless refresh timer when [catalog] refresh_secs > 0. After pool_start: the
+    # provider) and starts the refresh timer when [catalog] refresh_secs > 0. After pool_start: the
     # refresh is a pool job.
     catalog_start();
 
@@ -674,7 +674,7 @@ fn cmd_infer(model, prompt) {
 # only ever read the local config, so there was no way to ask a deployed hoosh
 # what it was actually serving. These use the plaintext local client, so
 # --server targets an http:// gateway (the usual case: a sidecar or a box on the
-# LAN). An https:// gateway would need a crypto bank on this thread.
+# LAN). An https:// gateway would need the TLS client on this path.
 
 fn _cli_server_get(url, path) {
     var resp = http_req_local("GET", url, path, 0, 0);
@@ -1080,7 +1080,7 @@ fn main() {
     var cfgv = _flag_val("--config", "-c");
     if (cfgv != 0) { _config_path = cfgv; }
 
-    # Install THIS thread's thread-local block (slot 0 = sigil crypto bank,
+    # Install THIS thread's thread-local block (sigil's lane slot,
     # slot 1 = traceparent) before anything can touch it. It used to live inside
     # cmd_serve, so every non-serve path ran with no TLS block — and any code
     # reaching trace_current_or_new() (which every outgoing request header

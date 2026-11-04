@@ -8,7 +8,7 @@
 # it (generating a fresh one if absent). Each batch worker is a fresh thread with
 # a zeroed TLS slot, so it generates its own per-item traceparent automatically.
 #
-# Slot 1 — slot 0 is sigil's crypto bank ([[sigil-crypto-needs-per-thread-bank]]).
+# Slot 1 — a fixed slot (0-15 are fixed; thread_local_alloc, sigil's lane slot included, hands out 16+).
 # Trace ids are unique (clock_now_ns + atomic counter), not crypto-random —
 # uniqueness is what correlation needs.
 
@@ -16,7 +16,7 @@ var TRACE_SLOT = 1;
 var _trace_counter = 0;
 
 # NB: thread_local_init() is NOT idempotent — it installs a fresh zeroed TLS
-# block, wiping all slots (including sigil's crypto bank at slot 0). It must be
+# block, wiping all slots (including sigil's lane slot). It must be
 # called exactly once per thread: the main thread via crypto_tls_main_init() at
 # startup, worker threads via CLONE_SETTLS in thread_create. So trace_* only
 # get/set, never init.

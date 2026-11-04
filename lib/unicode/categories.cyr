@@ -19,9 +19,9 @@ include "lib/unicode/_categories_data.cyr"
 # GeneralCategory leaf categories, indexed 0..29.
 #
 # Aggregate categories (L = Letter, M = Mark, N = Number, P = Punctuation,
-# S = Symbol, Z = Separator, C = Other) are NOT enumerated — consumers
-# should test membership via boolean helpers (see below) so they remain
-# decoupled from the leaf-set composition.
+# S = Symbol, Z = Separator, C = Other) are NOT enumerated and no aggregate
+# helper exists — a consumer tests membership against the leaf categories
+# unicode_category() returns (e.g. a letter is GC_LU .. GC_LO).
 enum GeneralCategory {
     GC_LU = 0;     # Lu — Letter, uppercase
     GC_LL = 1;     # Ll — Letter, lowercase

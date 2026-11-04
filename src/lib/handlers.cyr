@@ -514,7 +514,7 @@ fn _cat_literal(pat) {
 }
 
 # ── POST /v1/models/refresh (2.8.0) ──
-# Ask every live route for its models now, on this (banked) worker, and answer with what each said — the same
+# Ask every live route for its models now, on this worker, and answer with what each said — the same
 # per-route lines GET /v1/health/providers carries. 202 when a refresh is already running.
 fn handle_models_refresh(cfd) {
     var n = catalog_refresh_all();
@@ -635,7 +635,7 @@ fn handle_model_pull(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var model = json_get(pairs, str_from("model"));
+    var model = bayan_json_get_by_cstr(pairs, "model");
     if (model == 0) { return http_bad_request(cfd, "missing model"); }
     var model_cstr = to_cstr(model);
     if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
@@ -654,7 +654,7 @@ fn handle_model_delete(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var model = json_get(pairs, str_from("model"));
+    var model = bayan_json_get_by_cstr(pairs, "model");
     if (model == 0) { return http_bad_request(cfd, "missing model"); }
     var model_cstr = to_cstr(model);
     if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
@@ -673,7 +673,7 @@ fn handle_synapse_training(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var job = json_get(pairs, str_from("job_id"));
+    var job = bayan_json_get_by_cstr(pairs, "job_id");
     if (job == 0) { return http_bad_request(cfd, "missing job_id"); }
     var job_cstr = to_cstr(job);
     var job_n = strlen(job_cstr);
@@ -942,14 +942,14 @@ fn handle_cost_estimate(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var model = json_get(pairs, str_from("model"));
+    var model = bayan_json_get_by_cstr(pairs, "model");
     if (model == 0) { return http_bad_request(cfd, "missing model"); }
     var model_cstr = to_cstr(model);
     var in_tok = 0;
-    var it = json_get(pairs, str_from("input_tokens"));
+    var it = bayan_json_get_by_cstr(pairs, "input_tokens");
     if (it != 0) { in_tok = str_to_int(it); }
     var out_tok = 0;
-    var ot = json_get(pairs, str_from("output_tokens"));
+    var ot = bayan_json_get_by_cstr(pairs, "output_tokens");
     if (ot != 0) { out_tok = str_to_int(ot); }
     # Provider of the route that serves this model (drives fallback pricing).
     var prov = PROV_OPENAI;
@@ -973,7 +973,7 @@ fn handle_cost_estimate(cfd, body_ptr, body_len) {
 
 # Parse a JSON boolean field (true → 1, absent/false → 0).
 fn _req_bool(pairs, key) {
-    var v = json_get(pairs, str_from(key));
+    var v = bayan_json_get_by_cstr(pairs, key);
     if (v == 0) { return 0; }
     if (str_eq_cstr(v, "true") == 1) { return 1; }
     return 0;
@@ -991,10 +991,10 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
     var in_tok = 0;
-    var it = json_get(pairs, str_from("input_tokens"));
+    var it = bayan_json_get_by_cstr(pairs, "input_tokens");
     if (it != 0) { in_tok = str_to_int(it); }
     var out_tok = 0;
-    var ot = json_get(pairs, str_from("max_output_tokens"));
+    var ot = bayan_json_get_by_cstr(pairs, "max_output_tokens");
     if (ot != 0) { out_tok = str_to_int(ot); }
     var uses_tools = _req_bool(pairs, "uses_tools");
     var has_vision = _req_bool(pairs, "has_vision");
@@ -1153,8 +1153,8 @@ fn handle_tokens_check(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var tokens_str = json_get(pairs, str_from("tokens"));
+    var pool_name = bayan_json_get_by_cstr(pairs, "pool");
+    var tokens_str = bayan_json_get_by_cstr(pairs, "tokens");
     if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
     var pname = to_cstr(pool_name);
     var tokens = 0;
@@ -1184,8 +1184,8 @@ fn handle_tokens_reserve(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var tokens_str = json_get(pairs, str_from("tokens"));
+    var pool_name = bayan_json_get_by_cstr(pairs, "pool");
+    var tokens_str = bayan_json_get_by_cstr(pairs, "tokens");
     if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
     var pname = to_cstr(pool_name);
     var tokens = 0;
@@ -1212,9 +1212,9 @@ fn handle_tokens_report(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var pool_name = json_get(pairs, str_from("pool"));
-    var reserved_str = json_get(pairs, str_from("reserved"));
-    var actual_str = json_get(pairs, str_from("actual"));
+    var pool_name = bayan_json_get_by_cstr(pairs, "pool");
+    var reserved_str = bayan_json_get_by_cstr(pairs, "reserved");
+    var actual_str = bayan_json_get_by_cstr(pairs, "actual");
     if (pool_name == 0) { return http_bad_request(cfd, "missing 'pool'"); }
     var pname = to_cstr(pool_name);
     var reserved = 0;
@@ -1370,7 +1370,7 @@ fn handle_hw_simulate(cfd, body_ptr, body_len) {
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
 
-    var mp = _hw_json_whole(json_get(pairs, str_from("model_params")), HW_MAX_MODEL_PARAMS);
+    var mp = _hw_json_whole(bayan_json_get_by_cstr(pairs, "model_params"), HW_MAX_MODEL_PARAMS);
     if (mp == 0 - 2) { return _hw_out_of_range(cfd, "model_params", HW_MAX_MODEL_PARAMS); }
     if (mp == 0 - 1) { return http_bad_request(cfd, "model_params must be a positive whole number"); }
     if (mp == 0) {
@@ -1378,12 +1378,12 @@ fn handle_hw_simulate(cfd, body_ptr, body_len) {
     }
 
     var quant = 0;
-    var q_str = json_get(pairs, str_from("quantization"));
+    var q_str = bayan_json_get_by_cstr(pairs, "quantization");
     if (q_str != 0) { quant = quant_from_str(to_cstr(q_str)); }
     if (quant == 0) { quant = hw_suggest_quant(mp); }
 
     var rm = 0;
-    var rm_str = json_get(pairs, str_from("remove_count"));
+    var rm_str = bayan_json_get_by_cstr(pairs, "remove_count");
     if (rm_str != 0) { rm = str_to_int(rm_str); }
     if (rm < 0) { return http_bad_request(cfd, "remove_count must not be negative"); }
 
@@ -1465,21 +1465,21 @@ fn handle_hw_placement(cfd, body_ptr, body_len) {
     # 2.6.13: a model_params that is present must be a whole number within
     # HW_MAX_MODEL_PARAMS. 3e18 used to wrap the memory estimate negative and
     # answer fits_single_device: true. Absent, null or 0 still means "not given".
-    var model_params = _hw_json_whole(json_get(pairs, str_from("model_params")), HW_MAX_MODEL_PARAMS);
+    var model_params = _hw_json_whole(bayan_json_get_by_cstr(pairs, "model_params"), HW_MAX_MODEL_PARAMS);
     if (model_params == 0 - 2) { return _hw_out_of_range(cfd, "model_params", HW_MAX_MODEL_PARAMS); }
     if (model_params == 0 - 1) {
         return http_bad_request(cfd, "model_params must be a positive whole number");
     }
     # Also try extracting from model name
     if (model_params == 0) {
-        var mn = json_get(pairs, str_from("model"));
+        var mn = bayan_json_get_by_cstr(pairs, "model");
         if (mn != 0) {
             model_params = _hoosh_parse_model_params(to_cstr(mn));
         }
     }
     if (model_params == 0) { model_params = 7000000000; }
     var quant = 0;
-    var q_str = json_get(pairs, str_from("quantization"));
+    var q_str = bayan_json_get_by_cstr(pairs, "quantization");
     if (q_str != 0) {
         var qs = to_cstr(q_str);
         if (streq(qs, "fp16") == 1) { quant = QUANT_FP16; }
@@ -1523,12 +1523,12 @@ fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var req_str = json_get(pairs, str_from("requirement"));
+    var req_str = bayan_json_get_by_cstr(pairs, "requirement");
     if (req_str == 0) { return http_bad_request(cfd, "missing 'requirement'"); }
     var req = _hoosh_req_from_str(to_cstr(req_str));
     if (req < 0) { return http_bad_request(cfd, "unknown requirement"); }
     var min_chips = 1;
-    var mc_str = json_get(pairs, str_from("min_chips"));
+    var mc_str = bayan_json_get_by_cstr(pairs, "min_chips");
     if (mc_str != 0) { min_chips = str_to_int(mc_str); }
     var hit = 0;
     # 2.6.13: one load of the registry for the count and every profile. Since
@@ -1643,9 +1643,9 @@ fn handle_hw_models_post(cfd, body_ptr, body_len) {
     if (body_len > 0) {
         var pairs = json_parse(str_new(body_ptr, body_len));
         if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-        var mn = json_get(pairs, str_from("model"));
+        var mn = bayan_json_get_by_cstr(pairs, "model");
         if (mn != 0 && str_len(mn) > 0) { name = to_cstr(mn); }
-        var q_str = json_get(pairs, str_from("quantization"));
+        var q_str = bayan_json_get_by_cstr(pairs, "quantization");
         if (q_str != 0) {
             quant = quant_from_str(to_cstr(q_str));
             if (quant < 0) { return http_bad_request(cfd, "invalid quantization (fp32/fp16/bf16/int8/int4)"); }
@@ -1692,10 +1692,10 @@ fn handle_hw_cost(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
-    var mn = json_get(pairs, str_from("model"));
+    var mn = bayan_json_get_by_cstr(pairs, "model");
     if (mn == 0) { return http_bad_request(cfd, "missing 'model' (e.g. \"70b\")"); }
     var quant = QUANT_INT8;
-    var q_str = json_get(pairs, str_from("quantization"));
+    var q_str = bayan_json_get_by_cstr(pairs, "quantization");
     if (q_str != 0) {
         quant = quant_from_str(to_cstr(q_str));
         if (quant < 0) { return http_bad_request(cfd, "invalid quantization (fp32/fp16/bf16/int8/int4)"); }
@@ -1710,11 +1710,11 @@ fn handle_hw_training(cfd, body_ptr, body_len) {
     var pairs = json_parse(str_new(body_ptr, body_len));
     if (pairs == 0) { return http_bad_request(cfd, "invalid JSON"); }
     var params_m = 0;
-    var mn = json_get(pairs, str_from("model"));
+    var mn = bayan_json_get_by_cstr(pairs, "model");
     if (mn != 0) { params_m = _hoosh_parse_model_params(to_cstr(mn)) / 1000000; }
     # 2.6.13: model_params_m is bounded like model_params, in millions. 9e15 used
     # to wrap the estimate, and the response reported negative GiB figures.
-    var mp = json_get(pairs, str_from("model_params_m"));
+    var mp = bayan_json_get_by_cstr(pairs, "model_params_m");
     if (mp != 0) {
         var cap_m = HW_MAX_MODEL_PARAMS / 1000000;
         params_m = _hw_json_whole(mp, cap_m);
@@ -1725,7 +1725,7 @@ fn handle_hw_training(cfd, body_ptr, body_len) {
     }
     if (params_m == 0) { return http_bad_request(cfd, "missing 'model' (e.g. \"7b\") or 'model_params_m'"); }
     var method = TRAIN_LORA;
-    var meth_s = json_get(pairs, str_from("method"));
+    var meth_s = bayan_json_get_by_cstr(pairs, "method");
     if (meth_s != 0) {
         method = training_method_from_str(to_cstr(meth_s));
         if (method < 0) {
@@ -1735,7 +1735,7 @@ fn handle_hw_training(cfd, body_ptr, body_len) {
     }
     var target = TARGET_GPU;
     var tname = "gpu";
-    var tgt_s = json_get(pairs, str_from("target"));
+    var tgt_s = bayan_json_get_by_cstr(pairs, "target");
     if (tgt_s != 0) {
         var ts = to_cstr(tgt_s);
         if (streq(ts, "gpu") == 1) { target = TARGET_GPU; tname = "gpu"; }
@@ -1850,7 +1850,7 @@ fn handle_metrics(cfd) {
 
 # Validate chat request fields. Returns 0 if valid, error string if not.
 fn _validate_chat(pairs, body_ptr, body_len) {
-    var model = json_get(pairs, str_from("model"));
+    var model = bayan_json_get_by_cstr(pairs, "model");
     if (model == 0) { return "model field is required"; }
     var mc = to_cstr(model);
     var mlen = strlen(mc);
@@ -1867,7 +1867,7 @@ fn _validate_chat(pairs, body_ptr, body_len) {
     var has_messages = 0;
     if (_top_key_value(body_ptr, body_len, "\"messages\"", 10) >= 0) { has_messages = 1; }
     var has_prompt = 0;
-    if (json_get(pairs, str_from("prompt")) != 0) { has_prompt = 1; }
+    if (bayan_json_get_by_cstr(pairs, "prompt") != 0) { has_prompt = 1; }
     if (has_messages == 0) {
         if (has_prompt == 0) { return "messages array is required"; }
     }
@@ -2863,7 +2863,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
         }
     }
 
-    var model = json_get(pairs, str_from("model"));
+    var model = bayan_json_get_by_cstr(pairs, "model");
     var model_cstr = to_cstr(model);
     # 2.5.9: hardware-aware selection. When the model's size can be read from
     # its name and it does not fit the VRAM actually free, prefer a remote
@@ -2961,7 +2961,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
 
     # Token budget: reserve before inference
     var pool_name = "default";
-    var pool_str = json_get(pairs, str_from("pool"));
+    var pool_str = bayan_json_get_by_cstr(pairs, "pool");
     if (pool_str != 0) { pool_name = to_cstr(pool_str); }
     # 2.5.2: per-provider output clamp. A route may cap what any one request can
     # ask for, so an over-limit request is trimmed rather than refused.
@@ -3060,7 +3060,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
 
     var prompt_cstr = "hello";
     if (msg_raw == 0) {
-        var prompt_val = json_get(pairs, str_from("prompt"));
+        var prompt_val = bayan_json_get_by_cstr(pairs, "prompt");
         if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
     }
 

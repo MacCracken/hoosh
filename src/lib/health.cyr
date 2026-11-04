@@ -16,8 +16,9 @@
 #     (https://) routes get a TCP-connect probe instead. rust-old issued the
 #     authenticated GET remotely too, but that bills an API call per provider
 #     per interval and adds rate-limit pressure for a liveness signal that a
-#     connect already gives; it would also need a sigil crypto bank, which this
-#     bankless thread does not own (banks 0..7 = main + the 7 pool workers).
+#     connect already gives. (Through 2.9.0 it would also have needed a sigil
+#     crypto bank, which this thread did not own; since sigil 3.13.14 any thread
+#     can do TLS — see pool.cyr.)
 #
 #  2. THE ENDPOINT NO LONGER PROBES. /v1/health/providers used to run N blocking
 #     connects inline on a pool worker for every poll. It now reports the state
@@ -123,8 +124,8 @@ fn health_sweep() {
     return 0;
 }
 
-# Background prober. Bankless (no sigil crypto bank), which is why the remote
-# probe is a bare connect rather than a TLS request — see the header.
+# Background prober. The remote probe is a bare connect rather than a TLS
+# request — see the header.
 fn _health_thread(arg) {
     while (1 == 1) {
         sleep_ms(_health_interval_s * 1000);

@@ -5,6 +5,171 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.1] — 2026-11-04
+
+**Toolchain and dependency refresh to the latest releases.** cyrius 6.7.9 → 6.7.18, `ai-hwaccel` 2.4.2 → 2.5.6,
+and the vendored `bote-core` 3.4.10 → 3.8.3 and `majra` 2.12.0 → 2.13.0. All four are their latest releases, and
+each pins 6.7.18. Two of the inherited changes alter what clients get back. The hardware endpoints now return
+corrected numbers, and a JSON request body with a duplicate key is refused. hoosh's own changes are four:
+- moving off bayan's deprecated lookups;
+- a one-byte fix to the off-loopback security warning that 6.7.18's linter caught;
+- dropping a sigil call that is now a no-op;
+- rewriting the crypto-threading comments for sigil's new lane pool.
+
+**1205 assertions** (unchanged). fmt, lint, vet, deny, coverage, the security scan and the four fuzz targets are clean.
+The build prints one warning, the large-static-data note, which drops from 455,072 to 136,288 bytes. sigil's static
+crypto-buffer warning, present since 2.6.11, is gone.
+
+### Changed — cyrius pin 6.7.9 → **6.7.18**
+
+- **`lib/` re-vendored from an empty tree, and `cyrius.lock` regenerated.** 84 entries, one more than before:
+  `lib/math.cyr`, which bayan 1.11.1 requires. There is one commit pin, ai-hwaccel 2.5.6 at `ccdcd9c`, matching the
+  upstream tag. `deps --verify` reports 84/0. `cyrius deps` now notes that `lib/hashmap_fast.cyr` is outside the
+  declared footprint. `lib sync` has copied that file since 6.6.6 and nothing includes it, so the lock keeps it, and
+  CI's `lib sync` → `deps` order reproduces the lock byte for byte.
+- **Bundled modules moved:** sigil 3.13.11 → 3.13.15, sandhi 1.10.9 → 1.13.7, bayan 1.5.13 → 1.11.1,
+  sakshi 2.5.8 → 2.5.10, patra 1.16.0 → 1.16.6.
+- **Binary:** 2,017,384 → 2,305,640 B under `CYRIUS_DCE=1`, and 3,714,664 B without. The growth is mostly the two
+  bundles: bote-core grows from 4,074 to 9,170 lines and ai-hwaccel from 7,532 to 10,843.
+- **No language rule changed in 6.7.10–6.7.18 for code shaped like hoosh's.** Those releases' notes are about structs,
+  vectors, generics, multi-value returns and closures, and hoosh uses none of them. The build was clean, and it
+  would have stopped on the "stops compiling" items.
+
+### Changed — sigil crypto lanes (sigil 3.13.14, CYRIUS-2026-0040)
+
+- **Any thread may now do crypto.** sigil no longer pins a "bank" to a thread for life (8 banks: main plus hoosh's 7
+  workers). Each entry point that touches module-global crypto state now borrows one of 64 lanes for the operation
+  and returns it.
+- **The upstream bug this fixes.** Through 3.13.13 the 64th crypto-touching thread in a process wrapped the bank
+  counter and shared a bank with another thread, which could accept forged ChaCha20-Poly1305 records and reject
+  genuine ECDSA signatures. hoosh never reached 64 crypto threads.
+- **`crypto_bank_set` is a no-op, and `_pool_worker` no longer calls it.** `crypto_tls_main_init()` stays: it
+  installs main's thread-local block.
+- **The pool's design is unchanged.** It still has 7 workers, and HTTPS work from helper threads (OTLP export, the
+  catalog refresh) still goes to a worker. Those are now choices rather than requirements, and the ceiling is 64
+  concurrent crypto operations, not 8 banks.
+- **Comments and docs.** The comments in `pool.cyr`, `batch.cyr`, `health.cyr`, `catalog_fetch.cyr`, `otlp.cyr`,
+  `trace.cyr`, `handlers.cyr` and `main.cyr` now describe lanes, and keep one line on how it worked through 2.9.0.
+  [ADR 011](docs/decisions/011-multithreaded-accept-loop.md) gains a 2.9.1 update, and ADR 012 a pointer to it.
+- **The "slot 0 = sigil's bank" comments were already wrong before this release.** `thread_local_alloc` hands sigil a
+  slot from 16 up, and slots 0–15 are the fixed ones (hoosh uses 1–5), so nothing collided.
+
+### Changed — `ai-hwaccel` 2.4.2 → **2.5.6** (`/v1/hardware/*` answers change)
+
+All 45 ai-hwaccel functions hoosh calls keep their signatures. 17 of them changed body, mostly in 2.5.5's audit, which
+fixed about 75 defects. What reaches hoosh's endpoints:
+
+- **`/v1/hardware/cost` now reads every pricing row.** Before, the loader read only 1 of the 18: it matched the
+  file's `{"instances": [...]}` wrapper as a single object, so every answer came from that one row.
+  - Verified live: for a 7B BF16 model, 2.9.0 recommended **`p5.48xlarge` at $98.32/hr**. 2.9.1 lists the five
+    cheapest that fit, starting with **`g4dn.xlarge` at $0.53/hr**.
+  - `data/cloud_pricing.json` is re-synced from 2.5.6. It has 19 rows: the Azure A100 rows are corrected and an
+    MI300X row is added.
+  - `data/models.json` holds the same 26 models. It stays a top-level array; 2.5.x's `load_models` accepts that form
+    or the wrapper.
+- **Model sizes are parsed correctly.** "1.5B" used to plan as 15B, "350M" as 350B and "8x7B" as 87B. Verified live:
+  `/v1/hardware/cost` for `"1.5b"` now needs 3.6 GB, where 2.9.0 said 36 GB.
+- **Training estimates** (`/v1/hardware/training-estimate`) use mixed-precision AdamW accounting for full fine-tune,
+  DPO, RLHF and distillation, about 16 B per parameter. A 7B full fine-tune goes from 52.2 to 117.4 GiB. LoRA, QLoRA
+  and prefix are unchanged.
+- **Placement and sharding plans** gain `"fits"` (false when nothing holds the model). Tensor parallel now requires
+  one kind of device. Pipeline layers are split in proportion to device memory, and multi-device tokens/s now
+  depends on model size; before, it read about 100× the single-device figure.
+- **Detection** (`/v1/hardware`) fixes several wrong readings:
+  - NVIDIA power was 100× too high.
+  - AMD bandwidth used the DPM level index as the clock.
+  - ROCm's compute capability was the PCI revision byte.
+  - Any `/sys/class/accel` node was reported as a Google TPU v4.
+  - Intel IPU6 cameras were reported as Graphcore IPUs.
+
+  NUMA and PCIe links are now taken from the right GPU. JSON strings are escaped. A host with any of these devices
+  will see a different device list. A tool that ran and failed is listed in `warnings`.
+- **`registry_detect_with(mask)` runs no tools when the mask has no tool-based backend**, which matters when
+  `[hardware] disabled_backends` leaves only sysfs backends. `profile_from_json_str` refuses a duplicate key and a
+  leading-zero number.
+
+### Changed — vendored `bote-core` 3.4.10 → **3.8.3** and `majra` 2.12.0 → **2.13.0**
+
+- **bote: no wire change for hoosh's clients.**
+  - A request that does not name the new `2026-07-28` revision in `params._meta` gets the same answer as before. bote
+    fuzzed 200,000 legacy messages to byte-identical replies.
+  - Verified live against a 2.9.1 gateway: `tools/list`, an echo call, an unknown tool (`-32602`), invalid JSON
+    (`-32700`) and `initialize` answer exactly as on 2.9.0, apart from `serverInfo`'s version, now `3.8.3`.
+  - All seven functions hoosh calls keep their signatures.
+  - The core bundle no longer needs bayan (3.4.13); its `# Requires` block is `hashmap` and `sys`.
+  - The rest of 3.4.11–3.8.3 is in parts hoosh does not use: the HTTP/Streamable/WebSocket transports, OAuth
+    resource metadata and JWT, cancellation, progress, resource updates, and output and input schemas.
+  - `scripts/sync-bote.sh` defaults to 3.8.3.
+- **majra:** `pubsub_new`, `pubsub_publish` and `pubsub_total_published` are byte-identical.
+
+### Changed — bayan 1.11.1: stricter JSON, typed lookups
+
+- **A request body with a duplicate key or a malformed number is refused.** Malformed means a leading zero (`01`), no
+  digits, or an out-of-range integer. Every handler that parses a body with bayan answers 400 `invalid JSON`, where
+  it used to take the first value of a duplicate key. Verified live: `{"model":"7b","model":"70b",…}` on
+  `/v1/hardware/cost` was answered as 7b by 2.9.0 and is refused by 2.9.1.
+- **Provider model lists get the same treatment.** A duplicate key fails the parse, and that route keeps its last good
+  catalog.
+- **The bare lookups are deprecated.** 119 call sites move to the typed names:
+  - **`handlers.cyr`, 37 calls:** `json_get(pairs, str_from("key"))` → `bayan_json_get_by_cstr(pairs, "key")`. The
+    match is identical. Each lookup also stops allocating a `Str` header that hoosh's never-freeing allocator kept
+    for the life of the process.
+  - **`config.cyr`:** 63 `toml_get` and 19 `toml_get_sections` calls move to their `_by_cstr` names, which is where
+    the deprecated names already forwarded.
+  - **`tests/hoosh.tcyr`:** the same 14 calls.
+
+### Fixed
+
+- **The off-loopback security warning lost its newline** (`src/main.cyr`). `sys_write(2, "WARNING: bound to a
+  non-loopback address with no [[auth]] tokens.\n", 65)` wrote 65 of the literal's 66 bytes, so the warning's second
+  line ran onto the first. Now 66. 6.7.18's `cyrius lint` caught it, which made CI's lint gate fail. Verified live
+  with `--bind 0.0.0.0`.
+
+### Inherited without a hoosh change
+
+- **Native TLS** (6.7.10 / 6.7.14 / 6.7.18):
+  - Stricter with non-conformant peers: an unsolicited extension, an un-offered ALPN, or a byte after a signature
+    fails the handshake.
+  - The TLS 1.2 client keeps the server's intermediates, so a 1.2 server that sends one now verifies.
+  - X.509 nameConstraints are enforced.
+  - A peer's KeyUpdate storm is bounded.
+- **sandhi 1.13.x:** HTTP/2 flow control and request deadlines, the TLS session cache under a mutex, HPACK limits,
+  and an HTTP/1 header holding a NUL is dropped.
+- **Not applicable:** `lib/http.cyr`'s new `http_get` deadlines (hoosh's client is its own, over sandhi);
+  `args_init`'s negative-errno return (hoosh ignores the return).
+
+### Performance
+
+**No code regression, and the MCP path is faster.** The 2.9.0 (6.7.9) and 2.9.1 (6.7.18) bench binaries ran
+alternately for 9 rounds each. The box was busy (load ~3.5), so only rows whose two ranges do not overlap are called:
+
+| benchmark | 2.9.0 | 2.9.1 | Δ | cause |
+|---|---:|---:|---:|---|
+| `mcp_tools_list` | 4.400 µs | 3.674 µs | **−16.5%** | bote 3.4.11–3.8.3 |
+| `mcp_tools_call` | 6.863 µs | 5.839 µs | **−14.9%** | bote 3.4.11–3.8.3 |
+| `cost_record_local_free` | 140 ns | 113 ns | −19.3% | placement |
+| `auth_verify_wrong_early` | 96 ns | 106 ns | +10.4% | placement |
+| `cost_record_known_model` | 165 ns | 171 ns | +3.6% | placement |
+
+The other 20 rows' ranges overlap at this load. Their medians are within ±5%, apart from five that read faster and
+are too wide to call:
+- `queue_enqueue_dequeue` −32% (2.9.0 range 265–644 ns);
+- `pool_reserve_commit` −26% (31–47 ns);
+- `cache_insert` −17% (96–107 against 86–121 ns);
+- `cache_get_miss` −9.5% (62–63 against 56–77 ns);
+- `batch_split_4` −5.2%.
+
+**The placement rows are proven:**
+- `ct_eq_bytes`, `ct_eq_bytes_lens`, `strlen`, `streq`, `memeq`, `_map_find` and `map_get` are byte-identical between
+  the binaries.
+- `_bench_cost_record`, `_bench_price` and `cache_get` differ only in `call` and `movabs` operands.
+- What moved is their place in the 64-byte line. `ct_eq_bytes` went from offset 48 to 13, and `_bench_cost_record` /
+  `_bench_price` from 51 / 24 to 32 / 5.
+- `vec_get`'s cold path changed: its two error branches now call a shared abort helper. It shrinks from 257 to 225 B,
+  and its hot path is unchanged.
+
+The 2026-11-04 rows in `bench-history.csv` that follow 2.9.0's are this release's mandatory run.
+
 ## [2.9.0] — 2026-11-04
 
 **Toolchain and dependency refresh onto the cyrius 6.7.x language minor.** cyrius 6.6.20 → 6.7.9. The vendored

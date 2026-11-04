@@ -14,9 +14,9 @@
 #                  u24 (6 chars each). Max count = 18 (U+FDFA Arabic
 #                  ligature). Histogram (UCD 17.0.0): 1=2685, 2=648,
 #                  3=411, 4=67, 5=16, 6=3, 7=1, 8=1, 18=1. Single-string
-#                  variable (~41 KB) — under the 64 KB length cap of the
-#                  cycc string-token encoding (offset<<16 | length, length
-#                  is u16); no piece splitting needed.
+#                  variable (~41 KB). The cycc string-token encoding is
+#                  (offset<<32 | length) since v6.6.4 — the old u16 length
+#                  capped a literal at 64 KB; no piece splitting needed.
 # All sorted tables consumed by binary search in normalize.cyr;
 # composition is sorted by (cp1, cp2) — primary cp1 with secondary
 # linear-scan for cp2 within the cp1 run. Compat lookup: binary search

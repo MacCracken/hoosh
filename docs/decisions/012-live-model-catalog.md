@@ -36,7 +36,8 @@ vision); Ollama's `/api/tags` with what the box has.
   workers own (ADR 011). A refresh is therefore a POOL JOB (`JOB_CATALOG_REFRESH`), enqueued at startup (the
   gateway never waits on a provider to start serving), after `/v1/admin/reload`, and by a bankless timer every
   `[catalog] refresh_secs` (six hours by default); `POST /v1/models/refresh` runs one inline on the worker serving
-  it. Single-flight: a refresh asked for while one runs is skipped.
+  it. Single-flight: a refresh asked for while one runs is skipped. (2.9.1: any thread may do TLS now, see
+  ADR 011's 2.9.1 update. The refresh stays a pool job.)
 - **Publication.** A refresh builds a fresh vec of per-route records and publishes it with one aligned pointer
   store — the same lock-free old-or-new reasoning as the `_router` swap (ADR 011): readers on the workers load it
   once, and the allocator never frees, so an old snapshot stays valid. A route whose fetch fails keeps its previous

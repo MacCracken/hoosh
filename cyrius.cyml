@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -18,7 +18,7 @@ output = "build/hoosh"
 # sys must precede sigil too: since sigil 3.12.18 (cyrius 6.6.4) its
 # agnosys_uname calls lib/sys.cyr's sys_uname. Without sys the build warns
 # `undefined function 'sys_uname'` and that call compiles to a trap.
-# Since sigil 3.13.3 (cyrius 6.7.9 ships 3.13.11) the fold includes its own
+# Since sigil 3.13.3 (cyrius 6.7.18 ships 3.13.15) the fold includes its own
 # leaves (lib/sys.cyr, lib/bayan.cyr, …) and takes uname_release from
 # lib/sys.cyr, so the old benign `duplicate fn 'uname_release'` is gone. The
 # order above is kept: include-once makes the repeats no-ops.
@@ -30,7 +30,7 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.4.2"
+tag = "2.5.6"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
@@ -51,14 +51,15 @@ modules = ["dist/ai-hwaccel.cyr"]
 # `registry_*` ops keep their names. ai-hwaccel's own constructor is
 # `hw_registry_new`, so the two no longer share a name.)
 # The core bundle itself is self-contained (no libro/majra symbols). Its
-# `# Requires` block includes only stdlib leaves listed above (hashmap, bayan,
-# sigil, ct), and since bote 3.4.0 its log.cyr calls sakshi, which a copied
-# bundle must list itself — "sakshi" above covers it. So we vendor
+# `# Requires` block includes only stdlib leaves listed above (hashmap and
+# sys since bote 3.4.13 dropped bayan), and since bote 3.4.0 its log.cyr calls
+# sakshi, which a copied bundle must list itself — "sakshi" above covers it.
+# So we vendor
 # it directly as `src/vendor/bote-core.cyr` (committed; see that file's
 # header for the pinned bote tag) and include it from src/main.cyr. Re-sync
 # with `./scripts/sync-bote.sh <tag>`.
 #
-# majra (2.12.0) — provider event bus pubsub — is vendored the same way at
+# majra (2.13.0) — provider event bus pubsub — is vendored the same way at
 # src/vendor/majra.cyr (self-contained dist/majra.cyr; its `# Requires` block
 # names only stdlib leaves listed above, so the includes are no-ops; majra
 # ships no pubsub-only profile, so this is its smallest bundle). Re-sync by

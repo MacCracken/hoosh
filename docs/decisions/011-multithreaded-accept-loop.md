@@ -116,3 +116,15 @@ both now take `_chat_lock` for the snapshot. Lesson: the sync pass must cover
 during another worker's `map_set`/`map_delete` is unsafe. Also un-deaded the
 lowest-latency strategy, whose per-request EMA update uses a dedicated `_lat_lock`
 (not `_chat_lock`) so latency recording doesn't serialize with chat bookkeeping.
+
+## Update (2.9.1): the crypto-bank constraint is gone
+
+The hard constraint in *Context* no longer holds. sigil 3.13.14 (folded into cyrius 6.7.18, which 2.9.1 pins) replaced
+per-thread banks with a pool of `SIGIL_CRYPTO_BANKS = 64` lanes. Every sigil entry point that reaches module-global
+crypto state borrows a lane for that one operation and returns it, so any thread may hash, sign or do TLS, and
+`crypto_bank_set` is a no-op (2.9.1 stops calling it). Through 3.13.13 the 64th crypto-touching thread wrapped the lane
+counter and shared a lane with another thread; sigil fixed that as CYRIUS-2026-0040.
+
+The pool itself is unchanged: still `WORKER_COUNT = 7`, with HTTPS work (OTLP export, the catalog refresh) still routed to
+a worker rather than done on the helper threads. Those are now choices, not requirements. A larger pool, or a TLS health
+probe on the prober thread, is bounded by 64 concurrent crypto operations rather than 8 banks.

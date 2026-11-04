@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.0**: CHANGELOG, state, README, roadmap, CLAUDE.md and CONTRIBUTING touched for
-> the cyrius 6.7.9 / bote-core 3.4.10 / majra 2.12.0 refresh; the zugot-recipe step dropped from the process). The
-> previous refresh was 2026-11-04 (**v2.8.2**, the cyrius 6.6.20 refresh), and before it 2026-10-09 (**v2.8.1**).
+> **Last refresh**: 2026-11-04 (**v2.9.1**: CHANGELOG, state, README, roadmap, overview, CLAUDE.md, ADR 011 (a 2.9.1
+> update: the crypto-bank constraint is gone) and ADR 012 touched for the cyrius 6.7.18 / ai-hwaccel 2.5.6 / bote-core
+> 3.8.3 / majra 2.13.0 refresh). Earlier the same day: **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and
+> **v2.8.2** (cyrius 6.6.20); before that 2026-10-09 (**v2.8.1**).
 > The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the rust-old parity arc), when every doc below was
 > re-read against the source.
 >

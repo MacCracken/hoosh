@@ -9,9 +9,9 @@
 
 | | |
 |---|---|
-| **Version** | **2.9.0** (cyrius 6.7.9 and the bundles that pin it; `/v1/tools/call` answers to the MCP / JSON-RPC specs via bote 3.4.10) on 2.8.2 (cyrius 6.6.20 refresh) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
-| **Toolchain** | Cyrius pin **6.7.9** (`cyrius.cyml`); `ai-hwaccel` **2.4.2** (no 6.7.9 release); vendored `bote-core` **3.4.10**, `majra` **2.12.0** |
-| **Binary** (x86_64 static ELF) | ~2.0 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~3.1 MB without |
+| **Version** | **2.9.1** (cyrius 6.7.18 and the latest ai-hwaccel / bote / majra; corrected `/v1/hardware/*` numbers; sigil crypto lanes) on 2.9.0 (cyrius 6.7.9; `/v1/tools/call` answers to the MCP / JSON-RPC specs via bote 3.4.10) on 2.8.2 (cyrius 6.6.20 refresh) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
+| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; vendored `bote-core` **3.8.3**, `majra` **2.13.0** |
+| **Binary** (x86_64 static ELF) | ~2.3 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~3.7 MB without |
 | **Source** | ~15,600 lines / 38 files (`src/main.cyr` + 37 `src/lib/*.cyr`) + 2 vendored distlib bundles |
 | **Tests** | 1205 assertions, 181 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
@@ -20,7 +20,7 @@
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
 | **ADRs** | 12 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
-| **Concurrency** | unified 7-worker pool (banks 1..7); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
+| **Concurrency** | unified 7-worker pool (sigil crypto lanes from a pool of 64 since 2.9.1; no per-thread banks); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md) |
 
 ## 2.6.5 — errors stop being laundered into successes
 
@@ -48,7 +48,7 @@ reaches `_router`, a global defined in `main.cyr`, so it cannot be included by t
 untrusted-byte parsing is exactly what must be tested against the real implementation, not a mirror.
 
 ✅ **Since closed:** the sandhi SSE event loss at read boundaries (what made hoosh forward a tool call whose
-`id`/`name` frame never arrived) was fixed in **sandhi 1.9.15**, which the cyrius stdlib hoosh pins carries (1.10.9 at 6.7.9);
+`id`/`name` frame never arrived) was fixed in **sandhi 1.9.15**, which the cyrius stdlib hoosh pins carries (1.13.7 at 6.7.18);
 2.8.0 adds a test that splits a `tool_use` start at every byte, and drops any orphan argument fragment besides.
 
 ## Active cycle — v2.5.x arc: COMPLETE

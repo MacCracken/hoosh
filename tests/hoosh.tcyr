@@ -5138,40 +5138,40 @@ fn main() {
     assert(cfg_sections != 0, "config: parsed minimal toml");
 
     # Find [server] section
-    var cfg_srv = toml_get_sections(cfg_sections, "server");
+    var cfg_srv = bayan_toml_get_sections_by_cstr(cfg_sections, "server");
     assert(vec_len(cfg_srv) > 0, "config: server section found");
 
     test_group("config_defaults");
 
     # Verify default values (toml_get returns str, use str_eq_cstr)
     var cfg_pairs = toml_section_pairs(vec_get(cfg_srv, 0));
-    var cfg_bind = toml_get(cfg_pairs, "bind");
+    var cfg_bind = bayan_toml_get_by_cstr(cfg_pairs, "bind");
     assert(str_eq_cstr(cfg_bind, "127.0.0.1") == 1, "config: default bind");
-    var cfg_port = toml_get(cfg_pairs, "port");
+    var cfg_port = bayan_toml_get_by_cstr(cfg_pairs, "port");
     assert(str_eq_cstr(cfg_port, "8088") == 1, "config: default port");
 
     test_group("config_provider_section");
 
     var cfg2_src = str_from("[[server]]\nbind = \"0.0.0.0\"\nport = \"8088\"\n\n[[providers]]\ntype = \"ollama\"\nbase_url = \"http://localhost:11434\"\npriority = \"1\"\n");
     var cfg2_secs = toml_parse(cfg2_src);
-    var cfg2_provs = toml_get_sections(cfg2_secs, "providers");
+    var cfg2_provs = bayan_toml_get_sections_by_cstr(cfg2_secs, "providers");
     assert(vec_len(cfg2_provs) > 0, "config: providers section found");
     var cfg2_pairs = toml_section_pairs(vec_get(cfg2_provs, 0));
-    var cfg2_ptype = toml_get(cfg2_pairs, "type");
+    var cfg2_ptype = bayan_toml_get_by_cstr(cfg2_pairs, "type");
     assert(str_eq_cstr(cfg2_ptype, "ollama") == 1, "config: provider type=ollama");
-    var cfg2_purl = toml_get(cfg2_pairs, "base_url");
+    var cfg2_purl = bayan_toml_get_by_cstr(cfg2_pairs, "base_url");
     assert(str_eq_cstr(cfg2_purl, "http://localhost:11434") == 1, "config: provider base_url");
 
     test_group("config_cache_section");
 
     var cfg3_src = str_from("[[cache]]\nenabled = \"true\"\nmax_entries = \"10000\"\nttl_secs = \"3600\"\n");
     var cfg3_secs = toml_parse(cfg3_src);
-    var cfg3_cache = toml_get_sections(cfg3_secs, "cache");
+    var cfg3_cache = bayan_toml_get_sections_by_cstr(cfg3_secs, "cache");
     assert(vec_len(cfg3_cache) > 0, "config: cache section found");
     var cfg3_pairs = toml_section_pairs(vec_get(cfg3_cache, 0));
-    var cfg3_enabled = toml_get(cfg3_pairs, "enabled");
+    var cfg3_enabled = bayan_toml_get_by_cstr(cfg3_pairs, "enabled");
     assert(str_eq_cstr(cfg3_enabled, "true") == 1, "config: cache enabled=true");
-    var cfg3_max = toml_get(cfg3_pairs, "max_entries");
+    var cfg3_max = bayan_toml_get_by_cstr(cfg3_pairs, "max_entries");
     assert(str_eq_cstr(cfg3_max, "10000") == 1, "config: cache max=10000");
 
     # ================================================================
@@ -5183,9 +5183,9 @@ fn main() {
     var j_src = str_from("{\"model\":\"llama3\",\"prompt\":\"hello\",\"temperature\":\"0.7\"}");
     var j_pairs = json_parse(j_src);
     assert(j_pairs != 0, "json: parsed basic object");
-    var j_model = json_get(j_pairs, str_from("model"));
+    var j_model = bayan_json_get_by_cstr(j_pairs, "model");
     assert(str_eq_cstr(j_model, "llama3") == 1, "json: model=llama3");
-    var j_prompt = json_get(j_pairs, str_from("prompt"));
+    var j_prompt = bayan_json_get_by_cstr(j_pairs, "prompt");
     assert(str_eq_cstr(j_prompt, "hello") == 1, "json: prompt=hello");
 
     test_group("json_build");
@@ -5197,14 +5197,14 @@ fn main() {
     assert(j_out != 0, "json: built output");
     # Verify roundtrip — json_build returns a str, json_parse takes a str
     var j_reparsed = json_parse(j_out);
-    var j_rp_model = json_get(j_reparsed, str_from("model"));
+    var j_rp_model = bayan_json_get_by_cstr(j_reparsed, "model");
     assert(str_eq_cstr(j_rp_model, "gpt-4o") == 1, "json: roundtrip model");
-    var j_rp_status = json_get(j_reparsed, str_from("status"));
+    var j_rp_status = bayan_json_get_by_cstr(j_reparsed, "status");
     assert(str_eq_cstr(j_rp_status, "ok") == 1, "json: roundtrip status");
 
     test_group("json_get_missing");
 
-    assert_eq(json_get(j_pairs, str_from("nonexistent")), 0, "json: missing key returns 0");
+    assert_eq(bayan_json_get_by_cstr(j_pairs, "nonexistent"), 0, "json: missing key returns 0");
 
     # ================================================================
     # INFERENCE TYPES — request/response structs, role enum

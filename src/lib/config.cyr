@@ -104,9 +104,9 @@ fn bind_addr_str(addr) {
 # block would silently weaken TLS (several bundles, a missing file, half an mTLS
 # pair), which fails the config load rather than falling back to the system roots.
 fn _config_tls_policy(pp, purl) {
-    var pins = toml_get(pp, "tls_pinned_certs");
-    var ccert = toml_get(pp, "client_cert");
-    var ckey = toml_get(pp, "client_key");
+    var pins = bayan_toml_get_by_cstr(pp, "tls_pinned_certs");
+    var ccert = bayan_toml_get_by_cstr(pp, "client_cert");
+    var ckey = bayan_toml_get_by_cstr(pp, "client_key");
     if (pins == 0 && ccert == 0 && ckey == 0) { return 0; }
     if (memeq(purl, "https", 5) == 0) {
         hlog_warn("config: tls_pinned_certs / client_cert / client_key apply to https providers; ignored");
@@ -162,7 +162,7 @@ fn _config_tls_policy(pp, purl) {
 #   reasoning = true                an OpenAI-compatible model that takes reasoning_effort (forwarded only then)
 #   listed = false                  known for lookups, not offered by /v1/models/catalog
 fn _config_model(mp) {
-    var mid = toml_get(mp, "id");
+    var mid = bayan_toml_get_by_cstr(mp, "id");
     if (mid == 0) {
         hlog_warn("config: a [[models]] block has no id — ignored");
         return 0;
@@ -173,8 +173,8 @@ fn _config_model(mp) {
         return 0;
     }
     var e = catalog_entry_new(idc, CATSRC_CONFIG);
-    var ip = toml_get(mp, "input_per_mtok");
-    var op = toml_get(mp, "output_per_mtok");
+    var ip = bayan_toml_get_by_cstr(mp, "input_per_mtok");
+    var op = bayan_toml_get_by_cstr(mp, "output_per_mtok");
     if (ip != 0 && op != 0) {
         var ipv = catalog_usd_per_mtok_scaled(to_cstr(ip));
         var opv = catalog_usd_per_mtok_scaled(to_cstr(op));
@@ -187,28 +187,28 @@ fn _config_model(mp) {
     } elif (ip != 0 || op != 0) {
         hlog_warn("config: a [[models]] block sets only one of input_per_mtok / output_per_mtok: unpriced");
     }
-    var cx = toml_get(mp, "context");
+    var cx = bayan_toml_get_by_cstr(mp, "context");
     if (cx != 0) { store64(e + CAT_E_CTX, str_to_int(cx)); }
-    var mo = toml_get(mp, "max_output");
+    var mo = bayan_toml_get_by_cstr(mp, "max_output");
     if (mo != 0) { store64(e + CAT_E_MAXOUT, str_to_int(mo)); }
-    var vi = toml_get(mp, "vision");
+    var vi = bayan_toml_get_by_cstr(mp, "vision");
     if (vi != 0) {
         if (str_eq_cstr(vi, "true") == 1) { store64(e + CAT_E_VISION, 1); }
         if (str_eq_cstr(vi, "false") == 1) { store64(e + CAT_E_VISION, 0); }
     }
-    var ti = toml_get(mp, "tier");
+    var ti = bayan_toml_get_by_cstr(mp, "tier");
     if (ti != 0) {
         if (str_eq_cstr(ti, "economy") == 1) { store64(e + CAT_E_TIER, TIER_ECONOMY); }
         if (str_eq_cstr(ti, "standard") == 1) { store64(e + CAT_E_TIER, TIER_STANDARD); }
         if (str_eq_cstr(ti, "premium") == 1) { store64(e + CAT_E_TIER, TIER_PREMIUM); }
         if (str_eq_cstr(ti, "reasoning") == 1) { store64(e + CAT_E_TIER, TIER_REASONING); }
     }
-    var re = toml_get(mp, "reasoning");
+    var re = bayan_toml_get_by_cstr(mp, "reasoning");
     if (re != 0) {
         if (str_eq_cstr(re, "true") == 1) { store64(e + CAT_E_REASON, 1); }
         if (str_eq_cstr(re, "false") == 1) { store64(e + CAT_E_REASON, 0); }
     }
-    var li = toml_get(mp, "listed");
+    var li = bayan_toml_get_by_cstr(mp, "listed");
     if (li != 0) {
         if (str_eq_cstr(li, "false") == 1) { store64(e + CAT_E_LISTED, 0); }
     }
@@ -232,38 +232,38 @@ fn load_config(path) {
     if (vec_len(sections) == 0) { return 0; }
 
     # Parse [[server]] section
-    var srv_secs = toml_get_sections(sections, "server");
+    var srv_secs = bayan_toml_get_sections_by_cstr(sections, "server");
     if (vec_len(srv_secs) > 0) {
         var srv = toml_section_pairs(vec_get(srv_secs, 0));
-        var port_str = toml_get(srv, "port");
+        var port_str = bayan_toml_get_by_cstr(srv, "port");
         if (port_str != 0) { _http_port = str_to_int(port_str); }
-        var strat_str = toml_get(srv, "strategy");
+        var strat_str = bayan_toml_get_by_cstr(srv, "strategy");
         if (strat_str != 0) { _route_strategy = strategy_from_str(to_cstr(strat_str)); }
         # Listen address. Was parsed by NO ONE before 2.5.1 — hoosh.cyml shipped
         # `bind = "127.0.0.1"` while main.cyr bound INADDR_ANY, so the gateway
         # listened on every interface regardless of what the config claimed.
         # "0.0.0.0" packs to 0 (INADDR_ANY); host_addr also accepts a hostname.
-        var bind_str = toml_get(srv, "bind");
+        var bind_str = bayan_toml_get_by_cstr(srv, "bind");
         if (bind_str != 0) { _http_bind = host_addr(to_cstr(bind_str)); }
         # 2.5.5: background health-probe cadence. 0 disables probing, which
         # leaves every route optimistically healthy (pre-2.5.5 behavior).
-        var hci_str = toml_get(srv, "health_check_interval_secs");
+        var hci_str = bayan_toml_get_by_cstr(srv, "health_check_interval_secs");
         if (hci_str != 0) { health_configure(str_to_int(hci_str)); }
     }
 
     # Parse [storage] section — opt-in patra persistence (path only)
-    var stor_secs = toml_get_sections(sections, "storage");
+    var stor_secs = bayan_toml_get_sections_by_cstr(sections, "storage");
     if (vec_len(stor_secs) > 0) {
         var sp = toml_section_pairs(vec_get(stor_secs, 0));
-        var path_str = toml_get(sp, "path");
+        var path_str = bayan_toml_get_by_cstr(sp, "path");
         if (path_str != 0) { _storage_path = to_cstr(path_str); }
     }
 
     # Parse [logging] section — sets the sakshi operational log level
-    var log_secs = toml_get_sections(sections, "logging");
+    var log_secs = bayan_toml_get_sections_by_cstr(sections, "logging");
     if (vec_len(log_secs) > 0) {
         var lp = toml_section_pairs(vec_get(log_secs, 0));
-        var lvl_str = toml_get(lp, "level");
+        var lvl_str = bayan_toml_get_by_cstr(lp, "level");
         if (lvl_str != 0) {
             var lvl = hlog_level_from_str(to_cstr(lvl_str));
             if (lvl >= 0) { sakshi_set_level(lvl); }
@@ -272,21 +272,21 @@ fn load_config(path) {
 
     # Parse [telemetry] section — OpenTelemetry OTLP/HTTP+JSON export (off by
     # default; enabled when otlp_endpoint is set).
-    var tel_secs = toml_get_sections(sections, "telemetry");
+    var tel_secs = bayan_toml_get_sections_by_cstr(sections, "telemetry");
     if (vec_len(tel_secs) > 0) {
         var tp = toml_section_pairs(vec_get(tel_secs, 0));
-        var ep_str = toml_get(tp, "otlp_endpoint");
+        var ep_str = bayan_toml_get_by_cstr(tp, "otlp_endpoint");
         if (ep_str != 0) { _otlp_endpoint = to_cstr(ep_str); }
-        var svc_str = toml_get(tp, "service_name");
+        var svc_str = bayan_toml_get_by_cstr(tp, "service_name");
         if (svc_str != 0) { _otlp_service = to_cstr(svc_str); }
     }
 
     # Parse [dlp] section — Data Loss Prevention scanner (off by default).
-    var dlp_secs = toml_get_sections(sections, "dlp");
+    var dlp_secs = bayan_toml_get_sections_by_cstr(sections, "dlp");
     if (vec_len(dlp_secs) > 0) {
         var dp = toml_section_pairs(vec_get(dlp_secs, 0));
-        var den_str = toml_get(dp, "enabled");
-        var dlvl_str = toml_get(dp, "default_level");
+        var den_str = bayan_toml_get_by_cstr(dp, "enabled");
+        var dlvl_str = bayan_toml_get_by_cstr(dp, "default_level");
         var den = 0;
         if (den_str != 0) {
             if (str_eq_cstr(den_str, "true") == 1) { den = 1; }
@@ -302,13 +302,13 @@ fn load_config(path) {
     # Parse [[dlp_pattern]] sections (2.5.10) — caller-supplied patterns beyond
     # the eight built-ins: name + literal pattern + classification level.
     dlp_custom_clear();
-    var dpat_secs = toml_get_sections(sections, "dlp_pattern");
+    var dpat_secs = bayan_toml_get_sections_by_cstr(sections, "dlp_pattern");
     var dpi = 0;
     while (dpi < vec_len(dpat_secs)) {
         var dpp = toml_section_pairs(vec_get(dpat_secs, dpi));
-        var dp_name = toml_get(dpp, "name");
-        var dp_pat = toml_get(dpp, "pattern");
-        var dp_lvl_str = toml_get(dpp, "level");
+        var dp_name = bayan_toml_get_by_cstr(dpp, "name");
+        var dp_pat = bayan_toml_get_by_cstr(dpp, "pattern");
+        var dp_lvl_str = bayan_toml_get_by_cstr(dpp, "level");
         if (dp_pat != 0) {
             var dp_lvl = CLASS_CONFIDENTIAL;
             if (dp_lvl_str != 0) {
@@ -323,35 +323,35 @@ fn load_config(path) {
     }
 
     # Parse [semantic_cache] section — embedding-similarity cache (off by default).
-    var sem_secs = toml_get_sections(sections, "semantic_cache");
+    var sem_secs = bayan_toml_get_sections_by_cstr(sections, "semantic_cache");
     if (vec_len(sem_secs) > 0) {
         var sp = toml_section_pairs(vec_get(sem_secs, 0));
-        var sen_str = toml_get(sp, "enabled");
+        var sen_str = bayan_toml_get_by_cstr(sp, "enabled");
         var sen = 0;
         if (sen_str != 0) {
             if (str_eq_cstr(sen_str, "true") == 1) { sen = 1; }
         }
         var sthr = 850;
-        var sthr_str = toml_get(sp, "threshold");
+        var sthr_str = bayan_toml_get_by_cstr(sp, "threshold");
         if (sthr_str != 0) {
             var ts = to_cstr(sthr_str);
             var fr = _sem_parse_num(ts, 0, strlen(ts));
             sthr = load64(fr) / 10;
         }
         var smodel = 0;
-        var smodel_str = toml_get(sp, "embedding_model");
+        var smodel_str = bayan_toml_get_by_cstr(sp, "embedding_model");
         if (smodel_str != 0) { smodel = to_cstr(smodel_str); }
         var smax = 0;
-        var smax_str = toml_get(sp, "max_search");
+        var smax_str = bayan_toml_get_by_cstr(sp, "max_search");
         if (smax_str != 0) { smax = str_to_int(smax_str); }
         semantic_configure(sen, sthr, smodel, smax);
     }
 
     # Parse [compression] section — prompt whitespace compression (off by default).
-    var comp_secs = toml_get_sections(sections, "compression");
+    var comp_secs = bayan_toml_get_sections_by_cstr(sections, "compression");
     if (vec_len(comp_secs) > 0) {
         var cmp = toml_section_pairs(vec_get(comp_secs, 0));
-        var cmp_en_str = toml_get(cmp, "enabled");
+        var cmp_en_str = bayan_toml_get_by_cstr(cmp, "enabled");
         var cmp_en = 0;
         if (cmp_en_str != 0) {
             if (str_eq_cstr(cmp_en_str, "true") == 1) { cmp_en = 1; }
@@ -360,12 +360,12 @@ fn load_config(path) {
     }
 
     # Parse [[warming]] sections — cache warming prompts (model + prompt).
-    var warm_secs = toml_get_sections(sections, "warming");
+    var warm_secs = bayan_toml_get_sections_by_cstr(sections, "warming");
     var wi = 0;
     while (wi < vec_len(warm_secs)) {
         var wp = toml_section_pairs(vec_get(warm_secs, wi));
-        var wmodel = toml_get(wp, "model");
-        var wprompt = toml_get(wp, "prompt");
+        var wmodel = bayan_toml_get_by_cstr(wp, "model");
+        var wprompt = bayan_toml_get_by_cstr(wp, "prompt");
         if (wmodel != 0 && wprompt != 0) {
             warming_add(to_cstr(wmodel), to_cstr(wprompt));
         }
@@ -373,11 +373,11 @@ fn load_config(path) {
     }
 
     # Parse [[cache]] section
-    var cache_secs = toml_get_sections(sections, "cache");
+    var cache_secs = bayan_toml_get_sections_by_cstr(sections, "cache");
     if (vec_len(cache_secs) > 0) {
         var cache_p = toml_section_pairs(vec_get(cache_secs, 0));
-        var max_str = toml_get(cache_p, "max_entries");
-        var enabled_str = toml_get(cache_p, "enabled");
+        var max_str = bayan_toml_get_by_cstr(cache_p, "max_entries");
+        var enabled_str = bayan_toml_get_by_cstr(cache_p, "enabled");
         var max_e = 10000;
         var enabled = 1;
         if (max_str != 0) { max_e = str_to_int(max_str); }
@@ -388,22 +388,22 @@ fn load_config(path) {
         # 300` since the port while nothing parsed it, so cached responses never
         # expired. 0 (or a negative) disables expiry explicitly.
         var ttl_secs = 300;
-        var ttl_str = toml_get(cache_p, "ttl_secs");
+        var ttl_str = bayan_toml_get_by_cstr(cache_p, "ttl_secs");
         if (ttl_str != 0) { ttl_secs = str_to_int(ttl_str); }
         _cache = cache_new(max_e, enabled, ttl_secs);
     }
 
     # Parse [[providers]] sections
-    var prov_secs = toml_get_sections(sections, "providers");
+    var prov_secs = bayan_toml_get_sections_by_cstr(sections, "providers");
     var route_count = vec_len(prov_secs);
     if (route_count > 0) {
         var routes = alloc(route_count * 8);
         var ri = 0;
         while (ri < route_count) {
             var pp = toml_section_pairs(vec_get(prov_secs, ri));
-            var ptype_str = toml_get(pp, "type");
-            var purl_str = toml_get(pp, "base_url");
-            var ppri_str = toml_get(pp, "priority");
+            var ptype_str = bayan_toml_get_by_cstr(pp, "type");
+            var purl_str = bayan_toml_get_by_cstr(pp, "base_url");
+            var ppri_str = bayan_toml_get_by_cstr(pp, "priority");
 
             var ptype = PROV_OLLAMA;
             if (ptype_str != 0) { ptype = provider_parse(to_cstr(ptype_str)); }
@@ -417,14 +417,14 @@ fn load_config(path) {
             # 2.5.5: `enabled = false` takes a route out of selection without
             # deleting it (rust-old config.rs:272). route_enabled was already
             # honored by the router; nothing ever set it from config.
-            var pen_str = toml_get(pp, "enabled");
+            var pen_str = bayan_toml_get_by_cstr(pp, "enabled");
             if (pen_str != 0) {
                 if (str_eq_cstr(pen_str, "false") == 1) { route_set_enabled(route, 0); }
             }
 
             # Parse API key — "$NAME" expands from the environment so the
             # secret stays out of hoosh.cyml.
-            var apikey_str = toml_get(pp, "api_key");
+            var apikey_str = bayan_toml_get_by_cstr(pp, "api_key");
             if (apikey_str != 0) {
                 var apikey = _config_expand_env(to_cstr(apikey_str));
                 if (apikey != 0) {
@@ -435,8 +435,8 @@ fn load_config(path) {
             # Parse rate limit (RPM). 2.7.0: rust-old's key, `rate_limit_rpm`, is
             # accepted too; ADR 004 documents it, and a config carried over from
             # rust-old used to run with no limit at all. `rate_limit` wins if both.
-            var rpm_str = toml_get(pp, "rate_limit");
-            if (rpm_str == 0) { rpm_str = toml_get(pp, "rate_limit_rpm"); }
+            var rpm_str = bayan_toml_get_by_cstr(pp, "rate_limit");
+            if (rpm_str == 0) { rpm_str = bayan_toml_get_by_cstr(pp, "rate_limit_rpm"); }
             if (rpm_str != 0) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }
@@ -447,13 +447,13 @@ fn load_config(path) {
 
             # Per-provider output cap (2.5.2) — a request asking for more
             # max_tokens than this is clamped down to it, with a warn log.
-            var mtl_str = toml_get(pp, "max_tokens_limit");
+            var mtl_str = bayan_toml_get_by_cstr(pp, "max_tokens_limit");
             if (mtl_str != 0) {
                 route_set_max_tokens_limit(route, str_to_int(mtl_str));
             }
 
             # 2.8.0: catalog = "live" (ask the provider for its models) | "static" (offer the compiled table's).
-            var pcat_str = toml_get(pp, "catalog");
+            var pcat_str = bayan_toml_get_by_cstr(pp, "catalog");
             if (pcat_str != 0) {
                 if (str_eq_cstr(pcat_str, "static") == 1) { route_set_catalog_live(route, 0); }
                 elif (str_eq_cstr(pcat_str, "live") == 1) { route_set_catalog_live(route, 1); }
@@ -461,7 +461,7 @@ fn load_config(path) {
             }
 
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
-            var models_str = toml_get(pp, "models");
+            var models_str = bayan_toml_get_by_cstr(pp, "models");
             if (models_str != 0) {
                 var pats = alloc(MAX_MODEL_PATTERNS * 8);
                 var pat_count = _config_str_array(to_cstr(models_str), pats, MAX_MODEL_PATTERNS);
@@ -479,24 +479,24 @@ fn load_config(path) {
 
     # Parse [catalog] (2.8.0) — how often the live model catalog asks the providers again. 0 = only at startup,
     # on a reload and on POST /v1/models/refresh.
-    var cats_secs = toml_get_sections(sections, "catalog");
+    var cats_secs = bayan_toml_get_sections_by_cstr(sections, "catalog");
     if (vec_len(cats_secs) > 0) {
         var catp = toml_section_pairs(vec_get(cats_secs, 0));
-        var crs_str = toml_get(catp, "refresh_secs");
+        var crs_str = bayan_toml_get_by_cstr(catp, "refresh_secs");
         if (crs_str != 0) { catalog_configure(str_to_int(crs_str)); }
     }
 
     # Parse [[models]] (2.8.0) — the operator's own word on a model: its price, context window and tier, and
     # whether the catalog offers it. Replaced whole on every load, so a block deleted before a reload is gone.
-    _config_models(toml_get_sections(sections, "models"));
+    _config_models(bayan_toml_get_sections_by_cstr(sections, "models"));
 
     # Parse [[budgets]] sections
-    var bud_secs = toml_get_sections(sections, "budgets");
+    var bud_secs = bayan_toml_get_sections_by_cstr(sections, "budgets");
     var bi = 0;
     while (bi < vec_len(bud_secs)) {
         var bp = toml_section_pairs(vec_get(bud_secs, bi));
-        var bname = toml_get(bp, "name");
-        var bcap_str = toml_get(bp, "capacity");
+        var bname = bayan_toml_get_by_cstr(bp, "name");
+        var bcap_str = bayan_toml_get_by_cstr(bp, "capacity");
         if (bname != 0) {
             if (bcap_str != 0) {
                 budget_add_pool(_budget, pool_new(to_cstr(bname), str_to_int(bcap_str)));
@@ -506,12 +506,12 @@ fn load_config(path) {
     }
 
     # Parse [[retry]] section
-    var retry_secs = toml_get_sections(sections, "retry");
+    var retry_secs = bayan_toml_get_sections_by_cstr(sections, "retry");
     if (vec_len(retry_secs) > 0) {
         var rp = toml_section_pairs(vec_get(retry_secs, 0));
-        var mr_str = toml_get(rp, "max_retries");
-        var bd_str = toml_get(rp, "base_delay_ms");
-        var md_str = toml_get(rp, "max_delay_ms");
+        var mr_str = bayan_toml_get_by_cstr(rp, "max_retries");
+        var bd_str = bayan_toml_get_by_cstr(rp, "base_delay_ms");
+        var md_str = bayan_toml_get_by_cstr(rp, "max_delay_ms");
         var mr = 3;
         var bd = 500;
         var md = 30000;
@@ -520,7 +520,7 @@ fn load_config(path) {
         if (md_str != 0) { md = str_to_int(md_str); }
         # 2.5.7: jitter_factor, written as a fraction ("0.5") and carried x100.
         var jf = 50;
-        var jf_str = toml_get(rp, "jitter_factor");
+        var jf_str = bayan_toml_get_by_cstr(rp, "jitter_factor");
         if (jf_str != 0) {
             var js = to_cstr(jf_str);
             var jr = _sem_parse_num(js, 0, strlen(js));
@@ -533,20 +533,20 @@ fn load_config(path) {
     # Parse [hardware] section (2.5.7). Detection has already run by the time
     # config is parsed on the reload path, so disabled_backends takes effect at
     # the next hw_init/hw_refresh.
-    var hw_secs = toml_get_sections(sections, "hardware");
+    var hw_secs = bayan_toml_get_sections_by_cstr(sections, "hardware");
     if (vec_len(hw_secs) > 0) {
         var hp = toml_section_pairs(vec_get(hw_secs, 0));
         var vr = 0 - 1;
-        var vr_str = toml_get(hp, "vram_reserve_bytes");
+        var vr_str = bayan_toml_get_by_cstr(hp, "vram_reserve_bytes");
         if (vr_str != 0) { vr = str_to_int(vr_str); }
         var ri = 0 - 1;
-        var ri_str = toml_get(hp, "refresh_interval_secs");
+        var ri_str = bayan_toml_get_by_cstr(hp, "refresh_interval_secs");
         if (ri_str != 0) { ri = str_to_int(ri_str); }
         var ct = 0 - 1;
-        var ct_str = toml_get(hp, "cache_ttl_secs");
+        var ct_str = bayan_toml_get_by_cstr(hp, "cache_ttl_secs");
         if (ct_str != 0) { ct = str_to_int(ct_str); }
         hardware_configure(vr, ri, ct);
-        var db_str = toml_get(hp, "disabled_backends");
+        var db_str = bayan_toml_get_by_cstr(hp, "disabled_backends");
         if (db_str != 0) {
             var dbs = alloc(MAX_DISABLED_BACKENDS * 8);
             var dbn = _config_str_array(to_cstr(db_str), dbs, MAX_DISABLED_BACKENDS);
@@ -555,23 +555,23 @@ fn load_config(path) {
     }
 
     # Parse [context] section — compaction knobs (2.5.7).
-    var ctx_secs = toml_get_sections(sections, "context");
+    var ctx_secs = bayan_toml_get_sections_by_cstr(sections, "context");
     if (vec_len(ctx_secs) > 0) {
         var cp = toml_section_pairs(vec_get(ctx_secs, 0));
         var cen = 1;
-        var cen_str = toml_get(cp, "enabled");
+        var cen_str = bayan_toml_get_by_cstr(cp, "enabled");
         if (cen_str != 0) {
             if (str_eq_cstr(cen_str, "false") == 1) { cen = 0; }
         }
         var cthr = 80;
-        var cthr_str = toml_get(cp, "compaction_threshold");
+        var cthr_str = bayan_toml_get_by_cstr(cp, "compaction_threshold");
         if (cthr_str != 0) {
             var ts2 = to_cstr(cthr_str);
             var tr2 = _sem_parse_num(ts2, 0, strlen(ts2));
             cthr = load64(tr2) / 100;
         }
         var ckeep = 10;
-        var ckeep_str = toml_get(cp, "keep_last_messages");
+        var ckeep_str = bayan_toml_get_by_cstr(cp, "keep_last_messages");
         if (ckeep_str != 0) { ckeep = str_to_int(ckeep_str); }
         context_configure(cen, cthr, ckeep);
     }
@@ -579,19 +579,19 @@ fn load_config(path) {
     # Parse [audit] section — the HMAC chain (2.5.7). Off by default, matching
     # rust-old. The signing key is "$NAME"-expandable so it stays out of the
     # config file; when unset, a random per-process key is generated.
-    var aud_secs = toml_get_sections(sections, "audit");
+    var aud_secs = bayan_toml_get_sections_by_cstr(sections, "audit");
     if (vec_len(aud_secs) > 0) {
         var ap = toml_section_pairs(vec_get(aud_secs, 0));
         var aen = 0;
-        var aen_str = toml_get(ap, "enabled");
+        var aen_str = bayan_toml_get_by_cstr(ap, "enabled");
         if (aen_str != 0) {
             if (str_eq_cstr(aen_str, "true") == 1) { aen = 1; }
         }
         var amax = 10000;
-        var amax_str = toml_get(ap, "max_entries");
+        var amax_str = bayan_toml_get_by_cstr(ap, "max_entries");
         if (amax_str != 0) { amax = str_to_int(amax_str); }
         var akey = 0;
-        var akey_str = toml_get(ap, "signing_key");
+        var akey_str = bayan_toml_get_by_cstr(ap, "signing_key");
         if (akey_str != 0) { akey = _config_expand_env(to_cstr(akey_str)); }
         audit_configure(aen, akey, amax);
     }
@@ -600,10 +600,10 @@ fn load_config(path) {
     # `tokens = ["a", "b"]` (config.rs:166); the port used to push the raw
     # scalar, so only a single-token deployment worked and key rotation /
     # per-consumer keys were inexpressible. auth_check already loops the vec.
-    var auth_secs = toml_get_sections(sections, "auth");
+    var auth_secs = bayan_toml_get_sections_by_cstr(sections, "auth");
     if (vec_len(auth_secs) > 0) {
         var auth_p = toml_section_pairs(vec_get(auth_secs, 0));
-        var tok_str = toml_get(auth_p, "tokens");
+        var tok_str = bayan_toml_get_by_cstr(auth_p, "tokens");
         if (tok_str != 0) {
             # Rebuild, do not append: load_config is a live reload entry point
             # (POST /v1/admin/reload and SIGHUP), and appending made the token

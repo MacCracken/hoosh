@@ -54,6 +54,10 @@
 
 include "lib/unicode/_decode.cyr"
 include "lib/unicode/_normalize_data.cyr"
+# 6.6.9: str_normalize / str_eq_normalized take and build Str values (alloc, str_new, str_data,
+# str_len, str_eq) and this file included neither module. CHANGELOG [6.6.9]
+include "lib/alloc.cyr"
+include "lib/str.cyr"
 
 # NormalForm enum — passed to str_normalize / str_eq_normalized.
 # K-forms shipped at v5.8.60 once str_data cap was raised at .59.
@@ -87,7 +91,7 @@ var _UC_HANGUL_NCOUNT = 588;       # VCOUNT * TCOUNT
 var _UC_HANGUL_SBASE = 0xAC00;
 var _UC_HANGUL_SCOUNT = 11172;     # LCOUNT * NCOUNT
 
-# ── Piece dispatchers ─────────────────────────────────────────────────
+# ────────
 
 fn _uc_ccc_piece(idx) {
     if (idx == 0) { return _UNICODE_CCC_PIECE_0; }
@@ -121,7 +125,7 @@ fn _uc_compat_idx_piece(idx) {
     return 0;
 }
 
-# ── Public lookups ────────────────────────────────────────────────────
+# ────────
 
 # Canonical Combining Class — 0 (starter) by default; lookup miss → 0.
 fn unicode_canonical_combining_class(cp) {
@@ -241,7 +245,7 @@ fn unicode_compat_decomp(cp, out_buf, cap) {
                 var i = 0;
                 while (i < n) {
                     store64(out_buf + i * 8,
-                            _uc_u24(_UNICODE_COMPAT_DATA, data_off + 2 + i * 6));
+                      _uc_u24(_UNICODE_COMPAT_DATA, data_off + 2 + i * 6));
                     i = i + 1;
                 }
                 return n;
@@ -328,14 +332,20 @@ fn unicode_compose(cp1, cp2) {
 # `_uc_nz_*` synthetic-collision-dodge prefix) and in casefold.cyr —
 # the prior copies were byte-identical modulo whitespace.
 
-# ── Recursive decomposition ───────────────────────────────────────────
+# ────────
 # Walk s, decomposing each cp recursively until no further expansion.
 # Writes the expanded cp sequence to buf as i64 slots; returns count.
-# Canonical only (NFC/NFD); NFKC/NFKD compat path deferred to a later
-# slot per file header.
+# Canonical only (NFC/NFD); NFKC/NFKD take `_uc_decompose_cp_recursive_compat` below
+# (the K-forms shipped at v5.8.60 — see this file's header).
 
+# Returns the new count, or -1 when a step buffer could not be allocated. ⚠ It used to return
+# `off` on a refused alloc — "this cp decomposed to nothing" — so str_normalize dropped the
+# character and handed back a SHORTER string as a success; -1 propagates up every recursion
+# level and str_normalize returns 0. (niyama's fuzzy matcher, the one outside caller, loops
+# `k < n` and so treats -1 like 0, exactly as before.) CHANGELOG [6.6.10]
 fn _uc_decompose_cp_recursive(cp, buf, off, cap) {
     var step_buf = alloc(32);    # max 3 cps × 8 bytes (Hangul LVT)
+    if (step_buf == 0) { return 0 - 1; }
     var n = unicode_canonical_decomp(cp, step_buf, 3);
     if (n == 1) {
         if (load64(step_buf) == cp) {
@@ -350,6 +360,7 @@ fn _uc_decompose_cp_recursive(cp, buf, off, cap) {
     while (i < n) {
         var sub_cp = load64(step_buf + i * 8);
         off = _uc_decompose_cp_recursive(sub_cp, buf, off, cap);
+        if (off < 0) { return off; }
         i = i + 1;
     }
     return off;
@@ -360,8 +371,10 @@ fn _uc_decompose_cp_recursive(cp, buf, off, cap) {
 # walk handles both compat and canonical equivalents in one pass per
 # UAX #15 §1.3 ("compatibility decomposition" includes the canonical
 # decomposition for any character that has only a canonical mapping).
+# Same -1-on-refusal contract as _uc_decompose_cp_recursive above. CHANGELOG [6.6.10]
 fn _uc_decompose_cp_recursive_compat(cp, buf, off, cap) {
     var step_buf = alloc(_UC_COMPAT_MAX_CPS * 8);
+    if (step_buf == 0) { return 0 - 1; }
     var n = unicode_compat_decomp(cp, step_buf, _UC_COMPAT_MAX_CPS);
     if (n == 1) {
         if (load64(step_buf) == cp) {
@@ -374,12 +387,13 @@ fn _uc_decompose_cp_recursive_compat(cp, buf, off, cap) {
     while (i < n) {
         var sub_cp = load64(step_buf + i * 8);
         off = _uc_decompose_cp_recursive_compat(sub_cp, buf, off, cap);
+        if (off < 0) { return off; }
         i = i + 1;
     }
     return off;
 }
 
-# ── Canonical reordering ──────────────────────────────────────────────
+# ────────
 # Bubble sort consecutive non-starter (CCC > 0) cps by CCC.
 # Starters (CCC == 0) act as fence posts — they don't move and stop runs.
 
@@ -404,7 +418,7 @@ fn _uc_canonical_reorder(buf, n) {
     }
 }
 
-# ── Composition pass (NFC / NFKC) ─────────────────────────────────────
+# ────────
 # Walk the reordered buffer greedily composing pairs. UAX #15 §10.
 # Writes the composed sequence in place; returns new length.
 
@@ -451,7 +465,7 @@ fn _uc_compose_pass(buf, n) {
     return write_pos;
 }
 
-# ── Public Str-level normalization ────────────────────────────────────
+# ────────
 
 fn str_normalize(s, form) {
     var src = str_data(s);
@@ -466,6 +480,7 @@ fn str_normalize(s, form) {
     if (form == NFKD) { per_cp_factor = _UC_COMPAT_MAX_CPS; }
     var max_cps = src_len * per_cp_factor + 4;
     var dec_buf = alloc(max_cps * 8);
+    if (dec_buf == 0) { return 0; }
     # 1. Decompose (canonical for NFC/NFD, compat for NFKC/NFKD).
     var use_compat = 0;
     if (form == NFKC) { use_compat = 1; }
@@ -473,6 +488,7 @@ fn str_normalize(s, form) {
     var i = 0;
     var dec_len = 0;
     var cp_slot = alloc(8);
+    if (cp_slot == 0) { return 0; }
     while (i < src_len) {
         var consumed = _uc_decode_utf8(src, i, src_len, cp_slot);
         var cp = load64(cp_slot);
@@ -481,6 +497,7 @@ fn str_normalize(s, form) {
         } else {
             dec_len = _uc_decompose_cp_recursive(cp, dec_buf, dec_len, max_cps);
         }
+        if (dec_len < 0) { return 0; }   # a refused step buffer — never a silently shorter string
         i = i + consumed;
     }
     # 2. Canonical reorder (UAX #15: shared between NFC/NFD and NFKC/NFKD).
@@ -495,6 +512,7 @@ fn str_normalize(s, form) {
     }
     # 4. Re-encode to UTF-8.
     var out_buf = alloc(dec_len * 4 + 4);
+    if (out_buf == 0) { return 0; }
     var oi = 0;
     var k = 0;
     while (k < dec_len) {

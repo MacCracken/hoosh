@@ -1,16 +1,19 @@
 # pool.cyr — the unified worker pool (v2.4.0 multi-threaded accept loop).
 #
 # The accept loop (main thread) only accepts connections and enqueues them as
-# jobs; a fixed pool of WORKER_COUNT threads, each permanently owning a sigil
-# crypto bank (1..WORKER_COUNT), drains the queue. Batch items are the same kind
-# of job (see batch.cyr), so HTTP traffic and batch work share the one pool and
-# the full crypto-bank budget — no separate lane pool, no static split.
+# jobs; a fixed pool of WORKER_COUNT threads drains the queue. Batch items are
+# the same kind of job (see batch.cyr), so HTTP traffic and batch work share the
+# one pool — no separate lane pool, no static split.
 #
-# Crypto banks ([[sigil-crypto-needs-per-thread-bank]]): SIGIL_CRYPTO_BANKS = 8,
-# bank 0 = main/accept thread, banks 1..7 = workers — so WORKER_COUNT ≤ 7. Each
-# worker calls crypto_bank_set(bank) once at startup; main called
-# crypto_tls_main_init() before spawning (initializes the bank scratch). Workers
-# get their TLS block from CLONE_SETTLS, so they never call thread_local_init.
+# Crypto lanes (2.9.1): since sigil 3.13.14 (cyrius 6.7.18) every sigil entry
+# point borrows one of SIGIL_CRYPTO_BANKS (64) lanes for the length of the
+# operation and gives it back, so ANY thread may hash, sign or speak TLS. Through
+# 2.9.0 a thread pinned a bank for life with crypto_bank_set (8 banks: 0 = main,
+# 1..7 = workers), which is where WORKER_COUNT <= 7 and the "bankless" helper
+# threads came from. crypto_bank_set is a no-op now and is no longer called.
+# Main still calls crypto_tls_main_init() before spawning: it installs main's
+# thread-local block, so lane lookups skip their slow path. Workers get their
+# TLS block from CLONE_SETTLS, so they never call thread_local_init.
 
 var WORKER_COUNT = 7;
 var JOB_CONN = 0;
@@ -114,8 +117,9 @@ fn job_batch_item(req_ptr, req_len, slot, completed_ctr, failed_ctr) {
     return j;
 }
 
-# An OTLP/JSON export POST: [type, doc_ptr, doc_len]. The bankless exporter
-# thread enqueues this for an https collector so a banked worker does the TLS.
+# An OTLP/JSON export POST: [type, doc_ptr, doc_len]. The exporter thread
+# enqueues this for an https collector so a worker does the TLS (through 2.9.0
+# only a worker could; see the header).
 fn job_otlp_export(doc_ptr, doc_len) {
     var j = alloc(24);
     store64(j, JOB_OTLP_EXPORT);
@@ -125,7 +129,7 @@ fn job_otlp_export(doc_ptr, doc_len) {
 }
 
 # Read one full HTTP request off the connection, route it, close. Runs on a
-# worker thread (its crypto bank already set).
+# worker thread.
 #
 # Body cap (v2.5.1): rust-old enforced axum's DefaultBodyLimit(1 MiB) and
 # answered 413. The port had no cap at all — just one 64 KiB recv, which
@@ -148,7 +152,8 @@ fn job_otlp_export(doc_ptr, doc_len) {
 # :174-178) precisely so its slices own their bytes. Verify that copy still
 # exists before assuming this is safe.
 #
-# Slot 2 — slot 0 is sigil's crypto bank, slot 1 is the traceparent (trace.cyr).
+# Slot 2 — slot 1 is the traceparent (trace.cyr). Slots 0-15 are the fixed ones;
+# thread_local_alloc (sigil's lane slot, sandhi, patra) hands out 16 and up.
 var REQBUF_SLOT = 2;
 
 # Whole-phase deadline for an ACCEPTED client socket, in seconds. Mirrors the
@@ -260,12 +265,12 @@ fn job_process(job) {
         return 0;
     }
     if (load64(job) == JOB_OTLP_EXPORT) {
-        # On a banked worker → safe to TLS to a remote OTLP collector.
+        # On a worker: TLS to a remote OTLP collector.
         _otlp_post(load64(job + 8), load64(job + 16));
         return 0;
     }
     if (load64(job) == JOB_CATALOG_REFRESH) {
-        # 2.8.0: the model catalog's provider lists are HTTPS, so they are fetched here, on a banked worker.
+        # 2.8.0: the model catalog's provider lists are HTTPS; they are fetched here, on a pool worker.
         catalog_refresh_all();
         return 0;
     }
@@ -282,9 +287,9 @@ fn job_process(job) {
     return 0;
 }
 
-# Worker thread: own a crypto bank, then drain the queue forever.
+# Worker thread: drain the queue forever. arg is the worker's index
+# (1..WORKER_COUNT); through 2.9.0 it was the sigil bank this thread pinned.
 fn _pool_worker(arg) {
-    crypto_bank_set(arg);
     while (1 == 1) {
         var job = wq_pop();
         if (job == 0) {
@@ -301,7 +306,7 @@ fn _pool_worker(arg) {
     return 0;
 }
 
-# Spawn the worker pool. Call after crypto_tls_main_init() (bank scratch ready).
+# Spawn the worker pool. Call after crypto_tls_main_init() (main's TLS block installed).
 fn pool_start() {
     # Workers run the full request chain (was the 8 MB main stack; batch workers
     # already proved the chat path fits the 64 KB default). Give solid headroom

@@ -122,9 +122,9 @@ fn _otlp_is_https() {
 }
 
 # POST an OTLP/JSON body to the collector. Best-effort, ignores the response.
-# https:// → sandhi (DNS + TLS); this path only ever runs on a banked pool worker
-# (the bankless exporter thread routes https POSTs through the queue). Local
-# http:// → raw socket (the exporter posts these directly; no crypto bank).
+# https:// → sandhi (DNS + TLS); this path only ever runs on a pool worker
+# (the exporter thread routes https POSTs through the queue). Local http:// →
+# raw socket (the exporter posts these directly).
 fn _otlp_post(body, blen) {
     if (_otlp_is_https() == 1) {
         var h = sandhi_headers_new();
@@ -172,10 +172,10 @@ fn _otlp_exporter_thread(arg) {
         mutex_unlock(_otlp_lock);
         if (n > 0) {
             var doc = _otlp_build_batch(snapshot, n);
-            # https TLS needs a sigil crypto bank, which this exporter thread does
-            # not own (banks 0..7 = main + 7 pool workers). Route the POST through
-            # the work queue so a banked worker does the TLS. Local http needs no
-            # bank — post it directly here.
+            # Route an https POST through the work queue so a worker does the TLS.
+            # Through 2.9.0 that was required: TLS needed a sigil crypto bank, which
+            # this exporter thread did not own. Since sigil 3.13.14 any thread can
+            # (pool.cyr); the routing is unchanged. Local http is posted directly.
             if (_otlp_is_https() == 1) {
                 wq_push(job_otlp_export(str_data(doc), str_len(doc)));
             } else {

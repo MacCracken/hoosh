@@ -5,12 +5,12 @@
 # Who asks, when, and with what:
 #
 #  - A refresh asks every enabled route in "live" catalog mode for its model list, with that route's own key, and
-#    publishes the answers as one new snapshot (catalog.cyr). It runs on a POOL WORKER: remote lists are HTTPS,
-#    and a TLS request needs a sigil crypto bank, which only the workers own (bank 0 is the accept thread; the
-#    health prober and this file's timer thread are bankless, which is why the prober only TCP-connects).
+#    publishes the answers as one new snapshot (catalog.cyr). It runs on a POOL WORKER. Remote lists are HTTPS,
+#    and through 2.9.0 a TLS request needed a sigil crypto bank that only the workers owned. Since sigil 3.13.14
+#    any thread may do TLS (pool.cyr); the refresh stays a pool job.
 #  - Startup and /v1/admin/reload ENQUEUE a refresh (the gateway never waits on a provider to start serving);
-#    POST /v1/models/refresh runs one inline on the worker serving it and answers with the result; and a bankless
-#    timer enqueues one every [catalog] refresh_secs.
+#    POST /v1/models/refresh runs one inline on the worker serving it and answers with the result; and a timer
+#    thread enqueues one every [catalog] refresh_secs.
 #  - A refresh is single-flight (catalog_refresh_begin): a second one asked for while the first runs is skipped.
 #
 # Memory. hoosh's heap never frees, and a provider's list is parsed into a full JSON tree before the few fields
@@ -229,7 +229,7 @@ fn catalog_refresh_all() {
     return total;
 }
 
-# Hand a refresh to a banked pool worker unless one is already running.
+# Hand a refresh to a pool worker unless one is already running.
 fn catalog_kick() {
     if (catalog_refresh_running() == 1) { return 0; }
     var j = alloc(8);
@@ -238,7 +238,7 @@ fn catalog_kick() {
     return 1;
 }
 
-# The bankless timer: every minute, enqueue a refresh when one is due. It never does the TLS itself.
+# The timer thread: every minute, enqueue a refresh when one is due. It never does the TLS itself.
 fn _cat_timer_thread(arg) {
     while (1 == 1) {
         sleep_ms(60000);
