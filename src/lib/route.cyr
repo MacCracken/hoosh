@@ -93,6 +93,16 @@ fn route_set_max_tokens_limit(r, v) { store64(r + ROUTE_MAX_TOKENS, v); return 0
 fn route_set_enabled(r, v) { store64(r + ROUTE_ENABLED, v); return 0; }
 fn route_health(r) { return load64(r + ROUTE_HEALTH); }
 
+# Whether a route is a remote (https://) backend: forwarded over TLS through sandhi, and probed by health.cyr with
+# a bare connect rather than a request. Moved here from provider.cyr in 2.9.10, which let health.cyr be tested for
+# real.
+fn route_is_remote(route) {
+    var base = route_base_url(route);
+    if (base == 0) { return 0; }
+    if (memeq(base, "https", 5) == 1) { return 1; }
+    return 0;
+}
+
 # Read WITHOUT the health lock. This is a single aligned i64 written by the one
 # prober thread and read by the pool workers, so a read sees the old or the new
 # value and nothing in between; the worst case is one request routed on a

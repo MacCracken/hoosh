@@ -5,6 +5,96 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.10] — 2026-11-04
+
+**The tests run the real health prober and circuit breaker.** One function moved to make that possible:
+`route_is_remote` went from `provider.cyr` to `route.cyr`, unchanged. It was all `health.cyr` needed from
+`provider.cyr`. The test file's copies of the health state machine are gone, along with nine older groups that
+tested a map-based health design `src/` does not have. **1443 assertions** in 185 groups. All gates are clean:
+fmt, lint, vet, deny, coverage (373/684, 54%; **26 of 37** modules included for real), the security scan and the
+four fuzz targets.
+
+### Changed — `route_is_remote` lives in `route.cyr`
+
+- **What it is:** a route predicate (does the base URL start with `https`?), defined after `route_health`. Its body
+  is unchanged, and `provider.cyr` leaves a one-line note where it was.
+- **Comments:** the `# Requires` headers of `health.cyr` and `catalog_fetch.cyr` now say where it comes from.
+- **The binary:** the same size as before. Its bytes differ only because a function moved. The bench binary is
+  byte-identical to 2.9.9's tree rebuilt at version 2.9.10.
+
+### Changed — `health.cyr` is included for real
+
+`tests/hoosh.tcyr` includes it after `router.cyr`. `health_sweep` reads `main.cyr`'s `_router` global, so the test
+file declares that global in `main.cyr`'s place. Gone:
+- **The test file's `route_is_remote` copy;** the real one now comes from `route.cyr`.
+- **The `health_record` copy,** which returned whether the circuit flipped. The real function signals a flip by
+  publishing a health-changed event, and the tests now count those events.
+- **The copies of `health_status_str` and the probe path.**
+- **Nine groups** (`health_map_empty` through `health_rapid_cycle`, 35 assertions) that never called `src/`. They ran
+  their own state machine on a hashmap, modeled on rust-old's provider map. They recorded each failure's own error
+  message, where `src/` records "probe failed", and shadowed `UNHEALTHY_THRESHOLD` with a local `3`, so a change to
+  the real threshold could not reach them.
+
+### Added — tests for behavior no test had reached
+
+- **`health_circuit_breaker`,** on the real `health_record`:
+  - `health_start` with probing off creates the record lock and starts no prober;
+  - the circuit trips at the third consecutive failure, and each transition publishes exactly one event, naming the
+    route, with `healthy` false or true;
+  - a repeat failure or a repeat success publishes nothing;
+  - the error is recorded on failure and cleared on recovery;
+  - the last check is stamped with the clock.
+- **`health_failures_must_be_consecutive`:**
+  - two failures, a success, then two more does not trip it;
+  - the boundary sits at the real `UNHEALTHY_THRESHOLD`;
+  - trip, recover and trip again is two events, with the second run counted from 0;
+  - routes are independent, and a route without a health record is left alone.
+- **`health_status_str` and `health_probe_path`,** on real routes.
+- **`health_probe` over loopback, local routes:** Ollama is probed with `GET /api/tags`, the others with
+  `GET /v1/models`. 2xx and 3xx count as up; 404, 503 and no answer count as down.
+- **`health_probe` over loopback, remote routes:** a bare TCP connect, with no request sent. During those tests the
+  I/O timeout drops to 2 s, so a probe that sent a request and waited fails in seconds rather than hanging. With
+  nothing listening, either kind of probe reports down, and so does a route without a base URL.
+- **`health_sweep`:**
+  - with no router it does nothing;
+  - over three sweeps, a dead local backend is depooled, a reachable remote stays healthy, and a disabled route is
+    never probed.
+- **`route_is_remote`:** a route without a base URL is not remote.
+
+### Mutation-checked
+
+A copy of the tree was changed 17 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| the threshold compared with `>` instead of `>=` | 7 fail |
+| a success keeping the failure count, or the error | 5 and 1 fail |
+| an event on every probe; never an event; the event's `healthy` inverted | 5, 6 and 2 fail |
+| the last check not stamped; a success not recovering | 1 and 4 fail |
+| a remote probe sending a GET instead of connecting | 2 fail |
+| a 3xx counted as down; Ollama probed on `/v1/models` | 1 and 2 fail |
+| `health_sweep` probing disabled routes; `disabled` not outranking `unhealthy` | 1 and 2 fail |
+| `health_start` creating no lock when probing is off | fails, then crashes |
+| `health_start` starting the prober at interval 0 | fails, then the run hangs |
+| `route_is_remote` treating `http://` as remote | 6 fail |
+| `route_is_remote` without its no-base-URL guard | crashes |
+
+**Two first-round results led to test changes:**
+- **The no-base-URL mutant survived:** no test called `route_is_remote` on a route without a base URL, because
+  `health_probe` returns before reaching it. The assertion above now does.
+- **The remote-GET mutant hung** for the full timeout. The 2 s I/O timeout now turns that into two failures.
+
+**Why the interval-0 mutant hangs:** its prober thread spins forever and keeps the test process alive after the
+failure. CI's 5-minute cap on the test step ends it.
+
+### Notes
+
+- The test file is 7,136 lines (was 7,341). Symbol coverage rose from 369 to 373 of 684.
+- **What's next for mirror drift:** `retry.cyr` now needs only `provider.cyr`, and `provider.cyr` needs only
+  `otlp.cyr`'s `otlp_enqueue_inference_span`. `otlp.cyr` sits in a cycle with `pool.cyr`.
+- **More groups that test only their own inline code:** the count-only `rate_limit_*` groups and the `registry_*`
+  groups exercise a hashmap, not `src/`. The real rate limiter has its own tests. Both are listed in the roadmap.
+
 ## [2.9.9] — 2026-11-04
 
 **The tests run the real router and the real hardware module, on ai-hwaccel itself.** Their copies in the test file

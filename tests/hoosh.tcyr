@@ -77,6 +77,11 @@ include "src/lib/events.cyr"
 # drifted: it had no health filter, and it ranked a route with no latency measured as the slowest.
 include "src/lib/hardware.cyr"
 include "src/lib/router.cyr"
+# 2.9.10: the health prober and circuit breaker, for real, now that route_is_remote lives in route.cyr. It replaced
+# the health_record mirror, and the older groups that ran a map-based health design src no longer has. health_sweep
+# reads main.cyr's `_router`, the gateway's live router, which this file declares in main.cyr's place.
+include "src/lib/health.cyr"
+var _router = 0;
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -1085,47 +1090,18 @@ fn _t_has_system(p, len) {
 
 
 
-# ── 2.5.5 health / circuit breaker mirrors ──
-# The per-route health record is route.cyr's own (2.9.7): _health_record_new, the HEALTH_* layout and
-# UNHEALTHY_THRESHOLD. health_record(), the state machine, lives in health.cyr, which needs provider / http_client
-# / events and is not includable yet, so it is still mirrored here, but over the REAL record and threshold, so a
-# change to either in src reaches this suite. `now` is injected so the state machine runs without sleeping.
-
-# Returns 1 when this probe flipped the circuit, else 0. Mirrors health.cyr health_record (minus its lock, log
-# line and event).
-fn _t_health_record(h, ok, now) {
-    var was = load64(h + HEALTH_OK);
-    var now_ok = was;
-    if (ok == 1) {
-        store64(h + HEALTH_FAILS, 0);
-        store64(h + HEALTH_ERR, 0);
-        now_ok = 1;
-    } else {
-        var fails = load64(h + HEALTH_FAILS) + 1;
-        store64(h + HEALTH_FAILS, fails);
-        store64(h + HEALTH_ERR, "probe failed");
-        if (fails >= UNHEALTHY_THRESHOLD) { now_ok = 0; }
-    }
-    store64(h + HEALTH_OK, now_ok);
-    store64(h + HEALTH_CHECKED, now);
-    if (now_ok != was) { return 1; }
-    return 0;
-}
-
+# ── 2.5.5 health / circuit breaker — readers and drivers for the real health.cyr (2.9.10) ──
+# health.cyr is included for real since 2.9.10; these replaced its health_record, health_status_str and probe-path
+# mirrors.
 fn _t_health_ok(h) { return load64(h + HEALTH_OK); }
 fn _t_health_fails(h) { return load64(h + HEALTH_FAILS); }
 
-# Mirror of health_status_str — disabled outranks unhealthy.
-fn _t_health_status(enabled, healthy) {
-    if (enabled == 0) { return "disabled"; }
-    if (healthy == 1) { return "healthy"; }
-    return "unhealthy";
-}
-
-# Mirror of the probe path choice in health.cyr: Ollama speaks its native API.
-fn _t_probe_path(prov) {
-    if (prov == 0) { return "/api/tags"; }
-    return "/v1/models";
+# health_record on `route`, returning how many health-changed events it published: 1 when the circuit flipped,
+# 0 otherwise. Needs the event bus (events_init ran in the events group) and the lock health_start creates.
+fn _t_hrec(route, ok) {
+    var before = events_total_published();
+    health_record(route, ok);
+    return events_total_published() - before;
 }
 
 # types.cyr's own _sb_add_sampling, rendered to a cstr (2.9.6; it was mirrored). The ollama=1 branch nests the
@@ -1218,12 +1194,7 @@ fn _dlp_test(s) {
 # string/parse logic for the https:// (sandhi/TLS) forward path.
 # ================================================================
 
-fn route_is_remote(route) {
-    var base = route_base_url(route);
-    if (base == 0) { return 0; }
-    if (memeq(base, "https", 5) == 1) { return 1; }
-    return 0;
-}
+# route_is_remote is route.cyr's own since 2.9.10 (it moved there from provider.cyr); its copy here is gone.
 
 fn _provider_path(route) {
     if (route_provider(route) == PROV_OLLAMA) { return "/api/chat"; }
@@ -2910,6 +2881,18 @@ fn _t_req_roundtrip(lfd, base, method, path, body, reply) {
     return r;
 }
 
+# health_probe on `route` (a local http:// route at _t_listen's port), answered once with `reply`.
+fn _t_probe_rt(lfd, route, reply) {
+    _t_srv_lfd = lfd;
+    _t_srv_reply = reply;
+    _t_srv_body_len = 0;
+    var th = thread_create(&_t_serve_once, 0);
+    if (th == 0) { return 0 - 1; }
+    var r = health_probe(route);
+    thread_join(th);
+    return r;
+}
+
 # stream_skip_headers over a pipe holding `text`, with a buf_sz-byte buffer.
 fn _t_skip_pipe(text, buf_sz) {
     var fds = alloc(8);
@@ -3394,280 +3377,6 @@ fn main() {
     assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "third", "fifo: third");
 
     # ================================================================
-    # HEALTH MODULE — failure counting, threshold, recovery
-    # ================================================================
-
-    # Health state layout: is_healthy(8) consecutive_failures(8) last_error(8) = 24
-    # Health map: hashmap keyed by provider name -> health state ptr
-
-    # ── Health: map starts empty ──────────────────────────────────
-    test_group("health_map_empty");
-
-    var hmap = map_new();
-    assert_eq(map_size(hmap), 0, "health map starts empty");
-
-    # ── Health: insert and lookup ─────────────────────────────────
-    test_group("health_insert_lookup");
-
-    var hs = alloc(24);
-    store64(hs, 1);      # is_healthy = true
-    store64(hs + 8, 0);  # consecutive_failures = 0
-    store64(hs + 16, 0); # last_error = null
-    map_set(hmap, "ollama:localhost:11434", hs);
-    assert_eq(map_size(hmap), 1, "health map has 1 entry");
-    var got = map_get(hmap, "ollama:localhost:11434");
-    assert(got != 0, "health entry found");
-    assert_eq(load64(got), 1, "entry is healthy");
-
-    # ── Health: threshold constant ────────────────────────────────
-    test_group("health_threshold");
-
-    var UNHEALTHY_THRESHOLD = 3;
-    assert_eq(UNHEALTHY_THRESHOLD, 3, "threshold is 3");
-
-    # ── Health: handle_check_failure state machine ────────────────
-    test_group("health_failure_fsm");
-
-    # Simulate handle_check_failure: increment failures, check threshold
-    var hmap2 = map_new();
-    var hkey = "ollama:localhost:11434";
-
-    # First failure — no prior entry, starts at 1
-    var prev = map_get(hmap2, hkey);
-    var failures = 1;
-    if (prev != 0) { failures = load64(prev + 8) + 1; }
-    var new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs1 = alloc(24);
-    store64(hs1, new_healthy);
-    store64(hs1 + 8, failures);
-    store64(hs1 + 16, "timeout");
-    map_set(hmap2, hkey, hs1);
-
-    var e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 1, "1st failure: still healthy");
-    assert_eq(load64(e + 8), 1, "1st failure: count=1");
-    assert_streq(load64(e + 16), "timeout", "1st failure: error preserved");
-
-    # Second failure
-    prev = map_get(hmap2, hkey);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs2 = alloc(24);
-    store64(hs2, new_healthy);
-    store64(hs2 + 8, failures);
-    store64(hs2 + 16, "second");
-    map_set(hmap2, hkey, hs2);
-
-    e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 1, "2nd failure: still healthy");
-    assert_eq(load64(e + 8), 2, "2nd failure: count=2");
-
-    # Third failure — crosses threshold
-    prev = map_get(hmap2, hkey);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs3 = alloc(24);
-    store64(hs3, new_healthy);
-    store64(hs3 + 8, failures);
-    store64(hs3 + 16, "third strike");
-    map_set(hmap2, hkey, hs3);
-
-    e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 0, "3rd failure: now unhealthy");
-    assert_eq(load64(e + 8), 3, "3rd failure: count=3");
-    assert_streq(load64(e + 16), "third strike", "3rd failure: error msg");
-
-    # Fourth failure — stays unhealthy
-    prev = map_get(hmap2, hkey);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs4 = alloc(24);
-    store64(hs4, new_healthy);
-    store64(hs4 + 8, failures);
-    store64(hs4 + 16, "fourth");
-    map_set(hmap2, hkey, hs4);
-
-    e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 0, "4th failure: still unhealthy");
-    assert_eq(load64(e + 8), 4, "4th failure: count=4");
-
-    # ── Health: recovery ──────────────────────────────────────────
-    test_group("health_recovery");
-
-    # Simulate recovery (health check passes)
-    var hs_recover = alloc(24);
-    store64(hs_recover, 1);     # is_healthy = true
-    store64(hs_recover + 8, 0); # consecutive_failures = 0
-    store64(hs_recover + 16, 0);
-    map_set(hmap2, hkey, hs_recover);
-
-    e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 1, "recovered: healthy");
-    assert_eq(load64(e + 8), 0, "recovered: failures=0");
-
-    # One failure after recovery — should be healthy (1 < 3)
-    prev = map_get(hmap2, hkey);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs_post = alloc(24);
-    store64(hs_post, new_healthy);
-    store64(hs_post + 8, failures);
-    store64(hs_post + 16, "post-recovery fail");
-    map_set(hmap2, hkey, hs_post);
-
-    e = map_get(hmap2, hkey);
-    assert_eq(load64(e), 1, "post-recovery: still healthy");
-    assert_eq(load64(e + 8), 1, "post-recovery: count=1");
-
-    # ── Health: multiple providers independent ────────────────────
-    test_group("health_multi_provider");
-
-    var hmap3 = map_new();
-    var hk_a = "ollama:host-a";
-    var hk_b = "openai:api.openai.com";
-
-    # Fail provider A 3 times → unhealthy
-    var i = 0;
-    while (i < 3) {
-        prev = map_get(hmap3, hk_a);
-        failures = 1;
-        if (prev != 0) { failures = load64(prev + 8) + 1; }
-        new_healthy = 0;
-        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-        var hs_a = alloc(24);
-        store64(hs_a, new_healthy);
-        store64(hs_a + 8, failures);
-        store64(hs_a + 16, "err");
-        map_set(hmap3, hk_a, hs_a);
-        i = i + 1;
-    }
-
-    # Fail provider B once → still healthy
-    var hs_b = alloc(24);
-    store64(hs_b, 1);
-    store64(hs_b + 8, 1);
-    store64(hs_b + 16, "err");
-    map_set(hmap3, hk_b, hs_b);
-
-    assert_eq(load64(map_get(hmap3, hk_a)), 0, "provider A unhealthy");
-    assert_eq(load64(map_get(hmap3, hk_b)), 1, "provider B still healthy");
-    assert_eq(load64(map_get(hmap3, hk_a) + 8), 3, "A: 3 failures");
-    assert_eq(load64(map_get(hmap3, hk_b) + 8), 1, "B: 1 failure");
-
-    # ── Health: overwrite entry ───────────────────────────────────
-    test_group("health_overwrite");
-
-    var hmap4 = map_new();
-    var hk = "ollama:localhost";
-    var hs_h = alloc(24);
-    store64(hs_h, 1);
-    store64(hs_h + 8, 0);
-    store64(hs_h + 16, 0);
-    map_set(hmap4, hk, hs_h);
-    assert_eq(load64(map_get(hmap4, hk)), 1, "initially healthy");
-
-    var hs_u = alloc(24);
-    store64(hs_u, 0);
-    store64(hs_u + 8, 5);
-    store64(hs_u + 16, "down");
-    map_set(hmap4, hk, hs_u);
-    assert_eq(load64(map_get(hmap4, hk)), 0, "overwritten to unhealthy");
-    assert_eq(load64(map_get(hmap4, hk) + 8), 5, "overwritten failures=5");
-    assert_eq(map_size(hmap4), 1, "still 1 entry after overwrite");
-
-    # ── Health: boundary test (threshold-1 vs threshold) ──────────
-    test_group("health_boundary");
-
-    var hmap5 = map_new();
-    var hk5 = "test:boundary";
-    # Seed at threshold-2 failures
-    var hs_seed = alloc(24);
-    store64(hs_seed, 1);
-    store64(hs_seed + 8, UNHEALTHY_THRESHOLD - 2);
-    store64(hs_seed + 16, 0);
-    map_set(hmap5, hk5, hs_seed);
-
-    # One more failure → threshold-1, still healthy
-    prev = map_get(hmap5, hk5);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs_b1 = alloc(24);
-    store64(hs_b1, new_healthy);
-    store64(hs_b1 + 8, failures);
-    store64(hs_b1 + 16, "still ok");
-    map_set(hmap5, hk5, hs_b1);
-    e = map_get(hmap5, hk5);
-    assert_eq(load64(e), 1, "boundary: threshold-1 still healthy");
-    assert_eq(load64(e + 8), UNHEALTHY_THRESHOLD - 1, "boundary: count=threshold-1");
-
-    # One more → exactly at threshold, unhealthy
-    prev = map_get(hmap5, hk5);
-    failures = load64(prev + 8) + 1;
-    new_healthy = 0;
-    if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-    var hs_b2 = alloc(24);
-    store64(hs_b2, new_healthy);
-    store64(hs_b2 + 8, failures);
-    store64(hs_b2 + 16, "now bad");
-    map_set(hmap5, hk5, hs_b2);
-    e = map_get(hmap5, hk5);
-    assert_eq(load64(e), 0, "boundary: at threshold unhealthy");
-    assert_eq(load64(e + 8), UNHEALTHY_THRESHOLD, "boundary: count=threshold");
-
-    # ── Health: rapid recovery cycle ──────────────────────────────
-    test_group("health_rapid_cycle");
-
-    var hmap6 = map_new();
-    var hk6 = "test:cycle";
-
-    # Cycle 1: drive to unhealthy
-    i = 0;
-    while (i < UNHEALTHY_THRESHOLD) {
-        prev = map_get(hmap6, hk6);
-        failures = 1;
-        if (prev != 0) { failures = load64(prev + 8) + 1; }
-        new_healthy = 0;
-        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-        var hs_c = alloc(24);
-        store64(hs_c, new_healthy);
-        store64(hs_c + 8, failures);
-        store64(hs_c + 16, "fail");
-        map_set(hmap6, hk6, hs_c);
-        i = i + 1;
-    }
-    assert_eq(load64(map_get(hmap6, hk6)), 0, "cycle1: unhealthy");
-
-    # Recover
-    var hs_rec = alloc(24);
-    store64(hs_rec, 1);
-    store64(hs_rec + 8, 0);
-    store64(hs_rec + 16, 0);
-    map_set(hmap6, hk6, hs_rec);
-
-    # Cycle 2: drive to unhealthy again
-    i = 0;
-    while (i < UNHEALTHY_THRESHOLD) {
-        prev = map_get(hmap6, hk6);
-        failures = load64(prev + 8) + 1;
-        new_healthy = 0;
-        if (failures < UNHEALTHY_THRESHOLD) { new_healthy = 1; }
-        var hs_c2 = alloc(24);
-        store64(hs_c2, new_healthy);
-        store64(hs_c2 + 8, failures);
-        store64(hs_c2 + 16, "fail again");
-        map_set(hmap6, hk6, hs_c2);
-        i = i + 1;
-    }
-    assert_eq(load64(map_get(hmap6, hk6)), 0, "cycle2: unhealthy again");
-    assert_eq(load64(map_get(hmap6, hk6) + 8), UNHEALTHY_THRESHOLD, "cycle2: count=threshold");
-
-    # ================================================================
     # RATE LIMITER — sliding window RPM
     # ================================================================
 
@@ -3690,7 +3399,7 @@ fn main() {
     map_set(rl_map, "test", rl_rec);
 
     # 5 requests within limit
-    i = 0;
+    var i = 0;
     var all_ok = 1;
     while (i < 5) {
         var rec = map_get(rl_map, "test");
@@ -4453,6 +4162,7 @@ fn main() {
     var rt_remote = route_new(PROV_OPENAI, 1, "https://api.openai.com");
     assert_eq(route_is_remote(rt_local), 0, "http://localhost is not remote");
     assert_eq(route_is_remote(rt_remote), 1, "https://api.openai.com is remote");
+    assert_eq(route_is_remote(route_new(PROV_OPENAI, 1, 0)), 0, "a route without a base URL is not remote");
     assert_streq(_provider_path(rt_local), "/api/chat",
       "ollama path = /api/chat");
     assert_streq(_provider_path(rt_remote), "/v1/chat/completions",
@@ -5716,55 +5426,140 @@ fn main() {
     _sem_entries = 0;
     assert_eq(semantic_remove("sr-11"), 0, "sem_remove: empty store safe");
 
-    # ── v2.5.5 health & failover ──
+    # ── v2.5.5 health & failover — health.cyr for real since 2.9.10 ──
     test_group("health_circuit_breaker");
-    # A route starts healthy: refusing traffic before the first probe would make
-    # every startup a guaranteed outage.
-    var hh = _health_record_new();
+    # health_start creates the record lock even with probing off (interval 0), and then starts no prober.
+    health_configure(0);
+    assert_eq(health_start(), 0, "health: start with probing off");
+    assert_eq(_health_lock != 0 && _health_started == 0, 1, "health: lock created, no prober thread");
+    # A route starts healthy: refusing traffic before the first probe would make every startup a guaranteed outage.
+    var hcr = route_new(PROV_OLLAMA, 1, "http://hc-1");
+    var hh = route_health(hcr);
     assert_eq(_t_health_ok(hh), 1, "health: starts optimistic");
-    # One or two failures must NOT depool — a single blip is not an outage.
-    assert_eq(_t_health_record(hh, 0, 1000), 0, "health: 1 failure, no flip");
+    # One or two failures must NOT depool: a single blip is not an outage.
+    assert_eq(_t_hrec(hcr, 0), 0, "health: 1 failure, no flip");
     assert_eq(_t_health_ok(hh), 1, "health: still healthy after 1");
-    assert_eq(_t_health_record(hh, 0, 2000), 0, "health: 2 failures, no flip");
+    assert_eq(_t_hrec(hcr, 0), 0, "health: 2 failures, no flip");
     assert_eq(_t_health_ok(hh), 1, "health: still healthy after 2");
-    # The third consecutive failure trips it, and reports the transition so the
-    # caller emits exactly one health-changed event.
-    assert_eq(_t_health_record(hh, 0, 3000), 1, "health: 3rd failure flips");
-    assert_eq(_t_health_ok(hh), 0, "health: now unhealthy");
+    # The third consecutive failure trips it and publishes exactly one health-changed event.
+    assert_eq(_t_hrec(hcr, 0), 1, "health: 3rd failure flips, one event");
+    assert_eq(route_healthy(hcr), 0, "health: now unhealthy, as router_select reads it");
     assert_eq(_t_health_fails(hh), 3, "health: failure count tracked");
+    assert_streq(load64(hh + HEALTH_ERR), "probe failed", "health: the error recorded");
+    var hc_ev = _t_events_recent();
+    assert_eq(_t_has(hc_ev, strlen(hc_ev),
+        "{\"event\":\"health_changed\",\"provider\":\"ollama\",\"base_url\":\"http://hc-1\",\"healthy\":false}]}"),
+      1, "health: the event names the route, healthy false");
     # Further failures keep it down but must NOT re-fire the event.
-    assert_eq(_t_health_record(hh, 0, 4000), 0, "health: no repeat transition");
+    assert_eq(_t_hrec(hcr, 0), 0, "health: no repeat transition");
     assert_eq(_t_health_fails(hh), 4, "health: failures keep counting");
-    # A single success recovers immediately and resets the counter.
-    assert_eq(_t_health_record(hh, 1, 5000), 1, "health: success flips back");
-    assert_eq(_t_health_ok(hh), 1, "health: recovered");
-    assert_eq(_t_health_fails(hh), 0, "health: failure count reset");
-    assert_eq(load64(hh + 16), 5000, "health: last_check recorded");
+    # A single success recovers immediately and resets the counter and the error.
+    var hc_t0 = clock_now_ms();
+    assert_eq(_t_hrec(hcr, 1), 1, "health: success flips back, one event");
+    assert_eq(_t_health_ok(hh) == 1 && _t_health_fails(hh) == 0, 1, "health: recovered, count reset");
+    assert_eq(load64(hh + HEALTH_ERR), 0, "health: error cleared");
+    assert_eq(load64(hh + HEALTH_CHECKED) >= hc_t0 && load64(hh + HEALTH_CHECKED) <= clock_now_ms(), 1,
+      "health: last check stamped with the clock");
+    hc_ev = _t_events_recent();
+    assert_eq(_t_has(hc_ev, strlen(hc_ev), "\"base_url\":\"http://hc-1\",\"healthy\":true}]}"), 1,
+      "health: the recovery event says healthy true");
+    assert_eq(_t_hrec(hcr, 1), 0, "health: a repeat success publishes nothing");
 
     test_group("health_failures_must_be_consecutive");
-    # Two failures, a success, then two more must NOT trip — the counter resets,
-    # so an intermittent backend is not depooled by cumulative noise.
-    var hi2 = _health_record_new();
-    _t_health_record(hi2, 0, 1000);
-    _t_health_record(hi2, 0, 2000);
-    _t_health_record(hi2, 1, 3000);
+    # Two failures, a success, then two more must NOT trip: the counter resets, so an intermittent backend is not
+    # depooled by cumulative noise.
+    var hi2r = route_new(PROV_VLLM, 1, "http://hc-2");
+    var hi2 = route_health(hi2r);
+    _t_hrec(hi2r, 0);
+    _t_hrec(hi2r, 0);
+    _t_hrec(hi2r, 1);
     assert_eq(_t_health_fails(hi2), 0, "health: success clears the run");
-    _t_health_record(hi2, 0, 4000);
-    _t_health_record(hi2, 0, 5000);
+    _t_hrec(hi2r, 0);
+    _t_hrec(hi2r, 0);
     assert_eq(_t_health_ok(hi2), 1, "health: 2+2 split does not trip");
+    # The boundary is the real UNHEALTHY_THRESHOLD: one short stays up, reaching it goes down.
+    var hb_r = route_new(PROV_LLAMACPP, 1, "http://hc-3");
+    var hb_i = 0;
+    while (hb_i < UNHEALTHY_THRESHOLD - 1) { _t_hrec(hb_r, 0); hb_i = hb_i + 1; }
+    assert_eq(route_healthy(hb_r), 1, "health: threshold - 1 failures, still healthy");
+    assert_eq(_t_hrec(hb_r, 0), 1, "health: the threshold-th failure flips");
+    # Trip, recover, trip again: every transition is one event.
+    hb_i = 0;
+    var hb_ev = 0;
+    hb_ev = hb_ev + _t_hrec(hb_r, 1);
+    while (hb_i < UNHEALTHY_THRESHOLD) { hb_ev = hb_ev + _t_hrec(hb_r, 0); hb_i = hb_i + 1; }
+    assert_eq(hb_ev, 2, "health: recover then trip again, two events");
+    assert_eq(_t_health_fails(route_health(hb_r)), UNHEALTHY_THRESHOLD, "health: the second run counted from 0");
+    # Routes are independent: tripping one leaves another alone.
+    assert_eq(route_healthy(hi2r), 1, "health: another route is unaffected");
+    # A route without a health record is left alone and reads healthy.
+    var hn_r = route_new(PROV_OLLAMA, 1, "http://hc-4");
+    store64(hn_r + ROUTE_HEALTH, 0);
+    assert_eq(_t_hrec(hn_r, 0) == 0 && route_healthy(hn_r) == 1, 1, "health: no record, no change");
 
     test_group("health_status_str");
-    # Disabled outranks unhealthy — an operator-disabled route is not a fault.
-    assert_streq(_t_health_status(1, 1), "healthy", "status: enabled + up");
-    assert_streq(_t_health_status(1, 0), "unhealthy", "status: enabled + down");
-    assert_streq(_t_health_status(0, 1), "disabled", "status: disabled outranks up");
-    assert_streq(_t_health_status(0, 0), "disabled", "status: disabled outranks down");
+    # Disabled outranks unhealthy: an operator-disabled route is not a fault.
+    var hs_r = route_new(PROV_OLLAMA, 1, "http://hs-1");
+    assert_streq(health_status_str(hs_r), "healthy", "status: enabled + up");
+    store64(route_health(hs_r) + HEALTH_OK, 0);
+    assert_streq(health_status_str(hs_r), "unhealthy", "status: enabled + down");
+    route_set_enabled(hs_r, 0);
+    assert_streq(health_status_str(hs_r), "disabled", "status: disabled outranks down");
+    store64(route_health(hs_r) + HEALTH_OK, 1);
+    assert_streq(health_status_str(hs_r), "disabled", "status: disabled outranks up");
 
     test_group("health_probe_path");
     # Ollama serves its native API; everything OpenAI-compatible answers /v1/models.
-    assert_streq(_t_probe_path(PROV_OLLAMA), "/api/tags", "probe: ollama native path");
-    assert_streq(_t_probe_path(PROV_LMSTUDIO), "/v1/models", "probe: openai-compat path");
-    assert_streq(_t_probe_path(PROV_ANTHROPIC), "/v1/models", "probe: default path");
+    assert_streq(_health_probe_path(route_new(PROV_OLLAMA, 1, "http://p")), "/api/tags", "probe: ollama native path");
+    assert_streq(_health_probe_path(route_new(PROV_LMSTUDIO, 1, "http://p")), "/v1/models",
+      "probe: openai-compat path");
+    assert_streq(_health_probe_path(route_new(PROV_ANTHROPIC, 1, "https://p")), "/v1/models", "probe: default path");
+
+    test_group("health_probe");
+    # Local routes get a real GET on their liveness path; 2xx and 3xx count as serving.
+    var hp_port = alloc(8);
+    var hp_lfd = _t_listen(hp_port);
+    var hp_base = _t_base_url(load64(hp_port));
+    var hp_ol = route_new(PROV_OLLAMA, 1, hp_base);
+    var hp_vl = route_new(PROV_VLLM, 1, hp_base);
+    assert_eq(_t_probe_rt(hp_lfd, hp_ol, "HTTP/1.0 200 OK\r\n\r\n{}"), 1, "probe: local 200 is up");
+    assert_eq(memeq(_t_srv_req, "GET /api/tags HTTP/1.0\r\n", 24), 1, "probe: ollama gets GET /api/tags");
+    assert_eq(_t_probe_rt(hp_lfd, hp_vl, "HTTP/1.0 301 Moved\r\n\r\n"), 1, "probe: a 3xx is up");
+    assert_eq(memeq(_t_srv_req, "GET /v1/models HTTP/1.0\r\n", 25), 1, "probe: vllm gets GET /v1/models");
+    assert_eq(_t_probe_rt(hp_lfd, hp_vl, "HTTP/1.0 404 Not Found\r\n\r\n"), 0, "probe: a 404 is down");
+    assert_eq(_t_probe_rt(hp_lfd, hp_vl, "HTTP/1.0 503 Unavailable\r\n\r\n"), 0, "probe: a 503 is down");
+    assert_eq(_t_probe_rt(hp_lfd, hp_vl, ""), 0, "probe: no answer is down");
+    # Remote routes get a bare TCP connect: no request, no TLS, no billed API call. The listener's backlog
+    # completes the handshake without an accept. The I/O timeout drops to 2 s meanwhile, so a probe that wrongly
+    # sent a request and waited for the answer fails in seconds rather than hanging the suite for 300.
+    HTTP_IO_TIMEOUT_S = 2;
+    var hp_rbase = _t_cat("https://127.0.0.1:", _t_line("", load64(hp_port), ""));
+    var hp_rem = route_new(PROV_OPENAI, 1, hp_rbase);
+    assert_eq(route_is_remote(hp_rem), 1, "probe: an https route is remote");
+    assert_eq(health_probe(hp_rem), 1, "probe: remote reachable by connect");
+    # health_sweep folds a probe into each enabled route's record; nothing to sweep without a router.
+    assert_eq(health_sweep(), 0, "sweep: no router, nothing done");
+    var hp_dead = route_new(PROV_LLAMACPP, 2, "http://127.0.0.1:1");
+    var hp_off = route_new(PROV_LOCALAI, 3, "http://127.0.0.1:1");
+    route_set_enabled(hp_off, 0);
+    var hp_rs = alloc(24);
+    store64(hp_rs, hp_rem);
+    store64(hp_rs + 8, hp_dead);
+    store64(hp_rs + 16, hp_off);
+    _router = router_new(hp_rs, 3, STRAT_PRIORITY);
+    var hp_i = 0;
+    while (hp_i < UNHEALTHY_THRESHOLD) { health_sweep(); hp_i = hp_i + 1; }
+    assert_eq(route_healthy(hp_dead), 0, "sweep: a dead local backend is depooled after the threshold");
+    assert_eq(route_healthy(hp_rem) == 1 && _t_health_fails(route_health(hp_rem)) == 0, 1,
+      "sweep: the reachable remote stays healthy");
+    assert_eq(_t_health_fails(route_health(hp_off)), 0, "sweep: a disabled route is not probed");
+    _router = 0;
+    sys_close(hp_lfd);
+    # Nothing listening: both kinds of probe report down.
+    assert_eq(health_probe(hp_rem), 0, "probe: remote with nothing listening is down");
+    assert_eq(health_probe(hp_ol), 0, "probe: local with nothing listening is down");
+    assert_eq(health_probe(route_new(PROV_OLLAMA, 1, 0)), 0, "probe: a route without a base URL is down");
+    HTTP_IO_TIMEOUT_S = 300;
 
     # ── v2.5.6 cost accounting ──
     test_group("cost_local_is_free_first");

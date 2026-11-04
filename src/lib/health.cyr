@@ -1,6 +1,6 @@
 # health.cyr — background provider health probing + circuit breaking (2.5.5).
-# Requires: types.cyr, route.cyr, router.cyr, http_client.cyr, logging.cyr,
-#           events.cyr (health-changed notifications)
+# Requires: types.cyr, route.cyr (route_is_remote since 2.9.10), router.cyr, http_client.cyr, logging.cyr,
+#           events.cyr (health-changed notifications); main.cyr's `_router` global.
 #
 # Port of rust-old/src/health.rs. A background thread probes every enabled route
 # on an interval and maintains the per-route health record that router_select

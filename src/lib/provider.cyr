@@ -348,12 +348,7 @@ fn _remote_stream_opts(route) {
     return o;
 }
 
-fn route_is_remote(route) {
-    var base = route_base_url(route);
-    if (base == 0) { return 0; }
-    if (memeq(base, "https", 5) == 1) { return 1; }
-    return 0;
-}
+# route_is_remote moved to route.cyr (2.9.10): it is a route predicate, and health.cyr needed nothing else from here.
 
 # Chat-completion HTTP path for a provider.
 fn _provider_path(route) {

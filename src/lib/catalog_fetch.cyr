@@ -1,6 +1,6 @@
 # catalog_fetch.cyr — the live model catalog's I/O half (2.8.0).
-# Requires: catalog.cyr (the pure half), route.cyr, router.cyr (`_router`), provider.cyr (_provider_headers,
-#           route_is_remote), logging.cyr, pool.cyr (wq_push), sandhi + alloc (lib).
+# Requires: catalog.cyr (the pure half), route.cyr (route_is_remote), router.cyr (`_router`), provider.cyr
+#           (_provider_headers), logging.cyr, pool.cyr (wq_push), sandhi + alloc (lib).
 #
 # Who asks, when, and with what:
 #
