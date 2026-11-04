@@ -830,6 +830,20 @@ var _b_queue = 0;
 # BENCHMARKS
 # ================================================================
 
+# 2.9.11: an 8-byte-aligned heap copy of a literal, for the strings a timed loop reads. String literals are packed
+# into .rodata back to back with no alignment, and the stdlib strlen (which streq calls twice) walks byte by byte
+# until the pointer reaches an 8-byte boundary. So a row that timed a literal depended on everything stored before
+# that literal, including the CYRIUS_PKG_VERSION declaration, which cyrius puts first in .rodata: 2.9.10's one byte
+# longer version string moved cache_get_hit 119 -> 146 ns and cost_record_local_free 109 -> 136 ns on unchanged
+# code. The gateway's hot strings (cache keys, configured URLs, model patterns) are heap strings, and alloc rounds
+# every allocation to 8 bytes; these copies are too. Copy outside the timed loop, never inside it.
+fn _b_s(lit) {
+    var n = strlen(lit);
+    var p = alloc(n + 1);
+    memcpy(p, lit, n + 1);
+    return p;
+}
+
 fn main() {
     alloc_init();
 
@@ -841,9 +855,9 @@ fn main() {
     var i = 0;
     while (i < 20) {
         var prov = i % PROV_COUNT;
-        var r = route_new(prov, i + 1, "http://localhost");
+        var r = route_new(prov, i + 1, _b_s("http://localhost"));
         var pats = alloc(8);
-        store64(pats, "llama*");
+        store64(pats, _b_s("llama*"));
         route_set_patterns(r, pats, 1);
         store64(routes + i * 8, r);
         i = i + 1;
@@ -851,11 +865,12 @@ fn main() {
     _b_router = router_new(routes, 20, STRAT_PRIORITY);
 
     # ── Benchmark: route_select_20_providers ──────────────────────
+    var b_llama3 = _b_s("llama3");
     var b = bench_new("route_select_20_providers");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        router_select(_b_router, "llama3");
+        router_select(_b_router, b_llama3);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -870,12 +885,13 @@ fn main() {
         i = i + 1;
     }
     var rr_rt = router_new(rr_routes, 10, STRAT_ROUND_ROBIN);
+    var b_any = _b_s("anything");
 
     b = bench_new("route_round_robin_10");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        router_select(rr_rt, "anything");
+        router_select(rr_rt, b_any);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -910,13 +926,16 @@ fn main() {
 
     # ── Benchmark: cache_get_hit ──────────────────────────────────
     _b_cache = cache_new(10000, 1, 300);
-    cache_insert(_b_cache, "prompt-hash-1", 42);
+    cache_insert(_b_cache, _b_s("prompt-hash-1"), 42);
+    var b_hit = _b_s("prompt-hash-1");
+    var b_miss = _b_s("nonexistent-key");
+    var b_key = _b_s("key");
 
     b = bench_new("cache_get_hit");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        cache_get(_b_cache, "prompt-hash-1");
+        cache_get(_b_cache, b_hit);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -927,7 +946,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        cache_get(_b_cache, "nonexistent-key");
+        cache_get(_b_cache, b_miss);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -939,7 +958,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        cache_insert(ci_cache, "key", i);
+        cache_insert(ci_cache, b_key, i);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -981,16 +1000,17 @@ fn main() {
 
     # ── Benchmark: route_matches_model (pattern match) ────────────
     var pats = alloc(16);
-    store64(pats, "llama*");
-    store64(pats + 8, "mistral*");
-    var mr = route_new(PROV_OLLAMA, 1, "http://localhost");
+    store64(pats, _b_s("llama*"));
+    store64(pats + 8, _b_s("mistral*"));
+    var mr = route_new(PROV_OLLAMA, 1, _b_s("http://localhost"));
+    var b_model = _b_s("llama3.2:latest");
     route_set_patterns(mr, pats, 2);
 
     b = bench_new("route_matches_model");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        route_matches_model(mr, "llama3.2:latest");
+        route_matches_model(mr, b_model);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
@@ -1030,12 +1050,14 @@ fn main() {
     var mcp_sch = schema_new("object", vec_new(), vec_new());
     var mcp_td = tool_def_new("bote_echo", "Echo", mcp_sch);
     dispatcher_register_tool(mcp_disp, mcp_td, &_bench_mcp_echo);
+    var b_mlist = _b_s("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    var b_mcall = _b_s("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}");
 
     b = bench_new("mcp_tools_list");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", mcp_disp, 0);
+        codec_process_message(b_mlist, mcp_disp, 0);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -1046,7 +1068,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        codec_process_message("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}", mcp_disp, 0);
+        codec_process_message(b_mcall, mcp_disp, 0);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -1054,6 +1076,7 @@ fn main() {
 
     # ── Benchmark: batch_split_16 (POST /v1/batch request parsing) ─
     var barr = "[{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"second\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"third\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"fourth\"}]}]";
+    barr = _b_s(barr);
     var barr_len = strlen(barr);
     b = bench_new("batch_split_4");
     bench_batch_start(b);
@@ -1102,10 +1125,10 @@ fn main() {
     # same-length token that differs EARLY vs LATE: if the first-byte mismatch
     # is cheaper than the last-byte one, the compare leaks a prefix oracle and
     # an attacker can recover the token byte by byte.
-    var _b_tok = "bearer-secret-token-12345";
-    var _b_tok2 = "bearer-secret-token-12345";
-    var _b_late = "bearer-secret-token-1234X";   # differs in the LAST byte
-    var _b_early = "Xearer-secret-token-12345";  # differs in the FIRST byte
+    var _b_tok = _b_s("bearer-secret-token-12345");
+    var _b_tok2 = _b_s("bearer-secret-token-12345");
+    var _b_late = _b_s("bearer-secret-token-1234X");   # differs in the LAST byte
+    var _b_early = _b_s("Xearer-secret-token-12345");  # differs in the FIRST byte
     b = bench_new("auth_verify_token");
     bench_batch_start(b);
     i = 0;
@@ -1150,11 +1173,15 @@ fn main() {
 
     # Benchmark: cost_record — pricing lookup + accumulate, per completion.
     var _b_costs = vec_new();
+    var b_oai = _b_s("https://api.openai.com");
+    var b_gpt = _b_s("gpt-4o");
+    var b_local = _b_s("http://localhost:11434");
+    var b_llama = _b_s("llama3");
     b = bench_new("cost_record_known_model");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_cost_record(_b_costs, 5, "https://api.openai.com", 1000, 500, "gpt-4o");
+        _bench_cost_record(_b_costs, 5, b_oai, 1000, 500, b_gpt);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
@@ -1165,7 +1192,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_cost_record(_b_costs, 0, "http://localhost:11434", 1000, 500, "llama3");
+        _bench_cost_record(_b_costs, 0, b_local, 1000, 500, b_llama);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
@@ -1174,11 +1201,14 @@ fn main() {
     # Benchmark: audit_record — SHA-256 entry hash + HMAC signature per event.
     # This is the most expensive thing on the success path after the forward.
     sha256_global_init();
+    var b_akey = _b_s("audit-key");
+    var b_aev = _b_s("inference.request");
+    var b_amsg = _b_s("completed");
     b = bench_new("audit_record_sign");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        _bench_audit_sign("audit-key", 9, "inference.request", "completed");
+        _bench_audit_sign(b_akey, 9, b_aev, b_amsg);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);

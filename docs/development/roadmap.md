@@ -56,6 +56,19 @@ The bands are a plan, not a promise. Every item was checked against the code and
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
     `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header says so
     since 2.9.5.
+- **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
+  bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
+  (2026-11-04):
+  - **cyrius,** `docs/development/issues/2026-11-04-pkgver-declared-by-a-comment-mention.md`: the check that keeps
+    `CYRIUS_PKG_VERSION` matches the name in comments, so ai-hwaccel's comment declares it in every consumer, as
+    the first literal in `.rodata`.
+  - **cyrius,** `docs/development/issues/2026-11-04-unaligned-literals-make-strlen-cost-layout-dependent.md`, with
+    a repro: literals are packed unaligned, and `strlen` walks byte by byte to an 8-byte boundary (17 against 30 ns
+    for one 13-byte string).
+  - **ai-hwaccel,** `docs/development/issues/2026-11-04-comment-naming-cyrius-pkg-version-declares-it-in-consumers.md`:
+    reword the comment at `src/detect/command.cyr:222`.
+
+  When ai-hwaccel's fix ships, bump its tag here and check the version literal is gone from hoosh's binaries.
 - **Connection pooling for remote TLS.**
   - **Measured in 2.9.3:** a fresh HTTPS request takes a median 40 ms, a reused connection 6.7 ms, so −33 ms per
     request at a ~6 ms RTT, and more for distant providers.

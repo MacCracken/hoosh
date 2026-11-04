@@ -5,6 +5,64 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.11] — 2026-11-04
+
+**Benchmark rows no longer depend on the version string.** 2.9.10's one byte longer version moved three rows by up
+to 25% on unchanged code. 2.9.11 finds the mechanism and makes the bench time what the gateway handles: heap
+strings, not packed literals. No gateway code changed. The gates are unchanged and clean (1443 assertions, coverage
+373/684, 26 of 37 modules included for real).
+
+### Found — how a version string moved the benchmarks
+
+The chain, each link checked on a built binary:
+1. **ai-hwaccel is in every hoosh build.** cbt prepends each `[deps]` module to every compile, the bench and the tests
+   included; ai-hwaccel's strings are in the bench binary.
+2. **One of its comments names `CYRIUS_PKG_VERSION`** (`lib/ai-hwaccel.cyr:2520`). cycc declares that constant only
+   when the expanded source mentions it, but its check matches the text anywhere, comments included. So every hoosh
+   build gets `var CYRIUS_PKG_VERSION = "<version>";`. With ai-hwaccel left out (a scratch build), the declaration is
+   gone, and the bench binaries built at 2.9.9 and 2.9.10 are byte-identical.
+3. **That string is the first literal in `.rodata`,** and cyrius packs string literals back to back, unaligned. When
+   the version changes length, every literal after it moves by that many bytes.
+4. **The stdlib `strlen` walks byte by byte until it reaches an 8-byte boundary,** then reads 8 bytes at a time.
+   `streq` calls it twice. The hot keys sat at `% 8 == 0` in the 2.9.9 binary and at `% 8 == 1` in 2.9.10's:
+   `"prompt-hash-1"` for `cache_get_hit` and `"http://localhost:11434"` for `cost_record_local_free`. No literal
+   moved across a cache line; the cost was the byte-by-byte prologue.
+
+**In the gateway this mostly averages out.** It reads many literals, about one in eight aligned whatever the shift,
+and its hot keys (cache keys, configured URLs, model patterns) are heap strings. A benchmark timing one literal sees
+the whole swing.
+
+### Changed — the bench times heap copies of its string inputs
+
+`tests/hoosh.bcyr` gains `_b_s(lit)`, an 8-byte-aligned heap copy made outside the timed loop. `alloc` rounds every
+allocation to 8 bytes, as for the gateway's own strings. Every string a timed loop reads now goes through it:
+route patterns and model names, cache keys, the MCP messages, the batch body, the auth tokens, the cost-record URLs
+and models, and the audit fields. The DLP prompt was already a heap copy.
+
+**Proof:** the fixed bench, built at version `2.9.9` and at `2.9.11`, gives the same rows. Over eight alternated
+rounds `cache_get_hit` had a median of 120 ns for both builds; `cost_record_local_free` read 109–110 and
+`route_matches_model` 32–33 for both.
+
+### Notes
+
+- **A step in `bench-history.csv` at 2.9.11,** from the measurement change, not from code. Compared with 2.9.10:
+  - `cache_get_hit` 146 → 121 ns, `cost_record_local_free` 136 → 110 and `route_matches_model` 36 → 32, back where
+    2.9.9's lucky layout had them;
+  - `auth_verify_token` / `_wrong_late` / `_wrong_early` 105 / 102 / 92 → 80 / 81 / 81;
+  - `cost_record_known_model` 161 → 154. Its URL used to sit across a cache line.
+- **The auth rows answer a question they could not before.** Those rows exist to show the constant-time compare
+  costs the same whether a wrong token differs early or late. In 2.9.10 they read 92 and 102 ns, a 10 ns gap that
+  would look like a timing leak. It came from the literals' alignment: it appeared with 2.9.10's layout shift (2.9.9
+  read 103 and 102), and with aligned copies both read 81.
+- **Upstream, not changed here,** and filed in each repo's `docs/development/issues/` on 2026-11-04:
+  - cyrius's `CYRIUS_PKG_VERSION` check matching comments (`2026-11-04-pkgver-declared-by-a-comment-mention.md`);
+  - cyrius's unaligned string literals, together with `strlen`'s byte-by-byte prologue
+    (`2026-11-04-unaligned-literals-make-strlen-cost-layout-dependent.md`, with a repro);
+  - the ai-hwaccel comment that triggers the declaration
+    (`2026-11-04-comment-naming-cyrius-pkg-version-declares-it-in-consumers.md`).
+
+  hoosh cannot edit `lib/ai-hwaccel.cyr`: `cyrius deps` re-vendors it, and `deps --verify` checks its hash.
+
 ## [2.9.10] — 2026-11-04
 
 **The tests run the real health prober and circuit breaker.** One function moved to make that possible:
@@ -90,6 +148,14 @@ failure. CI's 5-minute cap on the test step ends it.
 ### Notes
 
 - The test file is 7,136 lines (was 7,341). Symbol coverage rose from 369 to 373 of 684.
+- **Benchmarks:** 22 of the 25 are within 1 ns or 13% of 2.9.9's. Three moved, all from the version string:
+  - **The moves:** `cache_get_hit` 119 → 146 ns, `cost_record_local_free` 109 → 136 ns, `route_matches_model`
+    32 → 36 ns. Three repeat runs agreed.
+  - **The cause:** "2.9.10" is one byte longer than "2.9.9", so everything stored after it moves by a byte.
+  - **The proof:** 2.9.9's tree, rebuilt with only its version set to 2.9.10, produces a bench binary byte-identical
+    to this one. Alternated over three rounds, the old binary ran 118–128 / 109–111 ns and both 2.9.10 builds
+    143–148 / 136–137 ns.
+  - **Not recorded:** two earlier runs went alongside another workload's compiles (load 4–7) and were discarded.
 - **What's next for mirror drift:** `retry.cyr` now needs only `provider.cyr`, and `provider.cyr` needs only
   `otlp.cyr`'s `otlp_enqueue_inference_span`. `otlp.cyr` sits in a cycle with `pool.cyr`.
 - **More groups that test only their own inline code:** the count-only `rate_limit_*` groups and the `registry_*`
