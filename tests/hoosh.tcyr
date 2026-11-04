@@ -26,6 +26,9 @@ include "lib/sigil.cyr"
 include "lib/assert.cyr"
 include "lib/sakshi.cyr"
 include "src/vendor/bote-core.cyr"
+# 2.9.8: majra's pub/sub, which src/lib/events.cyr publishes to, at the same point src/main.cyr includes it.
+# It shares one name with types.cyr, the enum member ERR_NONE, which is 0 in both (see cyrius.cyml).
+include "src/vendor/majra.cyr"
 # 2.9.6: the shared types, for real, first among hoosh modules as src/main.cyr orders them: the HooshErr /
 # Provider / Strategy enums, error and provider helpers, generation options, _sb_add_milli / _sb_add_sampling,
 # status_retryable. They replaced the test file's own copies of all of it.
@@ -63,6 +66,10 @@ include "src/lib/trace.cyr"
 # without four fields, and a pre-TTL, pre-LRU cache that counted an eviction without evicting.
 include "src/lib/route.cyr"
 include "src/lib/cache.cyr"
+# 2.9.8: the plaintext provider client and the event bus, for real. http_client replaced a copy of
+# _build_req_header that had drifted: it predated trace.cyr here and never wrote the traceparent header.
+include "src/lib/http_client.cyr"
+include "src/lib/events.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -70,38 +77,6 @@ include "src/lib/cache.cyr"
 # ================================================================
 
 
-fn _build_req_header(buf, method, path, host, body_len, cap) {
-    # src calls trace_current_or_new(); trace.cyr is not linked into this
-    # harness, so budget the W3C traceparent by its maximum length instead.
-    var _tp_max = 64;
-    var need = strlen(method) + 1 + strlen(path) + 9 + 2
-    + 6 + strlen(host) + 2
-    + 30 + 2 + 17 + 2
-    + 16 + 32 + 2
-    + 13 + _tp_max + 2
-    + 2 + 1;
-    if (need > cap) { return 0 - 1; }
-    var pos = 0;
-    memcpy(buf + pos, method, strlen(method)); pos = pos + strlen(method);
-    store8(buf + pos, 32); pos = pos + 1;
-    memcpy(buf + pos, path, strlen(path)); pos = pos + strlen(path);
-    memcpy(buf + pos, " HTTP/1.0", 9); pos = pos + 9;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Host: ", 6); pos = pos + 6;
-    memcpy(buf + pos, host, strlen(host)); pos = pos + strlen(host);
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Type: application/json", 30); pos = pos + 30;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
-    var cl_buf = alloc(32);
-    var cl_len = fmt_int_buf(body_len, cl_buf);
-    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
-    return pos;
-}
 
 # ================================================================
 # Provider route — heap-allocated struct
@@ -2958,6 +2933,190 @@ fn _t281_catalog_out_cap() {
     return 0;
 }
 
+# ── 2.9.8: fixtures for src/lib/http_client.cyr and src/lib/events.cyr ──
+# A listener on 127.0.0.1 at an ephemeral port. Returns its fd, or -1, and stores the port at `port_out`.
+# accept() honours SO_RCVTIMEO, so a client that never connects fails a test instead of hanging the suite.
+fn _t_listen(port_out) {
+    store64(port_out, 0);
+    var lt, lfd = tcp_socket();
+    if (is_ok(lt) == 0) { return 0 - 1; }
+    var bt, bv = sock_bind(lfd, 0x0100007F, 0);
+    if (is_ok(bt) == 0) { sys_close(lfd); return 0 - 1; }
+    var st, sv = sock_listen(lfd, 4);
+    if (is_ok(st) == 0) { sys_close(lfd); return 0 - 1; }
+    var sa = alloc(16);
+    var sl = alloc(8);
+    store64(sl, 16);
+    if (sys_getsockname(lfd, sa, sl) < 0) { sys_close(lfd); return 0 - 1; }
+    store64(port_out, load8(sa + 2) * 256 + load8(sa + 3));
+    sock_set_recv_timeout(lfd, 5, 0);
+    return lfd;
+}
+
+fn _t_base_url(port) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "http://127.0.0.1:");
+    str_builder_add_int(sb, port);
+    return str_data(str_builder_build(sb));
+}
+
+# `prefix` + n + `suffix` as a cstr, for the header lines whose value the test computes.
+fn _t_line(prefix, n, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, n);
+    str_builder_add_cstr(sb, suffix);
+    return str_data(str_builder_build(sb));
+}
+
+fn _t_cat(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+
+fn _t_has(buf, len, cstr) {
+    return str_contains(str_from_buf(buf, len), str_from(cstr));
+}
+
+# Offset just past the first CRLF CRLF in buf[0..len), or 0 when there is none.
+fn _t_hdr_end(buf, len) {
+    var i = 3;
+    while (i < len) {
+        if (load8(buf + i - 3) == 13 && load8(buf + i - 2) == 10 && load8(buf + i - 1) == 13
+          && load8(buf + i) == 10) {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Read one request off an accepted connection: its header block plus `body_len` bytes of body.
+fn _t_read_req(cfd, buf, cap, body_len) {
+    sock_set_recv_timeout(cfd, 5, 0);
+    var total = 0;
+    var more = 1;
+    while (more == 1 && total < cap - 1) {
+        var n = sys_read(cfd, buf + total, cap - 1 - total);
+        if (n <= 0) { more = 0; }
+        if (n > 0) {
+            total = total + n;
+            var h = _t_hdr_end(buf, total);
+            if (h > 0 && total >= h + body_len) { more = 0; }
+        }
+    }
+    store8(buf + total, 0);
+    return total;
+}
+
+# A one-shot server thread for http_req_local, which blocks until the reply arrives: it accepts one
+# connection on _t_srv_lfd, keeps the request in _t_srv_req, answers _t_srv_reply and closes.
+var _t_srv_lfd = 0;
+var _t_srv_reply = 0;
+var _t_srv_body_len = 0;
+var _t_srv_req = 0;
+var _t_srv_req_len = 0;
+
+fn _t_serve_once(arg) {
+    _t_srv_req_len = 0;
+    var ct, cfd = sock_accept(_t_srv_lfd);
+    if (is_ok(ct) == 0) { return 0; }
+    var buf = alloc(4096);
+    _t_srv_req_len = _t_read_req(cfd, buf, 4096, _t_srv_body_len);
+    _t_srv_req = buf;
+    var rl = strlen(_t_srv_reply);
+    if (rl > 0) { sys_write(cfd, _t_srv_reply, rl); }
+    sys_close(cfd);
+    return 0;
+}
+
+# `method path` with `body` (a cstr, or 0) through the real http_req_local, answered with `reply`.
+# Returns what http_req_local returns: the parsed {status, body, body_len}, or 0.
+fn _t_req_roundtrip(lfd, base, method, path, body, reply) {
+    _t_srv_lfd = lfd;
+    _t_srv_reply = reply;
+    var blen = 0;
+    if (body != 0) { blen = strlen(body); }
+    _t_srv_body_len = blen;
+    var th = thread_create(&_t_serve_once, 0);
+    if (th == 0) { return 0; }
+    var r = http_req_local(method, base, path, body, blen);
+    thread_join(th);
+    return r;
+}
+
+# stream_skip_headers over a pipe holding `text`, with a buf_sz-byte buffer.
+fn _t_skip_pipe(text, buf_sz) {
+    var fds = alloc(8);
+    if (sys_pipe(fds) < 0) { return 0 - 2; }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    sys_write(wfd, text, strlen(text));
+    sys_close(wfd);
+    var buf = alloc(buf_sz + 1);
+    var off = stream_skip_headers(rfd, buf, buf_sz);
+    sys_close(rfd);
+    return off;
+}
+
+# Bytes past `cap` the header builder wrote, over every cap from 0 to 400 (0 = it never overran).
+# `post` 1 drives _build_post_header, 0 _build_req_header("GET", ...).
+fn _t_hdr_overruns(post) {
+    var bad = 0;
+    var buf = alloc(512);
+    var cap = 0;
+    while (cap <= 400) {
+        var i = 0;
+        while (i < 512) { store8(buf + i, 170); i = i + 1; }
+        var r = 0;
+        if (post == 1) { r = _build_post_header(buf, "/p", "h", 7, cap); }
+        else { r = _build_req_header(buf, "GET", "/p", "h", 7, cap); }
+        if (r > cap) { bad = bad + 1; }
+        i = cap;
+        while (i < 512) {
+            if (load8(buf + i) != 170) { bad = bad + 1; }
+            i = i + 1;
+        }
+        cap = cap + 1;
+    }
+    return bad;
+}
+
+# GET /v1/events/recent through the real handler, over a pipe. Returns the body (after the header block).
+fn _t_events_recent() {
+    var fds = alloc(8);
+    if (sys_pipe(fds) < 0) { return ""; }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    handle_events_recent(wfd);
+    sys_close(wfd);
+    var cap = 65536;
+    var buf = alloc(cap + 1);
+    var total = 0;
+    var n = 1;
+    while (n > 0 && total < cap) {
+        n = sys_read(rfd, buf + total, cap - total);
+        if (n > 0) { total = total + n; }
+    }
+    sys_close(rfd);
+    store8(buf + total, 0);
+    return buf + _t_hdr_end(buf, total);
+}
+
+# Occurrences of `pat` in the cstr `s`.
+fn _t_count(s, pat) {
+    var n = 0;
+    var pl = strlen(pat);
+    var sl = strlen(s);
+    var i = 0;
+    while (i + pl <= sl) {
+        if (memeq(s + i, pat, pl) == 1) { n = n + 1; i = i + pl; } else { i = i + 1; }
+    }
+    return n;
+}
+
 fn main() {
     alloc_init();
 
@@ -4678,6 +4837,162 @@ fn main() {
     var obuf = alloc(2048);
     assert_eq(_build_req_header(obuf, "GET", toolong, "localhost", 0, 2048), 0 - 1,
       "req header: over-capacity path is refused, not overflowed");
+
+    # ── 2.9.8: http_client.cyr for real — headers, loopback round trips ──
+    test_group("http_client");
+    # The traceparent header carries THIS thread's trace id (the one the request came in with), not a fresh
+    # one per call. The copy this replaced never wrote the header, so dropping it could not fail a test.
+    var hc_tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    trace_set(hc_tp);
+    var hc_tail = _t_cat("traceparent: ", hc_tp);
+    var hc_buf = alloc(2048);
+    var hc_len = _build_req_header(hc_buf, "DELETE", "/api/delete", "localhost", 19, 2048);
+    assert_eq(_t_has(hc_buf, hc_len, "\r\nContent-Length: 19\r\n"), 1, "req header: Content-Length is the body length");
+    assert_eq(_t_has(hc_buf, hc_len, "\r\nHost: localhost\r\n"), 1, "req header: Host line");
+    assert_eq(memeq(hc_buf + hc_len - strlen(hc_tail) - 4, hc_tail, strlen(hc_tail)), 1,
+      "req header: traceparent is the thread's current trace id, last before the blank line");
+    var hc_pbuf = alloc(2048);
+    var hc_plen = _build_post_header(hc_pbuf, "/api/chat", "127.0.0.1", 42, 2048);
+    assert_eq(memeq(hc_pbuf, "POST /api/chat HTTP/1.0\r\nHost: 127.0.0.1\r\n", 42), 1,
+      "post header: request line + Host");
+    assert_eq(_t_has(hc_pbuf, hc_plen, "\r\nContent-Type: application/json\r\nConnection: close\r\n"), 1,
+      "post header: full media type, Connection: close");
+    assert_eq(_t_has(hc_pbuf, hc_plen, "\r\nContent-Length: 42\r\n"), 1, "post header: Content-Length");
+    assert_eq(memeq(hc_pbuf + hc_plen - strlen(hc_tail) - 4, hc_tail, strlen(hc_tail)), 1,
+      "post header: traceparent, then the blank line");
+    assert_eq(memeq(hc_pbuf + hc_plen - 4, "\r\n\r\n", 4), 1, "post header: ends with the blank line");
+    # The capacity check must count every byte the builder writes, the traceparent included: sweep every cap
+    # and require -1 or a header that stayed inside it.
+    assert_eq(_t_hdr_overruns(0), 0, "req header: no cap from 0 to 400 lets it write past the buffer");
+    assert_eq(_t_hdr_overruns(1), 0, "post header: no cap from 0 to 400 lets it write past the buffer");
+    var hc_small = alloc(512);
+    assert_eq(_build_req_header(hc_small, "GET", "/p", "h", 7, 400) > 0, 1, "req header: a roomy cap succeeds");
+    assert_eq(_build_post_header(hc_small, "/p", "h", 7, 400) > 0, 1, "post header: a roomy cap succeeds");
+
+    # host_addr: network-order IPv4 for sockaddr_in, with no DNS lookup for the local and literal cases.
+    assert_eq(host_addr(0), 0x0100007F, "host_addr: no host -> loopback");
+    assert_eq(host_addr("localhost"), 0x0100007F, "host_addr: localhost -> 127.0.0.1");
+    assert_eq(host_addr("10.1.2.3"), 0x0302010A, "host_addr: a dotted quad is parsed, not resolved");
+    assert_eq(host_addr("127.0.0.2"), 0x0200007F, "host_addr: a loopback literal other than .1 keeps its address");
+
+    # stream_skip_headers reads one byte at a time and stops right after the blank line, so the body stays
+    # in the fd for the SSE reader.
+    var hc_h = "HTTP/1.1 200 OK\r\nX: y\r\n\r\n";
+    var hc_resp = _t_cat(hc_h, "data: one\n\n");
+    assert_eq(_t_skip_pipe(hc_resp, 512), strlen(hc_h), "skip headers: offset of the body");
+    assert_eq(_t_skip_pipe(hc_resp, strlen(hc_h) + 1), strlen(hc_h), "skip headers: a buffer one byte over fits");
+    assert_eq(_t_skip_pipe(hc_resp, strlen(hc_h)), 0 - 1, "skip headers: a buffer the header fills is refused");
+    assert_eq(_t_skip_pipe("HTTP/1.1 200 OK\r\nX: y\r\n", 512), 0 - 1,
+      "skip headers: EOF before the blank line is -1");
+
+    # http_post_stream over loopback, single-threaded: the connection waits in the listen backlog, so the
+    # test accepts after the client has written, reads what went on the wire, then answers.
+    var hc_port = alloc(8);
+    var hc_lfd = _t_listen(hc_port);
+    assert_eq(hc_lfd >= 0, 1, "loopback: listener up");
+    var hc_base = _t_base_url(load64(hc_port));
+    var hc_body = "{\"model\":\"llama3\",\"stream\":true}";
+    var hc_sfd = http_post_stream(hc_base, "/api/chat", hc_body, strlen(hc_body));
+    assert_eq(hc_sfd >= 0, 1, "post stream: connected, returns the fd");
+    var hc_ct, hc_cfd = sock_accept(hc_lfd);
+    assert_eq(is_ok(hc_ct), 1, "post stream: server accepted the connection");
+    var hc_req = alloc(4096);
+    var hc_rlen = _t_read_req(hc_cfd, hc_req, 4096, strlen(hc_body));
+    assert_eq(memeq(hc_req, "POST /api/chat HTTP/1.0\r\nHost: 127.0.0.1\r\n", 42), 1,
+      "post stream: request line + Host on the wire");
+    assert_eq(_t_has(hc_req, hc_rlen, _t_line("\r\nContent-Length: ", strlen(hc_body), "\r\n")), 1,
+      "post stream: Content-Length matches the body");
+    assert_eq(_t_has(hc_req, hc_rlen, hc_tail), 1, "post stream: traceparent on the wire");
+    assert_eq(_t_hdr_end(hc_req, hc_rlen) + strlen(hc_body), hc_rlen, "post stream: the body follows the headers");
+    assert_eq(memeq(hc_req + hc_rlen - strlen(hc_body), hc_body, strlen(hc_body)), 1, "post stream: body bytes");
+    sys_write(hc_cfd, hc_resp, strlen(hc_resp));
+    sys_close(hc_cfd);
+    var hc_sbuf = alloc(512);
+    assert_eq(stream_skip_headers(hc_sfd, hc_sbuf, 512), strlen(hc_h), "post stream: response headers skipped");
+    var hc_n = sys_read(hc_sfd, hc_sbuf, 511);
+    assert_eq(hc_n, 11, "post stream: the SSE body is left to read");
+    assert_eq(memeq(hc_sbuf, "data: one\n\n", 11), 1, "post stream: SSE body bytes");
+    sys_close(hc_sfd);
+
+    # http_req_local blocks until the reply, so a one-shot server thread answers it.
+    var hc_r = _t_req_roundtrip(hc_lfd, hc_base, "POST", "/api/chat", hc_body,
+      "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}");
+    assert_eq(hc_r != 0, 1, "req local: POST round trip parsed");
+    assert_eq(load64(hc_r), 200, "req local: status 200");
+    assert_eq(load64(hc_r + 16), 11, "req local: body length");
+    assert_eq(memeq(load64(hc_r + 8), "{\"ok\":true}", 11), 1, "req local: body bytes");
+    assert_eq(memeq(_t_srv_req, "POST /api/chat HTTP/1.0\r\n", 25), 1, "req local: POST request line on the wire");
+    assert_eq(memeq(_t_srv_req + _t_srv_req_len - strlen(hc_body), hc_body, strlen(hc_body)), 1,
+      "req local: body on the wire");
+    hc_r = _t_req_roundtrip(hc_lfd, hc_base, "GET", "/health", 0, "HTTP/1.0 503 Service Unavailable\r\n\r\n");
+    assert_eq(hc_r != 0, 1, "req local: GET round trip parsed");
+    assert_eq(load64(hc_r), 503, "req local: upstream status passed through");
+    assert_eq(memeq(_t_srv_req, "GET /health HTTP/1.0\r\n", 22), 1, "req local: GET request line");
+    assert_eq(_t_has(_t_srv_req, _t_srv_req_len, "\r\nContent-Length: 0\r\n"), 1, "req local: GET sends length 0");
+    assert_eq(_t_hdr_end(_t_srv_req, _t_srv_req_len), _t_srv_req_len, "req local: GET sends no body");
+    assert_eq(_t_req_roundtrip(hc_lfd, hc_base, "GET", "/health", 0, ""), 0,
+      "req local: a backend that closes without answering is 0");
+    # A reply that reaches HTTP_RESP_CAP was cut off mid-body, so it is refused rather than parsed. 31 bytes
+    # fit under a 32-byte cap; 32 bytes reach it.
+    HTTP_RESP_CAP = 32;
+    hc_r = _t_req_roundtrip(hc_lfd, hc_base, "GET", "/x", 0, "HTTP/1.0 200 OK\r\n\r\n0123456789ab");
+    assert_eq(hc_r != 0, 1, "req local: a reply one byte under the cap is parsed");
+    assert_eq(load64(hc_r + 16), 12, "req local: ...with its whole body");
+    assert_eq(_t_req_roundtrip(hc_lfd, hc_base, "GET", "/x", 0, "HTTP/1.0 200 OK\r\n\r\n0123456789abc"), 0,
+      "req local: a reply that fills the cap is refused as truncated");
+    HTTP_RESP_CAP = 131072;
+    sys_close(hc_lfd);
+    # A port nobody listens on: connect is refused, and both entry points report failure.
+    assert_eq(http_req_local("GET", hc_base, "/health", 0, 0), 0, "req local: refused connection is 0");
+    assert_eq(http_post_stream(hc_base, "/api/chat", hc_body, strlen(hc_body)), 0 - 1,
+      "post stream: refused connection is -1");
+    trace_set(0);
+
+    # ── 2.9.8: events.cyr for real — the majra bus and the recent-events ring ──
+    test_group("events");
+    # Nothing in the suite has called events_init yet: every builder is a no-op and the ring is empty.
+    assert_eq(events_total_published(), 0, "events: nothing published before init");
+    event_rate_limited("ollama");
+    assert_eq(events_total_published(), 0, "events: a builder before init publishes nothing");
+    assert_eq(streq(_t_events_recent(), "{\"events\":[]}"), 1, "events: recent is empty before init");
+    events_init();
+    event_inference_completed("openai", "gpt-4o", 120, 42);
+    assert_eq(events_total_published(), 1, "events: one publish counted by the majra bus");
+    events_init();
+    assert_eq(events_total_published(), 1, "events: a second init keeps the bus and its count");
+    var ev_one = _t_cat("{\"events\":[{\"event\":\"inference_completed\",\"provider\":\"openai\",",
+      "\"model\":\"gpt-4o\",\"latency_ms\":120,\"tokens\":42}]}");
+    assert_eq(streq(_t_events_recent(), ev_one), 1, "events: recent holds the completed event");
+    # Free-form fields (model, error, base_url) are JSON-escaped; a quote must not end the string.
+    event_inference_failed("ollama", "m\"x", "bad \"q\"");
+    event_health_changed("ollama", "http://h:1/\"", 1);
+    event_health_changed("vllm", "http://v:2", 0);
+    event_rate_limited("groq");
+    var ev_body = _t_events_recent();
+    assert_eq(_t_has(ev_body, strlen(ev_body),
+        "{\"event\":\"inference_failed\",\"provider\":\"ollama\",\"model\":\"m\\\"x\",\"error\":\"bad \\\"q\\\"\"}"),
+      1, "events: failed event escapes model and error");
+    assert_eq(_t_has(ev_body, strlen(ev_body),
+        "{\"event\":\"health_changed\",\"provider\":\"ollama\",\"base_url\":\"http://h:1/\\\"\",\"healthy\":true}"),
+      1, "events: health up, base_url escaped");
+    assert_eq(_t_has(ev_body, strlen(ev_body),
+        "{\"event\":\"health_changed\",\"provider\":\"vllm\",\"base_url\":\"http://v:2\",\"healthy\":false}"),
+      1, "events: health down");
+    assert_eq(_t_has(ev_body, strlen(ev_body), "{\"event\":\"rate_limited\",\"provider\":\"groq\"}]}"), 1,
+      "events: newest event last");
+    assert_eq(events_total_published(), 5, "events: every builder published once");
+    # The ring keeps the newest EVENT_RING_MAX, oldest first, once it wraps.
+    var ev_i = 0;
+    while (ev_i < 200) {
+        event_emit("providers/inference", _t_line("{\"n\":", ev_i, "}"));
+        ev_i = ev_i + 1;
+    }
+    ev_body = _t_events_recent();
+    assert_eq(events_total_published(), 205, "events: the bus counts past the ring size");
+    assert_eq(_t_count(ev_body, "{\"n\":"), EVENT_RING_MAX, "events: the ring holds EVENT_RING_MAX entries");
+    assert_eq(memeq(ev_body, "{\"events\":[{\"n\":72},{\"n\":73},", 29), 1, "events: oldest kept entry first");
+    assert_eq(_t_has(ev_body, strlen(ev_body), "{\"n\":198},{\"n\":199}]}"), 1, "events: newest entry last");
+    assert_eq(_t_count(ev_body, "\"event\":"), 0, "events: the five early events were overwritten");
 
     # ── DLP scanner: PII/secret detection + classification ────────
     test_group("dlp_scanner");

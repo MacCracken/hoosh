@@ -5,6 +5,94 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.8] — 2026-11-04
+
+**The tests run the real plaintext provider client and the real event bus.** The test file's copy of
+`_build_req_header` had drifted: it never wrote the `traceparent` header `src/` sends. The event bus had no tests
+at all. No gateway code changed. **1355 assertions** (was 1291) in 188 groups. All gates are clean: fmt, lint, vet,
+deny, coverage (344/684, 50%; **23 of 37** modules included for real), the security scan and the four fuzz targets.
+
+### Changed — `http_client.cyr` and `events.cyr` are included for real
+
+`tests/hoosh.tcyr` now includes three more files:
+- `src/lib/http_client.cyr`;
+- `src/lib/events.cyr`;
+- the vendored majra bundle (`src/vendor/majra.cyr`), which `events.cyr` publishes to. It is included at the same
+  point as in `src/main.cyr`. As there, it shares one name with `types.cyr`: the enum member `ERR_NONE`, which is 0
+  in both.
+- **The `_build_req_header` copy is gone.** It dated from before `trace.cyr` was in the test harness; its comment
+  still said so. It reserved 64 bytes for the traceparent but never wrote the header. So no test could notice the
+  header going missing, or check that the capacity bound counts it.
+
+### Added — tests for behavior no test had reached
+
+- **`http_client`, the header builders.** Both `_build_req_header` and `_build_post_header`:
+  - write the Host line, the full JSON media type, `Connection: close` and the body's Content-Length;
+  - write the thread's current trace id as `traceparent`, the last header before the blank line.
+- **`http_client`, the capacity bound.** A sweep over every cap from 0 to 400 bytes: each builder either refuses
+  (-1) or writes inside the buffer.
+- **`http_client`, `host_addr`.** No host and `localhost` give loopback; dotted quads are parsed.
+- **`http_client`, `stream_skip_headers`.** Over a pipe:
+  - it returns the body's offset;
+  - a buffer one byte bigger than the header block works, one the header block fills is refused;
+  - EOF before the blank line is -1.
+- **`http_client`, `http_post_stream` over loopback,** single-threaded. The client's connection waits in the listen
+  backlog, so the test can accept it after the client has written.
+  - On the wire: the request line, Host, Content-Length, traceparent and body.
+  - After the reply: the response headers are skipped and the SSE body stays in the fd to be read.
+- **`http_client`, `http_req_local`,** which blocks until it gets the reply, against a one-shot server thread:
+  - POST and GET round trips, with the upstream status (503) passed through;
+  - a GET sends `Content-Length: 0` and no body;
+  - a backend that closes without answering gives 0;
+  - with `HTTP_RESP_CAP` lowered to 32: a 31-byte reply is parsed whole, and a 32-byte one is refused as truncated;
+  - a refused connection gives 0, or -1 from `http_post_stream`.
+- **`events`, before `events_init`:** every builder is a no-op, nothing is published, and `/v1/events/recent` answers
+  an empty list. **After it:**
+  - a second `events_init` keeps the bus and its count;
+  - each builder's JSON is checked, with the model, error and base URL escaped, and health as `true` / `false`;
+  - after 200 more events, the ring holds the newest 128, oldest first, and the majra bus has counted all 205.
+
+These are the suite's first sockets and its first thread. The listener binds 127.0.0.1 on an ephemeral port. Its
+accept and the server's reads time out after 5 s, so a broken client fails a test instead of hanging the suite (CI's
+5-minute cap stays as the backstop). The suite still runs in about 2 s.
+
+### Mutation-checked
+
+A copy of the tree was changed 21 ways. 19 mutants are caught; the 2 that survive are equivalent (see below):
+
+| mutant | result |
+|---|---|
+| `_build_req_header` not writing the traceparent | 1 fails |
+| `_build_post_header` not writing the traceparent | 3 fail |
+| either builder's capacity check leaving out the traceparent | 1 fails each (299 overruns in the sweep) |
+| Content-Length written as 0 | 1 fails |
+| `http_req_local` cap check `>` instead of `>=` | 1 fails |
+| `http_req_local` parsing an empty reply | 1 fails |
+| `http_req_local` not sending the body | 1 fails |
+| `http_post_stream` not sending the body | 2 fail |
+| `stream_skip_headers` bound off by one | 1 fails |
+| `stream_skip_headers` reading in chunks (consuming the body) | 4 fail |
+| the recent-events ring not capped at 128 | 2 fail |
+| recent events listed newest first | 3 fail |
+| `events_init` not idempotent | fails, then crashes |
+| a failed event's model not escaped | 1 fails |
+| health `true` / `false` inverted | 2 fail |
+| `event_emit` not counting an event | 8 fail |
+| `event_emit` not publishing to the bus | 4 fail |
+| the completed event dropping its token count | 1 fails |
+| `host_addr` without its dotted-quad shortcut | survives |
+| `host_addr` without its `localhost` shortcut | survives |
+
+**Why the two survivors are equivalent:** sandhi's resolver returns the same address for both inputs. Removing a
+shortcut costs a lookup, not a wrong address, so no test can see the difference.
+
+### Notes
+
+- The test file is 7,227 lines (was 6,912).
+- Symbol coverage rose from 332 to 344 of 684.
+- The bench binary differs from 2.9.7's by one byte, the version string. The 25 benchmarks ran on identical code.
+- With `http_client` and `events` in, `health.cyr` and `retry.cyr` each need only `provider.cyr`.
+
 ## [2.9.7] — 2026-11-04
 
 **The tests run the real route records and response cache.** The test file's copies of both had drifted. The route

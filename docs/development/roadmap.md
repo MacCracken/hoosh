@@ -8,8 +8,9 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.7 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.7 took eleven
-modules' mirrors out of the tests. See the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
+**Current**: v2.9.8 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.8 put
+thirteen modules under test for real (twelve replaced mirrors; `events.cyr` had no tests). See the CHANGELOG.
+**Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
@@ -30,15 +31,15 @@ The bands are a plan, not a promise. Every item was checked against the code and
   - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
     `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
     `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
-    (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7). `scripts/coverage.sh` prints the current
-    list: 21 of 37 modules.
-  - **Next candidates**, from a dependency scan in 2.9.6 (modules that need no hoosh module the tests lack):
-    - `http_client.cyr`: one collision (`_build_req_header`), plus sockets.
-    - `events.cyr` needs the vendored majra bundle, and `hardware.cyr` the ai-hwaccel bundle, included too.
-  - **Blocked until split or until their dependencies are in:** `router.cyr` (now only hardware), `budget.cyr` /
-    `storage.cyr` / `audit.cyr` (each other), `retry.cyr` and `provider.cyr` (route, router, otlp, http_client),
-    `pool.cyr` / `batch.cyr` / `otlp.cyr` (each other and provider), `health.cyr`, `catalog_fetch.cyr`, and
-    `config.cyr` / `handlers.cyr`, which reach nearly everything. Their helpers move into includable modules one at
+    (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7); `http_client.cyr` and `events.cyr`, with
+    the majra bundle (2.9.8). `scripts/coverage.sh` prints the current list: 23 of 37 modules.
+  - **Next candidates**, from a dependency scan in 2.9.8 (modules that need no hoosh module the tests lack):
+    - `hardware.cyr`, with the vendored ai-hwaccel bundle (`lib/ai-hwaccel.cyr`) included too;
+    - then `router.cyr`, which needs only `hardware.cyr`.
+  - **Blocked until split or until their dependencies are in:** `provider.cyr` (router, otlp); `health.cyr` and
+    `retry.cyr` (only provider); `budget.cyr` / `storage.cyr` / `audit.cyr` (each other); `pool.cyr` /
+    `batch.cyr` / `otlp.cyr` / `catalog_fetch.cyr` (each other and provider); and `config.cyr` / `handlers.cyr`,
+    which reach nearly everything. Their helpers move into includable modules one at
     a time (the `urlparse.cyr` split), or wait for the modules above.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
