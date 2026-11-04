@@ -5,6 +5,63 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.15] — 2026-11-04
+
+**The tests run the real retry logic, backoff and loops, end to end over loopback.** Nothing in the test file
+covered `retry.cyr` before. No gateway code changed (the only `src/` diff is the version string). **1481
+assertions** in 161 groups. All gates are clean: fmt, lint, vet, deny, coverage (388/686, 56%; **32 of 38**
+modules included for real), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Added — `retry.cyr` included for real, with its first tests
+
+`provider.cyr` came in with 2.9.14, so `retry.cyr` needed nothing the tests lacked. The test file had no copy of
+it; 2.9.12 deleted `retry_jitter_factor`, which only did arithmetic on constants.
+
+**`retry_delay`:**
+- the defaults (3 retries, 500 ms base, 30 s cap, 50% jitter);
+- without jitter the delay doubles from the base, meets the cap, and stays there at attempt 70 (no overflow);
+- a base above the cap is capped;
+- with jitter, 300 samples stay within delay..delay + 50% and vary.
+
+**`retry_forward`,** through the real `provider_forward` to a loopback Ollama that counts requests (a new
+multi-connection server thread in the test file):
+- a success returns on the first attempt, with the provider's text and token counts;
+- a 500 is retried `max_retries` times and then fails (three requests for `max_retries = 2`), and so is a 429;
+- a 400 fails at once, after one request, as the 2.5.3 permanent-error rule says;
+- `max_retries = 0` makes one attempt;
+- the streaming path returns the backend fd after one attempt, makes one attempt at `max_retries = 0`, and returns
+  -1 when every attempt is refused.
+
+During these groups the I/O timeout drops to 5 s, so an attempt left waiting on a silent backend fails the suite in
+seconds.
+
+### Mutation-checked
+
+A copy of the tree was changed 10 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| no doubling; no cap inside the loop (overflow at a high attempt); no cap after it | 4, 1 and 1 fail |
+| no jitter; twice the jitter | 1 fails each |
+| a permanent error retried, or returned as a result | 1 fails each |
+| `retry_forward` one attempt short; a success not returned | 4 fail; crashes |
+| `retry_forward_stream` one attempt short | 1 fails |
+
+**The first-round survivor:** the stream loop running one attempt short survived, because a refused connect leaves
+nothing to count. At `max_retries = 0` the mutant makes no attempt at all, which the added assertion catches.
+
+### Notes
+
+- The test file is 6,266 lines (was 6,101). Symbol coverage rose from 378 to 388 of 686.
+- **Benchmarks:** the bench binary differs from 2.9.14's only in the version digit. At load 3.2 (the machine stayed
+  busy for over 30 minutes) the 25 rows' median move against 2.9.14 is +0.4%, all within −4% and +3%.
+- **A stale header:** the test file's "DLP scanner — mirror of src/lib/dlp.cyr" header was fixed. `dlp.cyr` has been
+  included for real since 2.9.3, and the header's "enabled by default here" was wrong: the real scanner defaults
+  to off.
+- **What the test file still mirrors** (19 marked copies), all from modules that cannot be included yet:
+  `handlers.cyr`'s request parsers (8), `batch.cyr`'s request splitter and lane pool (5), `config.cyr`'s pickers
+  (3), `main.cyr`'s flag parser (2) and `pool.cyr`'s ring (1). Splitting the pure parsers out is the next step.
+
 ## [2.9.14] — 2026-11-04
 
 **The tests run the real provider forward path and OTLP span ring.** Splitting `otlp.cyr` broke the cycle that kept

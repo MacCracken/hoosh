@@ -94,6 +94,8 @@ include "src/lib/storage.cyr"
 # half (otlp_export.cyr, which needs pool.cyr) no longer keeps provider.cyr out of the tests.
 include "src/lib/otlp.cyr"
 include "src/lib/provider.cyr"
+# 2.9.15: the backoff schedule and the retry loops, for real (nothing in the test file covered them).
+include "src/lib/retry.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -1171,11 +1173,9 @@ fn _prune(s) {
 }
 
 # ================================================================
-# DLP scanner — mirror of src/lib/dlp.cyr (PII/secret byte matchers).
-# Enabled by default here so the matchers are exercised directly.
+# DLP scanner: dlp.cyr's own since 2.9.3 (this header still called it a mirror until 2.9.15). The real scanner
+# defaults to disabled; the dlp_scanner group turns it on. This wrapper feeds it a cstr literal.
 # ================================================================
-
-
 
 fn _dlp_test(s) {
     var n = strlen(s);
@@ -2089,6 +2089,82 @@ fn _t_req_roundtrip(lfd, base, method, path, body, reply) {
     if (th == 0) { return 0; }
     var r = http_req_local(method, base, path, body, blen);
     thread_join(th);
+    return r;
+}
+
+# ── 2.9.15: a counting loopback server for retry.cyr ──
+# Read one HTTP request off `cfd`: through the blank line, then the Content-Length body. Returns the bytes read.
+fn _t_read_http_req(cfd, buf, cap) {
+    sock_set_recv_timeout(cfd, 5, 0);
+    var total = 0;
+    var want = 0 - 1;
+    while (total < cap - 1) {
+        var n = sys_read(cfd, buf + total, cap - 1 - total);
+        if (n <= 0) { return total; }
+        total = total + n;
+        store8(buf + total, 0);
+        var h = _t_hdr_end(buf, total);
+        if (h > 0 && want < 0) {
+            var cl = _t_find(buf, "Content-Length: ");
+            want = 0;
+            if (cl >= 0) { want = atoi(buf + cl + 16); }
+        }
+        if (h > 0 && total >= h + want) { return total; }
+    }
+    return total;
+}
+
+# Accepts until _t_ms_stop is set, answers every request with _t_ms_reply and counts it in _t_ms_count.
+var _t_ms_lfd = 0;
+var _t_ms_reply = 0;
+var _t_ms_count = 0;
+var _t_ms_stop = 0;
+fn _t_serve_many(arg) {
+    var buf = alloc(16384);
+    while (_t_ms_stop == 0) {
+        var ct, cfd = sock_accept(_t_ms_lfd);
+        if (is_ok(ct) == 0) { return 0; }
+        if (_t_ms_stop == 1) {
+            sys_close(cfd);
+            return 0;
+        }
+        _t_read_http_req(cfd, buf, 16384);
+        _t_ms_count = _t_ms_count + 1;
+        sys_write(cfd, _t_ms_reply, strlen(_t_ms_reply));
+        sys_close(cfd);
+    }
+    return 0;
+}
+
+fn _t_ms_start(lfd, reply) {
+    _t_ms_lfd = lfd;
+    _t_ms_reply = reply;
+    _t_ms_count = 0;
+    _t_ms_stop = 0;
+    return thread_create(&_t_serve_many, 0);
+}
+
+# Stop the server: set the flag, then wake its accept() with a throwaway connection.
+fn _t_ms_stop_wait(th, port) {
+    _t_ms_stop = 1;
+    var wt, wfd = tcp_socket();
+    if (is_ok(wt) == 1) {
+        net_connect_nb(wfd, 0x0100007F, port, 500);
+        sock_close(wfd);
+    }
+    thread_join(th);
+    return 0;
+}
+
+# retry_forward for an Ollama route at 127.0.0.1:`port`, answered every time with `reply`. Backoff of 1 ms base and a
+# 4 ms cap with no jitter, so retries are quick. The request count is in _t_ms_count afterwards.
+fn _t_retry_run(lfd, port, reply, max_retries) {
+    var th = _t_ms_start(lfd, reply);
+    var route = route_new(PROV_OLLAMA, 1, _t_base_url(port));
+    var cfg = retry_config_new_x(max_retries, 1, 4, 0);
+    var msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    var r = retry_forward(cfg, route, "llama3", 0, msgs, strlen(msgs), 0, 0, 0);
+    _t_ms_stop_wait(th, port);
     return r;
 }
 
@@ -4491,6 +4567,93 @@ fn main() {
     var hn_r = route_new(PROV_OLLAMA, 1, "http://hc-4");
     store64(hn_r + ROUTE_HEALTH, 0);
     assert_eq(_t_hrec(hn_r, 0) == 0 && route_healthy(hn_r) == 1, 1, "health: no record, no change");
+
+
+    # ── 2.9.15: retry.cyr for real — the backoff schedule and the retry loop over loopback ──
+    test_group("retry_delay");
+    var rdc = retry_config_default();
+    assert_eq(retry_max(rdc) == 3 && retry_base(rdc) == 500 && retry_cap(rdc) == 30000 && retry_jitter(rdc) == 50, 1,
+      "retry: defaults 3 retries, 500 ms base, 30 s cap, 50% jitter");
+    # Without jitter the delay doubles from the base and stops at the cap.
+    var rdn = retry_config_new_x(3, 100, 1000, 0);
+    assert_eq(retry_delay_ms(rdn, 0), 100, "retry: attempt 0 waits the base");
+    assert_eq(retry_delay_ms(rdn, 1), 200, "retry: attempt 1 doubles it");
+    assert_eq(retry_delay_ms(rdn, 3), 800, "retry: attempt 3 is 8x");
+    assert_eq(retry_delay_ms(rdn, 4), 1000, "retry: attempt 4 meets the cap");
+    assert_eq(retry_delay_ms(rdn, 70), 1000, "retry: a high attempt stays at the cap (no overflow)");
+    assert_eq(retry_delay_ms(retry_config_new_x(3, 5000, 1000, 0), 0), 1000, "retry: a base above the cap is capped");
+    # Jitter adds 0..50% of the delay, so retries that failed together do not fire together.
+    var rdj = retry_config_new_x(3, 100, 1000, 50);
+    var rj_min = 1000000;
+    var rj_max = 0;
+    var rj_first = retry_delay_ms(rdj, 0);
+    var rj_varied = 0;
+    var rj_i = 0;
+    while (rj_i < 300) {
+        var rjd = retry_delay_ms(rdj, 0);
+        if (rjd < rj_min) { rj_min = rjd; }
+        if (rjd > rj_max) { rj_max = rjd; }
+        if (rjd != rj_first) { rj_varied = 1; }
+        rj_i = rj_i + 1;
+    }
+    assert_eq(rj_min >= 100 && rj_max <= 150, 1, "retry: jitter stays within delay..delay + 50%");
+    assert_eq(rj_varied, 1, "retry: jitter varies");
+
+    test_group("retry_forward");
+    # Through the real provider_forward, against a loopback Ollama that counts requests. The I/O timeout drops to
+    # 5 s, so an attempt that waited on a silent backend fails the suite in seconds, not minutes.
+    HTTP_IO_TIMEOUT_S = 5;
+    var rf_port = alloc(8);
+    var rf_lfd = _t_listen(rf_port);
+    var rf_p = load64(rf_port);
+    var rf_saved_router = _router;
+    var rf_routes = alloc(8);
+    store64(rf_routes, route_new(PROV_OLLAMA, 1, _t_base_url(rf_p)));
+    _router = router_new(rf_routes, 1, STRAT_PRIORITY);
+    var rf_ok = _t_cat("HTTP/1.0 200 OK\r\n\r\n{\"message\":{\"role\":\"assistant\",\"content\":\"hi there\"},",
+      "\"prompt_eval_count\":3,\"eval_count\":4,\"done\":true}");
+    var rf = _t_retry_run(rf_lfd, rf_p, rf_ok, 2);
+    assert_eq(rf != 0 && _t_ms_count == 1, 1, "retry: a success returns on the first attempt");
+    assert_streq(load64(rf), "hi there", "retry: ...with the provider's text");
+    assert_eq(load64(rf + 16) == 3 && load64(rf + 24) == 4, 1, "retry: ...and its token counts");
+    assert_eq(_t_retry_run(rf_lfd, rf_p, "HTTP/1.0 500 Internal Server Error\r\n\r\n{}", 2), 0,
+      "retry: a 5xx fails in the end");
+    assert_eq(_t_ms_count, 3, "retry: ...after the first attempt and max_retries (2) more");
+    _t_retry_run(rf_lfd, rf_p, "HTTP/1.0 429 Too Many Requests\r\n\r\n{}", 2);
+    assert_eq(_t_ms_count, 3, "retry: a 429 is retried too");
+    assert_eq(_t_retry_run(rf_lfd, rf_p, "HTTP/1.0 400 Bad Request\r\n\r\n{\"error\":\"bad\"}", 2), 0,
+      "retry: a 4xx fails");
+    assert_eq(_t_ms_count, 1, "retry: ...at once: a permanent error is not retried");
+    _t_retry_run(rf_lfd, rf_p, "HTTP/1.0 503 Service Unavailable\r\n\r\n{}", 0);
+    assert_eq(_t_ms_count, 1, "retry: max_retries 0 means one attempt");
+    # The streaming path returns the backend fd once a connection is made, and -1 when every attempt fails.
+    var rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 200 OK\r\n\r\n");
+    var rfs_route = route_new(PROV_OLLAMA, 1, _t_base_url(rf_p));
+    var rfs_msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    var rf_cfg = retry_config_new_x(2, 1, 4, 0);
+    var rfs_fd = retry_forward_stream(rf_cfg, rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    assert_eq(rfs_fd >= 0, 1, "retry stream: a connection returns the backend fd");
+    var rfs_buf = alloc(64);
+    sys_read(rfs_fd, rfs_buf, 63);
+    sys_close(rfs_fd);
+    _t_ms_stop_wait(rfs_th, rf_p);
+    assert_eq(_t_ms_count, 1, "retry stream: one attempt when the first connects");
+    # max_retries 0 still makes the one attempt.
+    rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 200 OK\r\n\r\n");
+    var rf_cfg0 = retry_config_new_x(0, 1, 4, 0);
+    rfs_fd = retry_forward_stream(rf_cfg0, rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    assert_eq(rfs_fd >= 0, 1, "retry stream: max_retries 0 means one attempt, not none");
+    sys_read(rfs_fd, rfs_buf, 63);
+    sys_close(rfs_fd);
+    _t_ms_stop_wait(rfs_th, rf_p);
+    sys_close(rf_lfd);
+    var rfs_dead = route_new(PROV_OLLAMA, 1, _t_base_url(rf_p));
+    var rfs_dead_fd = retry_forward_stream(rf_cfg, rfs_dead, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    assert_eq(rfs_dead_fd, 0 - 1, "retry stream: -1 when every attempt is refused");
+    var rf_dead_r = retry_forward(rf_cfg, rfs_dead, "llama3", 0, rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    assert_eq(rf_dead_r, 0, "retry: 0 when every attempt is refused");
+    _router = rf_saved_router;
+    HTTP_IO_TIMEOUT_S = 300;
 
     test_group("health_status_str");
     # Disabled outranks unhealthy: an operator-disabled route is not a fault.
