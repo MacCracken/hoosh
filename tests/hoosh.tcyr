@@ -52,6 +52,8 @@ include "src/lib/mcp.cyr"
 # exponent cap or no-progress guard in the embedding parser.
 include "src/lib/compression.cyr"
 include "src/lib/semantic.cyr"
+# 2.9.5: W3C traceparent extraction / generation / the thread-local current id, for real (it was mirrored).
+include "src/lib/trace.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -328,6 +330,9 @@ fn _compress(s) {
 # 2.5.7 audit). Both need only the Provider enum + provider_is_local above and catalog.cyr (included at the top).
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
+# 2.9.5: request/token counters and the per-provider latency histogram, for real (the bucket loop was mirrored).
+# Needs the Provider enum, PROV_COUNT and provider_name above.
+include "src/lib/metrics.cyr"
 
 # Semantic cache: semantic.cyr's own (2.9.4, included at the top).
 
@@ -518,87 +523,10 @@ fn _t_lane_release(lanes, lane) {
     return 0;
 }
 
-# Mirror of src/lib/metrics.cyr _lat_bound + the bucket-find loop.
-fn _t_lat_bound(i) {
-    if (i == 0) { return 5; }
-    if (i == 1) { return 10; }
-    if (i == 2) { return 25; }
-    if (i == 3) { return 50; }
-    if (i == 4) { return 100; }
-    if (i == 5) { return 250; }
-    if (i == 6) { return 500; }
-    if (i == 7) { return 1000; }
-    if (i == 8) { return 2500; }
-    if (i == 9) { return 5000; }
-    return 10000;
-}
-fn _t_lat_bucket(ms) {
-    var b = 0;
-    while (b < 11 && ms > _t_lat_bound(b)) { b = b + 1; }
-    return b;
-}
-
-# Mirror of src/lib/trace.cyr trace_extract — incoming traceparent header.
-fn _t_trace_ci_eq(a, pat, n) {
-    var i = 0;
-    while (i < n) {
-        var ca = load8(a + i);
-        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
-        if (ca != load8(pat + i)) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-fn _t_trace_is_hex(c) {
-    var b = c & 255;
-    if (b >= 48 && b <= 57) { return 1; }
-    if (b >= 97 && b <= 102) { return 1; }
-    if (b >= 65 && b <= 70) { return 1; }
-    return 0;
-}
-
-fn _t_trace_extract(buf, buf_len) {
-    var i = 0;
-    while (i < buf_len - 12) {
-        if (i == 0 || load8(buf + i - 1) == 10) {
-            if (_t_trace_ci_eq(buf + i, "traceparent:", 12) == 1) {
-                var j = i + 12;
-                while (j < buf_len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
-                var s = j;
-                while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
-                var n = j - s;
-                # Validate the W3C shape rather than just the length. The OTLP
-                # span builder slices this at FIXED offsets (tp[3..35) and
-                # tp[36..52)), so `traceparent: x` yielded a 2-byte allocation
-                # from which ~50 bytes were read and emitted unescaped; a
-                # length-legal 55-byte value needed no over-read at all to
-                # inject forged span fields, and an embedded NUL truncated the
-                # fragment and corrupted the whole batch. The same buffer is
-                # also forwarded verbatim into every outbound request header.
-                # Rejecting here means a fresh, well-formed id is generated.
-                #
-                #   00-<32 hex>-<16 hex>-<2 hex>   == 55 bytes exactly
-                if (n != 55) { return 0; }
-                if (load8(buf + s + 2) != 45) { return 0; }
-                if (load8(buf + s + 35) != 45) { return 0; }
-                if (load8(buf + s + 52) != 45) { return 0; }
-                var k = 0;
-                while (k < 55) {
-                    if (k != 2 && k != 35 && k != 52) {
-                        if (_t_trace_is_hex(load8(buf + s + k)) == 0) { return 0; }
-                    }
-                    k = k + 1;
-                }
-                var out = alloc(n + 1);
-                if (out == 0) { return 0; }
-                memcpy(out, buf + s, n);
-                store8(out + n, 0);
-                return out;
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
+# 2.9.5: one slot of metrics.cyr's OWN latency histogram (not a mirror: it reads the real storage, laid out
+# PROV_COUNT x (NLAT_BUCKETS + 1), the last slot per provider being the overflow).
+fn _t_lat_slot(prov, b) {
+    return load64(_lat_counts + (prov * (NLAT_BUCKETS + 1) + b) * 8);
 }
 
 # Mirror of src/lib/otlp.cyr _otlp_path — path component of an http URL.
@@ -5470,11 +5398,55 @@ fn main() {
 
     # ── Observability: latency buckets + traceparent extraction ───
     test_group("observability");
-    assert_eq(_t_lat_bucket(3), 0, "lat: 3ms → bucket 0 (le 5)");
-    assert_eq(_t_lat_bucket(5), 0, "lat: 5ms → bucket 0 (le 5)");
-    assert_eq(_t_lat_bucket(50), 3, "lat: 50ms → bucket 3 (le 50)");
-    assert_eq(_t_lat_bucket(51), 4, "lat: 51ms → bucket 4 (le 100)");
-    assert_eq(_t_lat_bucket(20000), 11, "lat: 20s → overflow bucket 11");
+    # 2.9.5: metrics.cyr's own histogram. Each sample lands in the first bucket whose bound it does not exceed
+    # (le 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 ms), the 12th slot is the overflow.
+    metrics_latency_init();
+    var lp = PROV_GROQ;                      # a provider no other test records against
+    metrics_record_latency(lp, 3);
+    metrics_record_latency(lp, 5);
+    metrics_record_latency(lp, 50);
+    metrics_record_latency(lp, 51);
+    metrics_record_latency(lp, 20000);
+    assert_eq(_t_lat_slot(lp, 0), 2, "lat: 3 and 5 ms -> bucket 0 (le 5)");
+    assert_eq(_t_lat_slot(lp, 3), 1, "lat: 50ms -> bucket 3 (le 50)");
+    assert_eq(_t_lat_slot(lp, 4), 1, "lat: 51ms -> bucket 4 (le 100)");
+    assert_eq(_t_lat_slot(lp, 11), 1, "lat: 20s -> overflow bucket 11");
+    assert_eq(load64(_lat_count + lp * 8), 5, "lat: five samples counted");
+    assert_eq(load64(_lat_sum + lp * 8), 3 + 5 + 50 + 51 + 20000, "lat: and summed");
+    metrics_record_latency(0 - 1, 7);
+    metrics_record_latency(PROV_COUNT, 7);
+    assert_eq(load64(_lat_count + lp * 8), 5, "lat: an out-of-range provider records nothing");
+    # The Prometheus exposition: cumulative buckets, +Inf, sum and count, labelled by provider.
+    var lsb = str_builder_new();
+    metrics_emit_latency(lsb);
+    var lexp = str_builder_build(lsb);
+    assert_eq(str_contains(lexp, str_from("# TYPE hoosh_provider_latency_ms histogram")), 1,
+      "lat: a histogram TYPE line");
+    var lname = provider_name(lp);
+    var lb5 = str_builder_new();
+    str_builder_add_cstr(lb5, "hoosh_provider_latency_ms_bucket{provider=\"");
+    str_builder_add_cstr(lb5, lname);
+    str_builder_add_cstr(lb5, "\",le=\"5\"} 2\n");
+    assert_eq(str_contains(lexp, str_builder_build(lb5)), 1, "lat: le=5 holds 2");
+    var lb100 = str_builder_new();
+    str_builder_add_cstr(lb100, "hoosh_provider_latency_ms_bucket{provider=\"");
+    str_builder_add_cstr(lb100, lname);
+    str_builder_add_cstr(lb100, "\",le=\"100\"} 4\n");
+    assert_eq(str_contains(lexp, str_builder_build(lb100)), 1, "lat: le=100 is cumulative (4)");
+    var linf = str_builder_new();
+    str_builder_add_cstr(linf, "hoosh_provider_latency_ms_bucket{provider=\"");
+    str_builder_add_cstr(linf, lname);
+    str_builder_add_cstr(linf, "\",le=\"+Inf\"} 5\n");
+    assert_eq(str_contains(lexp, str_builder_build(linf)), 1, "lat: +Inf counts every sample (5)");
+    # Request and token counters.
+    metrics_reset();
+    metrics_record(10, 4);
+    metrics_record(5, 1);
+    assert_eq(_met_requests, 2, "metrics: requests counted");
+    assert_eq(_met_prompt_tokens, 15, "metrics: prompt tokens summed");
+    assert_eq(_met_comp_tokens, 5, "metrics: completion tokens summed");
+    metrics_reset();
+    assert_eq(_met_requests + _met_prompt_tokens + _met_comp_tokens, 0, "metrics: reset zeroes all three");
     # 2.6.8: the value must be a well-formed W3C traceparent —
     # 00-<32 hex>-<16 hex>-<2 hex>, exactly 55 bytes. The OTLP span builder
     # slices it at FIXED offsets, so a short value made it read ~50 bytes past
@@ -5482,24 +5454,46 @@ fn main() {
     # assertions previously blessed `00-abc-def-01` and `00-XY-ZW-01` as valid.
     var tgood = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     var treq = "POST /x HTTP/1.1\r\nHost: h\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nContent-Type: application/json\r\n\r\nbody";
-    var tval = _t_trace_extract(treq, strlen(treq));
+    var tval = trace_extract(treq, strlen(treq));
     assert_eq(tval != 0, 1, "trace: well-formed header located");
     assert_eq(strlen(tval), 55, "trace: value is exactly the 55-byte header value");
     assert_streq(tval, tgood, "trace: value extracted verbatim");
     var tnone = "POST /x HTTP/1.1\r\nHost: h\r\n\r\nbody";
-    assert_eq(_t_trace_extract(tnone, strlen(tnone)), 0, "trace: absent → 0");
+    assert_eq(trace_extract(tnone, strlen(tnone)), 0, "trace: absent → 0");
     # Case-insensitive header NAME, with a valid value.
     var tcase = "GET / HTTP/1.1\r\nTraceParent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n";
-    assert_eq(_t_trace_extract(tcase, strlen(tcase)) != 0, 1, "trace: case-insensitive header name");
+    assert_eq(trace_extract(tcase, strlen(tcase)) != 0, 1, "trace: case-insensitive header name");
     # Malformed values are rejected so a fresh id is generated instead.
     var tshort = "GET / HTTP/1.1\r\ntraceparent: x\r\n\r\n";
-    assert_eq(_t_trace_extract(tshort, strlen(tshort)), 0, "trace: one-byte value rejected");
+    assert_eq(trace_extract(tshort, strlen(tshort)), 0, "trace: one-byte value rejected");
     var told = "GET / HTTP/1.1\r\ntraceparent: 00-abc-def-01\r\n\r\n";
-    assert_eq(_t_trace_extract(told, strlen(told)), 0, "trace: short malformed value rejected");
+    assert_eq(trace_extract(told, strlen(told)), 0, "trace: short malformed value rejected");
     var tnonhex = "GET / HTTP/1.1\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e47ZZ-00f067aa0ba902b7-01\r\n\r\n";
-    assert_eq(_t_trace_extract(tnonhex, strlen(tnonhex)), 0, "trace: non-hex value rejected");
+    assert_eq(trace_extract(tnonhex, strlen(tnonhex)), 0, "trace: non-hex value rejected");
     var tsep = "GET / HTTP/1.1\r\ntraceparent: 00_4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n";
-    assert_eq(_t_trace_extract(tsep, strlen(tsep)), 0, "trace: wrong separator rejected");
+    assert_eq(trace_extract(tsep, strlen(tsep)), 0, "trace: wrong separator rejected");
+    # 2.9.5: trace.cyr's own generator. A fresh id has the W3C shape the extractor demands, so it round-trips, and
+    # two ids are never equal (clock + atomic counter).
+    var tg1 = trace_generate();
+    var tg2 = trace_generate();
+    assert_eq(strlen(tg1), 55, "trace: a generated id is 55 bytes");
+    assert_eq(memeq(tg1, "00-", 3), 1, "trace: version 00");
+    assert_eq(memeq(tg1 + 52, "-01", 3), 1, "trace: sampled flag 01");
+    assert_eq(streq(tg1, tg2), 0, "trace: two generated ids differ");
+    var tgh = str_builder_new();
+    str_builder_add_cstr(tgh, "GET / HTTP/1.1\r\ntraceparent: ");
+    str_builder_add_cstr(tgh, tg1);
+    str_builder_add_cstr(tgh, "\r\n\r\n");
+    var tgs = str_builder_build(tgh);
+    assert_streq(trace_extract(str_data(tgs), str_len(tgs)), tg1, "trace: a generated id passes extraction");
+    # The thread-local current id: set, read back, and generated once when unset.
+    trace_set(tgood);
+    assert_streq(trace_current_or_new(), tgood, "trace: the current id is the one set");
+    trace_set(0);
+    var tc1 = trace_current_or_new();
+    assert_eq(strlen(tc1), 55, "trace: unset -> a fresh id");
+    assert_streq(trace_current_or_new(), tc1, "trace: and the same id until reset");
+    trace_set(0);
 
     # OTLP path extraction + int-attribute JSON (OTLP/JSON encodes ints as strings).
     var ourl = "http://localhost:4318/v1/traces";

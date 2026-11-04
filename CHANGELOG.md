@@ -5,6 +5,61 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.5] — 2026-11-04
+
+**The tests run the real trace and metrics code, and the coverage script describes the suite as it is now.** These
+are the next two modules of the roadmap's mirror-drift item. Unlike 2.9.3 and 2.9.4, their copies had not drifted.
+The gain is that they can no longer drift, and that real code no test touched before is now tested: the trace-id
+generator, the thread-local current id, the request and token counters, and the Prometheus histogram output.
+No gateway code changed. **1261 assertions** (was 1243). fmt, lint, vet, deny, coverage (312/684, 45%), the
+security scan and the four fuzz targets are clean.
+
+### Changed — `trace.cyr` and `metrics.cyr` are included for real
+
+- **The copies are gone.** `tests/hoosh.tcyr` includes both modules and drops five copies: `_t_trace_extract`,
+  `_t_trace_ci_eq` and `_t_trace_is_hex`, plus `_t_lat_bound` and `_t_lat_bucket`. Before deleting them I compared
+  each with its source, and all were identical. `metrics.cyr` is included after the test file's Provider enum and
+  `provider_name`, which it needs.
+- **Latency buckets.** The bucket assertions now record through the real `metrics_record_latency` and read the
+  module's own histogram storage (`_t_lat_slot`), rather than a copy of the bucket loop. New assertions cover:
+  - the per-provider count and sum;
+  - an out-of-range provider, which records nothing;
+  - the Prometheus exposition from `metrics_emit_latency`: the `histogram` TYPE line, a bucket's labelled line,
+    the cumulative le=100 bucket and `+Inf`.
+- **Counters:** `metrics_record` sums requests and prompt and completion tokens; `metrics_reset` zeroes them.
+- **Trace ids.**
+  - `trace_extract` is the real one.
+  - New assertions for `trace_generate`: an id is 55 bytes, with version `00` and flags `01`; two ids differ; a
+    generated id passes `trace_extract`'s own W3C validation.
+  - `trace_set` / `trace_current_or_new`: the id set is the one read back; when unset, one id is generated and
+    then kept until reset.
+- **Mutation-checked.** A copy of the tree was changed five ways, and every mutant is caught:
+
+  | mutant | result |
+  |---|---|
+  | a latency sample exactly on a bucket's bound goes to the next bucket | 4 fail |
+  | the histogram stops being cumulative | 1 fails |
+  | the traceparent hex check removed | 1 fails |
+  | `trace_current_or_new` stops storing the id it generated | 1 fails |
+  | the generator writes flags `00` | 1 fails |
+
+### Changed — `scripts/coverage.sh` says what the suite is
+
+Its header still said no test ever executes a line of `src/`. That has not been true since modules began to be
+included for real. The header now:
+- explains the two halves, modules included for real and modules mirrored;
+- states the name-based limitation both ways. A real module's helper that runs only through its caller counts as
+  uncovered, and a same-name copy used to count as covering one. That is the 2.9.4 dip from 306 to 301.
+
+The script also prints which `src/lib` modules the suite includes for real. That line is informational; the gate
+is unchanged. Today it lists **18 of 37**: auth, catalog, compact, compression, dlp, http_server, jsonlite, logging,
+mcp, metadata, metrics, outcome, pricing, provider_err, ratelimit, semantic, trace and urlparse.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.4's apart from the version string. No benched path changed. The
+2026-11-04 rows in `bench-history.csv` after 2.9.4's are this release's mandatory run.
+
 ## [2.9.4] — 2026-11-04
 
 **The tests run the real response-compression and semantic-cache code.** The test file had kept its own copies of

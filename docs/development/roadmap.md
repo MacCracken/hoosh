@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.4 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3 and 2.9.4 took six
+**Current**: v2.9.5 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.5 took eight
 modules' mirrors out of the tests. See the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
@@ -21,7 +21,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response-cache key, batch, metrics, the trace and OTLP helpers, the config and router pickers, the pool ring,
+    response-cache key, batch, the OTLP helpers, the config and router pickers, the pool ring,
     `types.cyr`'s error and sampling helpers, `main.cyr`'s flag parser and hardware. A mirror can drift from `src/`
     while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit chain-link verification).
     2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
@@ -29,16 +29,20 @@ The bands are a plan, not a promise. Every item was checked against the code and
     pointer-equality remove, and an embedding parser without its exponent clamp and no-progress guard).
   - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
     `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
-    `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4).
-  - **Next candidates:** `trace.cyr` and `metrics.cyr`, whose copies use different names, so they include with no
-    collisions. Then `types.cyr`, whose inclusion retires the test file's own enum and helper copies.
+    `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
+    (2.9.5). `scripts/coverage.sh` prints the current list: 18 of 37 modules.
+  - **Next candidate:** `types.cyr`. The test file defines its own Provider / HooshErr / Strategy enums,
+    `provider_name`, `provider_is_local`, the error mappers and the sampling helpers. Including the real module
+    retires all of them at once, but every enum value and helper must match first, so diff them and settle each
+    difference before switching. Then the modules that need a split first: `cache.cyr` (the TTL cache mirror),
+    `router.cyr` (the pickers) and `pool.cyr` (the ring).
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
     modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as
     a failure; the CI test step has a 5-minute timeout since 2.9.4.
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
-    `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header still
-    says no test executes `src/`, which stopped being true once modules were included for real; update that.
+    `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header says so
+    since 2.9.5.
 - **Connection pooling for remote TLS.**
   - **Measured in 2.9.3:** a fresh HTTPS request takes a median 40 ms, a reused connection 6.7 ms, so −33 ms per
     request at a ~6 ms RTT, and more for distant providers.
