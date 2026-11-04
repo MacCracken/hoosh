@@ -8,7 +8,7 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.8.1. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
+**Current**: v2.8.2. The **rust-old parity closeout arc (v2.5.1–v2.5.11) is
 complete** — the port is at behavioral parity with the archived Rust reference and
 past it. Evidence: [rust-old-parity-review.md](rust-old-parity-review.md); 2.7.0 and 2.7.1 closed what remained
 ([rust-old-retirement.md](rust-old-retirement.md)).
@@ -260,7 +260,7 @@ excluded; no `flags_` / `FLAG_ERR_`; `HOOSH_LOG` (`:1073`) is env, not argv):
   `cmdit_raw_argv` before dispatch.
 
 **cyrius.cyml:** `[deps].stdlib` already lists `args` and `io` (no `flags`). Add the
-block below. The 6.6.6 pin needs no move; the cmdit dist compiles on 6.6.2.
+block below. The 6.6.20 pin needs no move; the cmdit dist compiles on 6.6.2.
 
 ```
 [deps.cmdit]

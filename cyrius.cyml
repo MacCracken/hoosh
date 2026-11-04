@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.6"
+cyrius = "6.6.20"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -17,9 +17,11 @@ output = "build/hoosh"
 # precede sigil (sigil references bayan's u256 surface).
 # sys must precede sigil too: since sigil 3.12.18 (cyrius 6.6.4) its
 # agnosys_uname calls lib/sys.cyr's sys_uname. Without sys the build warns
-# `undefined function 'sys_uname'` and that call compiles to a trap. sigil
-# still carries its own copy of uname_release + the UTS_* offsets (identical
-# body and values), so expect one benign `duplicate fn 'uname_release'`.
+# `undefined function 'sys_uname'` and that call compiles to a trap.
+# Since sigil 3.13.3 (cyrius 6.6.20 ships 3.13.10) the fold includes its own
+# leaves (lib/sys.cyr, lib/bayan.cyr, …) and takes uname_release from
+# lib/sys.cyr, so the old benign `duplicate fn 'uname_release'` is gone. The
+# order above is kept: include-once makes the repeats no-ops.
 stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sys", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
@@ -28,7 +30,7 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap",
 # so ai-hwaccel's own stdlib needs are already covered by [deps] above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel"
-tag = "2.4.0"
+tag = "2.4.2"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
@@ -54,7 +56,7 @@ modules = ["dist/ai-hwaccel.cyr"]
 # header for the pinned bote tag) and include it from src/main.cyr. Re-sync
 # with `./scripts/sync-bote.sh <tag>`.
 #
-# majra (2.9.1) — provider event bus pubsub — is vendored the same way at
+# majra (2.9.3) — provider event bus pubsub — is vendored the same way at
 # src/vendor/majra.cyr (self-contained dist/majra.cyr, no includes; majra
 # ships no pubsub-only profile, so this is its smallest bundle). Re-sync by
 # fetching dist/majra.cyr at the new tag. majra still exports

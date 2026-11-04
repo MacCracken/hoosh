@@ -4,7 +4,7 @@
 #   - Device summary for /v1/hardware endpoint
 #   - Quantization suggestions for model placement
 #   - Sharding plans for multi-GPU inference
-# Requires: ai-hwaccel 2.4.0 bundle (registry, profile, quantization, plan,
+# Requires: ai-hwaccel 2.4.2 bundle (registry, profile, quantization, plan,
 #   cost, training, model, json_out — vendored as lib/ai-hwaccel.cyr). The
 #   simulator reads profile_shared_mem, which needs 2.3.28 or later.
 

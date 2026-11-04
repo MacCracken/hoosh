@@ -161,12 +161,12 @@ fn catalog_id_ok(id) {
 
 # The string at obj[key] as a fresh cstr, or 0.
 fn _cat_get_cstr(obj, key) {
-    return _cat_dup_str(bayan_json_v_str(bayan_json_v_obj_get(obj, key)));
+    return _cat_dup_str(bayan_json_v_str(bayan_json_v_obj_get_by_cstr(obj, key)));
 }
 
 # The integer at obj[key], or -1 when absent or not a number.
 fn _cat_get_int(obj, key) {
-    var v = bayan_json_v_obj_get(obj, key);
+    var v = bayan_json_v_obj_get_by_cstr(obj, key);
     if (v == 0) { return 0 - 1; }
     if (bayan_json_v_is_int(v) == 0 && bayan_json_v_is_float(v) == 0) { return 0 - 1; }
     var n = bayan_json_v_int(v);
@@ -176,9 +176,9 @@ fn _cat_get_int(obj, key) {
 
 # obj[key].supported as 1 / 0, or -1 when obj[key] or its `supported` is absent.
 fn _cat_supported(obj, key) {
-    var o = bayan_json_v_obj_get(obj, key);
+    var o = bayan_json_v_obj_get_by_cstr(obj, key);
     if (o == 0) { return 0 - 1; }
-    var s = bayan_json_v_obj_get(o, "supported");
+    var s = bayan_json_v_obj_get_by_cstr(o, "supported");
     if (s == 0) { return 0 - 1; }
     if (bayan_json_v_is_bool(s) == 0) { return 0 - 1; }
     return bayan_json_v_bool(s);
@@ -207,9 +207,9 @@ fn _cat_arr_has(arr, want) {
 fn _cat_anthropic_caps(e, caps) {
     if (caps == 0) { return 0; }
     store64(e + CAT_E_VISION, _cat_supported(caps, "image_input"));
-    var th = bayan_json_v_obj_get(caps, "thinking");
+    var th = bayan_json_v_obj_get_by_cstr(caps, "thinking");
     if (th != 0) {
-        var types = bayan_json_v_obj_get(th, "types");
+        var types = bayan_json_v_obj_get_by_cstr(th, "types");
         if (types != 0) {
             var m = 0;
             if (_cat_supported(types, "adaptive") == 1) { m = m | CAT_THINK_ADAPTIVE; }
@@ -218,9 +218,9 @@ fn _cat_anthropic_caps(e, caps) {
             store64(e + CAT_E_THINK, m);
         }
     }
-    var ef = bayan_json_v_obj_get(caps, "effort");
+    var ef = bayan_json_v_obj_get_by_cstr(caps, "effort");
     if (ef != 0) {
-        var sup = bayan_json_v_obj_get(ef, "supported");
+        var sup = bayan_json_v_obj_get_by_cstr(ef, "supported");
         if (sup != 0 && bayan_json_v_bool(sup) == 0) {
             store64(e + CAT_E_EFFORT, 0);
         } else {
@@ -243,7 +243,7 @@ fn catalog_parse_anthropic(a, body, len, out, more, last) {
     store64(more, 0);
     store64(last, 0);
     var v = bayan_json_v_parse_buf_a(a, body, len);
-    var data = bayan_json_v_obj_get(v, "data");
+    var data = bayan_json_v_obj_get_by_cstr(v, "data");
     if (bayan_json_v_is_arr(data) == 0) { return 0 - 1; }
     var n = bayan_json_v_arr_len(data);
     var i = 0;
@@ -256,12 +256,12 @@ fn catalog_parse_anthropic(a, body, len, out, more, last) {
             store64(e + CAT_E_CREATED, _cat_get_cstr(m, "created_at"));
             store64(e + CAT_E_CTX, _cat_get_int(m, "max_input_tokens"));
             store64(e + CAT_E_MAXOUT, _cat_get_int(m, "max_tokens"));
-            _cat_anthropic_caps(e, bayan_json_v_obj_get(m, "capabilities"));
+            _cat_anthropic_caps(e, bayan_json_v_obj_get_by_cstr(m, "capabilities"));
             vec_push(out, e);
         }
         i = i + 1;
     }
-    var hm = bayan_json_v_obj_get(v, "has_more");
+    var hm = bayan_json_v_obj_get_by_cstr(v, "has_more");
     if (hm != 0 && bayan_json_v_bool(hm) == 1) {
         var lid = _cat_get_cstr(v, "last_id");
         if (catalog_id_ok(lid) == 1) {
@@ -280,14 +280,14 @@ fn catalog_parse_anthropic(a, body, len, out, more, last) {
 fn catalog_parse_google(a, body, len, out, next) {
     store64(next, 0);
     var v = bayan_json_v_parse_buf_a(a, body, len);
-    var models = bayan_json_v_obj_get(v, "models");
+    var models = bayan_json_v_obj_get_by_cstr(v, "models");
     if (bayan_json_v_is_arr(models) == 0) { return 0 - 1; }
     var n = bayan_json_v_arr_len(models);
     var i = 0;
     while (i < n) {
         var m = bayan_json_v_arr_get(models, i);
-        if (_cat_arr_has(bayan_json_v_obj_get(m, "supportedGenerationMethods"), "generateContent") == 1) {
-            var id = _cat_dup_str_strip(bayan_json_v_str(bayan_json_v_obj_get(m, "name")), "models/");
+        if (_cat_arr_has(bayan_json_v_obj_get_by_cstr(m, "supportedGenerationMethods"), "generateContent") == 1) {
+            var id = _cat_dup_str_strip(bayan_json_v_str(bayan_json_v_obj_get_by_cstr(m, "name")), "models/");
             if (catalog_id_ok(id) == 1) {
                 var e = catalog_entry_new(id, CATSRC_LIVE);
                 store64(e + CAT_E_DISPLAY, _cat_get_cstr(m, "displayName"));
@@ -379,7 +379,7 @@ fn catalog_usd_per_token_to_micro_1k(s) {
 # capabilities.vision. Returns the list's length, or -1.
 fn catalog_parse_openai(a, body, len, out, filter) {
     var v = bayan_json_v_parse_buf_a(a, body, len);
-    var data = bayan_json_v_obj_get(v, "data");
+    var data = bayan_json_v_obj_get_by_cstr(v, "data");
     if (bayan_json_v_is_arr(data) == 0) { return 0 - 1; }
     var n = bayan_json_v_arr_len(data);
     var i = 0;
@@ -396,23 +396,24 @@ fn catalog_parse_openai(a, body, len, out, filter) {
             var ctx = _cat_get_int(m, "context_length");
             if (ctx < 0) { ctx = _cat_get_int(m, "max_context_length"); }
             store64(e + CAT_E_CTX, ctx);
-            var tp = bayan_json_v_obj_get(m, "top_provider");
+            var tp = bayan_json_v_obj_get_by_cstr(m, "top_provider");
             if (tp != 0) { store64(e + CAT_E_MAXOUT, _cat_get_int(tp, "max_completion_tokens")); }
-            var pr = bayan_json_v_obj_get(m, "pricing");
+            var pr = bayan_json_v_obj_get_by_cstr(m, "pricing");
             if (pr != 0) {
-                var pp = bayan_json_v_str(bayan_json_v_obj_get(pr, "prompt"));
-                var pc = bayan_json_v_str(bayan_json_v_obj_get(pr, "completion"));
+                var pp = bayan_json_v_str(bayan_json_v_obj_get_by_cstr(pr, "prompt"));
+                var pc = bayan_json_v_str(bayan_json_v_obj_get_by_cstr(pr, "completion"));
                 store64(e + CAT_E_IN_PRICE, catalog_usd_per_token_to_micro_1k(pp));
                 store64(e + CAT_E_OUT_PRICE, catalog_usd_per_token_to_micro_1k(pc));
             }
-            var caps = bayan_json_v_obj_get(m, "capabilities");
+            var caps = bayan_json_v_obj_get_by_cstr(m, "capabilities");
             if (caps != 0) {
-                var vis = bayan_json_v_obj_get(caps, "vision");
+                var vis = bayan_json_v_obj_get_by_cstr(caps, "vision");
                 if (bayan_json_v_is_bool(vis) == 1) { store64(e + CAT_E_VISION, bayan_json_v_bool(vis)); }
             }
-            var arch = bayan_json_v_obj_get(m, "architecture");
+            var arch = bayan_json_v_obj_get_by_cstr(m, "architecture");
             if (arch != 0) {
-                store64(e + CAT_E_VISION, _cat_arr_has(bayan_json_v_obj_get(arch, "input_modalities"), "image"));
+                var mods = bayan_json_v_obj_get_by_cstr(arch, "input_modalities");
+                store64(e + CAT_E_VISION, _cat_arr_has(mods, "image"));
             }
             vec_push(out, e);
         }
@@ -463,7 +464,7 @@ fn catalog_usd_per_mtok_scaled(s) {
 # Parse Ollama's GET /api/tags. Returns the list's length, or -1.
 fn catalog_parse_ollama(a, body, len, out) {
     var v = bayan_json_v_parse_buf_a(a, body, len);
-    var models = bayan_json_v_obj_get(v, "models");
+    var models = bayan_json_v_obj_get_by_cstr(v, "models");
     if (bayan_json_v_is_arr(models) == 0) { return 0 - 1; }
     var n = bayan_json_v_arr_len(models);
     var i = 0;

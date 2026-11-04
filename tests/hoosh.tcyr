@@ -55,7 +55,7 @@ enum HooshErr {
     ERR_RATE_LIMITED   = 3;
     ERR_BUDGET_EXCEEDED = 4;
     ERR_NO_PROVIDER    = 5;
-    ERR_TIMEOUT        = 6;
+    ERR_TIMED_OUT      = 6;
     ERR_CACHE          = 7;
     ERR_DLP_BLOCKED    = 8;
     ERR_HTTP           = 9;
@@ -65,7 +65,7 @@ enum HooshErr {
 fn error_http_status(code) {
     if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
     if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
-    if (code == ERR_TIMEOUT) { return 408; }
+    if (code == ERR_TIMED_OUT) { return 408; }
     if (code == ERR_DLP_BLOCKED) { return 403; }
     if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
     if (code == ERR_HTTP) { return 502; }
@@ -73,7 +73,7 @@ fn error_http_status(code) {
 }
 
 fn error_is_retryable(code) {
-    if (code == ERR_RATE_LIMITED || code == ERR_TIMEOUT) { return 1; }
+    if (code == ERR_RATE_LIMITED || code == ERR_TIMED_OUT) { return 1; }
     if (code == ERR_PROVIDER || code == ERR_CACHE) { return 1; }
     return 0;
 }
@@ -83,7 +83,7 @@ fn error_code_str(code) {
     if (code == ERR_NO_PROVIDER) { return "no_provider"; }
     if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
     if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
-    if (code == ERR_TIMEOUT) { return "timeout"; }
+    if (code == ERR_TIMED_OUT) { return "timeout"; }
     if (code == ERR_CACHE) { return "cache_error"; }
     if (code == ERR_PROVIDER) { return "provider_error"; }
     if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
@@ -4146,7 +4146,7 @@ fn main() {
     assert_eq(error_http_status(ERR_NO_PROVIDER), 404, "no_provider -> 404");
     assert_eq(error_http_status(ERR_RATE_LIMITED), 429, "rate_limited -> 429");
     assert_eq(error_http_status(ERR_BUDGET_EXCEEDED), 429, "budget_exceeded -> 429");
-    assert_eq(error_http_status(ERR_TIMEOUT), 408, "timeout -> 408");
+    assert_eq(error_http_status(ERR_TIMED_OUT), 408, "timeout -> 408");
     assert_eq(error_http_status(ERR_PROVIDER), 500, "provider -> 500");
     assert_eq(error_http_status(ERR_CACHE), 500, "cache -> 500");
     assert_eq(error_http_status(ERR_DLP_BLOCKED), 403, "dlp -> 403");
@@ -4154,7 +4154,7 @@ fn main() {
     assert_eq(error_http_status(ERR_INTERNAL), 500, "internal -> 500");
 
     assert(error_is_retryable(ERR_RATE_LIMITED) == 1, "rate_limited retryable");
-    assert(error_is_retryable(ERR_TIMEOUT) == 1, "timeout retryable");
+    assert(error_is_retryable(ERR_TIMED_OUT) == 1, "timeout retryable");
     assert(error_is_retryable(ERR_PROVIDER) == 1, "provider retryable");
     assert(error_is_retryable(ERR_MODEL_NOT_FOUND) == 0, "model_not_found not retryable");
     assert(error_is_retryable(ERR_BUDGET_EXCEEDED) == 0, "budget not retryable");
@@ -4164,7 +4164,7 @@ fn main() {
     assert_streq(error_code_str(ERR_NO_PROVIDER), "no_provider", "code_str no_prov");
     assert_streq(error_code_str(ERR_RATE_LIMITED), "rate_limit_exceeded", "code_str rate");
     assert_streq(error_code_str(ERR_BUDGET_EXCEEDED), "budget_exceeded", "code_str budget");
-    assert_streq(error_code_str(ERR_TIMEOUT), "timeout", "code_str timeout");
+    assert_streq(error_code_str(ERR_TIMED_OUT), "timeout", "code_str timeout");
     assert_streq(error_code_str(ERR_INTERNAL), "internal_error", "code_str internal");
 
     # ── Provider types ───────────────────────────────────────────

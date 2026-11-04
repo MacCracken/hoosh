@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-10-09 (**v2.8.1**: CHANGELOG, state, README, roadmap, overview and ADR 012 touched for the
-> output-ceiling clamp). The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the
-> rust-old parity arc), when every doc below was re-read against the source.
+> **Last refresh**: 2026-11-04 (**v2.8.2**: CHANGELOG, state, README, roadmap and CLAUDE.md touched for the
+> cyrius 6.6.20 / ai-hwaccel 2.4.2 / bote-core 3.3.17 / majra 2.9.3 refresh and the DCE binary size). The previous
+> refresh was 2026-10-09 (**v2.8.1**, the output-ceiling clamp). The last FULL sweep was 2026-07-23
+> (**v2.5.11**, closing the rust-old parity arc), when every doc below was re-read against the source.
 >
 > **What moved**: `roadmap.md` rewritten as forward-only (557 → 153 lines; ten
 > shipped `v2.5.x` band records and the absorbed Backlog tables removed — that

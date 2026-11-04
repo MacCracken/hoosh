@@ -5,6 +5,102 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.8.2] — 2026-11-04
+
+**Toolchain and dependency refresh.** cyrius 6.6.6 → 6.6.20. Each dependency moves to its last release that pins
+6.6.20: `ai-hwaccel` 2.4.0 → 2.4.2, vendored `bote-core` 3.3.13 → 3.3.17 and `majra` 2.9.1 → 2.9.3. Every newer
+release of the three pins cyrius 6.7.x. No gateway behavior changed. Two source edits clear warnings that 6.6.20
+added (below). **1205 assertions** (unchanged). fmt, lint, vet and deny are clean, and so are coverage, the security
+scan and the four fuzz targets. **The release binary shrinks from 2,931,928 to 1,981,704 B (−32%)**, because
+`CYRIUS_DCE=1` now removes dead code instead of NOP-filling it.
+
+### Changed — cyrius pin 6.6.6 → **6.6.20**
+
+- **`lib/` was re-vendored from an empty tree** (`lib sync`, then `deps`). The snapshot gains two leaves that hoosh's
+  compile set pulls in: `poison` (6.6.18's `freelist` includes it) and `tls_hostid`. 83 entries are locked, and
+  `deps --verify` reports 83/0.
+- **Bundled modules moved:** sandhi 1.9.17 → 1.10.8, sigil 3.12.18 → 3.13.10, patra 1.14.3 → 1.15.2,
+  bayan 1.5.6 → 1.5.12, sakshi → 2.5.7.
+- **The `duplicate fn 'uname_release'` warning is gone.** sigil 3.13.x now takes `uname_release` from `lib/sys.cyr`
+  instead of carrying its own copy. `sys` stays ahead of `sigil` in `[deps].stdlib`.
+- **The build now prints only two warnings, both upstream and both seen on 6.6.6:** sigil's per-bank static crypto
+  buffer (now `lib/sigil.cyr:28046`) and the large-static-data note.
+- **DCE now compacts.** On 6.6.6 a `CYRIUS_DCE=1` build was the same size as a plain one (2,931,928 B), and its
+  ~1.05 MB of dead code was NOP-filled in place. At 6.6.20 the text segment drops from 2,401,856 to 1,448,176 B. The
+  data segment is unchanged. A plain build is 3,099,912 B (+5.7%, from compiler and stdlib growth). This matches
+  6.6.20's HEAP-08 fix: the whole-program compaction registry was capped at 49,152 sources, and a build past the
+  cap silently gave up on compaction. Now the registry grows instead.
+- **The response cache benefits from 6.6.20's hashmap fix.** `lib/hashmap.cyr` now counts the tombstones
+  `map_delete` leaves and rebuilds in place. Before, a map kept at a steady size by delete + insert churn slowly
+  turned every miss into a scan of the whole table. That is the shape of the response cache at capacity (LRU
+  `map_delete`, then `map_set`). Nothing in hoosh keeps a slot pointer across a `map_set`: cache values are separate
+  allocations, and eviction walks a `map_keys` snapshot.
+- **Not applicable to hoosh:** sandhi 1.10.7's 60-second whole-request budget is applied by `sandhi_server_run`,
+  and hoosh runs its own accept loop. hoosh already ignores SIGPIPE at startup (`_sandhi_server_ignore_sigpipe`,
+  2.4.13). 6.6.16's `MSG_NOSIGNAL` socket writes add a second guard for the stdlib's own socket writes.
+
+### Changed — `ai-hwaccel` 2.4.0 → **2.4.2**
+
+The bundle's body is byte-identical to 2.4.0's, apart from three `bayan_json_v_obj_get` →
+`bayan_json_v_obj_get_by_cstr` renames inside `profile_from_json_str`. It also gains a compile-verified
+`# Requires` block. Every leaf that block names is already in hoosh's `[deps].stdlib`, so the include-once
+lines change nothing here. `data/cloud_pricing.json` is byte-identical at 2.4.2. `data/models.json` holds the same
+26 models (hoosh keeps the top-level-array form). Nothing needed re-syncing. **`cyrius.lock` was regenerated
+from empty.** After the tag bump, 6.6.20 kept the 2.4.0 commit pin beside the 2.4.2 one. It fails closed on purpose,
+and deleting the lock is the documented way to re-pin. The lock now carries one commit pin, ai-hwaccel 2.4.2 at
+`4d689d5`.
+
+### Changed — vendored `bote-core` 3.3.13 → **3.3.17** and `majra` 2.9.1 → **2.9.3**
+
+Both are toolchain releases. Their code is unchanged:
+
+- **bote-core** changes only its version header, the `_bote_server_version()` literal and a new `# Requires`
+  block (`hashmap bayan sigil ct`). So `initialize` over `POST /v1/tools/call` now reports `serverInfo` version
+  `3.3.17`. `scripts/sync-bote.sh` defaults to 3.3.17.
+- **majra** changes comments and adds its own `# Requires` block. `pubsub_new`, `pubsub_publish` and
+  `pubsub_total_published` are unchanged.
+- Both bundles were fetched from their tags and are byte-identical to the local tag checkouts.
+
+### Fixed — warnings 6.6.20 added
+
+- **24 calls to the deprecated `bayan_json_v_obj_get` in `src/lib/catalog.cyr`** now call
+  `bayan_json_v_obj_get_by_cstr`. bayan 1.5.10 deprecated the bare name because it does not say whether the key is
+  a C string or a `Str`. Every call site passes a C-string literal, either directly or through `_cat_get_cstr`,
+  `_cat_get_int` and `_cat_supported`, whose callers all pass literals. The deprecated name already forwarded to
+  `_by_cstr`, so no lookup changes. One line was split to stay under the 120-byte limit.
+- **`ERR_TIMEOUT` is renamed `ERR_TIMED_OUT`** in `src/lib/types.cyr` and the test mirror. 6.6.20 warns
+  `duplicate symbol 'ERR_TIMEOUT' redefined with conflicting value (last definition wins)`. sakshi's `ErrCode` has
+  defined `ERR_TIMEOUT = 5` all along, and hoosh's `HooshErr` defined it as 6. 6.6.6 compiled the same collision
+  silently. Nothing in the stdlib reads sakshi's constant, so hoosh's value already won wherever it was used and
+  behavior is unchanged. The rename removes the hazard. The only `HooshErr` name still shared is `ERR_NONE`, with
+  majra's alias, and both are 0.
+
+### Performance
+
+**No code regression.** The 6.6.6 (2.8.1 tree) and 6.6.20 (this tree) bench binaries ran alternately for 7 rounds
+each on one box (load ~1.2). Medians:
+
+| benchmark | 6.6.6 | 6.6.20 | Δ |
+|---|---:|---:|---:|
+| `auth_verify_token` | 104 ns | 86 ns | −17.3% |
+| `cost_record_known_model` | 170 ns | 155 ns | −8.8% |
+| `audit_record_sign` | 3.463 µs | 3.242 µs | −6.4% |
+| `auth_verify_wrong_late` / `_early` | 103 / 102 ns | 98 / 97 ns | −4.9% |
+| `mcp_tools_list` | 4.237 µs | 4.079 µs | −3.7% |
+| `route_select_20_providers` | 798 ns | 828 ns | +3.8% |
+| `cache_get_hit` | 124 ns | 144 ns | **+16.1%** |
+
+The other 17 rows are within ±3.3%, or ±1 ns on the rows a few ns long.
+
+**`cache_get_hit` moved because of code placement, not codegen.** Every function on its path compiles to the same
+size under both toolchains: `cache_get` 578 B, `map_get` 136 B, `_map_lookup` 175 B, `_map_find` 589 B, `hash_str`
+259 B, `_hm_mix` 197 B, `_map_key_eq` 162 B, and `streq`, `strlen` and `memeq`. Their source is identical too. What
+changed is where they sit in the 64-byte line (symbol maps from `CYRIUS_SYMS`). `_map_find` moved from offset 34 to
+offset 5, `cache_get` from 59 to 37, and `map_get` from 0 to 62, so `map_get` now straddles a cache line.
+`cache_get_miss` runs the same `map_get` without the key compare and is flat (+1.8%). This row has swung with
+layout before: 114 → 140 → 114 ns across three consecutive builds on 2026-08-30 in `bench-history.csv`. The
+2026-11-04 row in that file is this release's mandatory `bench-history.sh` run.
+
 ## [2.8.1] — 2026-10-09
 
 **A request's `max_tokens` is trimmed to the serving model's own output ceiling.** Providers refuse anything over

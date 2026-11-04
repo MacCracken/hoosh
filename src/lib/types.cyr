@@ -1,12 +1,15 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.8.1";
+var HOOSH_VERSION = "2.8.2";
 
 # ================================================================
 # Error types
 # ================================================================
 
+# Enum members share one flat namespace with every linked library. sakshi's `ErrCode` already
+# defines `ERR_TIMEOUT = 5`, so hoosh's timeout code is `ERR_TIMED_OUT` (cyrius 6.6.20 warns on
+# the conflicting redefinition; last definition wins). `ERR_NONE = 0` matches majra's alias.
 enum HooshErr {
     ERR_NONE           = 0;
     ERR_PROVIDER       = 1;
@@ -14,7 +17,7 @@ enum HooshErr {
     ERR_RATE_LIMITED   = 3;
     ERR_BUDGET_EXCEEDED = 4;
     ERR_NO_PROVIDER    = 5;
-    ERR_TIMEOUT        = 6;
+    ERR_TIMED_OUT      = 6;
     ERR_CACHE          = 7;
     ERR_DLP_BLOCKED    = 8;
     ERR_HTTP           = 9;
@@ -24,7 +27,7 @@ enum HooshErr {
 fn error_http_status(code) {
     if (code == ERR_MODEL_NOT_FOUND || code == ERR_NO_PROVIDER) { return 404; }
     if (code == ERR_RATE_LIMITED || code == ERR_BUDGET_EXCEEDED) { return 429; }
-    if (code == ERR_TIMEOUT) { return 408; }
+    if (code == ERR_TIMED_OUT) { return 408; }
     if (code == ERR_DLP_BLOCKED) { return 403; }
     if (code == ERR_CACHE || code == ERR_PROVIDER) { return 500; }
     if (code == ERR_HTTP) { return 502; }
@@ -36,7 +39,7 @@ fn error_code_str(code) {
     if (code == ERR_NO_PROVIDER) { return "no_provider"; }
     if (code == ERR_RATE_LIMITED) { return "rate_limit_exceeded"; }
     if (code == ERR_BUDGET_EXCEEDED) { return "budget_exceeded"; }
-    if (code == ERR_TIMEOUT) { return "timeout"; }
+    if (code == ERR_TIMED_OUT) { return "timeout"; }
     if (code == ERR_CACHE) { return "cache_error"; }
     if (code == ERR_PROVIDER) { return "provider_error"; }
     if (code == ERR_DLP_BLOCKED) { return "content_blocked"; }
