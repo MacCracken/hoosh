@@ -128,7 +128,9 @@ fn _otlp_post(body, blen) {
     if (_otlp_is_https() == 1) {
         var h = sandhi_headers_new();
         sandhi_headers_add(h, "Content-Type", "application/json");
-        sandhi_http_post(_otlp_endpoint, h, body, blen);
+        # 2.9.3: in the worker's scratch arena (provider.cyr _remote_arena): the response is ignored, and
+        # through 2.9.2 each export kept its connection, TLS state and receive buffer on the heap for good.
+        sandhi_http_post_a(_remote_arena(), _otlp_endpoint, h, body, blen);
         return 0;
     }
     var path = _otlp_path(_otlp_endpoint);

@@ -279,6 +279,41 @@ fn _remote_http_opts() {
     return o;
 }
 
+# ── Remote request scratch arena (2.9.3) ──
+# sandhi allocates everything a request needs (the connection, TLS state, record
+# buffers, and a receive buffer of max_response_bytes + 1 = 8 MiB, allocated up
+# front) through the allocator it is given. Through 2.9.2 that was the default
+# one, hoosh's never-freeing heap: every uncached buffered remote request kept
+# ~2.2 MB resident and ~8.5 MB of address space for the life of the process
+# (measured: 12 → 148 MB RSS over 60 requests to one HTTPS upstream).
+#
+# Now each thread that makes remote calls owns one growable arena. It is reset
+# at the START of the thread's next remote call, so it settles at the largest
+# single exchange and stops growing. That is safe because every caller is done
+# with the previous response by then: the bodies a caller keeps are copied out
+# (provider_forward's `rb`, the semantic-cache embedding), the error capture
+# copies into its own buffer, and a response written to the client is written
+# before the handler returns. Nothing from the arena may outlive the request
+# that made it, so connection pooling (whose conns would) cannot share it.
+#
+# Slot 6 is a fixed thread-local slot (0-15 are fixed; trace 1, reqbuf 2,
+# provider_err 3, auth 4, chat id 5). Every remote caller runs on a pool worker
+# or the main thread, which both have a thread-local block.
+var REMOTE_ARENA_SLOT = 6;
+var REMOTE_ARENA_INITIAL = 262144;
+
+fn _remote_arena() {
+    var a = thread_local_get(REMOTE_ARENA_SLOT);
+    if (a != 0) {
+        reset_via(a);
+        return a;
+    }
+    a = arena_allocator_growable(REMOTE_ARENA_INITIAL);
+    if (a == 0) { return default_alloc(); }       # out of memory: the 2.9.2 behaviour
+    thread_local_set(REMOTE_ARENA_SLOT, a);
+    return a;
+}
+
 # The same options plus the route's TLS policy (2.7.0: [[providers]]
 # tls_pinned_certs / client_cert / client_key). sandhi fails closed when a
 # policy cannot be enforced, and bypasses the connection pool for it.
@@ -1233,7 +1268,8 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             url = _provider_url(base, path);
         }
         var hdrs = _provider_headers(route);
-        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts_for(route));
+        # 2.9.3: in this thread's scratch arena; the body is copied out below (rb).
+        var sresp = sandhi_http_post_opts_a(_remote_arena(), url, hdrs, body, blen, _remote_http_opts_for(route));
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);

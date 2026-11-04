@@ -19,7 +19,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.3 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 1215 assertions, 182 groups, 0 failures |
+| **Tests** | 1226 assertions, 182 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -268,7 +268,7 @@ neither. `hoosh serve` logs a warning when either file is missing.
 ## Testing
 
 ```bash
-# Run tests (1215 assertions across 182 groups)
+# Run tests (1226 assertions across 182 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)

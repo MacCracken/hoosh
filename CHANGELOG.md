@@ -5,6 +5,99 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.3] — 2026-11-04
+
+**Remote requests stop leaking megabytes each, and the tests stop mirroring four modules.** The roadmap's
+connection-pooling measurement turned up something much bigger. Every remote request kept its sandhi allocations on
+hoosh's never-freeing heap:
+- **~2.2 MB resident and ~8.5 MB of address space** per buffered request (non-streaming chat, embeddings, the OTLP
+  export);
+- **~6.4 MB resident and ~26 MB of address space** per stream.
+
+At one remote stream a second that is ~23 GB of RSS an hour. The roadmap had tracked only the local path's
+~1 KiB/request. Both remote paths now use a per-thread scratch arena. A residue of ~170–190 KB per new TLS
+connection remains; it is in sandhi, which ignores the arena for TLS state, and is filed in the roadmap.
+**1226 assertions** (was 1215). fmt, lint, vet, deny, coverage (306/684, from 299/683), the security scan and the
+four fuzz targets are clean.
+
+### Fixed — remote requests no longer accumulate on the heap
+
+- **The cause.** sandhi allocates everything an exchange needs through the allocator it is given: the connection,
+  record buffers, and a receive buffer of `max_response_bytes + 1`. That buffer is allocated up front, and hoosh
+  sets the cap to 8 MiB (`REMOTE_MAX_BYTES`). hoosh called the default-allocator variants, so all of it went onto the
+  global bump heap, which never frees.
+- **The fix: `_remote_arena()`** (`provider.cyr`).
+  - Each thread that makes remote calls (the pool workers, or main for `hoosh infer`) owns one growable arena, in
+    fixed thread-local slot 6.
+  - It is reset at the **start** of that thread's next remote call, so it settles at the largest single exchange.
+  - That is safe because every caller is done with the previous response by then. Kept bodies are copied out (chat's
+    `rb`, the semantic-cache embedding), the error capture copies into its own buffer, a response relayed to the
+    client is written before the handler returns, and the stream callback copies text, tool fields and usage out of
+    sandhi's event buffers.
+  - The stream's status is read before the empty-stream fallback calls `retry_forward`, which resets the arena.
+  - Used by: chat (`provider_forward`), `/v1/embeddings`, the semantic-cache embedding, the remote stream
+    (`sandhi_http_stream_opts_a`) and the https OTLP export (`sandhi_http_post_a`).
+- **Measured live** against a local HTTPS upstream, each request with a unique prompt (a repeated prompt is answered
+  from the response cache and never reaches upstream, which hid this in a first run):
+
+  | path | 2.9.2 | 2.9.3 |
+  |---|---|---|
+  | buffered, 60 requests | RSS 12 → 148 MB; VmSize +256 MB | RSS 12 → 37 MB; VmSize flat |
+  | buffered, 200 requests | — | RSS 12 → 64 MB; VmSize flat |
+  | stream, 90 requests | RSS 16 → 592 MB; VmSize 276 → 2,373 MB | RSS 16 → 76 MB; VmSize flat |
+
+  The early rise in 2.9.3 is each worker's arena growing once. After it, growth is ~170–190 KB per request.
+- **What remains is upstream.** sandhi's arena-aware connect (`_sandhi_conn_finalize_with_early_data_a`) opens TLS
+  with `tls_connect_alloc(fd, …)`, the global-heap wrapper, instead of `tls_connect_alloc_in(a, fd, …)`. So each new
+  TLS connection's state (~179 KB) still lands on the heap. A standalone probe isolates it: with an arena, plain HTTP
+  costs 856 B per request and HTTPS 178,768 B. The roadmap records it as an upstream item.
+- **Still correct:**
+  - a stream that fails before emitting falls back to the buffered path and reports the provider's 500;
+  - a buffered 500 carries the provider's message;
+  - remote keep-alive still fires at 15.5 s.
+
+  All 200 buffered and 90 streamed requests returned 200.
+
+### Changed — four modules lose their test mirrors
+
+`tests/hoosh.tcyr` already included `dlp.cyr`, `compact.cyr`, `http_server.cyr` and `pricing.cyr` for real, yet
+it still carried copies of their functions. That is the roadmap's mirror-drift item, and two copies had drifted:
+- **`req_content_length`.** The real one was hardened later (the header must start a line, the value is capped
+  against overflow, and a value with no digits is refused), and the copy never followed. It and `_hdr_ci_eq` were
+  dead: the real-function tests had already replaced their callers.
+- **The pricing and cost tracker.** A whole legacy copy sat in the tests: its own `PRICE_*` table,
+  `pricing_lookup_packed`, `cost_calculate`, and a `cost_tracker_*` keyed by provider **name**. That is the keying
+  2.5.6 replaced with (provider, base_url), so `cost_accumulation` was testing the old design. Every cost assertion
+  now runs against `estimate_cost_micro`, `cost_record`, `cost_record_count` / `_at`, `cost_total_micro` and
+  `cost_reset`. Every expected figure held.
+- **DLP.** `_dlp_find_ci` is the real one. A `max()` helper that stood in for `dlp_custom_level`'s fold is replaced by
+  tests of the real `dlp_custom_add` / `dlp_custom_level` / `dlp_custom_hit_name`: highest level wins, order does not
+  matter, no match gives -1, the first matching rule is named, and an empty pattern is refused.
+- **Compaction.** `_cmp_ws` / `_msg_role_is` are the real ones. A duplicate `CHARS_PER_TOKEN_X10` global is gone.
+- **Mutation-checked.** A copy of the tree was changed three ways:
+  - cost records keyed by provider only fails 3 assertions;
+  - DLP keeping the first match instead of the highest level fails 1;
+  - a role matcher that skips the name compare **passed**. The closing-quote check alone rejected `"user"` and
+    `"systemx"` by length, so a new assertion uses a same-length role (`"tester"`), and that mutant now fails.
+- The test file is 212 lines shorter.
+
+### Measured — remote connection pooling (not adopted yet)
+
+- **Method.** A probe made alternating fresh and pooled HTTPS GETs with sandhi's pool against a 2xx CDN endpoint.
+  sandhi pools only after a 2xx/3xx response, so a provider's unauthenticated 401 cannot show reuse.
+- **Result.** A fresh request takes a median 40.0 ms, a reused one 6.7 ms: **−33 ms per request** at a ~6 ms RTT, and
+  more for a distant provider. About 12 ms is the two extra round trips and about 20 ms native TLS handshake CPU.
+  curl reached the same server in ~25 ms fresh.
+- **Why not yet.** Pooled connections must outlive the request, so they cannot live in the request arena that this
+  release introduces. Also, sandhi returns a failed send or read on a pooled connection to the caller rather than
+  retrying it on a fresh one (`_sandhi_http_exchange_keepalive_a`), so a stale socket would become a retried POST.
+  The roadmap records both preconditions.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.2's apart from the version string. No benched path changed. The
+2026-11-04 rows in `bench-history.csv` after 2.9.2's are this release's mandatory run.
+
 ## [2.9.2] — 2026-11-04
 
 **Quick wins from the 2026-11-04 roadmap review.** Five fixes, none of which changes an API:

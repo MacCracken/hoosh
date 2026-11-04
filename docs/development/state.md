@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| **Version** | **2.9.2** (quick wins: remote SSE keep-alive, `[hardware] data_dir` + shipped data files, MCP registration refusals logged, `rust-old/` removed, no bare syscalls) on 2.9.1 (cyrius 6.7.18 and the latest ai-hwaccel / bote / majra; corrected `/v1/hardware/*` numbers; sigil crypto lanes) on 2.9.0 (cyrius 6.7.9; `/v1/tools/call` answers to the MCP / JSON-RPC specs via bote 3.4.10) on 2.8.2 (cyrius 6.6.20 refresh) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
+| **Version** | **2.9.3** (remote requests no longer leak megabytes each: a per-thread request arena; four modules lose their test mirrors; pooling measured) on 2.9.2 (quick wins: remote SSE keep-alive, `[hardware] data_dir` + shipped data files, MCP registration refusals logged, `rust-old/` removed, no bare syscalls) on 2.9.1 (cyrius 6.7.18 and the latest ai-hwaccel / bote / majra; corrected `/v1/hardware/*` numbers; sigil crypto lanes) on 2.9.0 (cyrius 6.7.9; `/v1/tools/call` answers to the MCP / JSON-RPC specs via bote 3.4.10) on 2.8.2 (cyrius 6.6.20 refresh) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
 | **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; vendored `bote-core` **3.8.3**, `majra` **2.13.0** |
 | **Binary** (x86_64 static ELF) | ~2.3 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~3.7 MB without |
 | **Source** | ~15,600 lines / 38 files (`src/main.cyr` + 37 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 1215 assertions, 182 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
+| **Tests** | 1226 assertions, 182 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr`, `pricing.cyr`, `metadata.cyr`, `dlp.cyr`, `compact.cyr` and `http_server.cyr` are included for real, with no mirrors beside them |
 | **Benchmarks** | 25 (`tests/hoosh.bcyr`); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
 | **Coverage** | symbol coverage 43% (`scripts/coverage.sh`, CI floor 30%) |
@@ -83,8 +83,12 @@ is unguarded and is the top structural item in the roadmap.
 ## Open
 
 See [roadmap.md](roadmap.md), banded by release (2026-11-04).
-- **Next, 2.9.x patches:** mirror drift, module by module (`mcp.cyr` joined the real includes in 2.9.2), and
-  remote TLS connection pooling once measured.
+- **Next, 2.9.x patches:** mirror drift, module by module (`dlp`, `compact`, `http_server` and `pricing` were
+  finished in 2.9.3), and remote TLS connection pooling, which is measured (−33 ms per request) and waits on the
+  two preconditions in the roadmap.
+- **Memory:** 2.9.3 found that each remote request kept megabytes on the never-freeing heap (~2.2 MB buffered,
+  ~6.4 MB per stream) and fixed it with a per-thread arena. ~170–190 KB per new TLS connection remains; that is in
+  sandhi, which opens TLS on the global heap even when given an arena.
 - **2.10.0 headline: the per-request arena.** 2.5.11 removed the 64 KiB-per-request leak (~128 MB → 2.0 MB over
   2000 requests), but ~1 KiB per request still accumulates in response building, and the allocator never frees.
 

@@ -168,8 +168,10 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     var rb = 0;
     var rl = 0;
     if (route_is_remote(route) == 1) {
-        var sresp = sandhi_http_post_opts(_provider_url(base, "/v1/embeddings"), _provider_headers(route),
-          body_ptr, body_len, _remote_http_opts_for(route));
+        # 2.9.3: in this thread's scratch arena (provider.cyr _remote_arena). rb is written to the client
+        # before this handler returns, and the arena is only reset by the thread's next remote call.
+        var sresp = sandhi_http_post_opts_a(_remote_arena(), _provider_url(base, "/v1/embeddings"),
+          _provider_headers(route), body_ptr, body_len, _remote_http_opts_for(route));
         if (sresp != 0 && sandhi_http_err_kind(sresp) == SANDHI_OK) {
             st = sandhi_http_status(sresp);
             rb = sandhi_http_body(sresp);
@@ -2371,7 +2373,11 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         store64(ctx + 24, 0);
         store64(ctx + 32, 0);
         store64(ctx + 40, oc);        # 2.8.0: the stream's outcome state
-        var sres = sandhi_http_stream_opts(
+        # 2.9.3: in this thread's scratch arena (provider.cyr _remote_arena). Through 2.9.2 every remote
+        # stream kept ~6.4 MB resident on the never-freeing heap (measured: 16 → 592 MB over 90 streams).
+        # The callback copies what it keeps (text, tool fields, usage) out of sandhi's event buffers, and
+        # sres is read below BEFORE retry_forward, whose provider_forward resets the arena.
+        var sres = sandhi_http_stream_opts_a(_remote_arena(),
           surl, "POST", hdrs, sbody, strlen(sbody),
           &_remote_stream_cb, ctx, _remote_stream_opts(route));
         var emitted = load64(ctx + 24);
@@ -2645,7 +2651,8 @@ fn _embed_query_body(body_ptr, body_len) {
         # Bounded: this call sits inside _chat_lock (see the semantic-cache
         # note in _chat_prep), so an unbounded embedding round-trip would
         # serialise the whole worker pool behind one hung backend.
-        var sresp = sandhi_http_post_opts(url, hdrs, body, blen, _remote_http_opts_for(route));
+        # 2.9.3: in this thread's scratch arena; the vector body is copied out below.
+        var sresp = sandhi_http_post_opts_a(_remote_arena(), url, hdrs, body, blen, _remote_http_opts_for(route));
         if (sresp == 0) { return 0; }
         if (sandhi_http_err_kind(sresp) != SANDHI_OK) { return 0; }
         var sst = sandhi_http_status(sresp);

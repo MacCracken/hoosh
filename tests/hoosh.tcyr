@@ -153,12 +153,6 @@ fn provider_name(prov) {
     return "unknown";
 }
 
-# ----------------------------------------------------------------
-# Per-provider token estimation (mirrors src/lib/compact.cyr).
-# Chars-per-token ratio scaled by 10 (3.8 -> 38) since there are no floats.
-# ----------------------------------------------------------------
-
-var CHARS_PER_TOKEN_X10 = 40;
 
 fn _build_req_header(buf, method, path, host, body_len, cap) {
     # src calls trace_current_or_new(); trace.cyr is not linked into this
@@ -1063,34 +1057,7 @@ fn _t_json_array_count(ptr, len) {
 }
 
 # ── 2.5.10 DLP custom-pattern mirrors ──
-# Mirror of src/lib/dlp.cyr _dlp_find_ci — case-insensitive literal search.
-fn _t_dlp_find_ci(t, len, pat) {
-    var plen = strlen(pat);
-    if (plen == 0 || plen > len) { return 0 - 1; }
-    var i = 0;
-    while (i + plen <= len) {
-        var j = 0;
-        while (j < plen) {
-            var a = load8(t + i + j) & 0xFF;
-            var b = load8(pat + j) & 0xFF;
-            if (a >= 65 && a <= 90) { a = a + 32; }
-            if (b >= 65 && b <= 90) { b = b + 32; }
-            if (a != b) { break; }
-            j = j + 1;
-        }
-        if (j == plen) { return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
-}
-
-# Mirror of dlp_custom_level's "highest matching level wins" fold.
-fn _t_dlp_custom_max(a, b) {
-    var best = 0 - 1;
-    if (a > best) { best = a; }
-    if (b > best) { best = b; }
-    return best;
-}
+# 2.9.3: _dlp_find_ci and the custom-level fold are dlp.cyr's own (included for real), no longer mirrored.
 
 # ── 2.5.8 CLI flag-parser mirrors ──
 # Mirror of src/main.cyr _flag_val / _flag_set / _positional. argv is modelled
@@ -1684,90 +1651,20 @@ fn _t_remote_opts(stream, out) {
     return 0;
 }
 
-# ── 2.5.7 compaction role-matcher mirror ──
-# Mirror of src/lib/compact.cyr _cmp_ws / _msg_role_is.
-fn _t_cmp_ws(p, len, j) {
-    while (j < len) {
-        var c = load8(p + j);
-        if (c != 32 && c != 9 && c != 10 && c != 13) { return j; }
-        j = j + 1;
-    }
-    return j;
-}
-
-fn _t_msg_role_is(p, len, i, want, want_len) {
-    if (i + 6 > len) { return 0; }
-    if (memeq(p + i, "\"role\"", 6) == 0) { return 0; }
-    var j = _t_cmp_ws(p, len, i + 6);
-    if (j >= len) { return 0; }
-    if (load8(p + j) != 58) { return 0; }
-    j = _t_cmp_ws(p, len, j + 1);
-    if (j >= len) { return 0; }
-    if (load8(p + j) != 34) { return 0; }
-    j = j + 1;
-    if (j + want_len >= len) { return 0; }
-    if (memeq(p + j, want, want_len) == 0) { return 0; }
-    if (load8(p + j + want_len) != 34) { return 0; }
-    return 1;
-}
-
+# ── 2.5.7 compaction role matcher ──
+# 2.9.3: _msg_role_is / _cmp_ws are compact.cyr's own (included for real), no longer mirrored.
 # Scan a messages array for a system message the way compact_messages does.
 fn _t_has_system(p, len) {
     var i = 0;
     while (i < len - 8) {
-        if (_t_msg_role_is(p, len, i, "system", 6) == 1) { return 1; }
+        if (_msg_role_is(p, len, i, "system", 6) == 1) { return 1; }
         i = i + 1;
     }
     return 0;
 }
 
-# ── 2.5.6 cost tracker mirrors ──
-# Mirror of src/lib/pricing.cyr's record vec. Production keys by
-# (provider, base_url), NOT provider alone — two routes of the same provider
-# type at different URLs are separate lines on the bill.
-# Record: provider(0) base_url(8) in(16) out(24) cost_micro(32) reqs(40).
-fn _t_cost_find(recs, prov, base_url) {
-    var n = vec_len(recs);
-    var i = 0;
-    while (i < n) {
-        var r = vec_get(recs, i);
-        if (load64(r) == prov) {
-            if (streq(load64(r + 8), base_url) == 1) { return r; }
-        }
-        i = i + 1;
-    }
-    var fresh = alloc(48);
-    store64(fresh, prov);
-    store64(fresh + 8, base_url);
-    store64(fresh + 16, 0);
-    store64(fresh + 24, 0);
-    store64(fresh + 32, 0);
-    store64(fresh + 40, 0);
-    vec_push(recs, fresh);
-    return fresh;
-}
 
-fn _t_cost_record(recs, prov, base_url, in_tok, out_tok, model) {
-    var r = _t_cost_find(recs, prov, base_url);
-    store64(r + 16, load64(r + 16) + in_tok);
-    store64(r + 24, load64(r + 24) + out_tok);
-    var cost_micro = cost_calculate(model, prov, in_tok, out_tok);
-    store64(r + 32, load64(r + 32) + cost_micro);
-    store64(r + 40, load64(r + 40) + 1);
-    # 2.5.12: mirrors cost_record returning what it accumulated.
-    return cost_micro;
-}
 
-fn _t_cost_total(recs) {
-    var total = 0;
-    var n = vec_len(recs);
-    var i = 0;
-    while (i < n) {
-        total = total + load64(vec_get(recs, i) + 32);
-        i = i + 1;
-    }
-    return total;
-}
 
 # ── 2.5.5 health / circuit breaker mirrors ──
 # Mirror of the per-route health record in src/lib/route.cyr + health_record in
@@ -1919,43 +1816,6 @@ fn _t_config_str_array(raw, out, max) {
         }
     }
     return count;
-}
-
-# Mirror of src/lib/http_server.cyr _hdr_ci_eq / req_content_length.
-fn _t_hdr_ci_eq(a, b, n) {
-    var i = 0;
-    while (i < n) {
-        var ca = load8(a + i) & 0xFF;
-        var cb = load8(b + i) & 0xFF;
-        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
-        if (cb >= 65 && cb <= 90) { cb = cb + 32; }
-        if (ca != cb) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-
-fn _t_req_content_length(buf, len) {
-    var i = 0;
-    while (i < len - 3) {
-        if (load8(buf + i) == 13 && load8(buf + i + 1) == 10) {
-            if (load8(buf + i + 2) == 13 && load8(buf + i + 3) == 10) { return 0; }
-        }
-        if (i + 15 < len && _t_hdr_ci_eq(buf + i, "content-length:", 15) == 1) {
-            var j = i + 15;
-            while (j < len && load8(buf + j) == 32) { j = j + 1; }
-            var v = 0;
-            while (j < len) {
-                var c = load8(buf + j) & 0xFF;
-                if (c < 48 || c > 57) { break; }
-                v = v * 10 + (c - 48);
-                j = j + 1;
-            }
-            return v;
-        }
-        i = i + 1;
-    }
-    return 0;
 }
 
 # Mirror of src/lib/config.cyr bind_addr_str — packed network-order IPv4 to
@@ -3307,103 +3167,9 @@ fn _t_sem_remove(entries, key) {
     return 0;
 }
 
-# ================================================================
-# Cost tracker — pricing lookup + accumulation
-# ================================================================
-
-# Pricing in microdollars per million tokens (avoids f64)
-# e.g. $2.50/M = 2500000 microdollars/M
-enum Pricing {
-    # OpenAI
-    PRICE_GPT4O_IN       = 2500000;
-    PRICE_GPT4O_OUT      = 10000000;
-    PRICE_GPT4O_MINI_IN  = 150000;
-    PRICE_GPT4O_MINI_OUT = 600000;
-    # Anthropic
-    PRICE_OPUS_IN        = 15000000;
-    PRICE_OPUS_OUT       = 75000000;
-    PRICE_SONNET_IN      = 3000000;
-    PRICE_SONNET_OUT     = 15000000;
-    # DeepSeek
-    PRICE_DSCHAT_IN      = 270000;
-    PRICE_DSCHAT_OUT     = 1100000;
-    # Grok
-    PRICE_GROK3_IN       = 3000000;
-    PRICE_GROK3_OUT      = 15000000;
-    # Local providers
-    PRICE_LOCAL_IN       = 0;
-    PRICE_LOCAL_OUT      = 0;
-}
-
-# Lookup pricing: returns (input_microdollars_per_M, output_microdollars_per_M)
-# packed as: input * 0x100000000 + output (since both fit in 32 bits)
-# ⚠ RENAMED from `pricing_lookup`. This is a DIFFERENT function from the arity-3
-# `pricing_lookup(model, prov, out)` defined above at :448 and in src/lib/pricing.cyr —
-# it returns the in/out prices packed into one i64 instead of filling an out-param.
-# Both were in scope with the same name; cyrius 6.6.2 makes a same-name different-arity
-# duplicate a hard error, where it used to be a silent "last definition wins".
-fn pricing_lookup_packed(model, prov) {
-    if (provider_is_local(prov) == 1) { return 0; }
-    if (streq(model, "gpt-4o") == 1) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
-    if (streq(model, "gpt-4o-mini") == 1) { return PRICE_GPT4O_MINI_IN * 0x100000000 + PRICE_GPT4O_MINI_OUT; }
-    if (streq(model, "claude-opus-4") == 1) { return PRICE_OPUS_IN * 0x100000000 + PRICE_OPUS_OUT; }
-    if (streq(model, "claude-sonnet-4") == 1) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
-    if (streq(model, "deepseek-chat") == 1) { return PRICE_DSCHAT_IN * 0x100000000 + PRICE_DSCHAT_OUT; }
-    if (streq(model, "grok-3") == 1) { return PRICE_GROK3_IN * 0x100000000 + PRICE_GROK3_OUT; }
-    # Prefix match — check if model starts with a known base
-    if (memeq(model, "claude-sonnet-4", 15) == 1) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
-    if (memeq(model, "claude-opus-4", 13) == 1) { return PRICE_OPUS_IN * 0x100000000 + PRICE_OPUS_OUT; }
-    if (memeq(model, "gpt-4o", 6) == 1) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
-    # Fallback per provider
-    if (prov == PROV_ANTHROPIC) { return PRICE_SONNET_IN * 0x100000000 + PRICE_SONNET_OUT; }
-    if (prov == PROV_OPENAI) { return PRICE_GPT4O_IN * 0x100000000 + PRICE_GPT4O_OUT; }
-    if (prov == PROV_DEEPSEEK) { return PRICE_DSCHAT_IN * 0x100000000 + PRICE_DSCHAT_OUT; }
-    return 0;
-}
-
-fn pricing_input(packed) { return packed / 0x100000000; }
-fn pricing_output(packed) { return packed % 0x100000000; }
-
-# Cost for a request in microdollars
-fn cost_calculate(model, prov, prompt_tokens, completion_tokens) {
-    var p = pricing_lookup_packed(model, prov);
-    var inp = pricing_input(p);
-    var out = pricing_output(p);
-    # cost = tokens * price_per_M / 1_000_000
-    var cost = prompt_tokens * inp / 1000000 + completion_tokens * out / 1000000;
-    return cost;
-}
-
-# Cost tracker — hashmap of provider:url -> record
-# Record layout: total_input(8) total_output(8) total_cost(8) requests(8) = 32 bytes
-enum CostField {
-    COST_REC_SIZE   = 32;
-    COST_REC_INPUT  = 0;
-    COST_REC_OUTPUT = 8;
-    COST_REC_COST   = 16;
-    COST_REC_REQS   = 24;
-}
-
-fn cost_tracker_new() { return map_new(); }
-
-fn cost_tracker_record(tracker, prov, model, prompt_tok, comp_tok) {
-    var cost = cost_calculate(model, prov, prompt_tok, comp_tok);
-    var pname = provider_name(prov);
-    var rec = map_get(tracker, pname);
-    if (rec == 0) {
-        rec = alloc(COST_REC_SIZE);
-        store64(rec + COST_REC_INPUT, 0);
-        store64(rec + COST_REC_OUTPUT, 0);
-        store64(rec + COST_REC_COST, 0);
-        store64(rec + COST_REC_REQS, 0);
-        map_set(tracker, pname, rec);
-    }
-    store64(rec + COST_REC_INPUT, load64(rec + COST_REC_INPUT) + prompt_tok);
-    store64(rec + COST_REC_OUTPUT, load64(rec + COST_REC_OUTPUT) + comp_tok);
-    store64(rec + COST_REC_COST, load64(rec + COST_REC_COST) + cost);
-    store64(rec + COST_REC_REQS, load64(rec + COST_REC_REQS) + 1);
-    return cost;
-}
+# (2.9.3: the legacy pricing table + provider-name-keyed cost tracker mirror that stood here is gone.
+# Costs are tested against src/lib/pricing.cyr, included for real: estimate_cost_micro, cost_record,
+# cost_record_count / _at, cost_total_micro, cost_reset.)
 
 # ================================================================
 # Queue — simple priority queue (5 tiers)
@@ -4385,43 +4151,46 @@ fn main() {
     # ── Cost tracker: local free ──────────────────────────────────
     test_group("cost_tracker");
 
-    assert_eq(cost_calculate("anything", PROV_OLLAMA, 1000, 500), 0, "local provider free");
-    assert_eq(cost_calculate("anything", PROV_LLAMACPP, 1000, 500), 0, "llamacpp free");
-    assert_eq(cost_calculate("anything", PROV_SYNAPSE, 1000, 500), 0, "synapse free");
+    assert_eq(estimate_cost_micro("anything", PROV_OLLAMA, 1000, 500), 0, "local provider free");
+    assert_eq(estimate_cost_micro("anything", PROV_LLAMACPP, 1000, 500), 0, "llamacpp free");
+    assert_eq(estimate_cost_micro("anything", PROV_SYNAPSE, 1000, 500), 0, "synapse free");
 
     # ── Cost tracker: known model pricing ─────────────────────────
     test_group("cost_pricing");
 
     # gpt-4o: $2.5M input, $10M output → for 1M tokens input only = $2.50 = 2500000 microdollars
-    var gpt_cost = cost_calculate("gpt-4o", PROV_OPENAI, 1000000, 0);
+    var gpt_cost = estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000000, 0);
     assert_eq(gpt_cost, 2500000, "gpt-4o 1M input = $2.50");
 
     # ── Cost tracker: prefix match ────────────────────────────────
     test_group("cost_prefix");
 
-    var sonnet_cost = cost_calculate("claude-sonnet-4-20250514", PROV_ANTHROPIC, 1000000, 0);
+    var sonnet_cost = estimate_cost_micro("claude-sonnet-4-20250514", PROV_ANTHROPIC, 1000000, 0);
     assert_eq(sonnet_cost, 3000000, "claude-sonnet-4 prefix match = $3.00");
 
     # ── Cost tracker: accumulation ────────────────────────────────
     test_group("cost_accumulation");
 
-    var ct = cost_tracker_new();
-    cost_tracker_record(ct, PROV_OPENAI, "gpt-4o", 100, 50);
-    cost_tracker_record(ct, PROV_OPENAI, "gpt-4o", 100, 50);
-    var rec = map_get(ct, "openai");
-    assert(rec != 0, "openai record exists");
-    assert_eq(load64(rec + COST_REC_REQS), 2, "2 requests accumulated");
-    assert_eq(load64(rec + COST_REC_INPUT), 200, "200 input tokens");
-    assert_eq(load64(rec + COST_REC_OUTPUT), 100, "100 output tokens");
+    # 2.9.3: pricing.cyr's own tracker (it replaced a mirror keyed by provider NAME, the keying 2.5.6 dropped).
+    # Record: provider(0) base_url(8) in(16) out(24) cost_micro(32) reqs(40).
+    cost_reset();
+    cost_record(PROV_OPENAI, "https://api.openai.com", 100, 50, "gpt-4o");
+    cost_record(PROV_OPENAI, "https://api.openai.com", 100, 50, "gpt-4o");
+    assert_eq(cost_record_count(), 1, "openai record exists");
+    var rec = cost_record_at(0);
+    assert_eq(load64(rec + 40), 2, "2 requests accumulated");
+    assert_eq(load64(rec + 16), 200, "200 input tokens");
+    assert_eq(load64(rec + 24), 100, "100 output tokens");
 
     # ── Cost tracker: separate providers ──────────────────────────
     test_group("cost_separate_providers");
 
-    var ct2 = cost_tracker_new();
-    cost_tracker_record(ct2, PROV_OPENAI, "gpt-4o", 100, 50);
-    cost_tracker_record(ct2, PROV_ANTHROPIC, "claude-sonnet-4", 100, 50);
-    assert(map_get(ct2, "openai") != 0, "openai record");
-    assert(map_get(ct2, "anthropic") != 0, "anthropic record");
+    cost_reset();
+    cost_record(PROV_OPENAI, "https://api.openai.com", 100, 50, "gpt-4o");
+    cost_record(PROV_ANTHROPIC, "https://api.anthropic.com", 100, 50, "claude-sonnet-4");
+    assert_eq(cost_record_count(), 2, "openai and anthropic are separate records");
+    assert_eq(load64(cost_record_at(0)), PROV_OPENAI, "openai record");
+    assert_eq(load64(cost_record_at(1)), PROV_ANTHROPIC, "anthropic record");
 
     # ── Queue: priority ordering ──────────────────────────────────
     test_group("queue_priority");
@@ -4913,12 +4682,13 @@ fn main() {
 
     test_group("cost_tracker_reset");
 
-    var ct3 = cost_tracker_new();
-    cost_tracker_record(ct3, PROV_OPENAI, "gpt-4o", 100, 50);
-    assert(map_get(ct3, "openai") != 0, "pre-reset: record exists");
-    # Reset = new map
-    ct3 = map_new();
-    assert_eq(map_size(ct3), 0, "post-reset: empty");
+    cost_reset();
+    cost_record(PROV_OPENAI, "https://api.openai.com", 100, 50, "gpt-4o");
+    assert_eq(cost_record_count(), 1, "pre-reset: record exists");
+    assert(cost_total_micro() > 0, "pre-reset: spend recorded");
+    cost_reset();
+    assert_eq(cost_record_count(), 0, "post-reset: empty");
+    assert_eq(cost_total_micro(), 0, "post-reset: no spend");
 
     # ================================================================
     # CACHE EXTRAS — stats tracking, eviction counting
@@ -6526,21 +6296,21 @@ fn main() {
     # production lookup checked local only in its FALLBACK, so `llama-3.3-70b`
     # on Ollama matched the Groq row and billed real money for tokens generated
     # on your own GPU. Exactly the realistic cases were mispriced.
-    assert_eq(cost_calculate("gpt-4o", PROV_OPENAI, 1000, 500), 7500,
+    assert_eq(estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000, 500), 7500,
       "cost: remote gpt-4o priced");
-    assert_eq(cost_calculate("gpt-4o", PROV_LMSTUDIO, 1000, 500), 0,
+    assert_eq(estimate_cost_micro("gpt-4o", PROV_LMSTUDIO, 1000, 500), 0,
       "cost: same model name served locally is free");
-    assert_eq(cost_calculate("claude-opus-4", PROV_OLLAMA, 1000, 500), 0,
+    assert_eq(estimate_cost_micro("claude-opus-4", PROV_OLLAMA, 1000, 500), 0,
       "cost: table-matching name on ollama is free");
-    assert_eq(cost_calculate("anything", PROV_LLAMACPP, 9999, 9999), 0,
+    assert_eq(estimate_cost_micro("anything", PROV_LLAMACPP, 9999, 9999), 0,
       "cost: unknown model on llamacpp is free");
 
     test_group("cost_tracker_accumulate");
-    var cr = vec_new();
-    _t_cost_record(cr, PROV_OPENAI, "https://api.openai.com", 1000, 500, "gpt-4o");
-    _t_cost_record(cr, PROV_OPENAI, "https://api.openai.com", 2000, 1000, "gpt-4o");
-    assert_eq(vec_len(cr), 1, "cost: same provider+url is one record");
-    var c0 = vec_get(cr, 0);
+    cost_reset();
+    cost_record(PROV_OPENAI, "https://api.openai.com", 1000, 500, "gpt-4o");
+    cost_record(PROV_OPENAI, "https://api.openai.com", 2000, 1000, "gpt-4o");
+    assert_eq(cost_record_count(), 1, "cost: same provider+url is one record");
+    var c0 = cost_record_at(0);
     assert_eq(load64(c0 + 16), 3000, "cost: input tokens accumulate");
     assert_eq(load64(c0 + 24), 1500, "cost: output tokens accumulate");
     assert_eq(load64(c0 + 40), 2, "cost: request count accumulates");
@@ -6549,18 +6319,18 @@ fn main() {
     test_group("cost_tracker_keying");
     # Same provider TYPE at a different base_url is a separate record — two
     # OpenAI-compatible endpoints are two bills.
-    _t_cost_record(cr, PROV_OPENAI, "https://other.example.com", 1000, 0, "gpt-4o");
-    assert_eq(vec_len(cr), 2, "cost: different base_url is a new record");
+    cost_record(PROV_OPENAI, "https://other.example.com", 1000, 0, "gpt-4o");
+    assert_eq(cost_record_count(), 2, "cost: different base_url is a new record");
     # A different provider is likewise separate.
-    _t_cost_record(cr, PROV_ANTHROPIC, "https://api.anthropic.com", 1000, 500, "claude-opus-4");
-    assert_eq(vec_len(cr), 3, "cost: different provider is a new record");
+    cost_record(PROV_ANTHROPIC, "https://api.anthropic.com", 1000, 500, "claude-opus-4");
+    assert_eq(cost_record_count(), 3, "cost: different provider is a new record");
     # The grand total is the sum across records.
-    assert_eq(_t_cost_total(cr), 22500 + 2500 + 52500, "cost: total sums all records");
+    assert_eq(cost_total_micro(), 22500 + 2500 + 52500, "cost: total sums all records");
     # A local route contributes records but no spend.
-    _t_cost_record(cr, PROV_OLLAMA, "http://localhost:11434", 5000, 5000, "llama3");
-    assert_eq(vec_len(cr), 4, "cost: local route still tracked");
-    assert_eq(_t_cost_total(cr), 22500 + 2500 + 52500, "cost: local adds no spend");
-    assert_eq(load64(vec_get(cr, 3) + 16), 5000, "cost: local tokens still counted");
+    cost_record(PROV_OLLAMA, "http://localhost:11434", 5000, 5000, "llama3");
+    assert_eq(cost_record_count(), 4, "cost: local route still tracked");
+    assert_eq(cost_total_micro(), 22500 + 2500 + 52500, "cost: local adds no spend");
+    assert_eq(load64(cost_record_at(3) + 16), 5000, "cost: local tokens still counted");
 
     # ── v2.5.7 config-reader closeout ──
     test_group("audit_excision_detected");
@@ -7240,6 +7010,10 @@ fn main() {
     # A longer role starting with the wanted prefix must not match.
     var wsp = "[{\"role\": \"systemx\", \"content\": \"s\"}]";
     assert_eq(_t_has_system(wsp, strlen(wsp)), 0, "role: 'systemx' not matched as system");
+    # 2.9.3: a DIFFERENT role of the same length. The closing-quote check alone rejects "user" and
+    # "systemx" by length, so without this a matcher that skipped the name compare still passed.
+    var wst = "[{\"role\": \"tester\", \"content\": \"s\"}]";
+    assert_eq(_t_has_system(wst, strlen(wst)), 0, "role: a same-length role is not system");
 
     test_group("context_keep_last_floor");
     # The retained tail is floored so compaction cannot strip a conversation to
@@ -7605,20 +7379,34 @@ fn main() {
     # by config on the request path — a ReDoS surface. Literal is the capability
     # that ports safely.
     var cp = "Project BLUEJAY is confidential";
-    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "bluejay"), 8, "dlp: lowercase pattern matches mixed case");
-    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "BLUEJAY"), 8, "dlp: exact case matches");
-    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "Bluejay"), 8, "dlp: mixed case matches");
-    assert_eq(_t_dlp_find_ci(cp, strlen(cp), "goshawk"), 0 - 1, "dlp: absent pattern -> -1");
+    assert_eq(_dlp_find_ci(cp, strlen(cp), "bluejay"), 8, "dlp: lowercase pattern matches mixed case");
+    assert_eq(_dlp_find_ci(cp, strlen(cp), "BLUEJAY"), 8, "dlp: exact case matches");
+    assert_eq(_dlp_find_ci(cp, strlen(cp), "Bluejay"), 8, "dlp: mixed case matches");
+    assert_eq(_dlp_find_ci(cp, strlen(cp), "goshawk"), 0 - 1, "dlp: absent pattern -> -1");
     # A pattern longer than the text cannot match and must not read past the end.
-    assert_eq(_t_dlp_find_ci("hi", 2, "much longer pattern"), 0 - 1, "dlp: over-long pattern safe");
+    assert_eq(_dlp_find_ci("hi", 2, "much longer pattern"), 0 - 1, "dlp: over-long pattern safe");
     # Empty pattern is rejected rather than matching everything at offset 0.
-    assert_eq(_t_dlp_find_ci(cp, strlen(cp), ""), 0 - 1, "dlp: empty pattern never matches");
+    assert_eq(_dlp_find_ci(cp, strlen(cp), ""), 0 - 1, "dlp: empty pattern never matches");
     # Match at the very start and the very end.
-    assert_eq(_t_dlp_find_ci("acme-1234", 9, "acme"), 0, "dlp: match at start");
-    assert_eq(_t_dlp_find_ci("id-acme", 7, "acme"), 3, "dlp: match at end");
-    # Custom levels raise the classification; the highest of several wins.
-    assert_eq(_t_dlp_custom_max(3, 1), 3, "dlp: highest custom level wins");
-    assert_eq(_t_dlp_custom_max(1, 2), 2, "dlp: order-independent");
+    assert_eq(_dlp_find_ci("acme-1234", 9, "acme"), 0, "dlp: match at start");
+    assert_eq(_dlp_find_ci("id-acme", 7, "acme"), 3, "dlp: match at end");
+    # Custom levels raise the classification; the highest of several wins (2.9.3: dlp.cyr's own
+    # dlp_custom_add / dlp_custom_level / dlp_custom_hit_name, not a max() helper).
+    dlp_custom_clear();
+    assert_eq(dlp_custom_add("empty", "", CLASS_RESTRICTED), 0, "dlp: an empty pattern is not added");
+    assert_eq(dlp_custom_add("codename", "bluejay", CLASS_CONFIDENTIAL), 1, "dlp: a pattern is added");
+    assert_eq(dlp_custom_add("partner", "acme-", CLASS_RESTRICTED), 1, "dlp: a second pattern is added");
+    assert_eq(dlp_custom_count(), 2, "dlp: two custom patterns");
+    var dcb = "Project BLUEJAY for ACME-7";
+    assert_eq(dlp_custom_level(dcb, strlen(dcb)), CLASS_RESTRICTED, "dlp: highest custom level wins");
+    assert_eq(dlp_custom_level(cp, strlen(cp)), CLASS_CONFIDENTIAL, "dlp: only the matching pattern counts");
+    assert_eq(dlp_custom_level("nothing here", 12), 0 - 1, "dlp: no match -> -1");
+    assert_streq(dlp_custom_hit_name(dcb, strlen(dcb)), "codename", "dlp: the first matching rule is named");
+    dlp_custom_clear();
+    dlp_custom_add("partner", "acme-", CLASS_RESTRICTED);
+    dlp_custom_add("codename", "bluejay", CLASS_CONFIDENTIAL);
+    assert_eq(dlp_custom_level(dcb, strlen(dcb)), CLASS_RESTRICTED, "dlp: order-independent");
+    dlp_custom_clear();
     # A custom pattern can reach restricted, same as a built-in.
     assert_eq(CLASS_RESTRICTED > CLASS_CONFIDENTIAL, 1, "dlp: restricted outranks confidential");
 
@@ -7668,11 +7456,11 @@ fn main() {
 
     # cost_record now RETURNS what it accumulated, so the response body reports
     # the same value rather than a second computation that merely ought to agree.
-    var cr_ret_recs = vec_new();
-    var cr_returned = _t_cost_record(cr_ret_recs, PROV_OPENAI, "https://api.openai.com",
+    cost_reset();
+    var cr_returned = cost_record(PROV_OPENAI, "https://api.openai.com",
       1000, 500, "gpt-4o-mini");
     assert_eq(cr_returned, 450, "usage: cost_record returns the micro-USD it just recorded");
-    assert_eq(cr_returned, _t_cost_total(cr_ret_recs),
+    assert_eq(cr_returned, cost_total_micro(),
       "usage: and it equals what landed in the record — same value by construction, so a client \
     summing per-response costs cannot drift from /v1/costs");
 

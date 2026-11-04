@@ -6,10 +6,11 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.2**: CHANGELOG, README (*Hardware data files*, stats), state, roadmap (re-banded,
-> then 2.9.2's quick wins removed as shipped), overview, index and the rust-old retirement document (the tree is
-> gone)). Earlier the same day: **v2.9.1** (cyrius 6.7.18; ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9;
-> the zugot-recipe step dropped) and **v2.8.2** (cyrius 6.6.20); before that 2026-10-09 (**v2.8.1**).
+> **Last refresh**: 2026-11-04 (**v2.9.3**: CHANGELOG, README stats, state, roadmap: mirror-drift progress, the
+> pooling measurement and the upstream sandhi TLS-allocator item). Earlier the same day: **v2.9.2** (README
+> *Hardware data files*; the roadmap re-banded; the rust-old retirement carried out), **v2.9.1** (cyrius 6.7.18;
+> ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and **v2.8.2** (cyrius
+> 6.6.20); before that 2026-10-09 (**v2.8.1**).
 > The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the rust-old parity arc), when every doc below was
 > re-read against the source.
 >

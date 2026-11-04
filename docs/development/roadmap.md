@@ -8,8 +8,8 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.2 (cyrius 6.7.18). The 2.9.2 quick wins shipped; see the CHANGELOG. **Next**: the 2.9.x patches
-and 2.10.0 below.
+**Current**: v2.9.3 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each and took four modules'
+mirrors out of the tests; see the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
@@ -22,17 +22,29 @@ The bands are a plan, not a promise. Every item was checked against the code and
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
     response-cache key, compression, the semantic cache, batch, metrics, the trace and OTLP helpers, the config and
-    router pickers, the pool ring, DLP custom patterns, `main.cyr`'s flag parser and hardware. A mirror can drift
-    from `src/` while both stay green. That has happened twice: v2.5.6 pricing order and v2.5.7 audit chain-link
-    verification, and both times the mirror was right and `src/` was wrong.
-  - **The fix:** include each module for real, as `pricing.cyr`, `metadata.cyr`, `catalog.cyr`, `outcome.cyr`,
-    `urlparse.cyr` and (since 2.9.2) `mcp.cyr` already are. Where a helper lives in a module that needs the whole
-    server (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One
-    or two modules per patch.
+    router pickers, the pool ring, `types.cyr`'s error and sampling helpers, `main.cyr`'s flag parser and hardware. A
+    mirror can drift from `src/` while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit
+    chain-link verification). 2.9.3 found two more drifted copies, a stale `req_content_length` and a legacy cost
+    tracker keyed the pre-2.5.6 way.
+  - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
+    `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2), and `dlp.cyr`, `compact.cyr`
+    and `http_server.cyr` (2.9.3).
+  - **Next candidates:** `compression.cyr` (self-contained by design), `semantic.cyr`, `trace.cyr`, `metrics.cyr`,
+    then `types.cyr`, whose inclusion retires the test file's own enum and helper copies.
+  - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
+    (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
+    modules per patch. Mutation-check each one: change the real function and confirm a test fails.
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift.
-- **Connection pooling for remote TLS** (`sandhi_http_options_pool`; policy-bound requests bypass it). The case worth
-  doing is reusing remote TLS handshakes. Measure the handshake share of a remote request first. A local loopback
-  connect is ≪ inference latency.
+- **Connection pooling for remote TLS.**
+  - **Measured in 2.9.3:** a fresh HTTPS request takes a median 40 ms, a reused connection 6.7 ms, so −33 ms per
+    request at a ~6 ms RTT, and more for distant providers.
+  - **Two preconditions before adopting it:**
+    1. Pooled connections must outlive the request, so they cannot live in the per-thread request arena 2.9.3 added.
+       They need sandhi to allocate them from the pool's own allocator.
+    2. sandhi returns a failed send or read on a pooled connection to the caller rather than retrying it on a fresh
+       one (`_sandhi_http_exchange_keepalive_a`), so a stale socket would become a retried POST. Keep the pool's
+       idle timeout well under the providers' keep-alive, or get sandhi to retry stale connections internally.
+  - A policy-bound route (`tls_pinned_certs`, mTLS) bypasses the pool by design.
 
 ---
 
@@ -52,7 +64,10 @@ starts, and release it once the response is written.
   health records live in the same arena, and they must outlive the request that created them.
 - The design work is deciding what is request-scoped and what is process-scoped, then enforcing that split. Write
   an ADR first.
-- The 2.8.0 catalog fetch's reusable arena is a small working precedent.
+- Two working precedents: the 2.8.0 catalog fetch's reusable arena, and 2.9.3's per-thread `_remote_arena()`
+  (`provider.cyr`). The latter took every remote request's sandhi allocations, megabytes each, off the heap.
+- Measure with unique prompts. A repeated prompt is answered from the response cache and never exercises the
+  request path.
 
 Until then, a hoosh instance needs a periodic restart under sustained load. Measure with `/proc/<pid>/status` rather
 than assuming.
@@ -133,6 +148,15 @@ than assuming.
 ---
 
 ## Upstream-gated
+
+- **sandhi — TLS connection state ignores the request's allocator.** `_sandhi_conn_finalize_with_early_data_a` is
+  handed `a` but opens TLS with `tls_connect_alloc(fd, …)`, the global-heap wrapper, instead of
+  `tls_connect_alloc_in(a, fd, …)`. So each new TLS connection's state, ~179 KB, stays on hoosh's never-freeing
+  heap, even under 2.9.3's per-thread arena: ~170–190 KB per remote request.
+  - **Measured** with a standalone probe and an arena: plain HTTP 856 B per request, HTTPS 178,768 B.
+  - **The fix has to cover the session cache too:** passing `a` must not leave TLS session-cache entries pointing
+    into an arena that gets reset.
+  - File it in sandhi with these figures.
 
 - **cyrius — `cyrius coverage` reports on the vendored stdlib, not the local repo.** Still open:
   `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`. hoosh gates on
