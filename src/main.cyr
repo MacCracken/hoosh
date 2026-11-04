@@ -67,6 +67,7 @@ include "src/lib/audit.cyr"
 include "src/lib/storage.cyr"
 include "src/lib/retry.cyr"
 include "src/lib/hardware.cyr"
+include "src/lib/reqparse.cyr"     # 2.9.16: handlers.cyr's pure request helpers, includable by the tests
 include "src/lib/handlers.cyr"
 include "src/lib/batch.cyr"
 include "src/lib/events.cyr"

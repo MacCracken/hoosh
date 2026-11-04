@@ -96,6 +96,9 @@ include "src/lib/otlp.cyr"
 include "src/lib/provider.cyr"
 # 2.9.15: the backoff schedule and the retry loops, for real (nothing in the test file covered them).
 include "src/lib/retry.cyr"
+# 2.9.16: handlers.cyr's pure request helpers, split out as reqparse.cyr and included for real. Their copies here had
+# drifted: the cache key without the caller's identity, and the tools / numeric-field scans matching nested keys.
+include "src/lib/reqparse.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -127,32 +130,8 @@ fn _find_provider_route(routes, count, prov) {
     return 0;
 }
 
-# Exact-key response-cache key (mirror of handlers.cyr _cache_key).
-fn _cache_key(model, body_ptr, body_len) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\n");
-    var bb = alloc(body_len + 1);
-    memcpy(bb, body_ptr, body_len);
-    store8(bb + body_len, 0);
-    str_builder_add_cstr(sb, bb);
-    var s = str_builder_build(sb);
-    return sha256_hex(str_cstr(s), str_len(s));
-}
-
 fn _ckey(model, body) {
     return _cache_key(model, body, strlen(body));
-}
-
-# Canonical warming body (mirror of handlers.cyr _warming_body).
-fn _warming_body(model, prompt) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"messages\":[{\"role\":\"user\",\"content\":\"");
-    str_builder_add_cstr(sb, prompt);
-    str_builder_add_cstr(sb, "\"}]}");
-    return str_builder_build(sb);
 }
 
 # Whitespace compression: compression.cyr's own (2.9.4, included at the top).
@@ -182,45 +161,6 @@ fn _vec2(x, y) {
     store64(v, x);
     store64(v + 8, y);
     return v;
-}
-
-# Extract the raw tools array span (mirror of handlers.cyr _extract_tools).
-fn _extract_tools(body_ptr, body_len) {
-    var i = 0;
-    while (i + 9 < body_len) {
-        if (memeq(body_ptr + i, "\"tools\":", 8) == 1) {
-            var j = i + 8;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            if (j < body_len && load8(body_ptr + j) == 91) {
-                var depth = 1;
-                var start = j;
-                j = j + 1;
-                while (j < body_len && depth > 0) {
-                    var ch = load8(body_ptr + j);
-                    if (ch == 91) { depth = depth + 1; }
-                    if (ch == 93) { depth = depth - 1; }
-                    if (ch == 34) {
-                        j = j + 1;
-                        while (j < body_len) {
-                            if (load8(body_ptr + j) == 34) { break; }
-                            if (load8(body_ptr + j) == 92) { j = j + 1; }
-                            j = j + 1;
-                        }
-                    }
-                    j = j + 1;
-                }
-                var len = j - start;
-                if (len <= 2) { return 0; }
-                var result = alloc(16);
-                store64(result, body_ptr + start);
-                store64(result + 8, len);
-                return result;
-            }
-            return 0;
-        }
-        i = i + 1;
-    }
-    return 0;
 }
 
 # Extract tools from a cstr body literal, return the span as a cstr (or 0).
@@ -369,19 +309,6 @@ fn _t_lat_slot(prov, b) {
     return load64(_lat_counts + (prov * (NLAT_BUCKETS + 1) + b) * 8);
 }
 
-# Mirror of src/lib/handlers.cyr _hoosh_req_from_str (REQ_* values inlined:
-# none=0 gpu=1 tpu=2 gaudi=3 aws-neuron=4 gpu-or-tpu=5 any-accelerator=6, -1=bad).
-fn _t_req_from_str(s) {
-    if (streq(s, "none") == 1) { return 0; }
-    if (streq(s, "gpu") == 1) { return 1; }
-    if (streq(s, "tpu") == 1) { return 2; }
-    if (streq(s, "gaudi") == 1) { return 3; }
-    if (streq(s, "aws-neuron") == 1) { return 4; }
-    if (streq(s, "gpu-or-tpu") == 1) { return 5; }
-    if (streq(s, "any-accelerator") == 1) { return 6; }
-    return 0 - 1;
-}
-
 # Mirror of src/lib/config.cyr strategy_from_str (STRAT_* values inlined:
 # priority=0 round-robin=1 lowest-latency=2 direct=3).
 fn _t_strategy_from_str(s) {
@@ -424,77 +351,6 @@ fn _t_milli_str(v) {
     var sb = str_builder_new();
     _sb_add_milli(sb, v);
     return str_cstr(str_builder_build(sb));
-}
-
-# Mirror of src/lib/handlers.cyr _req_num_milli — raw-scan a top-level numeric
-# field to a x1000-scaled int, GEN_UNSET when absent.
-fn _t_req_num_milli(body_ptr, body_len, key, keylen) {
-    var i = 0;
-    while (i + keylen < body_len) {
-        if (memeq(body_ptr + i, key, keylen) == 1) {
-            var j = i + keylen;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            var neg = 0;
-            if (j < body_len && load8(body_ptr + j) == 45) {
-                neg = 1;
-                j = j + 1;
-            }
-            var ip = 0;
-            var digits = 0;
-            while (j < body_len) {
-                var c = load8(body_ptr + j) & 0xFF;
-                if (c < 48 || c > 57) { break; }
-                ip = ip * 10 + (c - 48);
-                digits = digits + 1;
-                j = j + 1;
-            }
-            if (digits == 0) { return GEN_UNSET; }
-            var frac = 0;
-            var scale = 100;
-            if (j < body_len && load8(body_ptr + j) == 46) {
-                j = j + 1;
-                while (j < body_len && scale > 0) {
-                    var fc = load8(body_ptr + j) & 0xFF;
-                    if (fc < 48 || fc > 57) { break; }
-                    frac = frac + (fc - 48) * scale;
-                    scale = scale / 10;
-                    j = j + 1;
-                }
-            }
-            var v = ip * 1000 + frac;
-            if (neg == 1) { return 0 - v; }
-            return v;
-        }
-        i = i + 1;
-    }
-    return GEN_UNSET;
-}
-
-# Mirror of src/lib/handlers.cyr _json_array_count — objects at depth 1.
-fn _t_json_array_count(ptr, len) {
-    var n = 0;
-    var depth = 0;
-    var i = 0;
-    while (i < len) {
-        var c = load8(ptr + i) & 0xFF;
-        if (c == 34) {
-            i = i + 1;
-            while (i < len) {
-                if (load8(ptr + i) == 34) { break; }
-                if (load8(ptr + i) == 92) { i = i + 1; }
-                i = i + 1;
-            }
-            i = i + 1;
-            continue;
-        }
-        if (c == 123 || c == 91) {
-            if (depth == 1 && c == 123) { n = n + 1; }
-            depth = depth + 1;
-        }
-        if (c == 125 || c == 93) { depth = depth - 1; }
-        i = i + 1;
-    }
-    return n;
 }
 
 # ── 2.5.10 DLP custom-pattern mirrors ──
@@ -695,64 +551,19 @@ fn _t_ll_pick2(lat_a, lat_b) {
     return router_select(rt, "m");
 }
 
-# ── 2.6.13 hardware whole-number input mirrors ──
-# Mirror of src/lib/handlers.cyr _hw_blank, _hw_num_byte, _hw_whole_bounded and
-# _hw_json_whole. handle_hw_simulate parses model_params and add_devices'
-# memory_bytes with them, handle_hw_placement model_params, and handle_hw_training
-# model_params_m; _hw_out_of_range words the 400 from the cap. The caps are hardware.cyr's own
-# SIM_MAX_DEVICE_BYTES and HW_MAX_MODEL_PARAMS (copied here until 2.9.9).
+# ── 2.6.13 hardware whole-number inputs ──
+# _hw_blank, _hw_num_byte, _hw_whole_bounded and _hw_json_whole are reqparse.cyr's own since 2.9.16 (they were
+# mirrored here). handle_hw_simulate parses model_params and add_devices' memory_bytes with them,
+# handle_hw_placement model_params, and handle_hw_training model_params_m; _hw_out_of_range words the 400 from the
+# cap. The caps are hardware.cyr's own SIM_MAX_DEVICE_BYTES and HW_MAX_MODEL_PARAMS (copied here until 2.9.9).
 
-fn _t_hw_blank(c) {
-    if (c == 32 || c == 9 || c == 13 || c == 10) { return 1; }
-    return 0;
-}
-
-fn _t_hw_num_byte(c) {
-    if (c >= 48 && c <= 57) { return 1; }
-    if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45) { return 1; }
-    return 0;
-}
-
-# _hw_whole_bounded: the value, -1 when not a whole number, -2 when above `cap`.
-fn _t_hw_whole_bounded(p, len, cap) {
-    var v = 0;
-    var i = 0;
-    while (i < len) {
-        var d = (load8(p + i) & 0xFF) - 48;
-        if (d < 0 || d > 9) { break; }
-        if (v > (cap - d) / 10) { return 0 - 2; }
-        v = v * 10 + d;
-        i = i + 1;
-    }
-    if (i == 0) { return 0 - 1; }
-    if (i < len && load8(p + i) == 46) {
-        i = i + 1;
-        if (i == len) { return 0 - 1; }
-        while (i < len && load8(p + i) == 48) { i = i + 1; }
-    }
-    if (i < len) { return 0 - 1; }
-    return v;
-}
-
-# _hw_json_whole: blanks trimmed; absent, empty and null read as 0.
-fn _t_hw_json_whole(s, cap) {
-    if (s == 0) { return 0; }
-    var p = str_data(s);
-    var len = str_len(s);
-    while (len > 0 && _t_hw_blank(load8(p)) == 1) { p = p + 1; len = len - 1; }
-    while (len > 0 && _t_hw_blank(load8(p + len - 1)) == 1) { len = len - 1; }
-    if (len == 0) { return 0; }
-    if (len == 4 && memeq(p, "null", 4) == 1) { return 0; }
-    return _t_hw_whole_bounded(p, len, cap);
-}
-
-fn _t_whole(cs, cap) { return _t_hw_whole_bounded(cs, strlen(cs), cap); }
+fn _t_whole(cs, cap) { return _hw_whole_bounded(cs, strlen(cs), cap); }
 
 # handle_hw_simulate's memory_bytes token: the JSON-number bytes after the key.
 fn _t_mem_token(cs) {
     var k = 0;
-    while (load8(cs + k) != 0 && _t_hw_num_byte(load8(cs + k)) == 1) { k = k + 1; }
-    return _t_hw_whole_bounded(cs, k, SIM_MAX_DEVICE_BYTES);
+    while (load8(cs + k) != 0 && _hw_num_byte(load8(cs + k)) == 1) { k = k + 1; }
+    return _hw_whole_bounded(cs, k, SIM_MAX_DEVICE_BYTES);
 }
 
 # The pre-2.6.13 arithmetic: the memory_bytes digit loop, and str_to_int, which
@@ -1344,14 +1155,6 @@ fn queue_len(q) {
 fn queue_is_empty(q) {
     if (queue_len(q) == 0) { return 1; }
     return 0;
-}
-
-# Audit entry layout
-# 2.5.0's _req_reasoning_effort mirror is gone: handlers.cyr's is a wrapper over catalog_req_effort (catalog.cyr,
-# included above), and this is the same wrapper, so the 2.5.0 assertions below run against the real scanner.
-fn _req_reasoning_effort(body_ptr, body_len) {
-    var w = alloc(8);
-    return catalog_req_effort(body_ptr, body_len, w);
 }
 
 # ================================================================
@@ -3630,6 +3433,17 @@ fn main() {
     assert_eq(streq(_ckey("gpt-4o-mini", rq), _ckey("gpt-4o-mini", rq2)), 0,
       "cache key: different body differs");
     assert_eq(strlen(_ckey("gpt-4o-mini", rq)), 64, "cache key: sha256 hex is 64 chars");
+    # 2.9.16: the real key leads with the caller's identity (auth.cyr sets it per request from the matched
+    # token), so one caller's cached answer is never served to another. The copy here left it out.
+    var ck_anon = _ckey("gpt-4o-mini", rq);
+    thread_local_set(AUTH_IDENT_SLOT, 1);
+    var ck_a = _ckey("gpt-4o-mini", rq);
+    assert_eq(streq(ck_a, _ckey("gpt-4o-mini", rq)), 1, "cache key: same caller, same key");
+    thread_local_set(AUTH_IDENT_SLOT, 2);
+    assert_eq(streq(ck_a, _ckey("gpt-4o-mini", rq)), 0, "cache key: another caller, another key");
+    thread_local_set(AUTH_IDENT_SLOT, 0);
+    assert_eq(streq(ck_anon, ck_a), 0, "cache key: an authenticated caller does not share the anonymous entry");
+    assert_eq(streq(ck_anon, _ckey("gpt-4o-mini", rq)), 1, "cache key: identity 0 is the anonymous key again");
 
     # ── Cache warming: canonical body + key match ─────────────────
     test_group("cache_warming");
@@ -3733,6 +3547,13 @@ fn main() {
     # Absent / empty tools → 0.
     assert_eq(_etools("{\"model\":\"m\",\"messages\":[]}"), 0, "tools: absent → 0");
     assert_eq(_etools("{\"tools\":[]}"), 0, "tools: empty array → 0");
+    # 2.9.16: only the TOP-LEVEL "tools" counts. The copy here matched the key anywhere, such as inside a
+    # message's content.
+    assert_eq(_etools("{\"messages\":[{\"role\":\"user\",\"content\":{\"tools\":[1]}}]}"), 0,
+      "tools: a nested tools key is not the request's tools");
+    # 2.9.16: with whitespace inside too. src forwarded "tools":[] from 2.6.9 to 2.9.15; the copy here kept the rule.
+    assert_eq(_etools("{\"tools\": [ \n ], \"model\":\"m\"}"), 0, "tools: whitespace-only array → 0");
+    assert_eq(streq(_etools("{\"tools\":[ 1 ]}"), "[ 1 ]"), 1, "tools: one element is kept");
 
     # Outbound conversion: OpenAI tools → Anthropic (input_schema) / Gemini.
     # NB: "function" appears as both the "type" value and the real object key.
@@ -4157,12 +3978,12 @@ fn main() {
 
     # ── Hardware: requirement-string → REQ_* enum ────────────────
     test_group("hardware");
-    assert_eq(_t_req_from_str("none"), 0, "req: none → REQ_NONE");
-    assert_eq(_t_req_from_str("gpu"), 1, "req: gpu → REQ_GPU");
-    assert_eq(_t_req_from_str("tpu"), 2, "req: tpu → REQ_TPU");
-    assert_eq(_t_req_from_str("gpu-or-tpu"), 5, "req: gpu-or-tpu → REQ_GPU_OR_TPU");
-    assert_eq(_t_req_from_str("any-accelerator"), 6, "req: any-accelerator → REQ_ANY_ACCELERATOR");
-    assert_eq(_t_req_from_str("quantum"), 0 - 1, "req: unknown → -1");
+    assert_eq(_hoosh_req_from_str("none"), 0, "req: none → REQ_NONE");
+    assert_eq(_hoosh_req_from_str("gpu"), 1, "req: gpu → REQ_GPU");
+    assert_eq(_hoosh_req_from_str("tpu"), 2, "req: tpu → REQ_TPU");
+    assert_eq(_hoosh_req_from_str("gpu-or-tpu"), 5, "req: gpu-or-tpu → REQ_GPU_OR_TPU");
+    assert_eq(_hoosh_req_from_str("any-accelerator"), 6, "req: any-accelerator → REQ_ANY_ACCELERATOR");
+    assert_eq(_hoosh_req_from_str("quantum"), 0 - 1, "req: unknown → -1");
 
     # ── Routing strategy config + lowest-latency pick (2.4.5) ────
     test_group("routing_strategy");
@@ -4246,28 +4067,39 @@ fn main() {
     # after the nested `messages` array, which the flat json_parse cannot reach.
     # That blind spot is why max_tokens silently fell back to 2048 pre-2.5.2.
     var rn1 = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\"}],\"temperature\":0.7}";
-    assert_eq(_t_req_num_milli(rn1, strlen(rn1), "\"temperature\":", 14), 700,
+    assert_eq(_req_num_milli(rn1, strlen(rn1), "\"temperature\"", 13), 700,
       "num: 0.7 after messages -> 700");
     var rn2 = "{\"max_tokens\":1234,\"messages\":[]}";
-    assert_eq(_t_req_num_milli(rn2, strlen(rn2), "\"max_tokens\":", 13), 1234000,
+    assert_eq(_req_num_milli(rn2, strlen(rn2), "\"max_tokens\"", 12), 1234000,
       "num: integer 1234 -> 1234000");
     # 0 must parse as 0, NOT be confused with absent — a client asking for
     # temperature 0 wants determinism and must not silently get the default.
     var rn3 = "{\"temperature\":0}";
-    assert_eq(_t_req_num_milli(rn3, strlen(rn3), "\"temperature\":", 14), 0,
+    assert_eq(_req_num_milli(rn3, strlen(rn3), "\"temperature\"", 13), 0,
       "num: explicit 0 is a value, not unset");
     var rn4 = "{\"model\":\"m\"}";
-    assert_eq(_t_req_num_milli(rn4, strlen(rn4), "\"temperature\":", 14), GEN_UNSET,
+    assert_eq(_req_num_milli(rn4, strlen(rn4), "\"temperature\"", 13), GEN_UNSET,
       "num: absent -> GEN_UNSET");
     var rn5 = "{\"top_p\": 0.95}";
-    assert_eq(_t_req_num_milli(rn5, strlen(rn5), "\"top_p\":", 8), 950,
+    assert_eq(_req_num_milli(rn5, strlen(rn5), "\"top_p\"", 7), 950,
       "num: space after colon tolerated");
     var rn6 = "{\"temperature\":-0.5}";
-    assert_eq(_t_req_num_milli(rn6, strlen(rn6), "\"temperature\":", 14), 0 - 500,
+    assert_eq(_req_num_milli(rn6, strlen(rn6), "\"temperature\"", 13), 0 - 500,
       "num: negative preserved for range validation");
     var rn7 = "{\"temperature\":2}";
-    assert_eq(_t_req_num_milli(rn7, strlen(rn7), "\"temperature\":", 14), 2000,
+    assert_eq(_req_num_milli(rn7, strlen(rn7), "\"temperature\"", 13), 2000,
       "num: 2 -> 2000 (range boundary)");
+    # 2.9.16: only a top-level field counts. A tool schema's "max_tokens" property, which precedes the request's
+    # own in OpenAI clients, is not the request's limit. The copy here matched it.
+    var rn8 = "{\"tools\":[{\"parameters\":{\"max_tokens\":5}}],\"max_tokens\":300}";
+    assert_eq(_req_num_milli(rn8, strlen(rn8), "\"max_tokens\"", 12), 300000, "num: a nested key is skipped");
+    var rn9 = "{\"tools\":[{\"parameters\":{\"max_tokens\":5}}]}";
+    assert_eq(_req_num_milli(rn9, strlen(rn9), "\"max_tokens\"", 12), GEN_UNSET, "num: only a nested key is absent");
+    # A value with no digits is unset, not 0: `null` from a client that serializes every field, or a quoted number.
+    var rn10 = "{\"temperature\":null}";
+    assert_eq(_req_num_milli(rn10, strlen(rn10), "\"temperature\"", 13), GEN_UNSET, "num: null is unset, not 0");
+    var rn11 = "{\"temperature\":\"0.5\"}";
+    assert_eq(_req_num_milli(rn11, strlen(rn11), "\"temperature\"", 13), GEN_UNSET, "num: a quoted number is unset");
 
     test_group("milli_render");
     # Scaled ints render back to the wire form a client would have sent.
@@ -4282,14 +4114,18 @@ fn main() {
 
     test_group("json_array_count");
     var ac1 = "[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]";
-    assert_eq(_t_json_array_count(ac1, strlen(ac1)), 2, "count: two messages");
-    assert_eq(_t_json_array_count("[]", 2), 0, "count: empty array -> 0");
+    assert_eq(_json_array_count(ac1, strlen(ac1)), 2, "count: two messages");
+    assert_eq(_json_array_count("[]", 2), 0, "count: empty array -> 0");
     # Braces inside a string value must not inflate the count.
     var ac2 = "[{\"content\":\"a{b}c\"}]";
-    assert_eq(_t_json_array_count(ac2, strlen(ac2)), 1, "count: braces in string ignored");
+    assert_eq(_json_array_count(ac2, strlen(ac2)), 1, "count: braces in string ignored");
     # A nested object belongs to its parent message, not a new element.
     var ac3 = "[{\"content\":\"x\",\"meta\":{\"a\":1}}]";
-    assert_eq(_t_json_array_count(ac3, strlen(ac3)), 1, "count: nested object not counted");
+    assert_eq(_json_array_count(ac3, strlen(ac3)), 1, "count: nested object not counted");
+    # Closing braces inside a string must not end an element early either: without the string skip, "}}" here
+    # drops the depth below 0 and the second message goes uncounted.
+    var ac4 = "[{\"content\":\"}}\"},{\"content\":\"x\"}]";
+    assert_eq(_json_array_count(ac4, strlen(ac4)), 2, "count: closing braces in a string do not end the element");
     assert_eq(256 > 256, 0, "count: 256 messages allowed");
     assert_eq(257 > 256, 1, "count: 257 messages rejected");
 
@@ -5063,12 +4899,12 @@ fn main() {
     assert_eq(_t_naive_digits("7000000000.0"), 70000000000, "whole: str_to_int read it as 7e10");
     assert_eq(_t_whole("24000000000.000", wc), 24000000000, "whole: any run of zeros");
     # json_get values: blanks trimmed; absent, empty and null read as 0.
-    assert_eq(_t_hw_json_whole(str_from(" 7000000000\r"), wc), 7000000000, "whole: CR after a bare value");
-    assert_eq(_t_hw_json_whole(str_from("7000000000\t"), wc), 7000000000, "whole: tab after a bare value");
-    assert_eq(_t_hw_json_whole(str_from("null"), wc), 0, "whole: null is not given");
-    assert_eq(_t_hw_json_whole(str_from("  "), wc), 0, "whole: blank is not given");
-    assert_eq(_t_hw_json_whole(0, wc), 0, "whole: absent is not given");
-    assert_eq(_t_hw_json_whole(str_from("\"7\""), wc), 0 - 1, "whole: stray quotes are refused");
+    assert_eq(_hw_json_whole(str_from(" 7000000000\r"), wc), 7000000000, "whole: CR after a bare value");
+    assert_eq(_hw_json_whole(str_from("7000000000\t"), wc), 7000000000, "whole: tab after a bare value");
+    assert_eq(_hw_json_whole(str_from("null"), wc), 0, "whole: null is not given");
+    assert_eq(_hw_json_whole(str_from("  "), wc), 0, "whole: blank is not given");
+    assert_eq(_hw_json_whole(0, wc), 0, "whole: absent is not given");
+    assert_eq(_hw_json_whole(str_from("\"7\""), wc), 0 - 1, "whole: stray quotes are refused");
     # handle_hw_simulate's memory_bytes token takes the whole number, so 1.5e9 is
     # refused rather than read as a 1 byte card.
     assert_eq(_t_mem_token("1.5e9}"), 0 - 1, "whole: token 1.5e9 is refused");

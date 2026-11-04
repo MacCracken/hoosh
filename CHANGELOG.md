@@ -5,6 +5,84 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.16] — 2026-11-04
+
+**Fixed: an empty `tools` array is no longer forwarded.** The test file's copy of `_extract_tools` had hidden this
+regression since 2.6.9. It surfaced when `handlers.cyr`'s pure request helpers moved into an includable module and
+the tests started running them. **1493 assertions** in 161 groups. All gates are clean: fmt, lint, vet, deny,
+coverage (388/686, 56%; **33 of 39** modules included for real), the security scan, the four fuzz targets and the
+shutdown smoke test.
+
+### Fixed — `"tools": []` was forwarded to the provider
+
+- **The bug:** a request carrying `"tools": []` (some SDKs send one when no tools are set) went out to the provider
+  with `"tools":[]`. OpenAI's API rejects an empty `tools` array (minimum length 1).
+- **The cause:** 2.6.9 rewrote `_extract_tools` onto the depth-aware `_top_key_value`, and the rewrite dropped the
+  old `len <= 2` rule that an empty array means no tools. The 2.6.9 CHANGELOG does not mention dropping it.
+- **Why no test noticed:** the test file's copy kept the rule, so "tools: empty array → 0" stayed green while the
+  gateway regressed.
+- **The fix:** an array with only whitespace between its brackets is treated as no tools again.
+
+### Changed — `reqparse.cyr`, split from `handlers.cyr`
+
+`handlers.cyr` needs the whole server, so the tests could not include it and kept copies of its helpers. Eleven pure
+helpers moved, verbatim with their comments, into the new `src/lib/reqparse.cyr`, included just before
+`handlers.cyr`:
+- `_req_reasoning_effort`, `_req_num_milli`, `_extract_tools` and `_json_array_count` (request body fields);
+- `_cache_key` and `_warming_body` (the response cache);
+- `_hoosh_req_from_str`, `_hw_blank`, `_hw_num_byte`, `_hw_whole_bounded` and `_hw_json_whole` (the hardware
+  endpoints' inputs).
+
+**Comments fixed along the way:**
+- two were misplaced: the "messages" line above `_extract_tools` belonged to `_extract_messages`, and `_cache_key`'s
+  comment had merged into `_sem_scope`'s;
+- `_req_num_milli`'s said its key includes the colon, which has been false since 2.6.9.
+
+### Changed — the tests run them for real
+
+The test file includes `reqparse.cyr` and its copies are gone. **Four had drifted:**
+- **`_cache_key`:** the copy left out `auth_identity()`. The real key leads with the caller's identity, so one
+  caller's cached answer is never served to another, and no test could check that.
+- **`_extract_tools`:** the copy matched `"tools"` anywhere in the body, inside a message's content too; `src/`
+  reads only the top-level key. It also still had the empty-array rule `src/` had lost (above).
+- **`_req_num_milli`:** the copy matched a key anywhere, so a tool schema's `max_tokens` property could stand in for
+  the request's. Its tests passed the key with the colon, the old convention; the real callers pass it without, so
+  those tests moved to the real convention.
+- **`_hoosh_req_from_str`:** the copy returned inlined numbers instead of the real `REQ_*` constants.
+
+**New assertions:**
+- a different caller gets a different cache key, and identity 0 is the anonymous key;
+- a nested `"tools"` key is not the request's tools, and a whitespace-only array is empty;
+- a nested `max_tokens` is skipped, and only a nested one reads as absent;
+- `null` and a quoted number are unset, not 0;
+- closing braces inside a string do not end a message early in the message count.
+
+### Mutation-checked
+
+A copy of the tree was changed 11 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| the cache key without the caller's identity | 2 fail |
+| the empty-tools rule removed, or whitespace counted as content | 2 and 1 fail |
+| `_req_num_milli` dropping the sign, reading no digits as 0, or misplacing the fraction | 1, 2 and 3 fail |
+| `_json_array_count` counting nested objects, or not skipping strings | 1 fails each |
+| `_hw_json_whole` reading `null` as a number; the warming body's role changed; `gpu-or-tpu` unknown | 1, 2 and 1 fail |
+
+**First-round survivors, now caught:**
+- **no digits read as 0** survived, because no test sent `null` or a quoted number;
+- **strings not skipped in the count** survived, because no test had a `}` inside a string.
+
+### Notes
+
+- The test file is 6,101 lines (was 6,266).
+- **Benchmarks:** the bench binary differs from 2.9.15's only in the version digit. At load 1.3 the 25 rows' median
+  move against 2.9.15 is −1.9%, all within −5% and +7%, except `pool_available` at 5 → 4 ns, a 1 ns step. A
+  first run at load 4.5 (+3.0% median) was discarded.
+- **What the test file still mirrors from `handlers.cyr`:** only the usage block of `_chat_completion_body` and the
+  requirement-match scan.
+- **Next:** the same split for `batch.cyr`'s request splitter, then `config.cyr`'s pickers.
+
 ## [2.9.15] — 2026-11-04
 
 **The tests run the real retry logic, backoff and loops, end to end over loopback.** Nothing in the test file

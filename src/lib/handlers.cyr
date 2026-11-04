@@ -733,18 +733,6 @@ fn warming_add(model, prompt) {
     return 0;
 }
 
-# Canonical compact body a client must POST to hit a warmed entry:
-# {"model":"M","messages":[{"role":"user","content":"P"}]}
-fn _warming_body(model, prompt) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"messages\":[{\"role\":\"user\",\"content\":\"");
-    str_builder_add_cstr(sb, prompt);
-    str_builder_add_cstr(sb, "\"}]}");
-    return str_builder_build(sb);
-}
-
 # Warm the cache from configured prompts. Returns the count warmed. Skips when
 # the cache is disabled, the model has no route, or the key is already cached.
 fn warming_run() {
@@ -1292,63 +1280,7 @@ fn handle_hardware(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
-# ── Whole-number inputs for the hardware planners (2.6.13) ──
-# str_to_int skips every byte that is not a digit and wraps on overflow: "7e9" is
-# 79, "7000000000.0" is 70000000000 and "18446744073709551617" is 1. The planners
-# multiply what they are given, so a wrapped or huge model_params came back as a
-# negative memory requirement with "fits": true.
-
-fn _hw_blank(c) {
-    if (c == 32 || c == 9 || c == 13 || c == 10) { return 1; }
-    return 0;
-}
-
-# A byte that can be part of a JSON number: a digit, a point, an exponent or a sign.
-fn _hw_num_byte(c) {
-    if (c >= 48 && c <= 57) { return 1; }
-    if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45) { return 1; }
-    return 0;
-}
-
-# p[0..len) as a whole number no larger than `cap`. Returns the value, -1 when the
-# text is not a whole number (empty, a sign, an exponent, a fraction other than
-# zeros, any other byte), or -2 when it is larger than `cap`. The cap is checked
-# before each multiply, so the accumulator never wraps. A zero fraction is the same
-# whole number: Python's json.dumps writes 7e9 as 7000000000.0.
-fn _hw_whole_bounded(p, len, cap) {
-    var v = 0;
-    var i = 0;
-    while (i < len) {
-        var d = (load8(p + i) & 0xFF) - 48;
-        if (d < 0 || d > 9) { break; }
-        if (v > (cap - d) / 10) { return 0 - 2; }
-        v = v * 10 + d;
-        i = i + 1;
-    }
-    if (i == 0) { return 0 - 1; }
-    if (i < len && load8(p + i) == 46) {
-        i = i + 1;
-        if (i == len) { return 0 - 1; }
-        while (i < len && load8(p + i) == 48) { i = i + 1; }
-    }
-    if (i < len) { return 0 - 1; }
-    return v;
-}
-
-# A json_get value (a Str, or 0 when the key is absent) as a whole number in
-# [0, cap] by the rules above. Absent, empty and null read as 0, "not given", which
-# is what str_to_int made of them. Blanks around the value are trimmed: the flat
-# parser ends a bare value at a space or LF, so a trailing CR or tab stays in it.
-fn _hw_json_whole(s, cap) {
-    if (s == 0) { return 0; }
-    var p = str_data(s);
-    var len = str_len(s);
-    while (len > 0 && _hw_blank(load8(p)) == 1) { p = p + 1; len = len - 1; }
-    while (len > 0 && _hw_blank(load8(p + len - 1)) == 1) { len = len - 1; }
-    if (len == 0) { return 0; }
-    if (len == 4 && memeq(p, "null", 4) == 1) { return 0; }
-    return _hw_whole_bounded(p, len, cap);
-}
+# ── Whole-number inputs for the hardware planners (2.6.13): the parsers are in reqparse.cyr since 2.9.16. ──
 
 # 400 "<field> out of range (max <cap>)", worded from the cap so the two agree.
 fn _hw_out_of_range(cfd, field, cap) {
@@ -1503,18 +1435,6 @@ fn handle_hw_model_format(cfd, body_ptr, body_len) {
     var m = detect_format_from_bytes(body_ptr, body_len);
     if (m == 0) { return http_bad_request(cfd, "unrecognized model format"); }
     return http_json_ok(cfd, model_meta_to_json(m));
-}
-
-# Map a requirement string to the ai-hwaccel REQ_* enum, or -1 if unknown.
-fn _hoosh_req_from_str(s) {
-    if (streq(s, "none") == 1) { return REQ_NONE; }
-    if (streq(s, "gpu") == 1) { return REQ_GPU; }
-    if (streq(s, "tpu") == 1) { return REQ_TPU; }
-    if (streq(s, "gaudi") == 1) { return REQ_GAUDI; }
-    if (streq(s, "aws-neuron") == 1) { return REQ_AWS_NEURON; }
-    if (streq(s, "gpu-or-tpu") == 1) { return REQ_GPU_OR_TPU; }
-    if (streq(s, "any-accelerator") == 1) { return REQ_ANY_ACCELERATOR; }
-    return 0 - 1;
 }
 
 # POST /v1/hardware/requirement-match — does the detected hardware satisfy a
@@ -1876,50 +1796,6 @@ fn _validate_chat(pairs, body_ptr, body_len) {
     return 0;
 }
 
-# Raw-scan a top-level numeric field -> its value x1000, or GEN_UNSET when
-# absent. Raw scan (not json_get) for the SAME reason as _req_reasoning_effort:
-# OpenAI clients place these keys AFTER the nested `messages` array, which the
-# flat json_parse cannot reach — which is why the pre-2.5.2
-# json_get("max_tokens") silently fell back to the 2048 budget default on real
-# client traffic. `key` must include the quotes and colon: "\"top_p\":".
-# Fractions beyond 3 decimals are truncated; a leading '-' is preserved so
-# out-of-range negatives reach validation rather than being silently dropped.
-
-fn _req_num_milli(body_ptr, body_len, key, keylen) {
-    var j = _top_key_value(body_ptr, body_len, key, keylen);
-    if (j < 0) { return GEN_UNSET; }
-    var neg = 0;
-    if (j < body_len && load8(body_ptr + j) == 45) {
-        neg = 1;
-        j = j + 1;
-    }
-    var ip = 0;
-    var digits = 0;
-    while (j < body_len) {
-        var c = load8(body_ptr + j) & 0xFF;
-        if (c < 48 || c > 57) { break; }
-        ip = ip * 10 + (c - 48);
-        digits = digits + 1;
-        j = j + 1;
-    }
-    if (digits == 0) { return GEN_UNSET; }
-    var frac = 0;
-    var scale = 100;
-    if (j < body_len && load8(body_ptr + j) == 46) {
-        j = j + 1;
-        while (j < body_len && scale > 0) {
-            var fc = load8(body_ptr + j) & 0xFF;
-            if (fc < 48 || fc > 57) { break; }
-            frac = frac + (fc - 48) * scale;
-            scale = scale / 10;
-            j = j + 1;
-        }
-    }
-    var v = ip * 1000 + frac;
-    if (neg == 1) { return 0 - v; }
-    return v;
-}
-
 # Upper bound on messages in one chat request (rust-old: handlers.rs).
 var MAX_MESSAGES = 256;
 
@@ -1963,34 +1839,6 @@ fn _count_err(label, got, max) {
     return to_cstr(str_builder_build(sb));
 }
 
-# Count elements in a raw JSON array span — objects at depth 1, string-aware.
-# Used to enforce the message-count bound.
-fn _json_array_count(ptr, len) {
-    var n = 0;
-    var depth = 0;
-    var i = 0;
-    while (i < len) {
-        var c = load8(ptr + i) & 0xFF;
-        if (c == 34) {
-            i = i + 1;
-            while (i < len) {
-                if (load8(ptr + i) == 34) { break; }
-                if (load8(ptr + i) == 92) { i = i + 1; }
-                i = i + 1;
-            }
-            i = i + 1;
-            continue;
-        }
-        if (c == 123 || c == 91) {
-            if (depth == 1 && c == 123) { n = n + 1; }
-            depth = depth + 1;
-        }
-        if (c == 125 || c == 93) { depth = depth - 1; }
-        i = i + 1;
-    }
-    return n;
-}
-
 # Check if request has "stream":true
 fn _req_is_stream(body_ptr, body_len) {
     var j = _top_key_value(body_ptr, body_len, "\"stream\"", 8);
@@ -1999,48 +1847,7 @@ fn _req_is_stream(body_ptr, body_len) {
     return 0;
 }
 
-# 2.5.0: the OpenAI `reasoning_effort` -> a thinking EFFORT LEVEL. 2.8.0: the scan lives in catalog.cyr
-# (catalog_req_effort, tested for real) and knows the words current models take — xhigh and max for Claude 4.7 and
-# later, minimal and none for OpenAI's reasoning models; before it, "xhigh" silently meant "no thinking".
-fn _req_reasoning_effort(body_ptr, body_len) {
-    var w = alloc(8);
-    return catalog_req_effort(body_ptr, body_len, w);
-}
-
 # Extract raw "messages" array from request body
-# Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0.
-# Balanced-bracket scan with JSON string handling (mirrors _extract_messages).
-fn _extract_tools(body_ptr, body_len) {
-    # Depth-aware, same reason as _extract_messages.
-    var j = _top_key_value(body_ptr, body_len, "\"tools\"", 7);
-    if (j < 0) { return 0; }
-    if (j >= body_len) { return 0; }
-    if (load8(body_ptr + j) != 91) { return 0; }
-    var depth = 1;
-    var ts = j;
-    j = j + 1;
-    while (j < body_len && depth > 0) {
-        var ch = load8(body_ptr + j);
-        if (ch == 91) { depth = depth + 1; }
-        if (ch == 93) { depth = depth - 1; }
-        if (ch == 34) {
-            j = j + 1;
-            while (j < body_len) {
-                if (load8(body_ptr + j) == 34) { break; }
-                if (load8(body_ptr + j) == 92) { j = j + 1; }
-                j = j + 1;
-            }
-        }
-        j = j + 1;
-    }
-    var tlen = j - ts;
-    var result = alloc(16);
-    if (result == 0) { return 0; }
-    store64(result, body_ptr + ts);
-    store64(result + 8, tlen);
-    return result;
-}
-
 fn _extract_messages(body_ptr, body_len) {
     # Depth-aware: an identical "messages" key nested inside a tools schema used
     # to win whenever it appeared first, so the validator saw a messages array,
@@ -2577,8 +2384,6 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
 }
 
 # Exact-key response-cache key: sha256-hex over model + the raw request body.
-# Identical requests (same model + byte-identical body) collide to one entry;
-# this is the exact-key LRU cache (the semantic cache handles similarity).
 # Scope for a semantic index entry: caller identity + model. The index matches
 # on vector similarity, so the exact cache key's identity does NOT protect it —
 # a near-identical prompt from another tenant would still score above the
@@ -2589,26 +2394,6 @@ fn _sem_scope(model) {
     str_builder_add_cstr(sb, "\n");
     str_builder_add_cstr(sb, model);
     return to_cstr(str_builder_build(sb));
-}
-
-fn _cache_key(model, body_ptr, body_len) {
-    var sb = str_builder_new();
-    # Caller identity first: without it the cache was shared across every
-    # consumer of the gateway, so one tenant's response could be replayed to
-    # another for an identical prompt. 0 when auth is not configured, which
-    # keeps single-tenant deployments byte-compatible with their existing keys
-    # only in the sense that they all share one namespace — the hash changes,
-    # so the cache is cold once after upgrade.
-    str_builder_add_int(sb, auth_identity());
-    str_builder_add_cstr(sb, "\n");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\n");
-    var bb = alloc(body_len + 1);
-    memcpy(bb, body_ptr, body_len);
-    store8(bb + body_len, 0);
-    str_builder_add_cstr(sb, bb);
-    var s = str_builder_build(sb);
-    return sha256_hex(to_cstr(s), str_len(s));
 }
 
 # Append ptr[0..len) into a str_builder, JSON-escaping it for a string value.
