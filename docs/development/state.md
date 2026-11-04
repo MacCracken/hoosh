@@ -9,8 +9,8 @@
 
 | | |
 |---|---|
-| **Version** | **2.8.2** (toolchain refresh: cyrius 6.6.20 and the dependency releases that pin it; no behavior change) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
-| **Toolchain** | Cyrius pin **6.6.20** (`cyrius.cyml`); `ai-hwaccel` **2.4.2**; vendored `bote-core` **3.3.17**, `majra` **2.9.3** |
+| **Version** | **2.9.0** (cyrius 6.7.9 and the bundles that pin it; `/v1/tools/call` answers to the MCP / JSON-RPC specs via bote 3.4.10) on 2.8.2 (cyrius 6.6.20 refresh) on 2.8.1 (a request's `max_tokens` trimmed to the serving model's own output ceiling) on 2.8.0 (the model catalog asked of the providers; requests shaped by each model's capabilities; stream usage + finish reasons — [ADR 012](../decisions/012-live-model-catalog.md)); release detail in the CHANGELOG |
+| **Toolchain** | Cyrius pin **6.7.9** (`cyrius.cyml`); `ai-hwaccel` **2.4.2** (no 6.7.9 release); vendored `bote-core` **3.4.10**, `majra` **2.12.0** |
 | **Binary** (x86_64 static ELF) | ~2.0 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~3.1 MB without |
 | **Source** | ~15,600 lines / 38 files (`src/main.cyr` + 37 `src/lib/*.cyr`) + 2 vendored distlib bundles |
 | **Tests** | 1205 assertions, 181 groups (`tests/hoosh.tcyr`); `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `pricing.cyr` and `metadata.cyr` are included for real, not mirrored |
@@ -48,7 +48,7 @@ reaches `_router`, a global defined in `main.cyr`, so it cannot be included by t
 untrusted-byte parsing is exactly what must be tested against the real implementation, not a mirror.
 
 ✅ **Since closed:** the sandhi SSE event loss at read boundaries (what made hoosh forward a tool call whose
-`id`/`name` frame never arrived) was fixed in **sandhi 1.9.15**, which the cyrius stdlib hoosh pins carries (1.10.8 at 6.6.20);
+`id`/`name` frame never arrived) was fixed in **sandhi 1.9.15**, which the cyrius stdlib hoosh pins carries (1.10.9 at 6.7.9);
 2.8.0 adds a test that splits a `tool_use` start at every byte, and drops any orphan argument fragment besides.
 
 ## Active cycle — v2.5.x arc: COMPLETE

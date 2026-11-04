@@ -15,7 +15,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 
 | Metric | Value |
 |--------|-------|
-| **Language** | Cyrius (pin 6.6.20) |
+| **Language** | Cyrius (pin 6.7.9) |
 | **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.0 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |

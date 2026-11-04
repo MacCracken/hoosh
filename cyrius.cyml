@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "AI inference gateway — multi-provider LLM routing, token budgets, caching"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 repository = "https://github.com/MacCracken/hoosh"
 
 [build]
@@ -18,7 +18,7 @@ output = "build/hoosh"
 # sys must precede sigil too: since sigil 3.12.18 (cyrius 6.6.4) its
 # agnosys_uname calls lib/sys.cyr's sys_uname. Without sys the build warns
 # `undefined function 'sys_uname'` and that call compiles to a trap.
-# Since sigil 3.13.3 (cyrius 6.6.20 ships 3.13.10) the fold includes its own
+# Since sigil 3.13.3 (cyrius 6.7.9 ships 3.13.11) the fold includes its own
 # leaves (lib/sys.cyr, lib/bayan.cyr, …) and takes uname_release from
 # lib/sys.cyr, so the old benign `duplicate fn 'uname_release'` is gone. The
 # order above is kept: include-once makes the repeats no-ops.
@@ -50,14 +50,17 @@ modules = ["dist/ai-hwaccel.cyr"]
 # (As of bote 2.7.6 the constructor is `tool_registry_new`; the other
 # `registry_*` ops keep their names. ai-hwaccel's own constructor is
 # `hw_registry_new`, so the two no longer share a name.)
-# The core bundle itself is self-contained (no libro/majra symbols; its only
-# includes are the stdlib hashmap + bayan, both listed above), so we vendor
+# The core bundle itself is self-contained (no libro/majra symbols). Its
+# `# Requires` block includes only stdlib leaves listed above (hashmap, bayan,
+# sigil, ct), and since bote 3.4.0 its log.cyr calls sakshi, which a copied
+# bundle must list itself — "sakshi" above covers it. So we vendor
 # it directly as `src/vendor/bote-core.cyr` (committed; see that file's
 # header for the pinned bote tag) and include it from src/main.cyr. Re-sync
 # with `./scripts/sync-bote.sh <tag>`.
 #
-# majra (2.9.3) — provider event bus pubsub — is vendored the same way at
-# src/vendor/majra.cyr (self-contained dist/majra.cyr, no includes; majra
+# majra (2.12.0) — provider event bus pubsub — is vendored the same way at
+# src/vendor/majra.cyr (self-contained dist/majra.cyr; its `# Requires` block
+# names only stdlib leaves listed above, so the includes are no-ops; majra
 # ships no pubsub-only profile, so this is its smallest bundle). Re-sync by
 # fetching dist/majra.cyr at the new tag. majra still exports
 # ratelimit_new/ratelimit_check, which is why src/lib/ratelimit.cyr names its

@@ -80,7 +80,7 @@ overflow on streaming disconnect`. (The maintainer makes commits.)
 
 `VERSION` is the source of truth (`cyrius.cyml` tracks it via `${file:VERSION}`).
 Use `./scripts/version-bump.sh <v>` (updates VERSION, CLAUDE.md, `types.cyr`
-`HOOSH_VERSION`, and a CHANGELOG stub). Keep the zugot recipe version in sync.
+`HOOSH_VERSION`, and a CHANGELOG stub).
 
 ## License
 

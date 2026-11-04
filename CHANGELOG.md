@@ -5,6 +5,107 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.0] — 2026-11-04
+
+**Toolchain and dependency refresh onto the cyrius 6.7.x language minor.** cyrius 6.6.20 → 6.7.9. The vendored
+bundles move to their last releases that pin 6.7.9: `bote-core` 3.3.17 → 3.4.10 and `majra` 2.9.3 → 2.12.0.
+`ai-hwaccel` stays at 2.4.2. It has no 6.7.9 release (2.4.2 pins 6.6.20, and 2.5.0 jumps to 6.7.18), and 2.4.2's
+bundle compiles clean on 6.7.9. No hoosh source changed. The minor bump is for what `POST /v1/tools/call` now
+answers (bote 3.4.5, below). **1205 assertions** (unchanged). fmt, lint, vet, deny, coverage, the security scan and
+the four fuzz targets are clean. The build prints only the two upstream warnings 2.8.2 had. The binary is
+2,017,384 B (+35,680 B, mostly bote-core's growth from 2,911 to 4,074 lines).
+
+### Changed — cyrius pin 6.6.20 → **6.7.9**
+
+- **`lib/` was re-vendored from an empty tree and `cyrius.lock` regenerated.** It holds the same 83 entries as at
+  6.6.20 (the snapshot's file list did not change), with one commit pin (ai-hwaccel 2.4.2). `deps --verify` 83/0.
+- **6.7.x is a language minor.** hoosh's sources, tests, fuzz targets and all three bundles were checked against
+  each change that can alter a program that already compiled. None applies:
+  - **`!` is a real operator since 6.7.3.** Before that, the lexer silently dropped a lone `!`, so `if (!ok)`
+    compiled as `if (ok)`. A scan that skips comments and strings finds no lone `!` anywhere in the compile set.
+  - **New reserved words**: `trait` (6.7.0), `const` (6.7.2), `true` / `false` (6.7.3), `do` (6.7.5), `dyn`
+    (6.7.8). None is used as an identifier.
+  - **Unary `-` / `~` on a constant binds tighter than a following literal operator** (6.7.9: `-K + 10` is now 5,
+    not 15). Every unary use in the compile set is parenthesised (`~(1 << b)`) or is binary subtraction
+    (`0 - 1 - …`).
+  - **Typed-pointer, `self`, struct-copy, `f32`, `u128` and slice semantics** (6.7.0–6.7.9). hoosh declares no
+    struct, `impl`, narrow typed pointer, `f32` or slice; it addresses memory with `load64` / `store64`.
+  - **Stricter checks that can only refuse, never change an answer.** These would have stopped the build, and it is
+    clean: arity checks on forward calls, a stray `}` at module scope, a `for` step assigning an undeclared name.
+- **Codegen for hoosh's hot paths is byte-identical.** Comparing the two bench binaries function by function (symbol
+  maps from `CYRIUS_SYMS`), `ct_eq_bytes`, `ct_eq_bytes_lens`, `strlen`, `streq`, `memeq` and `_map_find` match
+  byte for byte. `_bench_cost_record`, `_bench_price`, `vec_get` and `cache_get` differ only in the operands of a
+  `call` rel32 or a `movabs` address.
+- Bundled modules re-folded at 6.7.x (W2). `lib/vec.cyr` and `lib/hashmap.cyr` changed only in comments.
+
+### Changed — vendored `bote-core` 3.3.17 → **3.4.10**
+
+hoosh calls seven bote-core functions. Every signature is unchanged, and `dispatcher_new`, `tool_registry_new`,
+`tool_def_new` and `schema_new` are byte-identical. What changed for hoosh:
+
+- **`POST /v1/tools/call` answers as the MCP and JSON-RPC 2.0 specs require** (bote 3.4.5; `codec_process_message`
+  now validates the JSON before dispatching). A client should update:
+  - An unknown tool is error **`-32602`** (was `-32601`, which now means only that the *method* does not exist).
+  - Arguments that fail the tool's `inputSchema` return a **result** with `isError: true`, whose text names the
+    argument (was error `-32602`). A handler that returns nothing also gives an `isError` result (was
+    `"result":null`).
+  - Invalid JSON is error **`-32700`** with id `null`. Before, it was `-32600`, dispatched anyway, or dropped.
+  - An id that is an object, array or boolean, and `params` that is a string or number, are `-32600`.
+  - A `cursor` on a list method that bote never issued is `-32602`.
+- **Every string bote writes into JSON is fully escaped** (bote 3.4.6). `_json_emit_escaped` now forwards to the new
+  `bote_json_escape`. It escapes every control byte below 0x20 (`\b`, `\f`, or `\u00XX`); before, it escaped only
+  `"`, `\`, LF, CR and TAB and copied the rest raw. hoosh calls `_json_emit_escaped` for its own JSON too: the
+  event-bus payloads (`events.cyr`: model, error text, base URL), the OTLP attributes (`otlp.cyr`) and the
+  `infer` request body (`main.cyr`). A provider error or model name carrying a control byte (an ANSI colour code, a
+  BEL) used to produce invalid JSON there and now produces valid JSON.
+- **Registration checks the tool definition** (bote 3.4.8, `registry_check_tool_def`): name syntax, an `object`
+  `inputSchema`, property and `required` entries. The schema is compiled at registration. hoosh's `bote_echo`
+  passes (bote's own consumer audit lists hoosh as unaffected). `mcp_init` ignores the return value, so a future
+  tool that fails the check would be missing from `tools/list`. The suite's `registry_len == 1` assertion pins
+  that today.
+- **`tools/call` reads the clock only when something consumes the duration** (bote 3.4.1). `mcp_tools_call` is
+  **−27.8%** (below).
+- **bote logs through sakshi** (bote 3.4.0, `log.cyr`). Lines go wherever hoosh's sakshi output goes, at hoosh's level
+  (`HOOSH_LOG` / `[logging] level`). Refusals are WARN, one line per request is DEBUG, and no secret or tool
+  argument is logged. A copied bundle must list `sakshi` in its own `[deps].stdlib`, which hoosh already does. At
+  the default level a live run prints nothing new.
+- `initialize` reports `serverInfo` version `3.4.10`. `scripts/sync-bote.sh` defaults to 3.4.10.
+- **Verified live** against a 2.9.0 gateway: `tools/list` lists `bote_echo`, an echo call returns valid JSON, an
+  unknown tool gives `-32602`, a truncated body gives `-32700`, `ping` answers `{}`, and `initialize` reports
+  3.4.10.
+
+### Changed — vendored `majra` 2.9.3 → **2.12.0**
+
+`pubsub_new` and `pubsub_total_published` are byte-identical, and `pubsub_publish` changed only in a comment. That
+comment records the invariant its unlocked pattern walk relies on under 6.6.20's in-place hashmap rebuild: pubsub
+never deletes a key. The 2.10.1–2.12.0 fixes are in parts hoosh does not use: relay refcounts, the sliding-window
+limiter, signed envelopes, workflows, barriers, the admin endpoint, RESP and PostgreSQL.
+
+### Performance
+
+**No code regression, and one real win.** The 2.8.2 (6.6.20) and 2.9.0 (6.7.9) bench binaries ran alternately for 7
+rounds each (load ~1.1). Medians:
+
+| benchmark | 2.8.2 | 2.9.0 | Δ | cause |
+|---|---:|---:|---:|---|
+| `mcp_tools_call` | 8.644 µs | 6.241 µs | **−27.8%** | bote 3.4.1: no clock read per call |
+| `mcp_tools_list` | 4.058 µs | 3.875 µs | −4.5% | bote 3.4.x |
+| `cache_get_hit` | 147 ns | 124 ns | −15.6% | placement (back to its 2.8.1 value) |
+| `route_select_20_providers` | 843 ns | 780 ns | −7.5% | placement |
+| `route_matches_model` | 36 ns | 33 ns | −8.3% | placement |
+| `auth_verify_token` | 86 ns | 104 ns | +20.9% | placement (its 2.8.1 value) |
+| `cost_record_local_free` | 111 ns | 135 ns | +21.6% | placement |
+| `cache_get_miss` | 56 ns | 62 ns | +10.7% | placement |
+| `batch_split_4` | 766 ns | 807 ns | +5.4% | placement |
+
+The other 16 rows are within ±5.1%, or ±1 ns on the rows a few ns long. **The placement rows are proven,
+not assumed.** `auth_verify_token` is `ct_eq_bytes_lens` → `ct_eq_bytes` over two `strlen`s. All three are
+byte-identical between the binaries. Only `ct_eq_bytes`'s start moved, from offset 50 to 48 in its 64-byte
+line. The row has flipped with it, 104 → 86 → 104 ns across 2.8.1 → 2.8.2 → 2.9.0. `cost_record_local_free`'s
+two functions keep their sizes and code, and move from offsets 26 / 63 to 51 / 24. `_bench_batch_split` and
+`route_matches_model` differ only in `call` displacements, and both start at offset 52 instead of 27. The
+2026-11-04 rows in `bench-history.csv` that follow 2.8.2's are this release's mandatory run.
+
 ## [2.8.2] — 2026-11-04
 
 **Toolchain and dependency refresh.** cyrius 6.6.6 → 6.6.20. Each dependency moves to its last release that pins

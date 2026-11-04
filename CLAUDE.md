@@ -6,12 +6,11 @@
 
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
-- **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.6.20)
-- **Version**: SemVer 2.8.2 stable
+- **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.7.9)
+- **Version**: SemVer 2.9.0 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
-- **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
 ## Consumers
 
@@ -51,8 +50,8 @@ wrapper (guarded by the `hardware_data_files` test).
 7. Deeper tests/benchmarks from audit observations
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION (source of truth; `cyrius.cyml` tracks it via `${file:VERSION}`), recipe (in zugot) all in sync. Use `./scripts/version-bump.sh <v>`.
+10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface
+11. Version check — VERSION (source of truth; `cyrius.cyml` tracks it via `${file:VERSION}`) and `HOOSH_VERSION` in sync. Use `./scripts/version-bump.sh <v>`.
 12. **Release gate — benchmarks are mandatory** (see Key Principles); CI runs `./scripts/bench-history.sh` and fails the build if the suite does not run. Do not tag a release without a green bench run unless the maintainer explicitly waives it.
 13. Return to step 1
 
