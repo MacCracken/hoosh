@@ -8,8 +8,8 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.3 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each and took four modules'
-mirrors out of the tests; see the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
+**Current**: v2.9.4 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3 and 2.9.4 took six
+modules' mirrors out of the tests. See the CHANGELOG. **Next**: the 2.9.x patches and 2.10.0 below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
@@ -21,20 +21,24 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 - **Test-suite mirror drift, module by module.**
   - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response-cache key, compression, the semantic cache, batch, metrics, the trace and OTLP helpers, the config and
-    router pickers, the pool ring, `types.cyr`'s error and sampling helpers, `main.cyr`'s flag parser and hardware. A
-    mirror can drift from `src/` while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit
-    chain-link verification). 2.9.3 found two more drifted copies, a stale `req_content_length` and a legacy cost
-    tracker keyed the pre-2.5.6 way.
+    response-cache key, batch, metrics, the trace and OTLP helpers, the config and router pickers, the pool ring,
+    `types.cyr`'s error and sampling helpers, `main.cyr`'s flag parser and hardware. A mirror can drift from `src/`
+    while both stay green. That has happened twice (v2.5.6 pricing order, v2.5.7 audit chain-link verification).
+    2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
+    way) and 2.9.4 six (the compression scans' old escape check and return shape, pre-model semantic entries, a
+    pointer-equality remove, and an embedding parser without its exponent clamp and no-progress guard).
   - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
-    `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2), and `dlp.cyr`, `compact.cyr`
-    and `http_server.cyr` (2.9.3).
-  - **Next candidates:** `compression.cyr` (self-contained by design), `semantic.cyr`, `trace.cyr`, `metrics.cyr`,
-    then `types.cyr`, whose inclusion retires the test file's own enum and helper copies.
+    `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
+    `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4).
+  - **Next candidates:** `trace.cyr` and `metrics.cyr`, whose copies use different names, so they include with no
+    collisions. Then `types.cyr`, whose inclusion retires the test file's own enum and helper copies.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
-    modules per patch. Mutation-check each one: change the real function and confirm a test fails.
-  - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift.
+    modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as
+    a failure; the CI test step has a 5-minute timeout since 2.9.4.
+  - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
+    `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header still
+    says no test executes `src/`, which stopped being true once modules were included for real; update that.
 - **Connection pooling for remote TLS.**
   - **Measured in 2.9.3:** a fresh HTTPS request takes a median 40 ms, a reused connection 6.7 ms, so −33 ms per
     request at a ~6 ms RTT, and more for distant providers.
@@ -156,7 +160,11 @@ than assuming.
   - **Measured** with a standalone probe and an arena: plain HTTP 856 B per request, HTTPS 178,768 B.
   - **The fix has to cover the session cache too:** passing `a` must not leave TLS session-cache entries pointing
     into an arena that gets reset.
-  - File it in sandhi with these figures.
+  - **Filed:** `sandhi/docs/development/issues/2026-11-02-bote-tls-connect-keeps-each-connection-on-the-heap.md`.
+    bote 3.6.5 reported it first; hoosh 2.9.3 was added on 2026-11-04 as a second reporter, with the measurements
+    above and three constraints on the fix: a per-thread arena, the session cache kept out of it, and pooled
+    connections owning their own allocations. hoosh meets the issue's own Critical bar (a server that fetches on
+    every request) and has no workaround.
 
 - **cyrius — `cyrius coverage` reports on the vendored stdlib, not the local repo.** Still open:
   `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`. hoosh gates on

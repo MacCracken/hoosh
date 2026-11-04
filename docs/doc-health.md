@@ -6,8 +6,9 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.3**: CHANGELOG, README stats, state, roadmap: mirror-drift progress, the
-> pooling measurement and the upstream sandhi TLS-allocator item). Earlier the same day: **v2.9.2** (README
+> **Last refresh**: 2026-11-04 (**v2.9.4**: CHANGELOG, README stats, state, roadmap mirror-drift progress and the
+> coverage-script note). Earlier the same day: **v2.9.3** (the pooling measurement, the sandhi TLS-allocator
+> item), **v2.9.2** (README
 > *Hardware data files*; the roadmap re-banded; the rust-old retirement carried out), **v2.9.1** (cyrius 6.7.18;
 > ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and **v2.8.2** (cyrius
 > 6.6.20); before that 2026-10-09 (**v2.8.1**).

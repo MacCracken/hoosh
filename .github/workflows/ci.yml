@@ -102,6 +102,10 @@ jobs:
         run: xxd -l 4 build/hoosh | grep -q "7f45 4c46"
 
       - name: Test suite
+        # 2.9.4: the suite runs in ~2 s. Some regressions HANG it instead of failing an assertion (the
+        # embedding parser's no-progress guard and exponent clamp: their tests loop forever without them),
+        # and a job's default timeout is 6 hours. Fail in minutes instead.
+        timeout-minutes: 5
         run: cyrius test tests/hoosh.tcyr
 
       - name: Dependency policy

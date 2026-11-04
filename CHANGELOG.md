@@ -5,6 +5,85 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.4] — 2026-11-04
+
+**The tests run the real response-compression and semantic-cache code.** The test file had kept its own copies of
+both modules under the same function names, and the copies had drifted from `src/` in ways that mattered. The tests
+were exercising a string scan with a bug that `src/` had already fixed, two parser hangs that `src/` had already
+guarded, a return shape `src/` no longer used, and a cache-remove that only worked because the test used integer
+keys. The roadmap's mirror-drift item takes its next two modules. No gateway code changed.
+**1243 assertions** (was 1226). fmt, lint, vet, deny, coverage (306/684), the security scan and the four fuzz
+targets are clean.
+
+### Changed — `compression.cyr` and `semantic.cyr` are included for real
+
+`tests/hoosh.tcyr` includes both modules and drops 18 same-name copies, along with the global defaults they carried.
+How the copies had drifted:
+- **`_cmp_span_end` / `_cmp_str_field` (compression).** The copies decided a quote was escaped when the byte before
+  it was `\`. That misreads a string ending in an escaped backslash (`"C:\\"`), where the scan ran on past the
+  object. `src/` skips each escape pair instead. New assertions cover an object whose value ends in `\\`, and the
+  field that follows it.
+- **`compress_ws_json` / `prune_tool_pairs`.** `src/` returns a `(ptr, len)` pair; the copies returned a C string, an
+  API that no longer existed. The `_compress` / `_prune` helpers now read the pair.
+- **`semantic_insert` / `semantic_find`.** The copies predated per-model entries. `src/` delegates to
+  `semantic_insert_model` / `semantic_find_model`, which store the model with each entry.
+- **`_sem_parse_num` / `semantic_parse_embedding`.** The copies lacked the exponent clamp (at most 40 decades) and the
+  no-progress guard. Without the guard, a bare `NaN` (Python's `json.dumps` emits one by default) spins and allocates
+  until the heap runs out. Without the clamp, an exponent like `1e9223372036854775` loops ~9e15 times. New
+  assertions feed both.
+- **`semantic_remove`.** The copy (`_t_sem_remove`) compared keys as pointers, and its test used integer keys. That is
+  the bug that once left the real expired-entry removal dead. The test now stores string keys and removes one through
+  a separately allocated copy of the same text.
+- **The semantic store ships disabled.** The copy had defaulted it on, so the tests now call `semantic_configure`
+  first, as `[cache]` does.
+
+### Added — tests for code that had none
+
+- **`semantic_model_scope`.** `semantic_insert_model` / `semantic_find_model` had no test. Their own comment records
+  the bug they prevent: a `claude-opus-4-1` request served the `gpt-4o-mini` answer. The new group checks that:
+  - another model's entry never answers;
+  - the same model, compared by text, does;
+  - an unscoped query finds only unscoped entries;
+  - `max_search` bounds the scan;
+  - a disabled store finds nothing.
+- **The compression switch.** `compression_configure` / `compression_is_enabled`: off by default, on, and off again.
+
+### Mutation-checked
+
+A copy of the tree was changed seven ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| `_cmp_span_end` back to the copy's escape check | 1 assertion fails |
+| `_cmp_str_field` back to the copy's escape check | 1 fails |
+| `semantic_remove` by pointer | 4 fail |
+| the `NaN` no-progress guard removed | the suite hangs |
+| the exponent clamp removed | the suite hangs |
+| an unscoped query matching every entry | 1 fails |
+| any model matching any model | 1 fails |
+
+The first version of the scope test let the unscoped mutant through. Its scoped entry shared `key-cat`'s vector, so
+the first equal match won either way. The entry now uses a vector only it matches above the threshold.
+
+### Changed — CI fails a hung test suite in minutes
+
+Two of those mutants hang the suite rather than failing an assertion, and a GitHub Actions job waits 6 hours by
+default. The *Test suite* step in `ci.yml` gets `timeout-minutes: 5`; the suite takes ~2 s.
+
+### Notes
+
+- The test file is 397 lines shorter (7,611 → 7,214).
+- Symbol coverage dipped to 301 when the copies went, then returned to 306. `scripts/coverage.sh` counts a `src/`
+  function as covered when its name appears in `tests/`. The deleted copies had carried the names of seven internal
+  helpers (`_compress_is_ws`, `_cmp_is_role`, `_cmp_collect_ids`, `_cmp_id_in`, `_sem_find`, `_sem_is_digit`,
+  `_sem_parse_num`) that now run for real through their callers. The new tests above reference five functions the
+  suite had never named.
+
+### Performance
+
+The bench binary is byte-identical to 2.9.3's apart from the version string. No benched path changed. The
+2026-11-04 rows in `bench-history.csv` after 2.9.3's are this release's mandatory run.
+
 ## [2.9.3] — 2026-11-04
 
 **Remote requests stop leaking megabytes each, and the tests stop mirroring four modules.** The roadmap's
@@ -50,7 +129,9 @@ four fuzz targets are clean.
 - **What remains is upstream.** sandhi's arena-aware connect (`_sandhi_conn_finalize_with_early_data_a`) opens TLS
   with `tls_connect_alloc(fd, …)`, the global-heap wrapper, instead of `tls_connect_alloc_in(a, fd, …)`. So each new
   TLS connection's state (~179 KB) still lands on the heap. A standalone probe isolates it: with an arena, plain HTTP
-  costs 856 B per request and HTTPS 178,768 B. The roadmap records it as an upstream item.
+  costs 856 B per request and HTTPS 178,768 B. bote 3.6.5 had already filed it
+  (`sandhi/docs/development/issues/2026-11-02-bote-tls-connect-keeps-each-connection-on-the-heap.md`); hoosh's
+  measurements and fix constraints were added there as a second reporter.
 - **Still correct:**
   - a stream that fails before emitting falls back to the buffered path and reports the provider's 500;
   - a buffered 500 carries the provider's message;

@@ -46,6 +46,12 @@ include "src/lib/urlparse.cyr"
 # 2.9.2: the MCP wiring (tool registration, the echo handler) is tested against the REAL module; its
 # needs (bote-core, http_server, logging) are all included above. It replaced the _mcp_echo mirror.
 include "src/lib/mcp.cyr"
+# 2.9.4: response compression (whitespace collapse, stale tool-pair prune) and the semantic cache are tested
+# against the REAL modules. Both replaced same-name copies that had drifted: the copies kept the old string-escape
+# scan, a cstr return where src returns (ptr, len), pre-model semantic entries, a pointer-equality remove, and no
+# exponent cap or no-progress guard in the embedding parser.
+include "src/lib/compression.cyr"
+include "src/lib/semantic.cyr"
 
 # ================================================================
 # Error types — error code + HTTP status mapping
@@ -307,89 +313,14 @@ fn _warming_body(model, prompt) {
     return str_builder_build(sb);
 }
 
-# Whitespace compression (mirror of compression.cyr).
-fn _compress_is_ws(c) {
-    if (c == 32 || c == 9 || c == 10 || c == 13) { return 1; }
-    return 0;
-}
-
-fn compress_ws_json(ptr, len) {
-    var out = str_builder_new();
-    var i = 0;
-    var in_str = 0;
-    var is_val = 0;
-    var prev_sig = 0;
-    var pending = 0;
-    var emitted = 0;
-    while (i < len) {
-        var c = load8(ptr + i);
-        if (in_str == 0) {
-            str_builder_add_byte(out, c);
-            if (c == 34) {
-                in_str = 1;
-                is_val = 0;
-                if (prev_sig == 58) { is_val = 1; }
-                pending = 0;
-                emitted = 0;
-            } else {
-                if (_compress_is_ws(c) == 0) { prev_sig = c; }
-            }
-            i = i + 1;
-        } else {
-            if (c == 92) {
-                var nx = 0;
-                if (i + 1 < len) { nx = load8(ptr + i + 1); }
-                if (nx == 110 || nx == 116 || nx == 114) {
-                    if (is_val == 1) {
-                        pending = 1;
-                    } else {
-                        str_builder_add_byte(out, c);
-                        str_builder_add_byte(out, nx);
-                    }
-                    i = i + 2;
-                    continue;
-                }
-                if (is_val == 1) {
-                    if (emitted == 1 && pending == 1) { str_builder_add_byte(out, 32); }
-                    pending = 0;
-                    emitted = 1;
-                }
-                str_builder_add_byte(out, c);
-                if (i + 1 < len) { str_builder_add_byte(out, nx); }
-                i = i + 2;
-                continue;
-            }
-            if (c == 34) {
-                str_builder_add_byte(out, c);
-                in_str = 0;
-                is_val = 0;
-                i = i + 1;
-                continue;
-            }
-            if (is_val == 1) {
-                if (_compress_is_ws(c) == 1) {
-                    pending = 1;
-                } else {
-                    if (emitted == 1 && pending == 1) { str_builder_add_byte(out, 32); }
-                    str_builder_add_byte(out, c);
-                    emitted = 1;
-                    pending = 0;
-                }
-            } else {
-                str_builder_add_byte(out, c);
-            }
-            i = i + 1;
-        }
-    }
-    return str_cstr(str_builder_build(out));
-}
-
-# Compress a cstr JSON literal, return the collapsed cstr.
+# Whitespace compression: compression.cyr's own (2.9.4, included at the top).
+# Compress a cstr JSON literal, return the collapsed cstr (compress_ws_json returns (ptr, len); ptr is a cstr).
 fn _compress(s) {
     var n = strlen(s);
     var b = alloc(n + 1);
     memcpy(b, s, n);
-    return compress_ws_json(b, n);
+    store8(b + n, 0);
+    return load64(compress_ws_json(b, n));
 }
 
 # Per-token pricing + model metadata: 2.8.0 includes the REAL pricing.cyr and metadata.cyr here (they were
@@ -398,178 +329,7 @@ fn _compress(s) {
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
 
-# Semantic cache (mirror of semantic.cyr).
-var _sem_enabled = 1;
-var _sem_threshold = 850;
-var _sem_max_search = 0;
-var _sem_entries = 0;
-
-fn _isqrt(n) {
-    if (n < 2) { return n; }
-    var x = n;
-    var y = (x + 1) / 2;
-    while (y < x) {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    return x;
-}
-
-fn cosine_x1000(a, b, n) {
-    if (n <= 0) { return 0; }
-    var dot = 0;
-    var ma = 0;
-    var mb = 0;
-    var i = 0;
-    while (i < n) {
-        var av = load64(a + i * 8);
-        var bv = load64(b + i * 8);
-        dot = dot + av * bv;
-        ma = ma + av * av;
-        mb = mb + bv * bv;
-        i = i + 1;
-    }
-    if (ma == 0 || mb == 0) { return 0; }
-    var denom = _isqrt(ma) * _isqrt(mb);
-    if (denom == 0) { return 0; }
-    return dot * 1000 / denom;
-}
-
-fn semantic_insert(key, vec_ptr, n) {
-    if (_sem_enabled == 0) { return 0; }
-    if (_sem_entries == 0) { _sem_entries = vec_new(); }
-    var e = alloc(24);
-    store64(e, key);
-    store64(e + 8, vec_ptr);
-    store64(e + 16, n);
-    vec_push(_sem_entries, e);
-    return 0;
-}
-
-fn semantic_find(query_vec, n) {
-    if (_sem_enabled == 0) { return 0; }
-    if (_sem_entries == 0) { return 0; }
-    var count = vec_len(_sem_entries);
-    var best_key = 0;
-    var best_score = _sem_threshold;
-    var i = 0;
-    while (i < count) {
-        if (_sem_max_search > 0 && i >= _sem_max_search) {
-            i = count;
-        } else {
-            var e = vec_get(_sem_entries, i);
-            if (load64(e + 16) == n) {
-                var score = cosine_x1000(query_vec, load64(e + 8), n);
-                if (score > best_score) {
-                    best_score = score;
-                    best_key = load64(e);
-                }
-            }
-            i = i + 1;
-        }
-    }
-    return best_key;
-}
-
-fn _sem_is_digit(c) {
-    if (c >= 48 && c <= 57) { return 1; }
-    return 0;
-}
-
-fn _sem_parse_num(buf, start, len) {
-    var i = start;
-    var neg = 0;
-    if (i < len && load8(buf + i) == 45) {
-        neg = 1;
-        i = i + 1;
-    }
-    var int_part = 0;
-    while (i < len && _sem_is_digit(load8(buf + i)) == 1) {
-        int_part = int_part * 10 + (load8(buf + i) - 48);
-        i = i + 1;
-    }
-    var frac = 0;
-    var frac_div = 1;
-    if (i < len && load8(buf + i) == 46) {
-        i = i + 1;
-        while (i < len && _sem_is_digit(load8(buf + i)) == 1) {
-            if (frac_div < 10000000) {
-                frac = frac * 10 + (load8(buf + i) - 48);
-                frac_div = frac_div * 10;
-            }
-            i = i + 1;
-        }
-    }
-    var val = int_part * 10000 + frac * 10000 / frac_div;
-    if (i < len && (load8(buf + i) == 101 || load8(buf + i) == 69)) {
-        i = i + 1;
-        var esign = 1;
-        if (i < len && load8(buf + i) == 45) { esign = 0 - 1; i = i + 1; }
-        if (i < len && load8(buf + i) == 43) { i = i + 1; }
-        var exp = 0;
-        while (i < len && _sem_is_digit(load8(buf + i)) == 1) {
-            exp = exp * 10 + (load8(buf + i) - 48);
-            i = i + 1;
-        }
-        var k = 0;
-        while (k < exp) {
-            if (esign > 0) { val = val * 10; } else { val = val / 10; }
-            k = k + 1;
-        }
-    }
-    if (neg == 1) { val = 0 - val; }
-    var r = alloc(16);
-    store64(r, val);
-    store64(r + 8, i);
-    return r;
-}
-
-fn _sem_find(buf, len, needle, nlen) {
-    if (nlen == 0) { return 0 - 1; }
-    var i = 0;
-    while (i + nlen <= len) {
-        if (memeq(buf + i, needle, nlen) == 1) { return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
-}
-
-fn semantic_parse_embedding(buf, len, out_n) {
-    var pos = _sem_find(buf, len, "\"embedding\"", 11);
-    if (pos < 0) {
-        store64(out_n, 0);
-        return 0;
-    }
-    var i = pos + 11;
-    while (i < len && load8(buf + i) != 91) { i = i + 1; }
-    if (i >= len) {
-        store64(out_n, 0);
-        return 0;
-    }
-    i = i + 1;
-    var cap = 4096;
-    var vec = alloc(cap * 8);
-    var n = 0;
-    while (i < len) {
-        var c = load8(buf + i);
-        if (c == 32 || c == 44 || c == 10 || c == 13 || c == 9) {
-            i = i + 1;
-        } else {
-            if (c == 93) {
-                i = len;
-            } else {
-                var fr = _sem_parse_num(buf, i, len);
-                if (n < cap) {
-                    store64(vec + n * 8, load64(fr));
-                    n = n + 1;
-                }
-                i = load64(fr + 8);
-            }
-        }
-    }
-    store64(out_n, n);
-    return vec;
-}
+# Semantic cache: semantic.cyr's own (2.9.4, included at the top).
 
 # Build an int vector from N values for tests.
 fn _vec2(x, y) {
@@ -631,44 +391,6 @@ fn _etools(s) {
     memcpy(o, p, l);
     store8(o + l, 0);
     return o;
-}
-
-# Stale tool-pair prune (mirror of compression.cyr).
-var _CMP_KEEP_RECENT = 3;
-
-fn _cmp_span_end(p, len, start) {
-    var depth = 0;
-    var i = start;
-    while (i < len) {
-        var ch = load8(p + i);
-        if (ch == 34) {
-            i = i + 1;
-            while (i < len) {
-                if (load8(p + i) == 34) {
-                    if (load8(p + i - 1) != 92) { break; }
-                }
-                i = i + 1;
-            }
-        } else {
-            if (ch == 123 || ch == 91) { depth = depth + 1; }
-            if (ch == 125 || ch == 93) {
-                depth = depth - 1;
-                if (depth == 0) { return i + 1; }
-            }
-        }
-        i = i + 1;
-    }
-    return i;
-}
-
-fn _cmp_substr(p, plen, needle, nlen) {
-    if (nlen == 0) { return 0 - 1; }
-    var i = 0;
-    while (i + nlen <= plen) {
-        if (memeq(p + i, needle, nlen) == 1) { return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
 }
 
 # Mirror of src/lib/batch.cyr _batch_extract_requests — locate the raw
@@ -1832,179 +1554,14 @@ fn _t_bind_addr_str(addr) {
     return str_cstr(str_builder_build(sb));
 }
 
-fn _cmp_str_field(p, len, key, keylen) {
-    var i = 0;
-    while (i + keylen + 2 < len) {
-        if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
-          && load8(p + i + 1 + keylen) == 34) {
-            var j = i + 2 + keylen;
-            while (j < len && (load8(p + j) == 32 || load8(p + j) == 58)) {
-                j = j + 1;
-            }
-            if (j < len && load8(p + j) == 34) {
-                j = j + 1;
-                var vs = j;
-                while (j < len) {
-                    if (load8(p + j) == 34) {
-                        if (load8(p + j - 1) != 92) { break; }
-                    }
-                    j = j + 1;
-                }
-                var r = alloc(16);
-                store64(r, p + vs);
-                store64(r + 8, j - vs);
-                return r;
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-fn _cmp_is_role(field, role, rolelen) {
-    if (field == 0) { return 0; }
-    if (load64(field + 8) != rolelen) { return 0; }
-    if (memeq(load64(field), role, rolelen) == 1) { return 1; }
-    return 0;
-}
-
-fn _cmp_collect_ids(objp, objl, out) {
-    var tc = _cmp_substr(objp, objl, "\"tool_calls\"", 12);
-    if (tc < 0) { return 0; }
-    var i = tc + 12;
-    while (i < objl && load8(objp + i) != 91) { i = i + 1; }
-    if (i >= objl) { return 0; }
-    var arrend = _cmp_span_end(objp, objl, i);
-    var j = i;
-    while (j + 6 <= arrend) {
-        if (memeq(objp + j, "\"id\":\"", 6) == 1) {
-            var vs = j + 6;
-            var ve = vs;
-            while (ve < arrend && load8(objp + ve) != 34) {
-                if (load8(objp + ve) == 92) { ve = ve + 1; }
-                ve = ve + 1;
-            }
-            var idspan = alloc(16);
-            store64(idspan, objp + vs);
-            store64(idspan + 8, ve - vs);
-            vec_push(out, idspan);
-            j = ve;
-        }
-        j = j + 1;
-    }
-    return 0;
-}
-
-fn _cmp_id_in(ids, ptr, len) {
-    var n = vec_len(ids);
-    var i = 0;
-    while (i < n) {
-        var e = vec_get(ids, i);
-        if (load64(e + 8) == len) {
-            if (memeq(load64(e), ptr, len) == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-fn prune_tool_pairs(msg_ptr, msg_len) {
-    var spans = vec_new();
-    var tc_idx = vec_new();
-    var i = 0;
-    while (i < msg_len && load8(msg_ptr + i) != 91) { i = i + 1; }
-    i = i + 1;
-    while (i < msg_len) {
-        var ch = load8(msg_ptr + i);
-        if (ch == 32 || ch == 44 || ch == 10 || ch == 13 || ch == 9) {
-            i = i + 1;
-        } else {
-            if (ch != 123) {
-                i = msg_len;
-            } else {
-                var s = i;
-                var e = _cmp_span_end(msg_ptr, msg_len, i);
-                var span = alloc(24);
-                store64(span, s);
-                store64(span + 8, e);
-                store64(span + 16, 0);
-                vec_push(spans, span);
-                var objp = msg_ptr + s;
-                var objl = e - s;
-                var role = _cmp_str_field(objp, objl, "role", 4);
-                if (_cmp_is_role(role, "assistant", 9) == 1) {
-                    if (_cmp_substr(objp, objl, "\"tool_calls\"", 12) >= 0) {
-                        vec_push(tc_idx, vec_len(spans) - 1);
-                    }
-                }
-                i = e;
-            }
-        }
-    }
-    var total_tc = vec_len(tc_idx);
-    if (total_tc <= _CMP_KEEP_RECENT) {
-        var orig = alloc(msg_len + 1);
-        memcpy(orig, msg_ptr, msg_len);
-        store8(orig + msg_len, 0);
-        return orig;
-    }
-    var stale_count = total_tc - _CMP_KEEP_RECENT;
-    var stale_ids = vec_new();
-    var k = 0;
-    while (k < stale_count) {
-        var sidx = vec_get(tc_idx, k);
-        var sp = vec_get(spans, sidx);
-        store64(sp + 16, 1);
-        _cmp_collect_ids(msg_ptr + load64(sp), load64(sp + 8) - load64(sp), stale_ids);
-        k = k + 1;
-    }
-    var n = vec_len(spans);
-    var m = 0;
-    while (m < n) {
-        var sp2 = vec_get(spans, m);
-        if (load64(sp2 + 16) == 0) {
-            var op = msg_ptr + load64(sp2);
-            var ol = load64(sp2 + 8) - load64(sp2);
-            var role2 = _cmp_str_field(op, ol, "role", 4);
-            if (_cmp_is_role(role2, "tool", 4) == 1) {
-                var tcid = _cmp_str_field(op, ol, "tool_call_id", 12);
-                if (tcid != 0) {
-                    if (_cmp_id_in(stale_ids, load64(tcid), load64(tcid + 8)) == 1) {
-                        store64(sp2 + 16, 1);
-                    }
-                }
-            }
-        }
-        m = m + 1;
-    }
-    var sb = str_builder_new();
-    str_builder_add_byte(sb, 91);
-    var first = 1;
-    var q = 0;
-    while (q < n) {
-        var sp3 = vec_get(spans, q);
-        if (load64(sp3 + 16) == 0) {
-            if (first == 0) { str_builder_add_byte(sb, 44); }
-            var ms = load64(sp3);
-            var ml = load64(sp3 + 8) - ms;
-            var mb = alloc(ml + 1);
-            memcpy(mb, msg_ptr + ms, ml);
-            store8(mb + ml, 0);
-            str_builder_add_cstr(sb, mb);
-            first = 0;
-        }
-        q = q + 1;
-    }
-    str_builder_add_byte(sb, 93);
-    return str_cstr(str_builder_build(sb));
-}
-
-# Prune a cstr messages-array literal; return the pruned cstr.
+# Prune a cstr messages-array literal; return the pruned cstr. prune_tool_pairs returns (ptr, len): a fresh cstr
+# when it pruned, or the input span itself when there was nothing to prune, so the input is NUL-terminated here.
 fn _prune(s) {
     var n = strlen(s);
     var b = alloc(n + 1);
     memcpy(b, s, n);
-    return prune_tool_pairs(b, n);
+    store8(b + n, 0);
+    return load64(prune_tool_pairs(b, n));
 }
 
 # ================================================================
@@ -3142,28 +2699,6 @@ fn _t_tc_insert(c, key, value, now) {
         }
     }
     map_set(m, key, _t_tc_entry_new(value, now));
-    return 0;
-}
-
-# Mirror of src/lib/semantic.cyr semantic_remove — compact the entry out of the
-# vec so a stale embedding stops competing for max_search.
-fn _t_sem_remove(entries, key) {
-    if (entries == 0) { return 0; }
-    var count = vec_len(entries);
-    var i = 0;
-    while (i < count) {
-        var e = vec_get(entries, i);
-        if (load64(e) == key) {
-            var j = i;
-            while (j + 1 < count) {
-                vec_set(entries, j, vec_get(entries, j + 1));
-                j = j + 1;
-            }
-            vec_pop(entries);
-            return 1;
-        }
-        i = i + 1;
-    }
     return 0;
 }
 
@@ -5173,6 +4708,9 @@ fn main() {
     assert_eq(_isqrt(144), 12, "isqrt: 144 = 12");
 
     test_group("semantic_store");
+    # 2.9.4: semantic.cyr's own store. It ships disabled (the copy defaulted to enabled), so turn it on as
+    # [cache] semantic does: threshold 0.85, no model scope, unlimited search.
+    semantic_configure(1, 850, 0, 0);
     semantic_insert("key-cat", _vec2(10000, 0), 2);
     semantic_insert("key-dog", _vec2(0, 10000), 2);
     # Query [9000,1000] ≈ 6° from key-cat (cosine ≈ 0.99 > 0.85) → key-cat.
@@ -5187,6 +4725,33 @@ fn main() {
     store64(q3 + 8, 0);
     store64(q3 + 16, 0);
     assert_eq(semantic_find(q3, 3), 0, "semantic: dimension mismatch skipped");
+
+    test_group("semantic_model_scope");
+    # 2.9.4: semantic.cyr's per-model store, untested until now. An entry only answers a query for the SAME model:
+    # two request bodies differing only in "model" embed almost identically, and before the scope a
+    # claude-opus-4-1 request was served the gpt-4o-mini answer, labelled X-Hoosh-Cache: SEMANTIC.
+    # (8000, 6000) scores 0.80 against key-cat and 0.60 against key-dog, both under 0.85, so only ans-mini can
+    # answer a query along it: an unscoped query that returns anything there has crossed the scope.
+    semantic_insert_model("ans-mini", _vec2(8000, 6000), 2, "gpt-4o-mini");
+    var opus = alloc(32);
+    memcpy(opus, "claude-opus-4-1", 16);
+    assert_eq(semantic_find_model(_vec2(8000, 6000), 2, opus), 0,
+      "semantic: another model's entry never answers");
+    var mini = alloc(16);
+    memcpy(mini, "gpt-4o-mini", 12);
+    assert_streq(semantic_find_model(_vec2(8000, 6000), 2, mini), "ans-mini",
+      "semantic: the same model, compared by text, does");
+    assert_eq(semantic_find_model(_vec2(0, 10000), 2, 0) != 0, 1,
+      "semantic: an unscoped query still finds unscoped entries (key-dog)");
+    assert_eq(semantic_find_model(_vec2(8000, 6000), 2, 0), 0,
+      "semantic: an unscoped query never returns a model-scoped entry");
+    # max_search bounds the scan: with 1, only the first stored entry (key-cat) is considered.
+    semantic_configure(1, 850, 0, 1);
+    assert_eq(semantic_find(_vec2(0, 10000), 2), 0, "semantic: max_search=1 stops before key-dog");
+    semantic_configure(0, 850, 0, 0);
+    assert_eq(semantic_find(_vec2(9000, 1000), 2), 0, "semantic: disabled finds nothing");
+    assert_eq(semantic_is_enabled(), 0, "semantic: disabled reports 0");
+    semantic_configure(1, 850, 0, 0);
 
     test_group("embedding_parse");
     # Parse an OpenAI-style embeddings response → ×10000 int vector.
@@ -5209,6 +4774,21 @@ fn main() {
     assert_eq(load64(sci_n), 2, "embedding: 2 dims (scientific)");
     assert_eq(load64(sci_vec), 150, "embedding: 1.5e-2 → 0.015 → 150");
     assert_eq(load64(sci_vec + 8), 0 - 200000, "embedding: -2e1 → -20 → -200000");
+    # 2.9.4: semantic.cyr's own parser. A bare NaN (Python's json.dumps emits one by default) is not an embedding,
+    # and the parse stops with 0 dims. The copy this replaced spun on the same byte, allocating, until the heap ran out.
+    var emb_nan = "{\"embedding\":[0.5,NaN,1.0]}";
+    var nan_n = alloc(8);
+    var nan_buf = alloc(strlen(emb_nan) + 1);
+    memcpy(nan_buf, emb_nan, strlen(emb_nan));
+    semantic_parse_embedding(nan_buf, strlen(emb_nan), nan_n);
+    assert_eq(load64(nan_n), 0, "embedding: a NaN component abandons the parse");
+    # An absurd exponent is clamped to 40 decades. The copy applied it one decade per loop, ~9e15 iterations.
+    var emb_exp = "{\"embedding\":[1e9223372036854775]}";
+    var exp_n = alloc(8);
+    var exp_buf = alloc(strlen(emb_exp) + 1);
+    memcpy(exp_buf, emb_exp, strlen(emb_exp));
+    semantic_parse_embedding(exp_buf, strlen(emb_exp), exp_n);
+    assert_eq(load64(exp_n), 1, "embedding: a huge exponent is clamped and the parse completes");
 
     # ================================================================
     # MIDDLEWARE AUTH — constant-time token comparison
@@ -5596,6 +5176,12 @@ fn main() {
 
     # ── Prompt compression: whitespace collapse in JSON values ────
     test_group("compression");
+    # 2.9.4: compression.cyr's own switch ([cache] compress / the per-request opt-in reads it).
+    assert_eq(compression_is_enabled(), 0, "compression: off by default");
+    compression_configure(1);
+    assert_eq(compression_is_enabled(), 1, "compression: configure turns it on");
+    compression_configure(0);
+    assert_eq(compression_is_enabled(), 0, "compression: and off again");
     assert_eq(streq(_compress("{\"content\":\"hello  world\"}"),
         "{\"content\":\"hello world\"}"), 1, "compress: collapse runs in content");
     assert_eq(streq(_compress("{\"content\":\"  foo  bar  \"}"),
@@ -5773,6 +5359,17 @@ fn main() {
     var conv2 = "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"r\"}]";
     var pr2 = _prune(conv2);
     assert_eq(_cmp_substr(pr2, strlen(pr2), "\"c1\"", 4) >= 0, 1, "prune: <=3 turns unchanged");
+    # 2.9.4: the scans are compression.cyr's own. A string ending in an escaped backslash closes at its quote;
+    # the copy this replaced read the quote as escaped (`\"`) and ran on past the object.
+    var cesc = "{\"content\":\"dir C:\\\\\"},{\"role\":\"user\"}";   # {"content":"dir C:\\"},{"role":"user"}
+    assert_eq(_cmp_span_end(cesc, strlen(cesc), 0), 22,
+      "prune scan: an escaped backslash before the quote ends the string");
+    var cfv = "{\"content\":\"C:\\\\\",\"role\":\"tool\"}";             # {"content":"C:\\","role":"tool"}
+    var cfr = _cmp_str_field(cfv, strlen(cfv), "content", 7);
+    assert_eq(load64(cfr + 8), 4, "prune field: a value ending in an escaped backslash is 4 bytes");
+    var cfrole = _cmp_str_field(cfv, strlen(cfv), "role", 4);
+    assert_eq(load64(cfrole + 8), 4, "prune field: the next field is still found");
+    assert_eq(memeq(load64(cfrole), "tool", 4), 1, "prune field: and reads as tool");
 
     # ── MCP tool server (bote) ────────────────────────────────────
     # Exercises the real bote-core registry/dispatcher/codec that
@@ -6224,20 +5821,26 @@ fn main() {
 
     test_group("semantic_remove");
     # An expired response must take its embedding with it, or semantic_find
-    # keeps returning a key that resolves to nothing.
-    var sv = vec_new();
-    var se1 = alloc(24); store64(se1, 11); store64(se1 + 8, 0); store64(se1 + 16, 4);
-    var se2 = alloc(24); store64(se2, 22); store64(se2 + 8, 0); store64(se2 + 16, 4);
-    var se3 = alloc(24); store64(se3, 33); store64(se3 + 8, 0); store64(se3 + 16, 4);
-    vec_push(sv, se1); vec_push(sv, se2); vec_push(sv, se3);
-    assert_eq(_t_sem_remove(sv, 22), 1, "sem_remove: middle entry removed");
-    assert_eq(vec_len(sv), 2, "sem_remove: length shrank");
+    # keeps returning a key that resolves to nothing. 2.9.4: semantic.cyr's own
+    # semantic_remove, which matches the key by CONTENT. The copy this replaced
+    # compared pointers, the bug that kept the real expired-on-read path dead.
+    semantic_configure(1, 850, 0, 0);
+    var sc0 = semantic_count();
+    semantic_insert("sr-11", _vec2(10000, 0), 2);
+    semantic_insert("sr-22", _vec2(0, 10000), 2);
+    semantic_insert("sr-33", _vec2(7071, 7071), 2);
+    assert_eq(semantic_count(), sc0 + 3, "sem_remove: three entries stored");
+    var sk22 = alloc(8);
+    memcpy(sk22, "sr-22", 6);                 # a different pointer, the same text (the cache passes a fresh sha256 hex)
+    assert_eq(semantic_remove(sk22), 1, "sem_remove: middle entry removed by its text");
+    assert_eq(semantic_count(), sc0 + 2, "sem_remove: length shrank");
     # Order of the survivors is preserved by the compaction.
-    assert_eq(load64(vec_get(sv, 0)), 11, "sem_remove: first survivor kept");
-    assert_eq(load64(vec_get(sv, 1)), 33, "sem_remove: tail shifted down");
-    assert_eq(_t_sem_remove(sv, 999), 0, "sem_remove: absent key is a no-op");
-    assert_eq(vec_len(sv), 2, "sem_remove: no-op leaves length alone");
-    assert_eq(_t_sem_remove(0, 11), 0, "sem_remove: empty store safe");
+    assert_streq(load64(vec_get(_sem_entries, sc0)), "sr-11", "sem_remove: first survivor kept");
+    assert_streq(load64(vec_get(_sem_entries, sc0 + 1)), "sr-33", "sem_remove: tail shifted down");
+    assert_eq(semantic_remove("sr-999"), 0, "sem_remove: absent key is a no-op");
+    assert_eq(semantic_count(), sc0 + 2, "sem_remove: no-op leaves length alone");
+    _sem_entries = 0;
+    assert_eq(semantic_remove("sr-11"), 0, "sem_remove: empty store safe");
 
     # ── v2.5.5 health & failover ──
     test_group("health_circuit_breaker");
