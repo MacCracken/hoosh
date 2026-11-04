@@ -6,12 +6,13 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.11**: CHANGELOG, state, the roadmap's layout item). Earlier the same day:
-> **v2.9.10** (the roadmap's cycle map), **v2.9.9** (the `HW_MAX_MODEL_PARAMS` comment in `hardware.cyr`), **v2.9.8**,
-> **v2.9.7**, **v2.9.6** (the dependency scan), **v2.9.5**, **v2.9.4**, **v2.9.3** (the pooling measurement, the
-> sandhi TLS-allocator item), **v2.9.2** (README *Hardware data files*; the roadmap re-banded; the rust-old
-> retirement carried out), **v2.9.1** (cyrius 6.7.18; ADR 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the
-> zugot-recipe step dropped) and **v2.8.2** (cyrius 6.6.20); before that 2026-10-09 (**v2.8.1**).
+> **Last refresh**: 2026-11-04 (**v2.9.12**: CHANGELOG, README stats, state, the roadmap's cycle map and a new
+> audit-restore item). Earlier the same day: **v2.9.11** (the roadmap's layout item), **v2.9.10**, **v2.9.9** (the
+> `HW_MAX_MODEL_PARAMS` comment in `hardware.cyr`), **v2.9.8**, **v2.9.7**, **v2.9.6** (the dependency scan),
+> **v2.9.5**, **v2.9.4**, **v2.9.3** (the pooling measurement, the sandhi TLS-allocator item), **v2.9.2** (README
+> *Hardware data files*; the roadmap re-banded; the rust-old retirement carried out), **v2.9.1** (cyrius 6.7.18; ADR
+> 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and **v2.8.2** (cyrius
+> 6.6.20); before that 2026-10-09 (**v2.8.1**).
 > The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the rust-old parity arc), when every doc below was
 > re-read against the source.
 >

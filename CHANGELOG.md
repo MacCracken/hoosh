@@ -5,6 +5,107 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.12] — 2026-11-04
+
+**Fixed: an audit chain past `max_entries` no longer reports itself as tampered.** The bug turned up when the tests
+moved from an inline copy of the chain to the real `audit.cyr`. The same patch removes 33 test groups that never
+called `src/`. **1401 assertions** in 156 groups. All gates are clean: fmt, lint, vet, deny, coverage (380/684,
+55%; **27 of 37** modules included for real), the security scan and the four fuzz targets.
+
+### Fixed — `GET /v1/audit` said `"valid":false` once the chain rotated
+
+- **The bug:** `audit_record` evicts the oldest entry once the chain passes `max_entries` (default 10000,
+  `[audit] max_entries`). But `audit_verify` still required the first entry to link to GENESIS. So from the first
+  eviction on, every check failed, and `GET /v1/audit` reported `"valid":false`, its answer for tampering. With
+  auditing on, a gateway reported its own chain as tampered from the 10,001st audited event onwards.
+- **The fix:** the chain keeps an anchor, a new field at offset 64 (`AUDIT_CHAIN_SIZE` 64 → 72). It is GENESIS until
+  an entry is evicted, then the evicted entry's hash, and `audit_verify` expects the first entry to link to it.
+  Removing an entry at the front still breaks that link. Only the chain's own eviction moves the anchor.
+- **Restored chains:** `storage_restore_audit` reloads every stored entry from the first one, so a restored chain
+  starts at GENESIS and needs no change. It loads every row whatever `max_entries` says, and eviction removes only
+  one entry per new record, so a restored chain larger than the setting stays larger. That is unchanged and is in
+  the roadmap.
+
+### Changed — `audit.cyr` is included for real
+
+`audit_record` writes each entry through to `storage.cyr`, which cannot be included yet: storage and budget need
+each other. With persistence off, `storage_audit_insert` returns at once, and the test file's one-line stand-in
+does the same.
+
+**What the inline chains got wrong:**
+- **The hash:** they hashed only the message. The real entry hash covers id, timestamp, event, level, message,
+  provider and model.
+- **The verifier:** they checked links with their own loop rather than `audit_verify`. An inline verifier is how
+  v2.5.7's missing link check went unnoticed.
+
+**The new groups:**
+- **`audit_chain`:** ids, GENESIS and the link to the previous hash, the fields the hash covers, the signature's
+  shape.
+- **`audit_tamper`:** a changed message, a changed model, a broken link, a swapped signature and another key are
+  each caught, and undoing each verifies again.
+- **`audit_excision_detected`:** a removed middle entry is caught, on the real verifier now.
+- **`audit_eviction`:** a rotated chain verifies and `/v1/audit` says so; an entry removed at the front is still
+  caught; verification keeps passing as the chain rotates.
+
+### Removed — 33 groups that tested only their own code
+
+Each of these set local values and asserted them, or did arithmetic on constants. None could fail because of a
+change to `src/`.
+- **`rate_limit_*` (4):** a counter in a hashmap. The real limiter is tested in `ratelimit_*`.
+- **`registry_*` (5):** inserts into the stdlib hashmap.
+- **`metrics`:** sums on a local struct, and a variable set to 14 and asserted to be 14.
+- **`inference_*` (5):** stores and loads on local structs, `ROLE_USER = 1` asserted to be 1, and `1000 + 500` to be
+  `1500`.
+- **`token_count_*` (3):** the test's own division. The real `chars_per_token_x10` is tested elsewhere.
+- **Five inline `dlp_*` groups:** a search for `@`, and local flags. The real scanner is tested in `dlp_scanner`,
+  including email, clean text, the class ordering and disabled DLP.
+- **`request_body_cap`, `sampling_range_bounds` and `retry_jitter_factor`:** comparisons of constants, such as
+  `2001 > 2000`. The real checks live in `pool.cyr`, `handlers.cyr` and `retry.cyr`, which cannot be included yet.
+- **Seven inline audit groups,** replaced above. One asserted `1 == 1`.
+
+**Kept, although they call no `src/` function:**
+- `config_*` and `json_*` exercise bayan's real TOML and JSON parsers;
+- `auth_*` exercises sigil's real constant-time compare;
+- `hardware_data_files` reads the data files hoosh ships.
+
+### Changed — two context groups run the real code
+
+- **`context_token_limit`** calls `context_token_limit` (`compact.cyr`). It also checks that an unknown window gives
+  no limit.
+- **`context_keep_last_floor`** runs `compact_messages`:
+  - with keep_last 10, the newest ten messages are kept;
+  - with keep_last 0, the newest message is still kept;
+  - a conversation shorter than the floor is kept whole.
+
+  **One test premise was wrong, not the code:** `compact_messages` never lets its character budget drop below 100,
+  so three short messages fit even a 1-token budget. The floor tests use 150-byte messages, and a new assertion
+  pins the minimum.
+
+### Mutation-checked
+
+A copy of the tree was changed 15 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| eviction not moving the anchor, or moving it to the new first entry's hash | 4 and 5 fail |
+| `audit_verify` starting from GENESIS instead of the anchor | 3 fail |
+| `audit_verify` without its link, hash or HMAC check | 2 fail each |
+| the entry hash leaving out the model; the signature leaving out the previous hash | 1 and 8 fail |
+| eviction not lowering the count | 2 fail |
+| a new chain without its anchor | crashes |
+| `context_token_limit` ignoring the threshold | 1 fails |
+| the floor keeping one too few; keep_last 0 keeping none; the 100-char minimum lowered to 50 | 2, 2 and 1 fail |
+| the floor without its clamp at 0 | crashes |
+
+### Notes
+
+- The test file is 6,712 lines (was 7,136). Symbol coverage rose from 373 to 380 of 684.
+- **Benchmarks:** the bench file is unchanged, and its binary differs from 2.9.11's only in the version digit. At
+  load 1.0 the 25 rows' median move against 2.9.11 is 0.0%. All are within −6% and +7%, except
+  `work_queue_push_pop` at 9 → 10 ns, a one-nanosecond rounding step.
+- **Next easy step:** `budget.cyr` needs only `storage_budget_set` from `storage.cyr`, the same footing `audit.cyr`
+  came in on. The roadmap lists it.
+
 ## [2.9.11] — 2026-11-04
 
 **Benchmark rows no longer depend on the version string.** 2.9.10's one byte longer version moved three rows by up

@@ -28,8 +28,10 @@ var AUDIT_ENTRY_SIZE = 96;
 #  40: count (i64)
 #  48: max_entries (i64)
 #  56: next_id (i64)
+#  64: anchor (ptr)    — the hash the first entry links to: GENESIS until an entry
+#                        is evicted, then the last evicted entry's hash (2.9.12)
 
-var AUDIT_CHAIN_SIZE = 64;
+var AUDIT_CHAIN_SIZE = 72;
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 
 # HMAC-SHA256 → lowercase hex string. Replaces the old sigil `hmac_sign`
@@ -51,6 +53,7 @@ fn audit_chain_new(key, key_len, max_entries) {
     store64(c + 40, 0);
     store64(c + 48, max_entries);
     store64(c + 56, 1);
+    store64(c + 64, GENESIS_HASH);
     return c;
 }
 
@@ -176,11 +179,15 @@ fn audit_record(chain, event, level, message, provider, model) {
     var count = load64(chain + 40) + 1;
     store64(chain + 40, count);
 
-    # Evict oldest if over max
+    # Evict oldest if over max. 2.9.12: the evicted entry's hash becomes the anchor
+    # the new first entry must link to. Before, audit_verify still demanded GENESIS
+    # there, so once a chain passed max_entries (default 10000) every later
+    # GET /v1/audit reported "valid":false, the same answer as tampering.
     var max = load64(chain + 48);
     if (count > max) {
         var head = load64(chain + 24);
         if (head != 0) {
+            store64(chain + 64, load64(head + 72));
             store64(chain + 24, load64(head + 80));
             store64(chain + 40, count - 1);
         }
@@ -201,11 +208,17 @@ fn audit_record(chain, event, level, message, provider, model) {
 # clean, defeating the point of chaining. Each entry's `previous_hash` must now
 # equal the prior entry's hash, and the first must be GENESIS
 # (rust-old audit.rs:186-195).
+#
+# 2.9.12: "the first must be GENESIS" holds only until the chain evicts. After that
+# the first entry links to the last evicted entry, whose hash the chain keeps as its
+# anchor (offset 64). Removing entries at the front still breaks that link, so an
+# excision there is still caught; only the chain's own eviction moves the anchor.
 fn audit_verify(chain) {
     var key = load64(chain);
     var key_len = load64(chain + 8);
     var e = load64(chain + 24);
-    var expect_prev = GENESIS_HASH;
+    var expect_prev = load64(chain + 64);
+    if (expect_prev == 0) { expect_prev = GENESIS_HASH; }
     while (e != 0) {
         var id = load64(e);
         var ts = load64(e + 8);

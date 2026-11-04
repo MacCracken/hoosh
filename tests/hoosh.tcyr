@@ -82,6 +82,11 @@ include "src/lib/router.cyr"
 # reads main.cyr's `_router`, the gateway's live router, which this file declares in main.cyr's place.
 include "src/lib/health.cyr"
 var _router = 0;
+# 2.9.12: the HMAC-linked audit chain, for real. It replaced inline chains that hashed only the message and checked
+# links with their own loop. audit.cyr writes each entry through to storage.cyr, which cannot be included yet
+# (storage and audit need each other); with persistence off that call does nothing, and this stand-in does the same.
+fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev, ehash) { return 0; }
+include "src/lib/audit.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -2130,12 +2135,6 @@ fn queue_is_empty(q) {
 }
 
 # Audit entry layout
-enum AuditField {
-    AE_SIZE = 64;
-    AE_ID = 0; AE_EVENT = 8; AE_MSG = 16; AE_PROV = 24;
-    AE_MODEL = 32; AE_HASH = 40; AE_SIG = 48; AE_PREV = 56;
-}
-
 # 2.5.0's _req_reasoning_effort mirror is gone: handlers.cyr's is a wrapper over catalog_req_effort (catalog.cyr,
 # included above), and this is the same wrapper, so the 2.5.0 assertions below run against the real scanner.
 fn _req_reasoning_effort(body_ptr, body_len) {
@@ -2951,6 +2950,37 @@ fn _t_events_recent() {
     return buf + _t_hdr_end(buf, total);
 }
 
+# A messages array of `n` user messages whose contents are "m0-", "m1-", ..., each followed by `pad` x's
+# (2.9.12, for compact_messages).
+fn _t_msgs(n, pad) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"role\":\"user\",\"content\":\"m");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, "-");
+        var k = 0;
+        while (k < pad) { str_builder_add_cstr(sb, "x"); k = k + 1; }
+        str_builder_add_cstr(sb, "\"}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_data(str_builder_build(sb));
+}
+
+# Occurrences of `pat` in buf[0..n).
+fn _t_count_n(buf, n, pat) {
+    var c = 0;
+    var pl = strlen(pat);
+    var i = 0;
+    while (i + pl <= n) {
+        if (memeq(buf + i, pat, pl) == 1) { c = c + 1; i = i + pl; } else { i = i + 1; }
+    }
+    return c;
+}
+
 # Occurrences of `pat` in the cstr `s`.
 fn _t_count(s, pat) {
     var n = 0;
@@ -3377,140 +3407,6 @@ fn main() {
     assert_streq(load64(queue_dequeue(fq) + QITEM_ID), "third", "fifo: third");
 
     # ================================================================
-    # RATE LIMITER — sliding window RPM
-    # ================================================================
-
-    # Rate limiter: map of provider -> { max_rpm(8), count(8) }
-    # Simplified: no time window in test, just count-based
-
-    test_group("rate_limit_unconfigured");
-
-    var rl_map = map_new();
-    # Unconfigured provider always allowed
-    assert_eq(map_get(rl_map, "unknown"), 0, "unconfigured returns 0 (no limit)");
-
-    test_group("rate_limit_within");
-
-    # Configure "test" with max_rpm=5
-    # Rate limit record: max_rpm(8) current_count(8) = 16 bytes
-    var rl_rec = alloc(16);
-    store64(rl_rec, 5);     # max_rpm = 5
-    store64(rl_rec + 8, 0); # current_count = 0
-    map_set(rl_map, "test", rl_rec);
-
-    # 5 requests within limit
-    var i = 0;
-    var all_ok = 1;
-    while (i < 5) {
-        var rec = map_get(rl_map, "test");
-        var count = load64(rec + 8);
-        var max = load64(rec);
-        if (count >= max) { all_ok = 0; }
-        store64(rec + 8, count + 1);
-        i = i + 1;
-    }
-    assert(all_ok == 1, "5 requests within limit allowed");
-
-    test_group("rate_limit_exceeded");
-
-    # 6th request should be rejected
-    var rl_chk = map_get(rl_map, "test");
-    var rl_chk_cnt = load64(rl_chk + 8);
-    var rl_chk_max = load64(rl_chk);
-    assert(rl_chk_cnt >= rl_chk_max, "6th request: count >= max_rpm");
-
-    test_group("rate_limit_independent");
-
-    # Different providers are independent
-    var rl_a = alloc(16);
-    store64(rl_a, 1);
-    store64(rl_a + 8, 0);
-    var rl_b = alloc(16);
-    store64(rl_b, 1);
-    store64(rl_b + 8, 0);
-    map_set(rl_map, "prov_a", rl_a);
-    map_set(rl_map, "prov_b", rl_b);
-
-    # Use up prov_a's limit
-    var ra = map_get(rl_map, "prov_a");
-    store64(ra + 8, 1);
-
-    # prov_b should still be allowed
-    var rb = map_get(rl_map, "prov_b");
-    assert(load64(rb + 8) < load64(rb), "prov_b still has capacity");
-    assert(load64(ra + 8) >= load64(ra), "prov_a exhausted");
-
-    # ================================================================
-    # METRICS — counter + gauge accumulation
-    # ================================================================
-
-    test_group("metrics");
-
-    # Metrics record: requests(8) prompt_tokens(8) completion_tokens(8) = 24
-    var metrics = alloc(24);
-    store64(metrics, 0);
-    store64(metrics + 8, 0);
-    store64(metrics + 16, 0);
-
-    # Record a request
-    store64(metrics, load64(metrics) + 1);
-    store64(metrics + 8, load64(metrics + 8) + 100);
-    store64(metrics + 16, load64(metrics + 16) + 50);
-
-    assert_eq(load64(metrics), 1, "metrics: 1 request");
-    assert_eq(load64(metrics + 8), 100, "metrics: 100 prompt tokens");
-    assert_eq(load64(metrics + 16), 50, "metrics: 50 completion tokens");
-
-    # Record another
-    store64(metrics, load64(metrics) + 1);
-    store64(metrics + 8, load64(metrics + 8) + 200);
-    store64(metrics + 16, load64(metrics + 16) + 75);
-
-    assert_eq(load64(metrics), 2, "metrics: 2 requests");
-    assert_eq(load64(metrics + 8), 300, "metrics: 300 prompt tokens");
-    assert_eq(load64(metrics + 16), 125, "metrics: 125 completion tokens");
-
-    # Gauge: providers configured
-    var providers_gauge = 0;
-    providers_gauge = 14;
-    assert_eq(providers_gauge, 14, "metrics: gauge set to 14");
-
-    # ================================================================
-    # PROVIDER REGISTRY — register, dedup, lookup
-    # ================================================================
-
-    test_group("registry_empty");
-
-    var reg = map_new();
-    assert_eq(map_size(reg), 0, "registry starts empty");
-
-    test_group("registry_register");
-
-    # Register ollama
-    map_set(reg, "ollama:localhost:11434", PROV_OLLAMA);
-    assert_eq(map_size(reg), 1, "registry has 1 after register");
-    assert_eq(map_get(reg, "ollama:localhost:11434"), PROV_OLLAMA, "registry: ollama found");
-
-    test_group("registry_dedup");
-
-    # Same key again — should not increase count
-    map_set(reg, "ollama:localhost:11434", PROV_OLLAMA);
-    assert_eq(map_size(reg), 1, "registry: dedup same key");
-
-    test_group("registry_multiple");
-
-    map_set(reg, "llamacpp:localhost:8080", PROV_LLAMACPP);
-    assert_eq(map_size(reg), 2, "registry: 2 providers");
-
-    # Different URL for same type = different entry
-    map_set(reg, "ollama:other-host:11434", PROV_OLLAMA);
-    assert_eq(map_size(reg), 3, "registry: 3 entries (same type diff url)");
-
-    test_group("registry_get_missing");
-
-    assert_eq(map_get(reg, "whisper:localhost:9999"), 0, "registry: missing returns 0");
-
-    # ================================================================
     # ROUTER EXTRAS �� direct routing, cost tracker reset
     # ================================================================
 
@@ -3568,173 +3464,86 @@ fn main() {
     assert_eq(cache_len(cs3), 3, "eviction: capacity is held at 3");
 
     # ================================================================
-    # AUDIT CHAIN — HMAC-SHA256 linked entries, tamper detection
+    # AUDIT CHAIN — audit.cyr for real since 2.9.12 (HMAC-SHA256 linked entries, tamper detection)
     # ================================================================
-    # Entry layout: id(8) event(8) message(8) provider(8) model(8) hash(8) sig(8) prev_hash(8) = 64
-    # Chain: entries_vec(8) signing_key(8) key_len(8) last_hash(8) max_entries(8) = 40
+    # Entry: id 0, ts 8, event 16, level 24, message 32, provider 40, model 48, sig 56, prev 64, hash 72, next 80.
+    # Chain: key 0, key_len 8, last_hash 16, head 24, tail 32, count 40, max 48, next_id 56, anchor 64.
 
     test_group("audit_chain");
-
     sha256_global_init();
+    var ach = audit_chain_new("test-signing-key", 16, 100);
+    var ae1 = audit_record(ach, "inference.request", "info", "Request to llama3", "ollama", "llama3");
+    var ae2 = audit_record(ach, "inference.response", "info", "Response from llama3", 0, 0);
+    assert_eq(audit_count(ach), 2, "audit: 2 entries");
+    assert_eq(audit_verify(ach), 1, "audit: chain verifies");
+    assert_eq(load64(ae1) == 1 && load64(ae2) == 2, 1, "audit: ids count up from 1");
+    assert_streq(load64(ae1 + 64), GENESIS_HASH, "audit: the first entry links to GENESIS");
+    assert_streq(load64(ae2 + 64), load64(ae1 + 72), "audit: the second links to the first's hash");
+    assert_streq(load64(ae1 + 72),
+      _audit_entry_hash(1, load64(ae1 + 8), "inference.request", "info", "Request to llama3", "ollama", "llama3"),
+      "audit: the hash covers id, time, event, level, message, provider and model");
+    assert_eq(strlen(load64(ae1 + 56)), 64, "audit: the signature is 64 hex characters");
+    assert(streq(load64(ae1 + 72), load64(ae2 + 72)) != 1, "audit: entry hashes unique");
 
-    var GENESIS = "0000000000000000000000000000000000000000000000000000000000000000";
-
-    # AuditField enum moved to top-level (see above main)
-    var a_key = "test-signing-key";
-    var a_keylen = strlen(a_key);
-
-    # compute_entry_hash: hash event+message fields
-    # audit_record: create entry, link to chain, sign
-
-    # Create chain
-    var ac_entries = vec_new();
-    var ac_last = GENESIS;
-
-    # Record entry 1
-    var ae1_event = "inference.request";
-    var ae1_msg = "Request to llama3";
-    var ae1_hash = sha256_hex(ae1_msg, strlen(ae1_msg));
-
-    # sig = hmac_sha256(key, keylen, "hash:prev_hash", out32)
-    # Build sig_input: "hash:prev_hash"
-    var ae1_sinp = alloc(200);
-    var ae1_slen = 0;
-    memcpy(ae1_sinp, ae1_hash, strlen(ae1_hash));
-    ae1_slen = strlen(ae1_hash);
-    store8(ae1_sinp + ae1_slen, 58); # ':'
-    ae1_slen = ae1_slen + 1;
-    memcpy(ae1_sinp + ae1_slen, ac_last, strlen(ac_last));
-    ae1_slen = ae1_slen + strlen(ac_last);
-
-    var ae1_sig = alloc(32); hmac_sha256(a_key, a_keylen, ae1_sinp, ae1_slen, ae1_sig);
-    var ae1_sig_hex = hex_encode(ae1_sig, 32);
-
-    var ae1 = alloc(AE_SIZE);
-    store64(ae1 + AE_EVENT, ae1_event);
-    store64(ae1 + AE_MSG, ae1_msg);
-    store64(ae1 + AE_HASH, ae1_hash);
-    store64(ae1 + AE_SIG, ae1_sig_hex);
-    store64(ae1 + AE_PREV, ac_last);
-    vec_push(ac_entries, ae1);
-    ac_last = ae1_hash;
-
-    # Record entry 2
-    var ae2_msg = "Response from llama3";
-    var ae2_hash = sha256_hex(ae2_msg, strlen(ae2_msg));
-    var ae2_sinp = alloc(200);
-    var ae2_slen = 0;
-    memcpy(ae2_sinp, ae2_hash, strlen(ae2_hash));
-    ae2_slen = strlen(ae2_hash);
-    store8(ae2_sinp + ae2_slen, 58);
-    ae2_slen = ae2_slen + 1;
-    memcpy(ae2_sinp + ae2_slen, ac_last, strlen(ac_last));
-    ae2_slen = ae2_slen + strlen(ac_last);
-    var ae2_sig = alloc(32); hmac_sha256(a_key, a_keylen, ae2_sinp, ae2_slen, ae2_sig);
-    var ae2_sig_hex = hex_encode(ae2_sig, 32);
-
-    var ae2 = alloc(AE_SIZE);
-    store64(ae2 + AE_EVENT, "inference.response");
-    store64(ae2 + AE_MSG, ae2_msg);
-    store64(ae2 + AE_HASH, ae2_hash);
-    store64(ae2 + AE_SIG, ae2_sig_hex);
-    store64(ae2 + AE_PREV, ac_last);
-    vec_push(ac_entries, ae2);
-    ac_last = ae2_hash;
-
-    assert_eq(vec_len(ac_entries), 2, "audit: 2 entries");
-
-    # Verify chain: walk entries, check prev_hash links + signatures
-    var ac_valid = 1;
-    var ac_prev = GENESIS;
-    var ac_i = 0;
-    while (ac_i < vec_len(ac_entries)) {
-        var ac_e = vec_get(ac_entries, ac_i);
-        var ac_eprev = load64(ac_e + AE_PREV);
-        if (streq(ac_eprev, ac_prev) != 1) { ac_valid = 0; }
-
-        # Recompute signature
-        var ac_ehash = load64(ac_e + AE_HASH);
-        var ac_vsinp = alloc(200);
-        var ac_vslen = 0;
-        memcpy(ac_vsinp, ac_ehash, strlen(ac_ehash));
-        ac_vslen = strlen(ac_ehash);
-        store8(ac_vsinp + ac_vslen, 58);
-        ac_vslen = ac_vslen + 1;
-        memcpy(ac_vsinp + ac_vslen, ac_prev, strlen(ac_prev));
-        ac_vslen = ac_vslen + strlen(ac_prev);
-        var ac_vsig = alloc(32); hmac_sha256(a_key, a_keylen, ac_vsinp, ac_vslen, ac_vsig);
-        var ac_vsig_hex = hex_encode(ac_vsig, 32);
-
-        if (streq(ac_vsig_hex, load64(ac_e + AE_SIG)) != 1) { ac_valid = 0; }
-
-        ac_prev = ac_ehash;
-        ac_i = ac_i + 1;
-    }
-    assert(ac_valid == 1, "audit: chain verifies");
-
-    # ── Audit: empty chain verifies ───────────────────────────────
-    test_group("audit_empty_verifies");
-
-    var ac_empty = vec_new();
-    assert_eq(vec_len(ac_empty), 0, "audit: empty chain len=0");
-    # Empty chain = trivially valid (no entries to verify)
-    assert(1 == 1, "audit: empty chain trivially valid");
-
-    # ── Audit: tamper detection ───────────────────────────────────
     test_group("audit_tamper");
+    # Each kind of tampering fails verification; undoing it verifies again.
+    store64(ae1 + 32, "TAMPERED");
+    assert_eq(audit_verify(ach), 0, "audit: a changed message is caught");
+    store64(ae1 + 32, "Request to llama3");
+    assert_eq(audit_verify(ach), 1, "audit: restored, it verifies");
+    store64(ae1 + 48, "gpt-4o");
+    assert_eq(audit_verify(ach), 0, "audit: a changed model is caught, the hash covers it");
+    store64(ae1 + 48, "llama3");
+    var ac_prev2 = load64(ae2 + 64);
+    store64(ae2 + 64, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    assert_eq(audit_verify(ach), 0, "audit: a broken prev link is caught");
+    store64(ae2 + 64, ac_prev2);
+    var ac_sig1 = load64(ae1 + 56);
+    store64(ae1 + 56, load64(ae2 + 56));
+    assert_eq(audit_verify(ach), 0, "audit: a swapped signature is caught");
+    store64(ae1 + 56, ac_sig1);
+    store64(ach, "other-signing-key");
+    store64(ach + 8, 17);
+    assert_eq(audit_verify(ach), 0, "audit: another key does not verify");
+    store64(ach, "test-signing-key");
+    store64(ach + 8, 16);
+    assert_eq(audit_verify(ach), 1, "audit: everything restored, it verifies");
 
-    # Tamper with entry 1's message
-    store64(ae1 + AE_MSG, "TAMPERED");
+    test_group("audit_excision_detected");
+    # The check that matters and that production LACKED until 2.5.7: removing a record entirely. Every surviving
+    # entry is byte-identical, so its own hash and HMAC still verify; only the linkage breaks. A verifier that
+    # checks entries but not links reports a clean chain over doctored evidence. Through 2.9.11 this group checked
+    # an inline copy of the chain, which is how a verifier without the link check once passed its tests.
+    var ae3 = audit_record(ach, "inference.request", "info", "third", 0, 0);
+    assert_eq(audit_verify(ach), 1, "audit: intact chain verifies");
+    store64(ae1 + 80, ae3);
+    assert_eq(audit_verify(ach), 0, "audit: excised middle entry detected");
+    store64(ae1 + 80, ae2);
+    assert_eq(audit_verify(ach), 1, "audit: relinked, it verifies");
 
-    # Re-verify — should fail (hash no longer matches message)
-    var ac_t_valid = 1;
-    ac_prev = GENESIS;
-    ac_i = 0;
-    while (ac_i < vec_len(ac_entries)) {
-        var ac_te = vec_get(ac_entries, ac_i);
-        # Recompute hash from message
-        var ac_tmsg = load64(ac_te + AE_MSG);
-        var ac_thash = sha256_hex(ac_tmsg, strlen(ac_tmsg));
-        var ac_stored_hash = load64(ac_te + AE_HASH);
-        if (streq(ac_thash, ac_stored_hash) != 1) { ac_t_valid = 0; }
-        ac_prev = ac_stored_hash;
-        ac_i = ac_i + 1;
-    }
-    assert(ac_t_valid == 0, "audit: tamper detected via hash mismatch");
-
-    # ── Audit: prev hash link tamper ──────────────────────────────
-    test_group("audit_prev_link_tamper");
-
-    # Restore entry 1
-    store64(ae1 + AE_MSG, "Request to llama3");
-    # Tamper with entry 2's prev_hash link
-    store64(ae2 + AE_PREV, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-
-    ac_t_valid = 1;
-    ac_prev = GENESIS;
-    ac_i = 0;
-    while (ac_i < vec_len(ac_entries)) {
-        var ac_le = vec_get(ac_entries, ac_i);
-        if (streq(load64(ac_le + AE_PREV), ac_prev) != 1) { ac_t_valid = 0; }
-        ac_prev = load64(ac_le + AE_HASH);
-        ac_i = ac_i + 1;
-    }
-    assert(ac_t_valid == 0, "audit: prev hash link tamper detected");
-
-    # ── Audit: recent entries ─────────────────────────────────────
-    test_group("audit_recent");
-
-    # Restore entry 2
-    store64(ae2 + AE_PREV, ae1_hash);
-
-    # Get last 1 entry
-    var ac_last_e = vec_get(ac_entries, vec_len(ac_entries) - 1);
-    assert_streq(load64(ac_last_e + AE_MSG), "Response from llama3", "audit: recent entry correct");
-
-    # ── Audit: unique hashes ──────────────────────────────────────
-    test_group("audit_unique_hashes");
-
-    assert(streq(load64(ae1 + AE_HASH), load64(ae2 + AE_HASH)) != 1, "audit: entry hashes unique");
+    test_group("audit_eviction");
+    # 2.9.12: a chain at max_entries evicts its oldest entry and keeps verifying. It used to demand GENESIS of the
+    # first entry forever, so past max_entries (default 10000) GET /v1/audit reported "valid":false, the same
+    # answer as tampering. The evicted entry's hash is now the anchor the first entry must link to.
+    var aev = audit_chain_new("k", 1, 2);
+    var av1 = audit_record(aev, "e", "info", "one", 0, 0);
+    var av2 = audit_record(aev, "e", "info", "two", 0, 0);
+    assert_streq(load64(aev + 64), GENESIS_HASH, "audit: the anchor starts at GENESIS");
+    var av3 = audit_record(aev, "e", "info", "three", 0, 0);
+    assert_eq(audit_count(aev), 2, "audit: held at max_entries");
+    assert_eq(load64(aev + 24), av2, "audit: the oldest entry was evicted");
+    assert_streq(load64(aev + 64), load64(av1 + 72), "audit: the anchor is the evicted entry's hash");
+    assert_eq(audit_verify(aev), 1, "audit: an evicted chain still verifies");
+    var ajs = str_builder_new();
+    audit_json(aev, ajs, 50);
+    var ajs_s = str_data(str_builder_build(ajs));
+    assert_eq(_t_has(ajs_s, strlen(ajs_s), "{\"count\":2,\"valid\":true,"), 1, "audit: /v1/audit says valid");
+    # Removing the front entry is still caught: the next one does not link to the anchor.
+    store64(aev + 24, av3);
+    assert_eq(audit_verify(aev), 0, "audit: an entry removed at the front is caught");
+    store64(aev + 24, av2);
+    audit_record(aev, "e", "info", "four", 0, 0);
+    assert_eq(audit_verify(aev), 1, "audit: it keeps verifying as it rotates");
 
     # ================================================================
     # CONFIG PARSING — TOML sections for server, providers, cache
@@ -3814,181 +3623,6 @@ fn main() {
     test_group("json_get_missing");
 
     assert_eq(bayan_json_get_by_cstr(j_pairs, "nonexistent"), 0, "json: missing key returns 0");
-
-    # ================================================================
-    # INFERENCE TYPES — request/response structs, role enum
-    # ================================================================
-
-    test_group("inference_role_enum");
-
-    # Role: system=0, user=1, assistant=2, tool=3
-    var ROLE_SYSTEM = 0;
-    var ROLE_USER = 1;
-    var ROLE_ASSISTANT = 2;
-    var ROLE_TOOL = 3;
-    assert_eq(ROLE_SYSTEM, 0, "role: system=0");
-    assert_eq(ROLE_USER, 1, "role: user=1");
-    assert_eq(ROLE_ASSISTANT, 2, "role: assistant=2");
-    assert_eq(ROLE_TOOL, 3, "role: tool=3");
-
-    test_group("inference_request_defaults");
-
-    # InferenceRequest layout: model(8) prompt(8) system(8) max_tokens(8) temperature(8) stream(8) = 48
-    var ireq = alloc(48);
-    store64(ireq, 0);       # model = null (default)
-    store64(ireq + 8, 0);   # prompt = null
-    store64(ireq + 16, 0);  # system = null
-    store64(ireq + 24, 0);  # max_tokens = 0 (none)
-    store64(ireq + 32, 0);  # temperature = 0 (none)
-    store64(ireq + 40, 0);  # stream = false
-    assert_eq(load64(ireq), 0, "req: default model null");
-    assert_eq(load64(ireq + 40), 0, "req: default stream false");
-
-    test_group("inference_request_populated");
-
-    store64(ireq, "llama3");
-    store64(ireq + 8, "Explain Rust.");
-    store64(ireq + 24, 100);
-    assert_streq(load64(ireq), "llama3", "req: model=llama3");
-    assert_streq(load64(ireq + 8), "Explain Rust.", "req: prompt set");
-    assert_eq(load64(ireq + 24), 100, "req: max_tokens=100");
-
-    test_group("inference_response");
-
-    # InferenceResponse: text(8) model(8) provider(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 48
-    var iresp = alloc(48);
-    store64(iresp, "Hello world");
-    store64(iresp + 8, "llama3");
-    store64(iresp + 16, "ollama");
-    store64(iresp + 24, 150);
-    store64(iresp + 32, 10);
-    store64(iresp + 40, 25);
-    assert_streq(load64(iresp), "Hello world", "resp: text");
-    assert_streq(load64(iresp + 8), "llama3", "resp: model");
-    assert_streq(load64(iresp + 16), "ollama", "resp: provider");
-    assert_eq(load64(iresp + 24), 150, "resp: latency=150ms");
-    assert_eq(load64(iresp + 32), 10, "resp: prompt_tokens=10");
-    assert_eq(load64(iresp + 40), 25, "resp: completion_tokens=25");
-
-    test_group("inference_token_usage");
-
-    var tu_prompt = 1000;
-    var tu_comp = 500;
-    var tu_total = tu_prompt + tu_comp;
-    assert_eq(tu_total, 1500, "usage: total=prompt+completion");
-
-    # ================================================================
-    # TOKEN COUNTING — chars/4 heuristic + provider-aware ratios
-    # ================================================================
-
-    test_group("token_count_simple");
-
-    # Simple counter: bytes / 4, ceil
-    # "hello" = 5 bytes → ceil(5/4) = 2
-    var tc_txt = "hello";
-    var tc_len = strlen(tc_txt);
-    var tc_count = (tc_len + 3) / 4;  # integer ceil(len/4)
-    assert_eq(tc_count, 2, "token: 'hello' = 2 tokens");
-
-    # empty = 0
-    var tc_empty = "";
-    var tc_elen = strlen(tc_empty);
-    var tc_ecount = (tc_elen + 3) / 4;
-    assert_eq(tc_ecount, 0, "token: '' = 0 tokens");
-
-    # longer text: "The quick brown fox jumps over the lazy dog" = 43 bytes → ceil(43/4) = 11
-    var tc_long = "The quick brown fox jumps over the lazy dog";
-    var tc_llen = strlen(tc_long);
-    var tc_lcount = (tc_llen + 3) / 4;
-    assert_eq(tc_lcount, 11, "token: fox sentence = 11 tokens");
-
-    test_group("token_count_messages");
-
-    # Per message: tokens(content) + 4 overhead
-    # 2 messages: "hello" (2 tok) + 4 + "world" (2 tok) + 4 + 3 base = 15
-    var tc_m1 = 2 + 4;  # "hello" + overhead
-    var tc_m2 = 2 + 4;  # "world" + overhead
-    var tc_mtotal = tc_m1 + tc_m2 + 3;  # + base overhead
-    assert_eq(tc_mtotal, 15, "token: 2 messages = 15 tokens");
-
-    test_group("token_count_provider_ratios");
-
-    # OpenAI: 3.8 bytes/token → "hello" (5 bytes) → ceil(5/3.8) ≈ 2
-    # Anthropic: 3.5 bytes/token → "hello" (5 bytes) → ceil(5/3.5) ≈ 2
-    # For integer math: bytes * 10 / ratio_x10
-    var tc_oai = (5 * 10 + 37) / 38;   # ceil(50/38) = 2
-    var tc_ant = (5 * 10 + 34) / 35;   # ceil(50/35) = 2
-    assert_eq(tc_oai, 2, "token: openai ratio hello=2");
-    assert_eq(tc_ant, 2, "token: anthropic ratio hello=2");
-
-    # Longer text differences: 100 bytes
-    # OpenAI: ceil(100/3.8) = 27
-    # Anthropic: ceil(100/3.5) = 29
-    var tc_oai100 = (100 * 10 + 37) / 38;
-    var tc_ant100 = (100 * 10 + 34) / 35;
-    assert_eq(tc_oai100, 27, "token: openai 100 bytes=27");
-    assert_eq(tc_ant100, 29, "token: anthropic 100 bytes=29");
-
-    # ================================================================
-    # DLP SCANNER — pattern matching for PII detection
-    # ================================================================
-
-    test_group("dlp_classification_ordering");
-
-    # Classification levels: Public=0, Internal=1, Confidential=2, Restricted=3
-    var DLP_PUBLIC = 0;
-    var DLP_INTERNAL = 1;
-    var DLP_CONFIDENTIAL = 2;
-    var DLP_RESTRICTED = 3;
-    assert(DLP_PUBLIC < DLP_INTERNAL, "dlp: public < internal");
-    assert(DLP_INTERNAL < DLP_CONFIDENTIAL, "dlp: internal < confidential");
-    assert(DLP_CONFIDENTIAL < DLP_RESTRICTED, "dlp: confidential < restricted");
-
-    test_group("dlp_email_detection");
-
-    # Simple email pattern: contains @ and .
-    var dlp_email_text = "Contact me at user@example.com for details";
-    var dlp_has_at = 0;
-    var dlp_ei = 0;
-    while (dlp_ei < strlen(dlp_email_text)) {
-        if (load8(dlp_email_text + dlp_ei) == 64) { dlp_has_at = 1; }  # '@'
-        dlp_ei = dlp_ei + 1;
-    }
-    assert(dlp_has_at == 1, "dlp: email detected (@)");
-
-    test_group("dlp_clean_text");
-
-    var dlp_clean = "This is a normal sentence about programming";
-    dlp_has_at = 0;
-    dlp_ei = 0;
-    while (dlp_ei < strlen(dlp_clean)) {
-        if (load8(dlp_clean + dlp_ei) == 64) { dlp_has_at = 1; }
-        dlp_ei = dlp_ei + 1;
-    }
-    assert(dlp_has_at == 0, "dlp: clean text no email");
-
-    test_group("dlp_highest_level_wins");
-
-    # When multiple patterns match, highest classification wins
-    var dlp_levels = alloc(24);
-    store64(dlp_levels, DLP_PUBLIC);
-    store64(dlp_levels + 8, DLP_CONFIDENTIAL);
-    store64(dlp_levels + 16, DLP_INTERNAL);
-    var dlp_max = 0;
-    var dlp_li = 0;
-    while (dlp_li < 3) {
-        var dlp_lv = load64(dlp_levels + dlp_li * 8);
-        if (dlp_lv > dlp_max) { dlp_max = dlp_lv; }
-        dlp_li = dlp_li + 1;
-    }
-    assert_eq(dlp_max, DLP_CONFIDENTIAL, "dlp: highest level wins");
-
-    test_group("dlp_disabled_returns_public");
-
-    var dlp_disabled = 0;  # disabled flag
-    var dlp_result = DLP_PUBLIC;
-    if (dlp_disabled == 0) { dlp_result = DLP_PUBLIC; }
-    assert_eq(dlp_result, DLP_PUBLIC, "dlp: disabled returns public");
 
     # ================================================================
     # SEMANTIC CACHE — cosine + embedding store + float parsing
@@ -5146,14 +4780,6 @@ fn main() {
     assert_eq(req_content_length(rcl8, strlen(rcl8)), 0 - 1,
       "content-length: non-numeric value is refused");
 
-    test_group("request_body_cap");
-    # MAX_REQUEST_BODY = 1 MiB, matching rust-old's DefaultBodyLimit. The check
-    # is `>` so a body exactly at the cap is served, one byte over is 413.
-    var cap = 1048576;
-    assert_eq(1048575 > cap, 0, "body cap: under cap accepted");
-    assert_eq(cap > cap, 0, "body cap: exactly at cap accepted");
-    assert_eq((cap + 1) > cap, 1, "body cap: one byte over rejected");
-
     test_group("bind_addr_str");
     # Packed network-byte-order IPv4, octets LSB-first.
     assert_streq(_t_bind_addr_str(0x0100007F), "127.0.0.1", "bind: loopback default");
@@ -5199,15 +4825,6 @@ fn main() {
     assert_streq(_t_milli_str(1000), "1", "milli: 1000 -> 1");
     assert_streq(_t_milli_str(1500), "1.5", "milli: 1500 -> 1.5");
     assert_streq(_t_milli_str(2000), "2", "milli: 2000 -> 2");
-
-    test_group("sampling_range_bounds");
-    # temperature 0..2, top_p 0..1 — boundaries inclusive.
-    assert_eq(0 > 2000, 0, "range: temp 0 in range");
-    assert_eq(2000 > 2000, 0, "range: temp 2.0 in range (inclusive)");
-    assert_eq(2001 > 2000, 1, "range: temp 2.001 rejected");
-    assert_eq((0 - 500) < 0, 1, "range: negative temp rejected");
-    assert_eq(1000 > 1000, 0, "range: top_p 1.0 in range (inclusive)");
-    assert_eq(1500 > 1000, 1, "range: top_p 1.5 rejected");
 
     test_group("json_array_count");
     var ac1 = "[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]";
@@ -5605,73 +5222,18 @@ fn main() {
     assert_eq(load64(cost_record_at(3) + 16), 5000, "cost: local tokens still counted");
 
     # ── v2.5.7 config-reader closeout ──
-    test_group("audit_excision_detected");
-    # The check that matters and that production LACKED until 2.5.7: removing a
-    # record entirely. Every surviving entry is byte-identical, so its own hash
-    # and HMAC still verify — only the linkage breaks. A verifier that checks
-    # entries but not links reports a clean chain over doctored evidence, which
-    # defeats the point of chaining at all.
-    var xg = "0000000000000000000000000000000000000000000000000000000000000000";
-    var xe = vec_new();
-    var xprev = xg;
-    var xi = 0;
-    while (xi < 3) {
-        var xmsg = "entry-a";
-        if (xi == 1) { xmsg = "entry-b"; }
-        if (xi == 2) { xmsg = "entry-c"; }
-        var xh = sha256_hex(xmsg, strlen(xmsg));
-        var xrec = alloc(AE_SIZE);
-        store64(xrec + AE_MSG, xmsg);
-        store64(xrec + AE_HASH, xh);
-        store64(xrec + AE_PREV, xprev);
-        vec_push(xe, xrec);
-        xprev = xh;
-        xi = xi + 1;
-    }
-    # Intact chain walks clean.
-    var xvalid = 1;
-    var xexp = xg;
-    xi = 0;
-    while (xi < vec_len(xe)) {
-        var xr = vec_get(xe, xi);
-        if (streq(load64(xr + AE_PREV), xexp) != 1) { xvalid = 0; }
-        xexp = load64(xr + AE_HASH);
-        xi = xi + 1;
-    }
-    assert_eq(xvalid, 1, "audit: intact chain verifies");
-    # Excise the middle entry — entries 0 and 2 are untouched and individually
-    # valid, so only the link check can catch this.
-    var xe2 = vec_new();
-    vec_push(xe2, vec_get(xe, 0));
-    vec_push(xe2, vec_get(xe, 2));
-    xvalid = 1;
-    xexp = xg;
-    xi = 0;
-    while (xi < vec_len(xe2)) {
-        var xr2 = vec_get(xe2, xi);
-        if (streq(load64(xr2 + AE_PREV), xexp) != 1) { xvalid = 0; }
-        xexp = load64(xr2 + AE_HASH);
-        xi = xi + 1;
-    }
-    assert_eq(xvalid, 0, "audit: excised middle entry detected");
-
-    test_group("retry_jitter_factor");
-    # jitter_factor was hardcoded at 25%; it is now configurable. The spread is
-    # `delay * factor / 100`, so the delay lands in [delay, delay + spread].
-    assert_eq(1000 * 50 / 100, 500, "jitter: 0.5 of 1000ms -> 500ms spread");
-    assert_eq(1000 * 25 / 100, 250, "jitter: 0.25 -> 250ms spread");
-    # A zero factor must disable jitter entirely rather than divide by zero —
-    # the old code computed `ns % (delay/4 + 1)`, which could never be 0 spread.
-    assert_eq(1000 * 0 / 100, 0, "jitter: 0 factor -> no spread");
-
     test_group("context_token_limit");
-    # The compaction budget now derives from the MODEL's context window x
-    # threshold. The old `est_tokens * 2` keyed off the requested OUTPUT size,
-    # which says nothing about how much input the model accepts — so a
-    # 200k-context model was compacted as hard as an 8k one.
-    assert_eq(200000 * 80 / 100, 160000, "context: 200k window at 0.8");
-    assert_eq(8192 * 80 / 100, 6553, "context: 8k window at 0.8");
-    assert_eq(128000 * 50 / 100, 64000, "context: threshold is configurable");
+    # The compaction budget derives from the MODEL's context window x threshold. The old `est_tokens * 2` keyed off
+    # the requested OUTPUT size, which says nothing about how much input the model accepts, so a 200k-context model
+    # was compacted as hard as an 8k one. The real context_token_limit (compact.cyr) since 2.9.12; this group did
+    # the multiplication itself before.
+    context_configure(1, 80, 0 - 1);
+    assert_eq(context_token_limit(200000), 160000, "context: 200k window at 0.8");
+    assert_eq(context_token_limit(8192), 6553, "context: 8k window at 0.8");
+    assert_eq(context_token_limit(0), 0, "context: an unknown window gives no limit");
+    context_configure(1, 50, 0 - 1);
+    assert_eq(context_token_limit(128000), 64000, "context: threshold is configurable");
+    context_configure(1, 80, 0 - 1);
 
     test_group("cli_flag_parsing");
     # `hoosh serve --port 9000 --bind 0.0.0.0`
@@ -6541,18 +6103,32 @@ fn main() {
     assert_eq(_t_has_system(wst, strlen(wst)), 0, "role: a same-length role is not system");
 
     test_group("context_keep_last_floor");
-    # The retained tail is floored so compaction cannot strip a conversation to
-    # nothing. With 20 messages and keep_last 10, the floor is index 10.
-    var kf = 20 - 10;
-    assert_eq(kf, 10, "context: floor keeps the last 10");
-    # keep_last 0 still guarantees one non-system message — forwarding only a
-    # system prompt is a request the provider cannot answer usefully.
-    var kf0 = 20 - 1;
-    assert_eq(kf0, 19, "context: keep_last 0 still keeps one");
-    # A conversation shorter than keep_last clamps at 0, never negative.
-    var kfs = 3 - 10;
-    if (kfs < 0) { kfs = 0; }
-    assert_eq(kfs, 0, "context: short conversation clamps to 0");
+    # The retained tail is floored so compaction cannot strip a conversation to nothing. Through the real
+    # compact_messages since 2.9.12 (this group subtracted numbers before). Its character budget never drops below
+    # 100, so these messages carry 150 bytes of padding each: at a 1-token budget none fits, and only the floor
+    # survives.
+    var kf20 = _t_msgs(20, 150);
+    var kfr = compact_messages(kf20, strlen(kf20), 1, CHARS_PER_TOKEN_X10);
+    var kf_out = load64(kfr);
+    var kf_len = load64(kfr + 8);
+    assert_eq(_t_count_n(kf_out, kf_len, "\"role\":"), 10, "context: floor keeps the last 10");
+    assert_eq(_t_has(kf_out, kf_len, "\"content\":\"m10-") == 1 && _t_has(kf_out, kf_len, "\"content\":\"m9-") == 0,
+      1, "context: ...the newest ten, m10 to m19");
+    # keep_last 0 still guarantees one non-system message: forwarding only a system prompt is a request the
+    # provider cannot answer usefully.
+    context_configure(1, 0, 0);
+    kfr = compact_messages(kf20, strlen(kf20), 1, CHARS_PER_TOKEN_X10);
+    assert_eq(_t_count_n(load64(kfr), load64(kfr + 8), "\"role\":"), 1, "context: keep_last 0 still keeps one");
+    assert_eq(_t_has(load64(kfr), load64(kfr + 8), "\"content\":\"m19-"), 1, "context: ...the newest");
+    # The 100-character minimum: short messages still fit a 1-token budget, three of them here.
+    var kfs20 = _t_msgs(20, 0);
+    kfr = compact_messages(kfs20, strlen(kfs20), 1, CHARS_PER_TOKEN_X10);
+    assert_eq(_t_count_n(load64(kfr), load64(kfr + 8), "\"role\":"), 3, "context: the budget never drops below 100");
+    context_configure(1, 0, 10);
+    # A conversation shorter than keep_last is kept whole.
+    var kf3 = _t_msgs(3, 150);
+    kfr = compact_messages(kf3, strlen(kf3), 1, CHARS_PER_TOKEN_X10);
+    assert_eq(_t_count_n(load64(kfr), load64(kfr + 8), "\"role\":"), 3, "context: short conversation kept whole");
 
     # ── 2.6.8: the local streaming path reads the provider status ──
     test_group("stream_status_line");
