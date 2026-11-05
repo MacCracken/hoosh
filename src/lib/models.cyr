@@ -1,0 +1,164 @@
+# models.cyr — the model listings (2.9.22, split from handlers.cyr).
+#
+# GET /v1/models' body (models_list_json) and the pieces GET /v1/models/catalog and /api/tags share with it:
+# one entry per id (_models_emit), a backend's own list (_models_scan, _models_live_local), and the fallback when
+# nothing asked the provider live (_models_from_catalog, _models_from_table, _cat_literal). handlers.cyr reads
+# main.cyr's _router and cannot be included in the tests, so through 2.9.21 they kept copies of _models_emit,
+# _models_scan and _cat_literal; the _models_emit copy had lost the id's JSON escaping.
+#
+# Requires: types.cyr (provider_name), route.cyr, metadata.cyr, catalog.cyr (the live snapshot), jsonlite.cyr
+# (_json_value_pos, _json_escape_into), http_client.cyr (http_req_local, for a local backend's list).
+
+# ── GET /v1/models (2.7.0) ──
+# Concrete model ids, each owned_by the provider that would serve it. This used
+# to list one entry per route with the PROVIDER NAME as the id ("ollama"), so an
+# OpenAI client's model picker offered models that do not exist. rust-old asked
+# each provider for its models. Local backends are asked live (Ollama's
+# /api/tags, everyone else's /v1/models); remote routes, and a local one that
+# does not answer, list the catalogue models and literal patterns they match, so
+# /v1/models makes no remote call. Only ids a route actually matches are listed.
+
+# Append one {"id","object":"model","owned_by"} entry unless `id` is already in
+# `seen`. id[0..len) need not be NUL-terminated.
+fn _models_emit(sb, seen, id, len, owner) {
+    var n = vec_len(seen);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(seen, i);
+        if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
+        i = i + 1;
+    }
+    var c = alloc(len + 1);
+    memcpy(c, id, len);
+    store8(c + len, 0);
+    vec_push(seen, c);
+    if (n > 0) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    _json_escape_into(sb, c, len);
+    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
+    str_builder_add_cstr(sb, owner);
+    str_builder_add_cstr(sb, "\"}");
+    return 1;
+}
+
+# Every string value of `"<key>"` in a model listing that route `r` matches.
+# Returns how many ids the listing held (matched or not), so 0 means "no answer".
+fn _models_scan(sb, seen, r, body, len, key, keylen) {
+    var found = 0;
+    var pos = 0;
+    while (pos < len) {
+        var p = _json_value_pos(body + pos, len - pos, key, keylen);
+        if (p < 0) { break; }
+        var s = pos + p;
+        if (load8(body + s) != 34) { pos = s + 1; continue; }
+        var e = s + 1;
+        while (e < len && load8(body + e) != 34) {
+            if (load8(body + e) == 92) { e = e + 1; }
+            e = e + 1;
+        }
+        if (e >= len) { break; }
+        found = found + 1;
+        var id = alloc(e - s);
+        memcpy(id, body + s + 1, e - s - 1);
+        store8(id + e - s - 1, 0);
+        if (route_matches_model(r, id) == 1) {
+            _models_emit(sb, seen, id, e - s - 1, provider_name(route_provider(r)));
+        }
+        pos = e + 1;
+    }
+    return found;
+}
+
+# A local backend's own model list. Returns 0 when it did not answer.
+fn _models_live_local(sb, seen, r) {
+    if (route_healthy(r) == 0) { return 0; }
+    var path = "/v1/models";
+    var key = "id";
+    if (route_provider(r) == PROV_OLLAMA) { path = "/api/tags"; key = "name"; }
+    var resp = http_req_local("GET", route_base_url(r), path, 0, 0);
+    if (resp == 0) { return 0; }
+    if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
+    return _models_scan(sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
+}
+
+# The model ids route `r` can be offered for when nothing asked its provider live (2.8.0: a static route, or a
+# live one that has not answered yet): the compiled table's LISTED ids its patterns match, plus its literal
+# (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id.
+fn _models_from_table(sb, seen, r) {
+    var owner = provider_name(route_provider(r));
+    var n = metadata_count();
+    var i = 0;
+    while (i < n) {
+        var k = metadata_key(i);
+        if (metadata_listed(i) == 1) {
+            if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
+        }
+        i = i + 1;
+    }
+    var pats = load64(r + ROUTE_PATTERNS);
+    var pn = load64(r + ROUTE_PATTERNS_N);
+    var j = 0;
+    while (j < pn) {
+        var pat = load64(pats + j * 8);
+        if (_cat_literal(pat) == 1) { _models_emit(sb, seen, pat, strlen(pat), owner); }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# Route `r`'s good live catalog record, or 0.
+fn _models_live_record(r) {
+    var rec = catalog_record_find(catalog_snapshot(), route_provider(r), route_base_url(r));
+    if (rec == 0) { return 0; }
+    if (cat_r_good_ms(rec) == 0) { return 0; }
+    return rec;
+}
+
+# What route `r` can be offered for: its provider's live list (2.8.0) when it has answered, else the table.
+fn _models_from_catalog(sb, seen, r) {
+    var rec = _models_live_record(r);
+    if (rec == 0) { return _models_from_table(sb, seen, r); }
+    var owner = provider_name(route_provider(r));
+    var es = cat_r_entries(rec);
+    var n = vec_len(es);
+    var i = 0;
+    while (i < n) {
+        var id = cat_e_id(vec_get(es, i));
+        if (route_matches_model(r, id) == 1) { _models_emit(sb, seen, id, strlen(id), owner); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A pattern with no `*` or `?` names one model (a non-empty one).
+fn _cat_literal(pat) {
+    var q = 0;
+    while (load8(pat + q) != 0) {
+        if (load8(pat + q) == 42 || load8(pat + q) == 63) { return 0; }
+        q = q + 1;
+    }
+    if (q == 0) { return 0; }
+    return 1;
+}
+
+# Every enabled route's models, in router order, as /v1/models' body: a local route's own live list when it
+# answers, else the catalog (or table) fallback. Each id once.
+fn models_list_json(rt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var seen = vec_new();
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var got = 0;
+            if (route_is_remote(r) == 0) { got = _models_live_local(sb, seen, r); }
+            if (got == 0) { _models_from_catalog(sb, seen, r); }
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build(sb);
+}

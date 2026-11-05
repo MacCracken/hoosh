@@ -28,71 +28,7 @@ fn handle_health(cfd) {
 # takes a string or an array; other OpenAI-compatible backends, local or remote
 # (with their auth), get the body unchanged at /v1/embeddings.
 
-# Span of the raw JSON value of `"<key>"` at the top of an object: a string, an
-# array or an object. out: ptr(8) len(8). Returns 1, or 0 when absent/malformed.
-fn _json_raw_value(body, len, key, keylen, out) {
-    var s = _json_value_pos(body, len, key, keylen);
-    if (s < 0 || s >= len) { return 0; }
-    var c = load8(body + s);
-    var e = 0 - 1;
-    if (c == 91 || c == 123) {
-        e = _json_span_end(body, len, s);
-    } elif (c == 34) {
-        var i = s + 1;
-        while (i < len) {
-            if (load8(body + i) == 34) { break; }
-            if (load8(body + i) == 92) { i = i + 1; }
-            i = i + 1;
-        }
-        if (i < len) { e = i + 1; }
-    }
-    if (e <= s || e > len) { return 0; }
-    store64(out, body + s);
-    store64(out + 8, e - s);
-    return 1;
-}
-
-# Ollama's /api/embed answer, {"embeddings":[[...],...],"prompt_eval_count":N},
-# as an OpenAI {"object":"list","data":[{"object":"embedding","index":i,...}]}.
-# Returns 0 when the answer has no embeddings array.
-fn _ollama_embed_to_openai(model, rb, rl) {
-    var span = alloc(16);
-    if (_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
-    var p = load64(span);
-    var n = load64(span + 8);
-    if (load8(p) != 91) { return 0; }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var idx = 0;
-    var i = 1;
-    while (i < n) {
-        var c = load8(p + i);
-        if (c == 91) {
-            var e = _json_span_end(p, n, i);
-            if (e <= i) { return 0; }
-            if (idx > 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"object\":\"embedding\",\"index\":");
-            str_builder_add_int(sb, idx);
-            str_builder_add_cstr(sb, ",\"embedding\":");
-            _sb_add_span(sb, p + i, e - i);
-            str_builder_add_cstr(sb, "}");
-            idx = idx + 1;
-            i = e;
-        } else {
-            i = i + 1;
-        }
-    }
-    var ptok = _json_extract_int(rb, rl, "prompt_eval_count", 17);
-    if (ptok < 0) { ptok = 0; }
-    str_builder_add_cstr(sb, "],\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
-}
+# _json_raw_value is jsonlite.cyr's and _ollama_embed_to_openai provider.cyr's since 2.9.22, so the tests run them.
 
 fn handle_embeddings(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
@@ -196,151 +132,9 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
 }
 
-# ── GET /v1/models (2.7.0) ──
-# Concrete model ids, each owned_by the provider that would serve it. This used
-# to list one entry per route with the PROVIDER NAME as the id ("ollama"), so an
-# OpenAI client's model picker offered models that do not exist. rust-old asked
-# each provider for its models. Local backends are asked live (Ollama's
-# /api/tags, everyone else's /v1/models); remote routes, and a local one that
-# does not answer, list the catalogue models and literal patterns they match, so
-# /v1/models makes no remote call. Only ids a route actually matches are listed.
-
-# Append one {"id","object":"model","owned_by"} entry unless `id` is already in
-# `seen`. id[0..len) need not be NUL-terminated.
-fn _models_emit(sb, seen, id, len, owner) {
-    var n = vec_len(seen);
-    var i = 0;
-    while (i < n) {
-        var s = vec_get(seen, i);
-        if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
-        i = i + 1;
-    }
-    var c = alloc(len + 1);
-    memcpy(c, id, len);
-    store8(c + len, 0);
-    vec_push(seen, c);
-    if (n > 0) { str_builder_add_cstr(sb, ","); }
-    str_builder_add_cstr(sb, "{\"id\":\"");
-    _json_escape_into(sb, c, len);
-    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-    str_builder_add_cstr(sb, owner);
-    str_builder_add_cstr(sb, "\"}");
-    return 1;
-}
-
-# Every string value of `"<key>"` in a model listing that route `r` matches.
-# Returns how many ids the listing held (matched or not), so 0 means "no answer".
-fn _models_scan(sb, seen, r, body, len, key, keylen) {
-    var found = 0;
-    var pos = 0;
-    while (pos < len) {
-        var p = _json_value_pos(body + pos, len - pos, key, keylen);
-        if (p < 0) { break; }
-        var s = pos + p;
-        if (load8(body + s) != 34) { pos = s + 1; continue; }
-        var e = s + 1;
-        while (e < len && load8(body + e) != 34) {
-            if (load8(body + e) == 92) { e = e + 1; }
-            e = e + 1;
-        }
-        if (e >= len) { break; }
-        found = found + 1;
-        var id = alloc(e - s);
-        memcpy(id, body + s + 1, e - s - 1);
-        store8(id + e - s - 1, 0);
-        if (route_matches_model(r, id) == 1) {
-            _models_emit(sb, seen, id, e - s - 1, provider_name(route_provider(r)));
-        }
-        pos = e + 1;
-    }
-    return found;
-}
-
-# A local backend's own model list. Returns 0 when it did not answer.
-fn _models_live_local(sb, seen, r) {
-    if (route_healthy(r) == 0) { return 0; }
-    var path = "/v1/models";
-    var key = "id";
-    if (route_provider(r) == PROV_OLLAMA) { path = "/api/tags"; key = "name"; }
-    var resp = http_req_local("GET", route_base_url(r), path, 0, 0);
-    if (resp == 0) { return 0; }
-    if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
-    return _models_scan(sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
-}
-
-# The model ids route `r` can be offered for when nothing asked its provider live (2.8.0: a static route, or a
-# live one that has not answered yet): the compiled table's LISTED ids its patterns match, plus its literal
-# (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id.
-fn _models_from_table(sb, seen, r) {
-    var owner = provider_name(route_provider(r));
-    var n = metadata_count();
-    var i = 0;
-    while (i < n) {
-        var k = metadata_key(i);
-        if (metadata_listed(i) == 1) {
-            if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
-        }
-        i = i + 1;
-    }
-    var pats = load64(r + ROUTE_PATTERNS);
-    var pn = load64(r + ROUTE_PATTERNS_N);
-    var j = 0;
-    while (j < pn) {
-        var pat = load64(pats + j * 8);
-        var literal = 1;
-        var q = 0;
-        while (load8(pat + q) != 0) {
-            if (load8(pat + q) == 42 || load8(pat + q) == 63) { literal = 0; }
-            q = q + 1;
-        }
-        if (literal == 1 && q > 0) { _models_emit(sb, seen, pat, q, owner); }
-        j = j + 1;
-    }
-    return 0;
-}
-
-# Route `r`'s good live catalog record, or 0.
-fn _models_live_record(r) {
-    var rec = catalog_record_find(catalog_snapshot(), route_provider(r), route_base_url(r));
-    if (rec == 0) { return 0; }
-    if (cat_r_good_ms(rec) == 0) { return 0; }
-    return rec;
-}
-
-# What route `r` can be offered for: its provider's live list (2.8.0) when it has answered, else the table.
-fn _models_from_catalog(sb, seen, r) {
-    var rec = _models_live_record(r);
-    if (rec == 0) { return _models_from_table(sb, seen, r); }
-    var owner = provider_name(route_provider(r));
-    var es = cat_r_entries(rec);
-    var n = vec_len(es);
-    var i = 0;
-    while (i < n) {
-        var id = cat_e_id(vec_get(es, i));
-        if (route_matches_model(r, id) == 1) { _models_emit(sb, seen, id, strlen(id), owner); }
-        i = i + 1;
-    }
-    return 0;
-}
-
+# GET /v1/models. The listing is models.cyr's (2.9.22: models_list_json and its helpers), so the tests run it.
 fn handle_models(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var seen = vec_new();
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            var got = 0;
-            if (route_is_remote(r) == 0) { got = _models_live_local(sb, seen, r); }
-            if (got == 0) { _models_from_catalog(sb, seen, r); }
-        }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    return http_json_ok(cfd, str_builder_build(sb));
+    return http_json_ok(cfd, models_list_json(_router));
 }
 
 # ── GET /v1/models/catalog (2.4.9; 2.8.0: asked of the providers) ──
@@ -483,16 +277,7 @@ fn handle_models_catalog(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
-# A pattern with no `*` or `?` names one model.
-fn _cat_literal(pat) {
-    var q = 0;
-    while (load8(pat + q) != 0) {
-        if (load8(pat + q) == 42 || load8(pat + q) == 63) { return 0; }
-        q = q + 1;
-    }
-    if (q == 0) { return 0; }
-    return 1;
-}
+# _cat_literal is models.cyr's since 2.9.22.
 
 # ── POST /v1/models/refresh (2.8.0) ──
 # Ask every live route for its models now, on this worker, and answer with what each said — the same
@@ -1285,39 +1070,13 @@ fn handle_hw_simulate(cfd, body_ptr, body_len) {
     if (rm_str != 0) { rm = str_to_int(rm_str); }
     if (rm < 0) { return http_bad_request(cfd, "remove_count must not be negative"); }
 
-    # add_devices is a raw array scan: json_parse is flat and cannot reach into
-    # the nested objects (same constraint the sampling params hit in 2.5.2).
-    # 2.6.13: each size is the whole number token after the key, bounded by
-    # SIM_MAX_DEVICE_BYTES. The old digit loop had no bound, so 18446744073709551615
-    # wrapped to a -1 byte card, and sizes that fit in i64 still wrapped the totals
-    # once summed. It also stopped at the first non-digit, so 1.5e9 was a 1 byte card.
+    # add_devices' sizes: reqparse.cyr's _hw_add_devices (2.9.22, so the tests run the scan).
     var add_mem = vec_new();
-    var i = 0;
-    while (i + 15 < body_len) {
-        if (memeq(body_ptr + i, "\"memory_bytes\":", 15) == 1) {
-            var j = i + 15;
-            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
-            # The token: digits plus any point, exponent or sign that belong to it.
-            var k = j;
-            while (k < body_len && _hw_num_byte(load8(body_ptr + k)) == 1) { k = k + 1; }
-            var v = _hw_whole_bounded(body_ptr + j, k - j, SIM_MAX_DEVICE_BYTES);
-            if (v == 0 - 2) {
-                return _hw_out_of_range(cfd, "device memory_bytes", SIM_MAX_DEVICE_BYTES);
-            }
-            if (v == 0 - 1) {
-                return http_bad_request(cfd, "device memory_bytes must be a positive whole number");
-            }
-            if (v == 0) {
-                return http_bad_request(cfd, "device memory_bytes must be greater than 0");
-            }
-            if (vec_len(add_mem) >= SIM_MAX_DEVICES) {
-                return http_bad_request(cfd, "add_devices limited to 64 entries");
-            }
-            vec_push(add_mem, v);
-            i = k;
-        }
-        i = i + 1;
-    }
+    var nd = _hw_add_devices(body_ptr, body_len, add_mem);
+    if (nd == 0 - 2) { return _hw_out_of_range(cfd, "device memory_bytes", SIM_MAX_DEVICE_BYTES); }
+    if (nd == 0 - 1) { return http_bad_request(cfd, "device memory_bytes must be a positive whole number"); }
+    if (nd == 0 - 3) { return http_bad_request(cfd, "device memory_bytes must be greater than 0"); }
+    if (nd == 0 - 4) { return http_bad_request(cfd, "add_devices limited to 64 entries"); }
 
     var sb = str_builder_new();
     hw_simulate_json(sb, mp, quant, rm, add_mem);
@@ -2203,14 +1962,12 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     # already left, and something an unauthenticated caller could do in a loop.
     while (done == 0) {
         var n = sys_read(bfd, rbuf, 4096);
+        idle_s = sse_idle_next(idle_s, n);   # http_client.cyr (2.9.22): -1 ends the stream
+        if (idle_s < 0) { done = 1; break; }
         if (n == 0 - EAGAIN) {
-            idle_s = idle_s + SSE_KEEPALIVE_S;
-            if (idle_s >= HTTP_IO_TIMEOUT_S) { done = 1; break; }
             if (http_sse_comment(cfd, "keep-alive") < 0) { done = 1; }
             continue;
         }
-        if (n <= 0) { done = 1; break; }
-        idle_s = 0;
         var ri = 0;
         while (ri < n) {
             var ch = load8(rbuf + ri);
@@ -2306,22 +2063,6 @@ fn _sem_scope(model) {
     str_builder_add_cstr(sb, "\n");
     str_builder_add_cstr(sb, model);
     return to_cstr(str_builder_build(sb));
-}
-
-# Append ptr[0..len) into a str_builder, JSON-escaping it for a string value.
-fn _json_escape_into(sb, ptr, len) {
-    var i = 0;
-    while (i < len) {
-        var c = load8(ptr + i);
-        if (c == 34) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 34); }
-        if (c == 92) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 92); }
-        if (c == 10) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 110); }
-        if (c == 13) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 114); }
-        if (c == 9) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 116); }
-        if (c >= 32 && c != 34 && c != 92) { str_builder_add_byte(sb, c); }
-        i = i + 1;
-    }
-    return 0;
 }
 
 # Embed a query (the request body) via the configured embedding model's provider.

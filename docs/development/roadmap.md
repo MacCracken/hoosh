@@ -20,51 +20,27 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 ## 2.9.x — later patches *(fixes, no API change)*
 
-- **Test-suite mirror drift, module by module.**
-  - **The problem:** `tests/hoosh.tcyr` still re-implements much of what it tests rather than including it: the
-    response-cache key, batch, the config pickers, the pool ring, `main.cyr`'s flag parser, and the handlers'
-    parsers. A mirror can drift from `src/` while both stay green. That has happened twice (v2.5.6
-    pricing order, v2.5.7 audit chain-link verification).
-    2.9.3 found two more drifted copies (a stale `req_content_length`, a legacy cost tracker keyed the pre-2.5.6
-    way) and 2.9.4 six (the compression scans' old escape check and return shape, pre-model semantic entries, a
-    pointer-equality remove, and an embedding parser without its exponent clamp and no-progress guard).
-  - **Done so far:** these modules are included for real, with no copies left beside them: `pricing.cyr`,
-    `metadata.cyr`, `catalog.cyr`, `outcome.cyr`, `urlparse.cyr`, `mcp.cyr` (2.9.2); `dlp.cyr`, `compact.cyr` and
-    `http_server.cyr` (2.9.3); `compression.cyr` and `semantic.cyr` (2.9.4); `trace.cyr` and `metrics.cyr`
-    (2.9.5); `types.cyr` (2.9.6); `route.cyr` and `cache.cyr` (2.9.7); `http_client.cyr` and `events.cyr`, with
-    the majra bundle (2.9.8); `hardware.cyr`, with the ai-hwaccel bundle, and `router.cyr` (2.9.9); `health.cyr`,
-    after `route_is_remote` moved into `route.cyr` (2.9.10); `audit.cyr` (2.9.12); `budget.cyr` and `storage.cyr`
-    (2.9.13; the persistence tests use a real patra database in `/tmp`); `otlp.cyr` and `provider.cyr`, after
-    `otlp.cyr`'s I/O half moved to `otlp_export.cyr` (2.9.14); `retry.cyr` (2.9.15); `reqparse.cyr`, split from
-    `handlers.cyr` (2.9.16); `cfgparse.cyr`, split from `config.cyr` (2.9.18); `cli.cyr`, split from `main.cyr`
-    (2.9.19); `wq.cyr`, split from `pool.cyr` (2.9.20). `scripts/coverage.sh` prints the current list: 36 of 42
-    modules.
-  - **Where the rest stand** (scan of 2.9.15):
-    - `pool.cyr`, `batch.cyr`, `catalog_fetch.cyr` and `otlp_export.cyr` formed one cycle through `pool.cyr`'s
-      `wq_push` and job constructors. Those are `wq.cyr`'s since 2.9.20, which the tests include; `pool.cyr`
-      itself reads sockets and dispatches into `handlers.cyr`.
-    - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
-      a time (the `urlparse.cyr` split), or wait for the modules above.
-  - **What the test file still copies** (a full scan of its helpers in 2.9.21), all from `handlers.cyr`:
-    - the embeddings helpers `_json_raw_value` and `_ollama_embed_to_openai`;
-    - the model listing's `_models_emit` and `_models_scan`;
-    - the pattern-is-literal check (`_models_from_catalog`, `handle_ollama_tags`);
-    - the local stream's keep-alive loop, whose copy re-declares `SSE_KEEPALIVE_S` and the I/O timeout;
-    - `handle_hw_simulate`'s `memory_bytes` token loop.
-
-    Through 2.9.20 this list named two pieces; the scan found the six above and four more. 2.9.16–2.9.21 moved the
-    handlers', `batch.cyr`'s and `config.cyr`'s self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`,
-    `main.cyr`'s flag parser into `cli.cyr`, `pool.cyr`'s work-queue ring into `wq.cyr`, and in 2.9.21 the
-    completion envelope, the provider lookup, the requirement scan, `/v1/health`'s verdict and body, the `/metrics`
-    body and the POST-only path list into `provider_err.cyr`, `router.cyr`, `hardware.cyr`, `health.cyr`,
-    `metrics.cyr` and `reqparse.cyr`. **Next:** the six above, then the bench file.
-  - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
-    (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
-    modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as
-    a failure; the CI test step has a 5-minute timeout since 2.9.4.
+- **Test-suite mirror drift: done in 2.9.22.** `tests/hoosh.tcyr` used to re-implement much of what it tested,
+  and copies drifted from `src/` while both stayed green: v2.5.6 pricing order, v2.5.7 audit chain-link
+  verification, then 2.9.3–2.9.22 found more each time a copy was replaced (each is in its CHANGELOG entry, the
+  last a `_requires_post` list of 4 paths out of 19 and a `_models_emit` that did not escape ids).
+  - **Now:** the test file copies no current `src/` code. Its helpers are fixtures, readers, loopback servers and
+    drivers over the real functions. 37 of 43 `src/lib` modules are included for real (`scripts/coverage.sh`
+    lists them). The other six, `handlers`, `pool`, `batch`, `catalog_fetch`, `otlp_export` and `config`, hold the
+    sockets and main.cyr's globals. Their testable parts were split out instead: `reqparse.cyr`, `cfgparse.cyr`,
+    `cli.cyr`, `wq.cyr`, `models.cyr`, `otlp_export.cyr`'s pure half in `otlp.cyr`, and single functions moved into
+    `jsonlite`, `provider`, `provider_err`, `router`, `hardware`, `health`, `metrics` and `http_client`.
+  - **How it was done, for the bench file next:** include each module for real; where a helper lives in a module
+    that needs the whole server, move it out first. Mutation-check each move: change the real function and confirm
+    a test fails (a hang counts; the CI test step has a 5-minute timeout since 2.9.4).
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
-    `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header says so
-    since 2.9.5.
+    `tests/`, so deleting a copy can lower it even when the real function now runs. Its header says so since 2.9.5.
+- **TOML string arrays split quoted values** (found in 2.9.22, next). `cfgparse.cyr`'s `_config_str_array` does
+  not track quotes: a `,`, `]` or `"` inside a quoted element ends it, and leading spaces are dropped. A
+  configured pattern `"we\"ird"` became two ids. It reads model patterns, TLS pins, disabled backends and
+  `[auth] tokens`, so a token like `abc,def` is loaded as two tokens and `abc` alone authenticates. Fix: read each
+  element as a TOML basic string (escapes decoded, delimiters inside quotes kept), keep the bare-scalar form, and
+  test it with tokens, pins and patterns holding those bytes.
 - **The bench file times copies, not `src/`** (found in 2.9.20). `tests/hoosh.bcyr` includes the stdlib and bote
   but no `src/` module. 62 of its 65 functions are copies (the others are `main`, the `_b_s` string helper and a
   stand-in clock): the route record and model match, the router's select, the token estimate, the DLP scanner, the
@@ -73,7 +49,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
   the 25 rows measures a copy that can drift from `src/` as the test copies did. A real change in `src/` cannot move
   them, and a regression there cannot show up in them. The test file has now proved which modules include cleanly,
   so the same method applies: include them in the bench, delete the copies, and record each row's break in the
-  CHANGELOG with an old-against-new A/B. This starts after the test file's last `handlers.cyr` copies.
+  CHANGELOG with an old-against-new A/B. Next, now that the test file is done.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

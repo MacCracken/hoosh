@@ -5,6 +5,111 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.22] — 2026-11-05
+
+**The test file copies no `src/` code any more.** The last six copies, all of `handlers.cyr` code, were replaced
+by the real functions, moved into modules the tests include. One had drifted: the copy of `_models_emit` did not
+JSON-escape model ids. That ends the mirror-drift track begun in 2.9.2. No behavior changed. **1619 assertions** in
+161 groups. All gates are clean: fmt, lint, vet, deny, coverage (403/700, 57%; **37 of 43** modules included for
+real), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — the pieces moved
+
+| what | from | to |
+|---|---|---|
+| `_json_raw_value` (a key's raw string, array or object value) and `_json_escape_into` | `handlers.cyr` | `jsonlite.cyr` |
+| `_json_span_end` (the string-aware end of an array or object) | `provider.cyr` | `jsonlite.cyr`, beside the readers that use it |
+| `_ollama_embed_to_openai` | `handlers.cyr` | `provider.cyr`, beside `_sb_add_span` |
+| the model listing: `_models_emit`, `_models_scan`, `_models_live_local`, the catalog and table fallbacks, `_cat_literal`, and **new** `models_list_json(rt)` | `handlers.cyr` | **new** `models.cyr` |
+| the local stream's keep-alive arithmetic, as **new** `sse_idle_next(idle_s, n)` | `handle_chat_stream`'s loop | `http_client.cyr` |
+| `add_devices`' size scan, as **new** `_hw_add_devices(body, len, out)` | `handle_hw_simulate` | `reqparse.cyr` |
+
+The handlers call these:
+- `handle_models` is `models_list_json(_router)`;
+- the stream loop asks `sse_idle_next` what each backend read does to its silence: -1 ends the stream, and a
+  timed-out read sends the keep-alive comment;
+- `handle_hw_simulate` maps `_hw_add_devices`' codes to the same four 400s as before;
+- `_models_from_table` uses `_cat_literal` instead of its own inline copy of the same check.
+
+`jsonlite.cyr`'s header no longer says `provider.cyr` cannot be included in the tests; that stopped being true in
+2.9.14. The binary is the same size.
+
+**Checked live on the real binary:**
+- `/v1/models` lists the table fallback and the literal patterns of a local route whose backend is down, and a
+  remote route's literal;
+- `/v1/hardware/simulate` takes two `add_devices` sizes, and answers 400 for `1.5e9`, a 0-byte device and one past
+  the cap, as before;
+- `/v1/health`, `/metrics`, and `/v1/embeddings` with its backend down (502) still answer.
+
+### Changed — the tests run them for real
+
+**Gone:** `_t_json_raw_value`, `_t_sb_add_span`, `_t_ollama_embed`, `_t_models_emit`, `_t_models_scan`,
+`_t_pat_literal`, `_t_mem_token`, and the keep-alive copy with its own `_T_SSE_KEEPALIVE_S` and
+`_T_HTTP_IO_TIMEOUT_S`. `_t_keepalive` is now a driver over the real `sse_idle_next`, with its three sequences
+unchanged.
+
+**New assertions:**
+- **`_json_raw_value`:** an object value whose span ends at its own close, not at a brace inside a string; an
+  unterminated string and a number are not values; a string's span runs past its escaped quotes.
+- **`_ollama_embed_to_openai`:** an `embeddings` value that is not an array is refused, and a missing or negative
+  `prompt_eval_count` reads as 0 tokens.
+- **A new `jsonlite_readers` group** for `_json_value_pos` and `_json_extract_int`, whose only mentions here were
+  in the copies: keys are quote-anchored (`eval_count` is not read out of `prompt_eval_count`); whitespace around
+  the colon is skipped; an absent key is -1, or 0 as an int; and a string value equal to the key's name is not the
+  key.
+- **The model listing:**
+  - `_models_emit` escapes the id;
+  - `_cat_literal` refuses `?`;
+  - the whole `models_list_json` runs over a real router. A local Ollama route is answered by a loopback backend
+    at `/api/tags`, and only the ids its patterns match are listed, once each. A remote route lists its literal.
+    A disabled route lists nothing;
+  - with the backend gone, the same local route falls back to its literal patterns.
+- **`sse_idle_next`:** a timed-out read adds one period, silence accumulates, reaching `HTTP_IO_TIMEOUT_S` ends
+  the stream, data resets it, and a closed backend or another read error ends it.
+- **`_hw_add_devices`:** over whole bodies: a space after the colon, a token ending at `}` or `,`, `24000000000.0`
+  read as 24 GB, and `1.5e9`, a quoted size, one past the cap and a 0-byte device each refused with its code.
+  Bodies with no `add_devices`, with 64 devices and with 65 are covered too.
+
+### Mutation-checked
+
+A copy of the tree was changed 26 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| `_json_raw_value` not skipping escapes; objects not values. `_json_span_end` not skipping strings | 1, 2, 2 fail |
+| `_json_escape_into` not escaping a quote; a backslash | 1, 1 |
+| `_ollama_embed_to_openai`: the index not advanced; a negative count not clamped; a non-array accepted | 1, 1, 1 |
+| `_models_emit`: duplicates kept; a leading comma; the id unescaped. `_models_scan` listing unroutable ids | 3, 3, 1, 3 |
+| `_models_live_local`: Ollama asked at `/v1/models`; healthy routes skipped. `_cat_literal`: an empty pattern, `?` | 2, 2, 1, 1 |
+| `models_list_json`: disabled routes listed; no fallback for a silent backend. The table not listing literals | 1, 2, 2 |
+| `sse_idle_next`: the bound one period late; data not resetting; a closed backend continuing | 2, 3, 1 |
+| `_hw_add_devices`: the space not skipped; a zero accepted; the limit off by one; the count not returned | 1, 1, 1, 3 |
+
+**The first-round survivors:**
+- **Escapes:** `_json_raw_value` without its escape skip survived, because the "escaped quotes kept" assertion
+  compared only as many bytes as the found span held, and a span cut short at the first `\"` matches its own
+  prefix. The span's length is now asserted.
+- **The clamp:** `_json_extract_int` reads an absent key as 0, so only a negative count reaches it. That case was
+  added.
+- **Also caught early:** a non-array `embeddings` (found before the run), and `_json_span_end`'s mutant, whose
+  anchor first matched twice.
+
+### Notes
+
+- The test file is 5,941 lines (was 5,965).
+- **Benchmarks,** at load 2.6 (the maintainer chose not to wait: another session's benchmarks kept the machine
+  busy for 40 minutes): the 25 rows' median move is +2.3%, all within −0.4% and +3.6%, except `pool_available`
+  at 4 → 5 ns, a 1 ns row that flips between the two. `tests/hoosh.bcyr` is unchanged and times copies, so this
+  release cannot move it; the small rise is the load.
+- **Coverage** reads 403 of 700 functions. 3 functions are new. `handle_models` and `handle_embeddings` left the
+  count: deleted comments had been the only mentions of them.
+- **Found: the TOML string-array reader splits quoted values.** Checking `/v1/models` live, a configured pattern
+  `"we\"ird"` came back as two ids, `we\` and `ird`. `cfgparse.cyr`'s `_config_str_array` does not track quotes:
+  a comma, `]` or `"` inside a quoted element ends it, and leading spaces are dropped. It reads model patterns,
+  TLS pins, disabled backends and **`[auth] tokens`**, so a token like `abc,def` is loaded as two tokens, and
+  `abc` alone authenticates. Base64-style tokens contain no comma or `]`, which limits the exposure. Not changed
+  here: the roadmap has it as the next fix.
+
 ## [2.9.21] — 2026-11-05
 
 **Six more copies in the test file replaced by the real code.** The roadmap named two pieces of `handlers.cyr`; a

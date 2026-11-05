@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.9.21";
+var HOOSH_VERSION = "2.9.22";
 
 # ================================================================
 # Error types

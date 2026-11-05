@@ -26,6 +26,49 @@ fn _sb_add_span(sb, ptr, len) {
     return 0;
 }
 
+# Ollama's /api/embed answer, {"embeddings":[[...],...],"prompt_eval_count":N},
+# as an OpenAI {"object":"list","data":[{"object":"embedding","index":i,...}]}.
+# Returns 0 when the answer has no embeddings array. Moved from handlers.cyr in 2.9.22 (the tests had a copy);
+# /v1/embeddings and the semantic cache's query embedding both use it.
+fn _ollama_embed_to_openai(model, rb, rl) {
+    var span = alloc(16);
+    if (_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
+    var p = load64(span);
+    var n = load64(span + 8);
+    if (load8(p) != 91) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var idx = 0;
+    var i = 1;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c == 91) {
+            var e = _json_span_end(p, n, i);
+            if (e <= i) { return 0; }
+            if (idx > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "{\"object\":\"embedding\",\"index\":");
+            str_builder_add_int(sb, idx);
+            str_builder_add_cstr(sb, ",\"embedding\":");
+            _sb_add_span(sb, p + i, e - i);
+            str_builder_add_cstr(sb, "}");
+            idx = idx + 1;
+            i = e;
+        } else {
+            i = i + 1;
+        }
+    }
+    var ptok = _json_extract_int(rb, rl, "prompt_eval_count", 17);
+    if (ptok < 0) { ptok = 0; }
+    str_builder_add_cstr(sb, "],\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
+
 # OpenAI tool-continuation messages → Ollama-shaped messages (cstr array), or 0 when nothing
 # needs rewriting (caller then forwards the raw span unchanged).
 #
@@ -914,33 +957,6 @@ fn _provider_headers(route) {
 
 # Forward request to provider and extract text + tokens
 # Result: text(8) latency_ms(8) prompt_tok(8) comp_tok(8) = 32 bytes, or 0 on failure
-# Index just past the close matching the `{`/`[` at `start` (string-aware).
-fn _json_span_end(p, len, start) {
-    var close_open = load8(p + start);
-    var depth = 0;
-    var i = start;
-    while (i < len) {
-        var ch = load8(p + i);
-        if (ch == 34) {
-            i = i + 1;
-            # Forward scan (see _json_extract_str): a backslash consumes the
-            # next byte, so an escaped backslash cannot hide the terminator.
-            while (i < len) {
-                if (load8(p + i) == 34) { break; }
-                if (load8(p + i) == 92) { i = i + 1; }
-                i = i + 1;
-            }
-        } else {
-            if (ch == 123 || ch == 91) { depth = depth + 1; }
-            if (ch == 125 || ch == 93) {
-                depth = depth - 1;
-                if (depth == 0) { return i + 1; }
-            }
-        }
-        i = i + 1;
-    }
-    return i;
-}
 
 # Span (ptr,len) of the array value after `"key":[`, or 0. Keeps searching past
 # a same-name match whose value is not an array.

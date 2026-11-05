@@ -145,6 +145,9 @@ include "src/lib/metadata.cyr"
 # 2.9.5: request/token counters and the per-provider latency histogram, for real (the bucket loop was mirrored).
 # Needs the Provider enum, PROV_COUNT and provider_name above.
 include "src/lib/metrics.cyr"
+# 2.9.22: the model listings, split from handlers.cyr as models.cyr (needs route, metadata, catalog, jsonlite and
+# http_client, all above).
+include "src/lib/models.cyr"
 
 # Semantic cache: semantic.cyr's own (2.9.4, included at the top).
 
@@ -350,13 +353,6 @@ fn _t_ll_pick2(lat_a, lat_b) {
 
 fn _t_whole(cs, cap) { return _hw_whole_bounded(cs, strlen(cs), cap); }
 
-# handle_hw_simulate's memory_bytes token: the JSON-number bytes after the key.
-fn _t_mem_token(cs) {
-    var k = 0;
-    while (load8(cs + k) != 0 && _hw_num_byte(load8(cs + k)) == 1) { k = k + 1; }
-    return _hw_whole_bounded(cs, k, SIM_MAX_DEVICE_BYTES);
-}
-
 # The pre-2.6.13 arithmetic: the memory_bytes digit loop, and str_to_int, which
 # also skips every non-digit. No bound, so both wrap.
 fn _t_naive_digits(cs) {
@@ -422,155 +418,23 @@ fn _t_prom_family(tn, grouped, s, len) {
     return 0;
 }
 
-fn _t_sb_add_span(sb, p, n) {
-    var c = alloc(n + 1);
-    memcpy(c, p, n);
-    store8(c + n, 0);
-    str_builder_add_cstr(sb, c);
-    return 0;
-}
-
-# handlers.cyr _json_raw_value (handle_embeddings): the raw span of `"<key>"`'s
-# string, array or object value. out: ptr(8) len(8).
-fn _t_json_raw_value(body, len, key, keylen, out) {
-    var s = _json_value_pos(body, len, key, keylen);
-    if (s < 0 || s >= len) { return 0; }
-    var c = load8(body + s);
-    var e = 0 - 1;
-    if (c == 91 || c == 123) {
-        e = _json_span_end(body, len, s);
-    } elif (c == 34) {
-        var i = s + 1;
-        while (i < len) {
-            if (load8(body + i) == 34) { break; }
-            if (load8(body + i) == 92) { i = i + 1; }
-            i = i + 1;
-        }
-        if (i < len) { e = i + 1; }
-    }
-    if (e <= s || e > len) { return 0; }
-    store64(out, body + s);
-    store64(out + 8, e - s);
-    return 1;
-}
-
-# handlers.cyr _ollama_embed_to_openai: Ollama's /api/embed answer as an OpenAI list.
-fn _t_ollama_embed(model, rb, rl) {
-    var span = alloc(16);
-    if (_t_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
-    var p = load64(span);
-    var n = load64(span + 8);
-    if (load8(p) != 91) { return 0; }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var idx = 0;
-    var i = 1;
-    while (i < n) {
-        if (load8(p + i) == 91) {
-            var e = _json_span_end(p, n, i);
-            if (e <= i) { return 0; }
-            if (idx > 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "{\"object\":\"embedding\",\"index\":");
-            str_builder_add_int(sb, idx);
-            str_builder_add_cstr(sb, ",\"embedding\":");
-            _t_sb_add_span(sb, p + i, e - i);
-            str_builder_add_cstr(sb, "}");
-            idx = idx + 1;
-            i = e;
-        } else {
-            i = i + 1;
-        }
-    }
-    var ptok = _json_extract_int(rb, rl, "prompt_eval_count", 17);
-    if (ptok < 0) { ptok = 0; }
-    str_builder_add_cstr(sb, "],\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, "}}");
-    return to_cstr(str_builder_build(sb));
-}
-
-# handlers.cyr _models_emit / _models_scan (handle_models, _models_live_local): ids
-# from a model listing that the route matches, each once.
-fn _t_models_emit(sb, seen, id, len, owner) {
-    var n = vec_len(seen);
-    var i = 0;
-    while (i < n) {
-        var s = vec_get(seen, i);
-        if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
-        i = i + 1;
-    }
-    var c = alloc(len + 1);
-    memcpy(c, id, len);
-    store8(c + len, 0);
-    vec_push(seen, c);
-    if (n > 0) { str_builder_add_cstr(sb, ","); }
-    str_builder_add_cstr(sb, "{\"id\":\"");
-    str_builder_add_cstr(sb, c);
-    str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-    str_builder_add_cstr(sb, owner);
-    str_builder_add_cstr(sb, "\"}");
-    return 1;
-}
-
-fn _t_models_scan(sb, seen, r, body, len, key, keylen, owner) {
-    var found = 0;
-    var pos = 0;
-    while (pos < len) {
-        var p = _json_value_pos(body + pos, len - pos, key, keylen);
-        if (p < 0) { break; }
-        var s = pos + p;
-        if (load8(body + s) != 34) { pos = s + 1; continue; }
-        var e = s + 1;
-        while (e < len && load8(body + e) != 34) {
-            if (load8(body + e) == 92) { e = e + 1; }
-            e = e + 1;
-        }
-        if (e >= len) { break; }
-        found = found + 1;
-        var id = alloc(e - s);
-        memcpy(id, body + s + 1, e - s - 1);
-        store8(id + e - s - 1, 0);
-        if (route_matches_model(r, id) == 1) { _t_models_emit(sb, seen, id, e - s - 1, owner); }
-        pos = e + 1;
-    }
-    return found;
-}
-
-# _models_from_catalog: a pattern is listed as a model only if it has no wildcard.
-fn _t_pat_literal(pat) {
-    var q = 0;
-    while (load8(pat + q) != 0) {
-        if (load8(pat + q) == 42 || load8(pat + q) == 63) { return 0; }
-        q = q + 1;
-    }
-    if (q == 0) { return 0; }
-    return 1;
-}
-
-# handlers.cyr local-stream keep-alive. `reads` holds read results, -11
-# (EAGAIN) for a read that timed out. out: comments sent(8), ended-idle(8).
-var _T_SSE_KEEPALIVE_S = 15;
-var _T_HTTP_IO_TIMEOUT_S = 300;
+# The local stream loop around http_client.cyr's sse_idle_next (2.9.22; through 2.9.21 this was a copy of the
+# loop's arithmetic with its own constants). `reads` holds read results in order, -EAGAIN for a read that timed
+# out. out: comments sent(8), ended-idle(8) (1 when the silence bound, not the backend, ended it).
 fn _t_keepalive(reads, out) {
     var comments = 0;
-    var idle = 0;
     var ended = 0;
+    var idle = 0;
     var i = 0;
     while (i < vec_len(reads)) {
         var n = vec_get(reads, i);
         i = i + 1;
-        if (n == 0 - 11) {
-            idle = idle + _T_SSE_KEEPALIVE_S;
-            if (idle >= _T_HTTP_IO_TIMEOUT_S) { ended = 1; break; }
-            comments = comments + 1;
-            continue;
+        idle = sse_idle_next(idle, n);
+        if (idle < 0) {
+            if (n == 0 - EAGAIN) { ended = 1; }
+            break;
         }
-        if (n <= 0) { break; }
-        idle = 0;
+        if (n == 0 - EAGAIN) { comments = comments + 1; }
     }
     store64(out, comments);
     store64(out + 8, ended);
@@ -4673,12 +4537,37 @@ fn main() {
     assert_eq(_hw_json_whole(str_from("  "), wc), 0, "whole: blank is not given");
     assert_eq(_hw_json_whole(0, wc), 0, "whole: absent is not given");
     assert_eq(_hw_json_whole(str_from("\"7\""), wc), 0 - 1, "whole: stray quotes are refused");
-    # handle_hw_simulate's memory_bytes token takes the whole number, so 1.5e9 is
-    # refused rather than read as a 1 byte card.
-    assert_eq(_t_mem_token("1.5e9}"), 0 - 1, "whole: token 1.5e9 is refused");
-    assert_eq(_t_mem_token("24000000000.0}"), 24000000000, "whole: token 24000000000.0 is 24 GB");
-    assert_eq(_t_mem_token("25769803776,"), 25769803776, "whole: token ends at a comma");
-    assert_eq(_t_mem_token("\"24\"}"), 0 - 1, "whole: a quoted size is refused");
+    # handle_hw_simulate's add_devices sizes take the whole number, so 1.5e9 is refused rather than read as a 1 byte
+    # card. 2.9.22: reqparse.cyr's own _hw_add_devices over whole bodies (a copy of its token loop stood here).
+    var adv = vec_new();
+    var adb = "{\"model_params\":7,\"add_devices\":[{\"memory_bytes\": 25769803776},{\"memory_bytes\":24000000000.0}]}";
+    assert_eq(_hw_add_devices(adb, strlen(adb), adv), 2, "devices: two sizes read");
+    assert_eq(vec_get(adv, 0), 25769803776, "devices: a space after the colon is skipped; the token ends at }");
+    assert_eq(vec_get(adv, 1), 24000000000, "devices: 24000000000.0 is 24 GB");
+    var adc = "{\"add_devices\":[{\"memory_bytes\":1000,\"name\":\"a\"}]}";
+    assert_eq(_hw_add_devices(adc, strlen(adc), vec_new()), 1, "devices: the token ends at a comma");
+    var ad15 = "{\"add_devices\":[{\"memory_bytes\":1.5e9}]}";
+    assert_eq(_hw_add_devices(ad15, strlen(ad15), vec_new()), 0 - 1, "devices: 1.5e9 is refused");
+    var adq = "{\"add_devices\":[{\"memory_bytes\":\"24\"}]}";
+    assert_eq(_hw_add_devices(adq, strlen(adq), vec_new()), 0 - 1, "devices: a quoted size is refused");
+    var adbig = "{\"add_devices\":[{\"memory_bytes\":72057594037927937}]}";
+    assert_eq(_hw_add_devices(adbig, strlen(adbig), vec_new()), 0 - 2, "devices: one past SIM_MAX_DEVICE_BYTES");
+    var adz = "{\"add_devices\":[{\"memory_bytes\":8},{\"memory_bytes\":0}]}";
+    assert_eq(_hw_add_devices(adz, strlen(adz), vec_new()), 0 - 3, "devices: a 0-byte device is refused");
+    assert_eq(_hw_add_devices("{\"model_params\":7}", 18, vec_new()), 0, "devices: no add_devices, none added");
+    var ad64 = str_builder_new();
+    str_builder_add_cstr(ad64, "{\"add_devices\":[");
+    var adi = 0;
+    while (adi < 65) {
+        if (adi > 0) { str_builder_add_cstr(ad64, ","); }
+        str_builder_add_cstr(ad64, "{\"memory_bytes\":1024}");
+        adi = adi + 1;
+    }
+    str_builder_add_cstr(ad64, "]}");
+    var ad65s = str_builder_build(ad64);
+    assert_eq(_hw_add_devices(str_data(ad65s), str_len(ad65s), vec_new()), 0 - 4, "devices: 65 is one too many");
+    var ad64v = vec_new();
+    assert_eq(_hw_add_devices(str_data(ad65s), str_len(ad65s) - 24, ad64v), 64, "devices: 64 is the limit");
 
     test_group("hardware_planner_caps");
     # SIM_MAX_DEVICE_BYTES: 64 added cards at the cap total 2^62, which leaves 2^62
@@ -4862,30 +4751,64 @@ fn main() {
     test_group("rustold_embeddings");
     # Ollama gets /api/embed with the caller's `input` (string or array), and its
     # {"embeddings":[[...]]} answer comes back as OpenAI's list.
+    # 2.9.22: jsonlite.cyr's own _json_raw_value and provider.cyr's own _ollama_embed_to_openai (they were copies).
     var eb = "{\"model\":\"nomic\",\"input\":[\"a, b\",\"c\"],\"encoding_format\":\"float\"}";
     var esp = alloc(16);
-    assert_eq(_t_json_raw_value(eb, strlen(eb), "input", 5, esp), 1, "embed: array input found");
+    assert_eq(_json_raw_value(eb, strlen(eb), "input", 5, esp), 1, "embed: array input found");
     assert_eq(load64(esp + 8), 12, "embed: whole array, commas in strings included");
     var eb2 = "{\"model\":\"nomic\", \"input\": \"one \\\"q\\\" line\"}";
-    assert_eq(_t_json_raw_value(eb2, strlen(eb2), "input", 5, esp), 1, "embed: string input found");
-    assert_eq(memeq(load64(esp), "\"one \\\"q\\\" line\"", load64(esp + 8)), 1, "embed: escaped quotes kept");
+    assert_eq(_json_raw_value(eb2, strlen(eb2), "input", 5, esp), 1, "embed: string input found");
+    assert_eq(load64(esp + 8), 16, "embed: the string's span runs past its escaped quotes to its own close");
+    assert_eq(memeq(load64(esp), "\"one \\\"q\\\" line\"", 16), 1, "embed: escaped quotes kept");
     var eb3 = "{\"model\":\"nomic\"}";
-    assert_eq(_t_json_raw_value(eb3, strlen(eb3), "input", 5, esp), 0, "embed: missing input");
+    assert_eq(_json_raw_value(eb3, strlen(eb3), "input", 5, esp), 0, "embed: missing input");
+    var eb4 = "{\"input\":{\"a\":[1,{\"b\":\"}\"}]},\"model\":\"m\"}";
+    assert_eq(_json_raw_value(eb4, strlen(eb4), "input", 5, esp), 1, "embed: an object value is found");
+    assert_eq(load64(esp + 8), 19, "embed: the object's span ends at its own close, not a brace in a string");
+    var eb5 = "{\"input\":\"unterminated}";
+    assert_eq(_json_raw_value(eb5, strlen(eb5), "input", 5, esp), 0, "embed: an unterminated string is not a value");
+    var eb6 = "{\"input\":42}";
+    assert_eq(_json_raw_value(eb6, strlen(eb6), "input", 5, esp), 0, "embed: a number is not a raw value here");
     var oresp = "{\"model\":\"nomic\",\"embeddings\":[[0.1,-0.2],[0.3,0.4]],\"prompt_eval_count\":7}";
     var orb = alloc(strlen(oresp) + 1);
     memcpy(orb, oresp, strlen(oresp) + 1);
-    var onorm = _t_ollama_embed("nomic", orb, strlen(oresp));
+    var onorm = to_cstr(_ollama_embed_to_openai("nomic", orb, strlen(oresp)));
     assert_streq(onorm,
       "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.1,-0.2]},{\"object\":\"embedding\",\"index\":1,\"embedding\":[0.3,0.4]}],\"model\":\"nomic\",\"usage\":{\"prompt_tokens\":7,\"total_tokens\":7}}",
       "embed: Ollama answer normalized");
     var obad = "{\"embedding\":[0.1]}";
     var obb = alloc(strlen(obad) + 1);
     memcpy(obb, obad, strlen(obad) + 1);
-    assert_eq(_t_ollama_embed("nomic", obb, strlen(obad)), 0, "embed: legacy shape is not an answer");
+    assert_eq(_ollama_embed_to_openai("nomic", obb, strlen(obad)), 0, "embed: legacy shape is not an answer");
+    var oobj = _t_cat("{\"embeddings\":{\"a\":[1]}}", "");
+    assert_eq(_ollama_embed_to_openai("nomic", oobj, strlen(oobj)), 0, "embed: embeddings must be an array");
+    var oneg = _t_cat("{\"embeddings\":[[1]],\"prompt_eval_count\":-3}", "");
+    var onegn = to_cstr(_ollama_embed_to_openai("nomic", oneg, strlen(oneg)));
+    assert_eq(_t_has(onegn, strlen(onegn), "\"usage\":{\"prompt_tokens\":0,"), 1, "embed: a negative count reads as 0");
+    var onc = _t_cat("{\"embeddings\":[[1]]}", "");
+    var oncn = to_cstr(_ollama_embed_to_openai("nomic", onc, strlen(onc)));
+    assert_eq(_t_has(oncn, strlen(oncn), "\"usage\":{\"prompt_tokens\":0,\"total_tokens\":0}"), 1,
+      "embed: no prompt_eval_count reads as 0 tokens");
+
+    test_group("jsonlite_readers");
+    # 2.9.22: the two readers under _json_raw_value and the embedding converter, tested directly. Their only
+    # references in this file were inside the copies this release removed.
+    var jr = _t_cat("{\"prompt_eval_count\":7,\"eval_count\":3}", "");
+    assert_eq(_json_extract_int(jr, strlen(jr), "eval_count", 10), 3, "json: a key is quote-anchored, not a suffix");
+    assert_eq(_json_extract_int(jr, strlen(jr), "prompt_eval_count", 17), 7, "json: the longer key reads its own");
+    var jw = _t_cat("{\"n\" :\n\t 42}", "");
+    assert_eq(_json_extract_int(jw, strlen(jw), "n", 1), 42, "json: whitespace around the colon is skipped");
+    assert_eq(_json_value_pos(jr, strlen(jr), "missing", 7), 0 - 1, "json: an absent key is -1");
+    assert_eq(_json_extract_int(jr, strlen(jr), "missing", 7), 0, "json: and reads as 0");
+    var jt = "{\"type\":\"text\",\"text\":\"hi\"}";
+    var jtp = _json_value_pos(jt, strlen(jt), "text", 4);
+    assert_eq(memeq(jt + jtp, "\"hi\"", 4), 1, "json: a string value equal to the key's name is not the key");
 
     test_group("rustold_models_list");
     # /v1/models lists model ids a route can serve, once each, owned_by the provider.
-    var mr = route_new(1, 1, "http://127.0.0.1:11434");
+    # 2.9.22: models.cyr's own _models_scan, _models_emit, _cat_literal and models_list_json (the first three were
+    # copies, and the _models_emit copy did not escape the id).
+    var mr = route_new(PROV_OLLAMA, 1, "http://127.0.0.1:11434");
     var mlpats = alloc(16);
     store64(mlpats, "llama*");
     store64(mlpats + 8, "qwen3:8b");
@@ -4893,13 +4816,56 @@ fn main() {
     var tags = "{\"models\":[{\"name\":\"llama3.2:3b\",\"model\":\"llama3.2:3b\"},{\"name\":\"phi3:mini\"},{\"name\":\"llama3.2:3b\"}]}";
     var msb = str_builder_new();
     var mseen = vec_new();
-    assert_eq(_t_models_scan(msb, mseen, mr, tags, strlen(tags), "name", 4, "ollama"), 3, "models: three names listed");
+    assert_eq(_models_scan(msb, mseen, mr, tags, strlen(tags), "name", 4), 3, "models: three names listed");
     assert_eq(vec_len(mseen), 1, "models: unroutable and duplicate ids skipped");
     assert_streq(to_cstr(str_builder_build(msb)), "{\"id\":\"llama3.2:3b\",\"object\":\"model\",\"owned_by\":\"ollama\"}",
       "models: entry shape");
-    assert_eq(_t_pat_literal("qwen3:8b"), 1, "models: a literal pattern is a model id");
-    assert_eq(_t_pat_literal("llama*"), 0, "models: a wildcard pattern is not");
-    assert_eq(_t_pat_literal(""), 0, "models: an empty pattern is not");
+    var mesb = str_builder_new();
+    assert_eq(_models_emit(mesb, vec_new(), "we\"ird\\id", 9, "openai"), 1, "models: an odd id is emitted");
+    var mes_want = "{\"id\":\"we\\\"ird\\\\id\",\"object\":\"model\",\"owned_by\":\"openai\"}";
+    assert_streq(to_cstr(str_builder_build(mesb)), mes_want, "models: the id is JSON-escaped");
+    assert_eq(_cat_literal("qwen3:8b"), 1, "models: a literal pattern is a model id");
+    assert_eq(_cat_literal("llama*"), 0, "models: a wildcard pattern is not");
+    assert_eq(_cat_literal("qwen?"), 0, "models: nor is one with ?");
+    assert_eq(_cat_literal(""), 0, "models: an empty pattern is not");
+    # The whole listing: a local Ollama route that answers (its own list), a remote route listed from the table
+    # (its literal pattern), and a disabled route (nothing).
+    var ml_port = alloc(8);
+    var ml_lfd = _t_listen(ml_port);
+    assert_eq(ml_lfd > 0, 1, "models: a loopback backend listens");
+    var ml_ol = route_new(PROV_OLLAMA, 1, _t_base_url(load64(ml_port)));
+    route_set_patterns(ml_ol, mlpats, 2);
+    var ml_rp = alloc(8);
+    store64(ml_rp, "my-ft-model");
+    var ml_oa = route_new(PROV_OPENAI, 2, "https://ft.example");
+    route_set_patterns(ml_oa, ml_rp, 1);
+    var ml_off = route_new(PROV_OPENAI, 3, "https://other.example");
+    var ml_op = alloc(8);
+    store64(ml_op, "hidden-model");
+    route_set_patterns(ml_off, ml_op, 1);
+    route_set_enabled(ml_off, 0);
+    var ml_routes = alloc(24);
+    store64(ml_routes, ml_ol);
+    store64(ml_routes + 8, ml_oa);
+    store64(ml_routes + 16, ml_off);
+    var ml_rt = router_new(ml_routes, 3, STRAT_PRIORITY);
+    _t_srv_lfd = ml_lfd;
+    _t_srv_reply = _t_cat("HTTP/1.0 200 OK\r\n\r\n", tags);
+    _t_srv_body_len = 0;
+    var ml_th = thread_create(&_t_serve_once, 0);
+    var ml_body = to_cstr(models_list_json(ml_rt));
+    thread_join(ml_th);
+    assert_eq(memeq(_t_srv_req, "GET /api/tags ", 14), 1, "models: an Ollama route is asked at /api/tags");
+    var ml_want = _t_cat(
+      "{\"object\":\"list\",\"data\":[{\"id\":\"llama3.2:3b\",\"object\":\"model\",\"owned_by\":\"ollama\"},",
+      "{\"id\":\"my-ft-model\",\"object\":\"model\",\"owned_by\":\"openai\"}]}");
+    assert_streq(ml_body, ml_want, "models: the live list, then the remote route's literal; not the disabled route");
+    # The same local route when its backend does not answer: its literal pattern, from the table fallback.
+    sys_close(ml_lfd);
+    var ml_body2 = to_cstr(models_list_json(ml_rt));
+    var ml_q = "{\"id\":\"qwen3:8b\",\"object\":\"model\",\"owned_by\":\"ollama\"}";
+    assert_eq(_t_has(ml_body2, strlen(ml_body2), ml_q), 1, "models: a silent local backend falls back to its literals");
+    assert_eq(_t_has(ml_body2, strlen(ml_body2), "llama3.2:3b"), 0, "models: and not to what it listed before");
 
     test_group("rustold_catalog");
     # rust-old's catalog entries, found by exact match and longest prefix.
@@ -4919,25 +4885,35 @@ fn main() {
 
     test_group("rustold_keepalive");
     # Local streams send an SSE comment every 15 s of silence and still end after
-    # 300 s with nothing from the backend.
+    # 300 s with nothing from the backend. 2.9.22: http_client.cyr's own sse_idle_next decides each read.
+    assert_eq(sse_idle_next(0, 0 - EAGAIN), SSE_KEEPALIVE_S, "keepalive: a timed-out read adds one period");
+    assert_eq(sse_idle_next(270, 0 - EAGAIN), 285, "keepalive: silence accumulates");
+    assert_eq(sse_idle_next(285, 0 - EAGAIN), 0 - 1, "keepalive: reaching HTTP_IO_TIMEOUT_S ends the stream");
+    assert_eq(sse_idle_next(120, 512), 0, "keepalive: data resets the silence");
+    assert_eq(sse_idle_next(120, 0), 0 - 1, "keepalive: the backend closing ends the stream");
+    assert_eq(sse_idle_next(0, 0 - 104), 0 - 1, "keepalive: a read error other than a timeout ends it");
     var ka = alloc(16);
     var kr = vec_new();
-    vec_push(kr, 0 - 11); vec_push(kr, 0 - 11); vec_push(kr, 0 - 11); vec_push(kr, 512); vec_push(kr, 0);
+    vec_push(kr, 0 - EAGAIN);
+    vec_push(kr, 0 - EAGAIN);
+    vec_push(kr, 0 - EAGAIN);
+    vec_push(kr, 512);
+    vec_push(kr, 0);
     _t_keepalive(kr, ka);
     assert_eq(load64(ka), 3, "keepalive: one comment per quiet 15 s");
     assert_eq(load64(ka + 8), 0, "keepalive: data resets the idle clock");
     var kr2 = vec_new();
     var kz = 0;
-    while (kz < 25) { vec_push(kr2, 0 - 11); kz = kz + 1; }
+    while (kz < 25) { vec_push(kr2, 0 - EAGAIN); kz = kz + 1; }
     _t_keepalive(kr2, ka);
     assert_eq(load64(ka), 19, "keepalive: comments until the idle bound");
     assert_eq(load64(ka + 8), 1, "keepalive: 300 s of silence still ends the stream");
     var kr3 = vec_new();
     kz = 0;
-    while (kz < 19) { vec_push(kr3, 0 - 11); kz = kz + 1; }
+    while (kz < 19) { vec_push(kr3, 0 - EAGAIN); kz = kz + 1; }
     vec_push(kr3, 64);
     kz = 0;
-    while (kz < 19) { vec_push(kr3, 0 - 11); kz = kz + 1; }
+    while (kz < 19) { vec_push(kr3, 0 - EAGAIN); kz = kz + 1; }
     vec_push(kr3, 0);
     _t_keepalive(kr3, ka);
     assert_eq(load64(ka + 8), 0, "keepalive: silence is counted per gap, not in total");
@@ -5059,7 +5035,7 @@ fn main() {
     var soe = "{\"model\":\"nomic\",\"embeddings\":[[0.5,-1.25,2]],\"prompt_eval_count\":3}";
     var sob = alloc(strlen(soe) + 1);
     memcpy(sob, soe, strlen(soe) + 1);
-    var snorm = _t_ollama_embed("nomic", sob, strlen(soe));
+    var snorm = to_cstr(_ollama_embed_to_openai("nomic", sob, strlen(soe)));
     var sn = alloc(8);
     var svec = semantic_parse_embedding(snorm, strlen(snorm), sn);
     assert_eq(load64(sn), 3, "semantic: three components from the normalized answer");

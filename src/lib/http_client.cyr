@@ -11,6 +11,22 @@ var HTTP_IO_TIMEOUT_S = 300;
 # a caller at the end of a full buffer stays inside it.
 var HTTP_RESP_CAP = 131072;
 
+# A local stream's silence after one backend read (2.7.0 keep-alive). `idle_s` is the silence so far, `n` what
+# sys_read returned on a socket whose read times out every SSE_KEEPALIVE_S (http_server.cyr). A timeout (-EAGAIN)
+# adds SSE_KEEPALIVE_S, and the caller sends an SSE comment so a proxy's idle timeout does not cut the stream; data
+# resets the silence to 0. Returns the new silence, or -1 when the stream should end: the backend closed or failed,
+# or HTTP_IO_TIMEOUT_S passed with nothing from it. handle_chat_stream's local loop; the tests had a copy of it
+# through 2.9.21.
+fn sse_idle_next(idle_s, n) {
+    if (n == 0 - EAGAIN) {
+        var idle = idle_s + SSE_KEEPALIVE_S;
+        if (idle >= HTTP_IO_TIMEOUT_S) { return 0 - 1; }
+        return idle;
+    }
+    if (n <= 0) { return 0 - 1; }
+    return 0;
+}
+
 # Generic request header for an arbitrary method (GET/POST/DELETE/...).
 # method must be a cstr like "POST" or "DELETE"; a single space follows it.
 # Returns the header length, or -1 if it would not fit in `cap` bytes.

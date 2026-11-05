@@ -75,10 +75,12 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 |--------|------|
 | `types.cyr` | Provider enum (`PROV_*`), `provider_name`, error codes, `HOOSH_VERSION` |
 | `router.cyr` / `route.cyr` | Provider selection (4 strategies), the first enabled route of a provider type (2.9.21) + route records |
-| `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing |
-| `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building |
+| `jsonlite.cyr` | Byte-level JSON field readers (2.6.5): value position, string/int extraction, object and span ends, raw values, JSON escaping (2.9.22 gathered the last three here) |
+| `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing; Ollama's embeddings answer as OpenAI's list (2.9.22) |
+| `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building; a local stream's keep-alive step (`sse_idle_next`, 2.9.22) |
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
-| `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`) |
+| `models.cyr` | The model listings (2.9.22 split from `handlers.cyr`): `/v1/models`' body (`models_list_json`), one entry per id, a local backend's own list, the catalog and table fallbacks, `_cat_literal` |
+| `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`), `add_devices`' sizes (2.9.22) |
 | `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, and the job constructors |
 | `pool.cyr` | Unified worker pool (v2.4.0) — 7 workers draining `wq.cyr`'s queue (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |

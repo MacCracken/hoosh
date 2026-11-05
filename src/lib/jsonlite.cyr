@@ -3,10 +3,12 @@
 # These five functions were born inside provider.cyr and stayed there because that is where the first
 # caller was. They are not provider logic: handlers.cyr reads with them too, and 2.6.5's upstream-error
 # surface needs them as well. Moving them here is a pure lift — no signature and no behaviour changed —
-# with one concrete payoff: **provider.cyr reaches `_router`, a global defined in main.cyr, so it cannot
-# be included by the test binary.** Anything that lives in provider.cyr is therefore untestable, and the
-# 2.6.5 error surface is precisely the kind of untrusted-byte parsing that must be tested against the
-# real implementation rather than a mirror.
+# with one concrete payoff at the time: provider.cyr reached `_router`, a global defined in main.cyr, so the
+# test binary could not include it (it can since 2.9.14). The 2.6.5 error surface is precisely the kind of
+# untrusted-byte parsing that must be tested against the real implementation rather than a mirror.
+#
+# 2.9.22 added three more from provider.cyr and handlers.cyr: _json_span_end, _json_raw_value and
+# _json_escape_into.
 #
 # Deliberately NOT a full JSON parser. hoosh reads a handful of known fields out of provider responses on
 # a hot path; a scanner that is quote-anchored on the key and tolerant of whitespace around the colon is
@@ -222,4 +224,72 @@ fn _top_key_value(body, len, key, keylen) {
         }
     }
     return 0 - 1;
+}
+
+# Index just past the close matching the `{`/`[` at `start` (string-aware).
+fn _json_span_end(p, len, start) {
+    var close_open = load8(p + start);
+    var depth = 0;
+    var i = start;
+    while (i < len) {
+        var ch = load8(p + i);
+        if (ch == 34) {
+            i = i + 1;
+            # Forward scan (see _json_extract_str): a backslash consumes the
+            # next byte, so an escaped backslash cannot hide the terminator.
+            while (i < len) {
+                if (load8(p + i) == 34) { break; }
+                if (load8(p + i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+        } else {
+            if (ch == 123 || ch == 91) { depth = depth + 1; }
+            if (ch == 125 || ch == 93) {
+                depth = depth - 1;
+                if (depth == 0) { return i + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+# Span of the raw JSON value of `"<key>"` at the top of an object: a string, an
+# array or an object. out: ptr(8) len(8). Returns 1, or 0 when absent/malformed.
+fn _json_raw_value(body, len, key, keylen, out) {
+    var s = _json_value_pos(body, len, key, keylen);
+    if (s < 0 || s >= len) { return 0; }
+    var c = load8(body + s);
+    var e = 0 - 1;
+    if (c == 91 || c == 123) {
+        e = _json_span_end(body, len, s);
+    } elif (c == 34) {
+        var i = s + 1;
+        while (i < len) {
+            if (load8(body + i) == 34) { break; }
+            if (load8(body + i) == 92) { i = i + 1; }
+            i = i + 1;
+        }
+        if (i < len) { e = i + 1; }
+    }
+    if (e <= s || e > len) { return 0; }
+    store64(out, body + s);
+    store64(out + 8, e - s);
+    return 1;
+}
+
+# Append ptr[0..len) into a str_builder, JSON-escaping it for a string value.
+fn _json_escape_into(sb, ptr, len) {
+    var i = 0;
+    while (i < len) {
+        var c = load8(ptr + i);
+        if (c == 34) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 34); }
+        if (c == 92) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 92); }
+        if (c == 10) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 110); }
+        if (c == 13) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 114); }
+        if (c == 9) { str_builder_add_byte(sb, 92); str_builder_add_byte(sb, 116); }
+        if (c >= 32 && c != 34 && c != 92) { str_builder_add_byte(sb, c); }
+        i = i + 1;
+    }
+    return 0;
 }

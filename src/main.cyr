@@ -62,6 +62,7 @@ include "src/lib/outcome.cyr"
 include "src/lib/provider.cyr"
 # 2.8.0: the live catalog's I/O half — asks each route for its models on a pool worker.
 include "src/lib/catalog_fetch.cyr"
+include "src/lib/models.cyr"        # 2.9.22: the model listings, split from handlers.cyr so the tests run them
 include "src/lib/compact.cyr"
 include "src/lib/audit.cyr"
 include "src/lib/storage.cyr"

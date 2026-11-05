@@ -6,7 +6,7 @@
 #   - request body fields: _req_reasoning_effort, _req_num_milli, _extract_tools, _json_array_count;
 #   - the response cache's key and the warming body: _cache_key, _warming_body;
 #   - the hardware endpoints' inputs: _hoosh_req_from_str, _hw_blank, _hw_num_byte, _hw_whole_bounded,
-#     _hw_json_whole;
+#     _hw_json_whole, and add_devices' sizes, _hw_add_devices (2.9.22);
 #   - POST /v1/batch's body and status names (2.9.17, from batch.cyr): _batch_extract_requests, _batch_split,
 #     _batch_is_async, _batch_status_name and the BATCH_* status values;
 #   - which paths are POST-only (2.9.21, from main.cyr): _requires_post.
@@ -241,6 +241,35 @@ fn _hw_json_whole(s, cap) {
     if (len == 0) { return 0; }
     if (len == 4 && memeq(p, "null", 4) == 1) { return 0; }
     return _hw_whole_bounded(p, len, cap);
+}
+
+# POST /v1/hardware/simulate's add_devices sizes: every `"memory_bytes":` value in the body, in order, pushed onto
+# `out`. A raw scan, because json_parse is flat and cannot reach into the nested objects (the constraint the
+# sampling params hit in 2.5.2). 2.6.13: each size is the whole-number token after the key, bounded by
+# SIM_MAX_DEVICE_BYTES (hardware.cyr). The old digit loop had no bound, so 18446744073709551615 wrapped to a -1
+# byte card, and sizes that fit in i64 still wrapped the totals once summed. It also stopped at the first
+# non-digit, so 1.5e9 was a 1 byte card. Moved from handle_hw_simulate in 2.9.22 (the tests had a copy of the
+# token loop). Returns the number of sizes, or -1 (a size that is not a positive whole number), -2 (one above
+# SIM_MAX_DEVICE_BYTES), -3 (a 0-byte device) or -4 (more than SIM_MAX_DEVICES), at the first bad one.
+fn _hw_add_devices(body_ptr, body_len, out) {
+    var i = 0;
+    while (i + 15 < body_len) {
+        if (memeq(body_ptr + i, "\"memory_bytes\":", 15) == 1) {
+            var j = i + 15;
+            while (j < body_len && load8(body_ptr + j) == 32) { j = j + 1; }
+            # The token: digits plus any point, exponent or sign that belong to it.
+            var k = j;
+            while (k < body_len && _hw_num_byte(load8(body_ptr + k)) == 1) { k = k + 1; }
+            var v = _hw_whole_bounded(body_ptr + j, k - j, SIM_MAX_DEVICE_BYTES);
+            if (v < 0) { return v; }
+            if (v == 0) { return 0 - 3; }
+            if (vec_len(out) >= SIM_MAX_DEVICES) { return 0 - 4; }
+            vec_push(out, v);
+            i = k;
+        }
+        i = i + 1;
+    }
+    return vec_len(out);
 }
 
 # ── POST /v1/batch (2.9.17, split from batch.cyr) ──
