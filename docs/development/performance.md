@@ -38,7 +38,7 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-25 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
+26 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
 function (no live backend — inference latency is backend-bound and not meaningful to
 micro-measure here). The clock-reading rows run on the production coarse clock, which
 the bench sets as the gateway's ticker would:
@@ -46,7 +46,8 @@ the bench sets as the gateway's ticker would:
 - **Routing** — `route_select_20_providers`, `route_round_robin_10`,
   `route_matches_model`
 - **Budget** — `pool_reserve_commit`, `pool_available`
-- **Cache** — `cache_get_hit`, `cache_get_miss`, `cache_insert`
+- **Cache** — `cache_get_hit`, `cache_get_miss`, `cache_insert` (one key, replaced),
+  `cache_insert_full` (a full 10000-entry cache taking new keys, 2.10.0)
 - **Tokens / DLP** — `estimate_tokens_per_provider`, `dlp_scan_clean_prompt`
 - **MCP** — `mcp_tools_list`, `mcp_tools_call`
 - **Batch / Observability** — `batch_split_4`, `latency_bucket_find`,

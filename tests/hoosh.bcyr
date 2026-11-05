@@ -216,6 +216,38 @@ fn main() {
     bench_batch_stop(b, 10000);
     bench_report(b);
 
+    # ── Benchmark: cache_insert_full (2.10.0) ─────────────────────
+    # The default 10000-entry cache, full, taking new keys: each insert evicts the least recently used. Through 2.9.26
+    # every such insert built map_keys() twice and scanned every entry, about 4 ms and 524 KB; the row above never
+    # filled its cache, so it did not see that.
+    var cf_cache = cache_new(10000, 1, 300);
+    var cf_keys = vec_new();
+    i = 0;
+    while (i < 12000) {
+        var cf_k = _b_s("cache-full-key-00000");
+        store8(cf_k + 15, 48 + (i / 10000) % 10);
+        store8(cf_k + 16, 48 + (i / 1000) % 10);
+        store8(cf_k + 17, 48 + (i / 100) % 10);
+        store8(cf_k + 18, 48 + (i / 10) % 10);
+        store8(cf_k + 19, 48 + i % 10);
+        vec_push(cf_keys, cf_k);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 10000) {
+        cache_insert(cf_cache, vec_get(cf_keys, i), i);
+        i = i + 1;
+    }
+    b = bench_new("cache_insert_full");
+    bench_batch_start(b);
+    i = 10000;
+    while (i < 12000) {
+        cache_insert(cf_cache, vec_get(cf_keys, i), i);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 2000);
+    bench_report(b);
+
     # ── Benchmark: route_matches_model (pattern match) ────────────
     var pats = alloc(16);
     store64(pats, _b_s("llama*"));

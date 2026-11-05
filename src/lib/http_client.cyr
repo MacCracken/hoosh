@@ -11,6 +11,47 @@ var HTTP_IO_TIMEOUT_S = 300;
 # a caller at the end of a full buffer stays inside it.
 var HTTP_RESP_CAP = 131072;
 
+# ── Per-thread scratch for the local client and local streams (2.10.0) ──
+# Through 2.9.26 every local request took a 2 KiB header buffer and a 128 KiB + 1 response buffer from the arena that
+# never frees, and every local stream took 4 + 4 + 64 KiB more: 139 KB a buffered request and 79 KB a stream
+# through an Ollama route, measured over 3000 requests with unique prompts. Each thread now allocates each block
+# once and reuses it. The contract: a local response (the parsed struct's body points into the buffer) lives until
+# the SAME thread's next http_req_local, and a stream's buffers until its next stream. Every caller reads the body
+# (extracting text, copying ids, or writing it to the client) before it makes another local request; a provider's
+# error body is copied by provider_err_set. Slots 1..6 are taken (trace, request buffer, provider error, auth
+# identity, completion id, remote arena); 16 and up are the stdlib's.
+var LOCAL_HTTP_SLOT = 7;
+var LH_HDR = 0;          # the request header, 2048 bytes
+var LH_BUF = 2048;       # the response, HTTP_RESP_CAP + 1 bytes
+
+fn _local_http_scratch() {
+    var b = thread_local_get(LOCAL_HTTP_SLOT);
+    if (b == 0) {
+        b = alloc(LH_BUF + HTTP_RESP_CAP + 1);
+        if (b == 0) { return 0; }
+        thread_local_set(LOCAL_HTTP_SLOT, b);
+    }
+    return b;
+}
+
+# A local stream's buffers: the backend's response head (4096), each read (4096) and the line being assembled
+# (65536). provider.cyr reads the head, then handle_chat_stream reads the body; the two never overlap.
+var STREAM_SCRATCH_SLOT = 8;
+var SS_HDR = 0;
+var SS_READ = 4096;
+var SS_LINE = 8192;
+var SS_SIZE = 8192 + 65536;
+
+fn stream_scratch() {
+    var b = thread_local_get(STREAM_SCRATCH_SLOT);
+    if (b == 0) {
+        b = alloc(SS_SIZE);
+        if (b == 0) { return 0; }
+        thread_local_set(STREAM_SCRATCH_SLOT, b);
+    }
+    return b;
+}
+
 # A local stream's silence after one backend read (2.7.0 keep-alive). `idle_s` is the silence so far, `n` what
 # sys_read returned on a socket whose read times out every SSE_KEEPALIVE_S (http_server.cyr). A timeout (-EAGAIN)
 # adds SSE_KEEPALIVE_S, and the caller sends an SSE comment so a proxy's idle timeout does not cut the stream; data
@@ -123,8 +164,9 @@ fn http_req_local(method, base_url, path, body, body_len) {
     }
     sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
-    var hdr = alloc(2048);
-    if (hdr == 0) { sock_close(fd); return 0; }
+    var scr = _local_http_scratch();
+    if (scr == 0) { sock_close(fd); return 0; }
+    var hdr = scr + LH_HDR;
     var hlen = _build_req_header(hdr, method, path, host, body_len, 2048);
     if (hlen < 0) { sock_close(fd); return 0; }
     sys_write(fd, hdr, hlen);
@@ -134,8 +176,7 @@ fn http_req_local(method, base_url, path, body, body_len) {
     # which lands one past the allocation when a provider fills the buffer
     # exactly — into the shared bump arena at the offset the next alloc on any
     # of 7 workers is about to receive.
-    var rbuf = alloc(HTTP_RESP_CAP + 1);
-    if (rbuf == 0) { sock_close(fd); return 0; }
+    var rbuf = scr + LH_BUF;
     var total = 0;
     var n = 1;
     while (n > 0 && total < HTTP_RESP_CAP) {
@@ -174,8 +215,9 @@ fn http_post_stream(base_url, path, body, body_len) {
     # backend has genuinely stopped talking.
     sock_set_recv_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
     sock_set_send_timeout(fd, HTTP_IO_TIMEOUT_S, 0);
-    var hdr = alloc(2048);
-    if (hdr == 0) { sock_close(fd); return 0 - 1; }
+    var scr = _local_http_scratch();
+    if (scr == 0) { sock_close(fd); return 0 - 1; }
+    var hdr = scr + LH_HDR;
     var hlen = _build_post_header(hdr, path, host, body_len, 2048);
     if (hlen < 0) { sock_close(fd); return 0 - 1; }
     sys_write(fd, hdr, hlen);

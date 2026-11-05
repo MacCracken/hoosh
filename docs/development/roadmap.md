@@ -73,27 +73,32 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 ## 2.10.x — memory and accounting
 
-### 2.10.0 — per-request arena *(highest priority)*
+### 2.10.0 — request memory, measured *(done)*
 
-hoosh's allocator **never frees**.
-- v2.5.11 removed the dominant per-connection 64 KiB allocation: over 2000 requests, growth fell from ~128 MB to
-  2.0 MB.
-- **~1 KiB per request still accumulates**, from response building (`str_builder`, `to_cstr`, path parsing). At
-  100 req/s that is ~360 MB/hour, still an eventual OOM on a long-lived gateway, only a slower one.
+The roadmap said about 1 KiB per request still accumulated. Measured with unique prompts through a local Ollama
+route, 2.9.26 kept **139 KB per buffered request and 79 KB per stream**. Its response cache took **524 KB and 4 ms
+per insert** once full, which with mostly new prompts was within about a minute.
+- **2.10.0 fixed both:** the cache evicts in O(1) and allocates only the new entry, and the local client and local
+  streams reuse per-thread scratch blocks.
+- **What remains:** 5.6 KB per buffered request and 3.5 KB per stream, steady with the cache full.
+  [ADR 013](../decisions/013-request-memory.md) (Proposed) records the measurements and the plan below.
 
-Point fixes will not close this. It needs a **per-request arena with mark/release**: take a mark when a request
-starts, and release it once the response is written.
-- `alloc_reset` cannot run per request as it stands. The response cache, audit chain, cost records, routes and
-  health records live in the same arena, and they must outlive the request that created them.
-- The design work is deciding what is request-scoped and what is process-scoped, then enforcing that split. Write
-  an ADR first.
-- Two working precedents: the 2.8.0 catalog fetch's reusable arena, and 2.9.3's per-thread `_remote_arena()`
-  (`provider.cyr`). The latter took every remote request's sandhi allocations, megabytes each, off the heap.
-- Measure with unique prompts. A repeated prompt is answered from the response cache and never exercises the
-  request path.
+### 2.10.1 and on — the per-request arena *(highest priority)*
 
-Until then, a hoosh instance needs a periodic restart under sustained load. Measure with `/proc/<pid>/status` rather
-than assuming.
+From ADR 013:
+1. **A per-thread request arena,** reset when a worker starts a job, threaded explicitly through the chat path
+   (`_chat_prep`, `_chat_forward`, `_chat_assemble`, `_resp_write`) with the stdlib's `_a` variants and new `_a`
+   forms of hoosh's helpers. Anything not converted stays on the global heap, so a miss leaks rather than
+   corrupts. The chat path first, then embeddings, the model listings and the rest. Target: request memory under
+   1 KiB per request.
+2. **The boundary:** whatever crosses into process memory is copied. That is the cache's envelope and key, the
+   semantic index, the event ring, audit entries (`audit_record` keeps the caller's pointers today), async batch
+   results and OTLP spans. In the tests the arena is poisoned on reset, so a pointer that crossed reads poison.
+3. **Process memory with churn:** cache entries, values and keys, the event ring's strings, and audit and OTLP past
+   their maxima are recycled on free lists instead of leaking when evicted.
+
+Measure each step with `scripts/memory-growth.py` (a fake local backend, unique prompts, `VmRSS`), and
+`alloc_used()` per phase for a breakdown.
 
 ### Then, in any order
 

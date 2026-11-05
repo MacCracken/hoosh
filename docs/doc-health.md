@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-05 (**v2.9.26**: CHANGELOG, README stats, state (version, bote 3.8.12), `SECURITY.md`'s
-> scope and considerations, which still described rust-old, `architecture/overview.md`'s `wq.cyr` row). Also
-> 2026-11-05: **v2.9.25** (the lookup item, `performance.md`'s live-catalog rows, the `keyindex.cyr` row),
+> **Last refresh**: 2026-11-05 (**v2.10.0**: CHANGELOG, README stats, state, the roadmap's 2.10.0 item rewritten
+> from the measurements, new `decisions/013-request-memory.md`, `development/performance.md`'s cache rows,
+> `architecture/overview.md`'s cache and http_client rows). Also 2026-11-05: **v2.9.26** (bote 3.8.12 in state,
+> `SECURITY.md`'s scope and considerations, the `wq.cyr` row), **v2.9.25** (the lookup item, `performance.md`'s live-catalog rows, the `keyindex.cyr` row),
 > **v2.9.24** (the bench item, `performance.md`'s suite description, `SECURITY.md`'s
 > authentication line), **v2.9.23** (the
 > TOML item, `SECURITY.md`'s token-contents line, the `cfgparse.cyr` row), **v2.9.22** (the mirror-drift item marked done, the

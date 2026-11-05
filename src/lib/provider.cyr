@@ -1427,8 +1427,9 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     # nowhere, with provider_last_error_status() still 0 and audit_record
     # filing it as a SUCCESS. That is the exact failure 2.6.5 fixed for the
     # remote path; the local one was left uncovered.
-    var hdr_buf = alloc(4096);
+    var hdr_buf = stream_scratch();     # 2.10.0: per thread (http_client.cyr), not 4096 bytes a stream
     if (hdr_buf == 0) { sys_close(fd); return 0 - 1; }
+    hdr_buf = hdr_buf + SS_HDR;
     var skip = stream_skip_headers(fd, hdr_buf, 4096);
     if (skip < 0) { sys_close(fd); return 0 - 1; }
     var sst = _stream_status(hdr_buf, skip);

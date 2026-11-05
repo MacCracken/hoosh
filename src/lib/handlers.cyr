@@ -1937,16 +1937,23 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
         return http_error(cfd, "502", "Bad Gateway",
           "provider backend unreachable");
     }
+    # 2.10.0: the line and read buffers are this thread's stream scratch (http_client.cyr), not 68 KiB a stream.
+    var sscr = stream_scratch();
+    if (sscr == 0) {
+        sys_close(bfd);
+        _stream_meter(route, model, bpool, est_tokens, oc, gen, 0);
+        return http_error(cfd, "503", "Service Unavailable", "stream buffer unavailable");
+    }
 
     http_sse_begin(cfd);
 
     # Read backend response line by line
-    var lbuf = alloc(65536);
+    var lbuf = sscr + SS_LINE;
     var lpos = 0;
     var is_ollama = (route_provider(route) == PROV_OLLAMA);
     var token_count = 0;
 
-    var rbuf = alloc(4096);
+    var rbuf = sscr + SS_READ;
     var done = 0;
     # 2.7.0: SSE keep-alive. rust-old sent a comment every 15 s of silence, which
     # keeps a proxy's idle timeout (nginx and most load balancers: 60 s) from

@@ -1690,6 +1690,24 @@ fn _t_req_roundtrip(lfd, base, method, path, body, reply) {
     return r;
 }
 
+# 2.10.0: _t_serve_once with its read buffer allocated up front, so a test can measure what the client allocates.
+var _t_srv_prebuf = 0;
+fn _t_serve_once_prebuf(arg) {
+    var ct, cfd = sock_accept(_t_srv_lfd);
+    if (is_ok(ct) == 0) { return 0; }
+    _t_read_req(cfd, _t_srv_prebuf, 4096, _t_srv_body_len);
+    var rl = strlen(_t_srv_reply);
+    if (rl > 0) { sys_write(cfd, _t_srv_reply, rl); }
+    sys_close(cfd);
+    return 0;
+}
+
+var _t_other_scr = 0;
+fn _t_other_scratch(arg) {
+    _t_other_scr = _local_http_scratch();
+    return 0;
+}
+
 # ── 2.9.15: a counting loopback server for retry.cyr ──
 # Read one HTTP request off `cfd`: through the blank line, then the Content-Length body. Returns the bytes read.
 fn _t_read_http_req(cfd, buf, cap) {
@@ -3106,6 +3124,41 @@ fn main() {
     assert_eq(memeq(_t_srv_req, "POST /api/chat HTTP/1.0\r\n", 25), 1, "req local: POST request line on the wire");
     assert_eq(memeq(_t_srv_req + _t_srv_req_len - strlen(hc_body), hc_body, strlen(hc_body)), 1,
       "req local: body on the wire");
+    # 2.10.0: the header and response buffers are this thread's scratch block, allocated once, not 130 KB a request.
+    var hc_scr = _local_http_scratch();
+    assert_eq(hc_scr != 0 && hc_scr == _local_http_scratch(), 1, "scratch: one block per thread");
+    assert_eq(load64(hc_r + 8) >= hc_scr + LH_BUF && load64(hc_r + 8) < hc_scr + LH_BUF + HTTP_RESP_CAP, 1,
+      "scratch: the response body is in it");
+    _t_srv_prebuf = alloc(4096);
+    _t_srv_lfd = hc_lfd;
+    _t_srv_reply = "HTTP/1.0 200 OK\r\n\r\n{\"second\":2}";
+    _t_srv_body_len = 0;
+    var hc_th2 = thread_create(&_t_serve_once_prebuf, 0);
+    var hc_u0 = alloc_used();
+    var hc_r2 = http_req_local("GET", hc_base, "/again", 0, 0);
+    var hc_du = alloc_used() - hc_u0;
+    thread_join(hc_th2);
+    assert_lt(hc_du, 1024, "scratch: a local request allocates under 1 KiB (it took 130 KB)");
+    assert_eq(load64(hc_r2 + 16), 12, "scratch: the second response's length");
+    assert_eq(memeq(load64(hc_r2 + 8), "{\"second\":2}", 12), 1, "scratch: the second body, in the reused buffer");
+    var hc_oth = thread_create(&_t_other_scratch, 0);
+    thread_join(hc_oth);
+    assert_eq(_t_other_scr != 0 && _t_other_scr != hc_scr, 1, "scratch: another thread gets its own block");
+    # http_post_stream's request head is the scratch block's too. Its own listener: the connection stays queued
+    # unaccepted, and the shared one is accepted by the tests that follow.
+    var hc_pport = alloc(8);
+    var hc_plfd = _t_listen(hc_pport);
+    var hc_pu0 = alloc_used();
+    var hc_pfd = http_post_stream(_t_base_url(load64(hc_pport)), "/api/chat", "{}", 2);
+    var hc_pdu = alloc_used() - hc_pu0;
+    sys_close(hc_pfd);
+    sys_close(hc_plfd);
+    assert_eq(hc_pfd >= 0, 1, "scratch: the stream request was sent");
+    assert_lt(hc_pdu, 1024, "scratch: starting a local stream allocates under 1 KiB (its head took 2 KiB)");
+    var hc_ss = stream_scratch();
+    assert_eq(hc_ss != 0 && hc_ss == stream_scratch(), 1, "scratch: one stream block per thread");
+    assert_eq(SS_HDR + 4096 == SS_READ && SS_READ + 4096 == SS_LINE && SS_LINE + 65536 == SS_SIZE, 1,
+      "scratch: the stream block's head, read and line regions do not overlap");
     hc_r = _t_req_roundtrip(hc_lfd, hc_base, "GET", "/health", 0, "HTTP/1.0 503 Service Unavailable\r\n\r\n");
     assert_eq(hc_r != 0, 1, "req local: GET round trip parsed");
     assert_eq(load64(hc_r), 503, "req local: upstream status passed through");
@@ -4231,6 +4284,88 @@ fn main() {
     _t_ins_at(x_tq, "z", 3, 4100);            # full: x has expired (age 3100), y is live (age 2100)
     assert_eq(_t_get_at(x_tq, "y", 4200), 2, "capacity: the live entry survives though it is the LRU one");
     assert_eq(_t_get_at(x_tq, "z", 4200), 3, "capacity: and the new entry is stored");
+
+    test_group("cache_o1_eviction");
+    # 2.10.0: two lists in each entry, by access (LRU) and by creation (TTL), so a full cache evicts in O(1) and
+    # allocates nothing beyond the new entry. Through 2.9.26 every insert into a full cache built map_keys() twice
+    # and scanned every entry: 524 KB and 4 ms an insert at the default 10000 entries.
+    var x_l = cache_new(3, 1, 0);
+    _t_ins_at(x_l, "a", 1, 1000);
+    _t_ins_at(x_l, "b", 2, 1001);
+    _t_ins_at(x_l, "c", 3, 1002);
+    _t_get_at(x_l, "a", 1003);                # a is now the most recent: b is the LRU
+    _t_ins_at(x_l, "d", 4, 1004);
+    assert_eq(_t_get_at(x_l, "b", 1005), 0, "lru: the least recently used (b) is evicted");
+    _t_get_at(x_l, "c", 1006);                # order now c, d, a: a is the LRU
+    _t_ins_at(x_l, "e", 5, 1007);
+    assert_eq(_t_get_at(x_l, "a", 1008), 0, "lru: then a, read before c was");
+    assert_eq(_t_get_at(x_l, "c", 1009) + _t_get_at(x_l, "d", 1009) + _t_get_at(x_l, "e", 1009), 12,
+      "lru: c, d and e remain");
+    assert_eq(cache_evictions(x_l), 2, "lru: two evictions");
+    # Inserting a key that is already there replaces its entry and evicts nothing, even at capacity.
+    var x_rp = cache_new(2, 1, 0);
+    _t_ins_at(x_rp, "x", 1, 1000);
+    _t_ins_at(x_rp, "y", 2, 1001);
+    _t_ins_at(x_rp, "x", 3, 1002);
+    assert_eq(cache_len(x_rp), 2, "replace: still two entries");
+    assert_eq(cache_evictions(x_rp), 0, "replace: nothing evicted");
+    assert_eq(_t_get_at(x_rp, "x", 1003), 3, "replace: the new value");
+    assert_eq(_t_get_at(x_rp, "y", 1003), 2, "replace: the other entry kept");
+    _t_get_at(x_rp, "x", 1004);               # x is now the most recent: y is the LRU
+    _t_ins_at(x_rp, "z", 4, 1005);
+    assert_eq(_t_get_at(x_rp, "x", 1006), 3, "replace: listed once, so a later eviction spares it");
+    assert_eq(_t_get_at(x_rp, "y", 1006), 0, "replace: and takes y, the LRU");
+    # An evicted entry leaves the semantic index too (semantic_find would otherwise keep returning its key).
+    var x_sem_was = _sem_enabled;
+    _sem_enabled = 1;
+    var x_sem = cache_new(1, 1, 0);
+    var x_sem_n0 = semantic_count();
+    var x_sem_v = alloc(16);
+    _t_ins_at(x_sem, "sk1", 1, 1000);
+    semantic_insert("sk1", x_sem_v, 2);
+    assert_eq(semantic_count(), x_sem_n0 + 1, "semantic: the key is indexed");
+    _t_ins_at(x_sem, "sk2", 2, 1001);         # evicts sk1
+    assert_eq(semantic_count(), x_sem_n0, "semantic: evicting the entry drops its embedding");
+    _sem_enabled = x_sem_was;
+    # An expired entry read from the middle of the lists is unlinked cleanly: the sweep and LRU eviction that follow
+    # still see consistent lists.
+    var x_md = cache_new(3, 1, 3);
+    _t_ins_at(x_md, "p", 1, 1000);
+    _t_ins_at(x_md, "q", 2, 2000);
+    _t_ins_at(x_md, "r", 3, 3000);
+    assert_eq(_t_get_at(x_md, "q", 5100), 0, "middle: q has expired (age 3100) and is dropped on read");
+    assert_eq(_t_sweep_at(x_md, 5100), 1, "middle: the sweep then takes p, the oldest, and stops at r");
+    assert_eq(cache_len(x_md), 1, "middle: r alone remains");
+    _t_ins_at(x_md, "s", 4, 5200);
+    _t_ins_at(x_md, "t", 5, 5300);
+    _t_ins_at(x_md, "u", 6, 5400);            # full (r, s, t): r is the LRU and has not expired
+    assert_eq(_t_get_at(x_md, "r", 5500), 0, "middle: LRU eviction takes r");
+    assert_eq(_t_get_at(x_md, "s", 5500) + _t_get_at(x_md, "t", 5500) + _t_get_at(x_md, "u", 5500), 15,
+      "middle: s, t and u remain");
+    # A full cache takes only the new entry per insert.
+    var x_full = cache_new(1000, 1, 300);
+    var xk = vec_new();
+    var xi = 0;
+    while (xi < 2000) {
+        vec_push(xk, _t_line("prompt-", xi, ""));
+        xi = xi + 1;
+    }
+    xi = 0;
+    while (xi < 1000) {
+        _t_ins_at(x_full, vec_get(xk, xi), xi + 1, 1000 + xi);
+        xi = xi + 1;
+    }
+    var xu0 = alloc_used();
+    while (xi < 2000) {
+        _t_ins_at(x_full, vec_get(xk, xi), xi + 1, 1000 + xi);
+        xi = xi + 1;
+    }
+    assert_lt((alloc_used() - xu0) / 1000, 256, "full: an insert takes under 256 bytes (it took 33 KB at 1000)");
+    assert_eq(cache_len(x_full), 1000, "full: still 1000 entries");
+    assert_eq(cache_evictions(x_full), 1000, "full: one eviction per insert");
+    assert_eq(_t_get_at(x_full, vec_get(xk, 999), 3000), 0, "full: the oldest thousand are gone");
+    assert_eq(_t_get_at(x_full, vec_get(xk, 1999), 3000), 2000, "full: the newest is there");
+    _t_clock_real();
 
     test_group("route_real");
     # 2.9.7: route.cyr's own records. A new route is healthy until probed (refusing traffic before the first probe

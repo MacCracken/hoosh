@@ -77,7 +77,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `router.cyr` / `route.cyr` | Provider selection (4 strategies), the first enabled route of a provider type (2.9.21) + route records |
 | `jsonlite.cyr` | Byte-level JSON field readers (2.6.5): value position, string/int extraction, object and span ends, raw values, JSON escaping (2.9.22 gathered the last three here) |
 | `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing; Ollama's embeddings answer as OpenAI's list (2.9.22) |
-| `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building; a local stream's keep-alive step (`sse_idle_next`, 2.9.22) |
+| `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building; per-thread scratch blocks for local responses and local streams (2.10.0); a local stream's keep-alive step (`sse_idle_next`, 2.9.22) |
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
 | `models.cyr` | The model listings (2.9.22 split from `handlers.cyr`): `/v1/models`' body (`models_list_json`), one entry per id, a local backend's own list, the catalog and table fallbacks, `_cat_literal` |
 | `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`), `add_devices`' sizes (2.9.22) |
@@ -90,7 +90,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms; the `/metrics` body (`metrics_render`, 2.9.21) |
-| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry + semantic (embedding cosine) cache |
+| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry, evicting in O(1) through two lists in each entry (2.10.0) + semantic (embedding cosine) cache |
 | `budget.cyr` | Named token pools (reserve → commit/release) |
 | `ratelimit.cyr` | Per-provider RPM token bucket (`hoosh_ratelimit_*` — majra exports colliding names) |
 | `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |

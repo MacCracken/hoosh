@@ -1,27 +1,51 @@
 # cache.cyr — response cache with TTL expiry, LRU eviction and stats
 # Each entry stores value + access timestamp (LRU) + creation timestamp (TTL).
+#
+# 2.10.0: eviction is O(1) and allocates nothing. Through 2.9.26, once the cache held max_entries, every insert ran
+# cache_evict_expired and _cache_evict_lru, and each built map_keys() of the whole map (a fresh vector, grown by
+# doubling on the arena that never frees) and scanned every entry. With the default 10000 entries that was 524 KB
+# and 4 ms per insert, under _chat_lock: a gateway serving mostly new prompts filled the cache within a minute and
+# then grew by half a megabyte per response, until it ran out of memory. Each entry is now on two lists, threaded
+# through the entry itself: by last access (the LRU end is the tail) and by creation (the oldest is the tail). The
+# TTL is the same for every entry of a cache, so expired entries are always the oldest created: the sweep pops the
+# creation tail while it is expired, and LRU eviction pops the access tail. Every caller holds _chat_lock (warming
+# runs before the workers start), so the lists need no lock of their own.
 
 enum CacheField {
-    CACHE_SIZE = 56; CACHE_ENTRIES = 0; CACHE_MAX = 8;
+    CACHE_ENTRIES = 0; CACHE_MAX = 8;
     CACHE_HITS = 16; CACHE_MISSES = 24; CACHE_EVICTIONS = 32;
     CACHE_ENABLED = 40; CACHE_TTL_MS = 48;
+    CACHE_A_HEAD = 56; CACHE_A_TAIL = 64;     # by last access: head most recent, tail least (2.10.0)
+    CACHE_C_HEAD = 72; CACHE_C_TAIL = 80;     # by creation: head newest, tail oldest (2.10.0)
+    CACHE_SIZE = 88;
 }
 
-# Entry layout: 0=value(8), 8=last_access_ms(8), 16=created_ms(8)
+# Entry layout: 0=value(8), 8=last_access_ms(8), 16=created_ms(8), 24=key(8), 32=access prev(8), 40=access next(8),
+# 48=creation prev(8), 56=creation next(8).
 #
 # 2.5.4: `created_ms` is new. Before it, the entry carried only the LRU recency
 # stamp — rewritten on every read — so there was nothing to measure an age
 # against and `[cache] ttl_secs` (shipped in hoosh.cyml since the port) was
 # silently ignored. A cached response was served as a hit forever; eviction was
 # capacity-only. rust-old had CacheEntry.ttl + is_expired (cache/mod.rs:40-44).
-var CACHE_ENTRY_SIZE = 24;
+var CACHE_ENTRY_SIZE = 64;
+var CE_KEY = 24;
+var CE_APREV = 32;
+var CE_ANEXT = 40;
+var CE_CPREV = 48;
+var CE_CNEXT = 56;
 
-fn _cache_entry_new(value) {
+fn _cache_entry_new(key, value) {
     var e = alloc(CACHE_ENTRY_SIZE);
     var now = hoosh_now_ms();
     store64(e, value);
     store64(e + 8, now);
     store64(e + 16, now);
+    store64(e + CE_KEY, key);
+    store64(e + CE_APREV, 0);
+    store64(e + CE_ANEXT, 0);
+    store64(e + CE_CPREV, 0);
+    store64(e + CE_CNEXT, 0);
     return e;
 }
 
@@ -37,6 +61,10 @@ fn cache_new(max_entries, enabled, ttl_secs) {
     var ttl_ms = 0;
     if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
     store64(c + CACHE_TTL_MS, ttl_ms);
+    store64(c + CACHE_A_HEAD, 0);
+    store64(c + CACHE_A_TAIL, 0);
+    store64(c + CACHE_C_HEAD, 0);
+    store64(c + CACHE_C_TAIL, 0);
     return c;
 }
 
@@ -49,6 +77,39 @@ fn _cache_expired(c, entry, now) {
     var ttl = load64(c + CACHE_TTL_MS);
     if (ttl <= 0) { return 0; }
     if (now - load64(entry + 16) >= ttl) { return 1; }
+    return 0;
+}
+
+# ── the two lists ──
+# Each is (head, tail) in the cache at offset `h` and (prev, next) in the entry at offset `p`.
+
+fn _cache_list_push_front(c, h, e, p) {
+    var head = load64(c + h);
+    store64(e + p, 0);
+    store64(e + p + 8, head);
+    if (head != 0) { store64(head + p, e); } else { store64(c + h + 8, e); }
+    store64(c + h, e);
+    return 0;
+}
+
+fn _cache_list_unlink(c, h, e, p) {
+    var prev = load64(e + p);
+    var next = load64(e + p + 8);
+    if (prev != 0) { store64(prev + p + 8, next); } else { store64(c + h, next); }
+    if (next != 0) { store64(next + p, prev); } else { store64(c + h + 8, prev); }
+    store64(e + p, 0);
+    store64(e + p + 8, 0);
+    return 0;
+}
+
+# Drop `e` from the map, both lists and the semantic index (semantic_find would otherwise keep returning a key
+# whose response is gone).
+fn _cache_remove(c, e) {
+    var key = load64(e + CE_KEY);
+    map_delete(load64(c + CACHE_ENTRIES), key);
+    _cache_list_unlink(c, CACHE_A_HEAD, e, CE_APREV);
+    _cache_list_unlink(c, CACHE_C_HEAD, e, CE_CPREV);
+    semantic_remove(key);
     return 0;
 }
 
@@ -66,83 +127,51 @@ fn cache_get(c, key) {
     # different questions: hit_rate stays honest, evictions shows TTL churn.
     var now = hoosh_now_ms();
     if (_cache_expired(c, entry, now) == 1) {
-        map_delete(load64(c + CACHE_ENTRIES), key);
-        # Keep the semantic index consistent — otherwise semantic_find keeps
-        # returning a key whose response is gone, costing a lookup per query.
-        semantic_remove(key);
+        _cache_remove(c, entry);
         var ev = load64(c + CACHE_EVICTIONS);
         store64(c + CACHE_EVICTIONS, ev + 1);
         var m2 = load64(c + CACHE_MISSES);
         store64(c + CACHE_MISSES, m2 + 1);
         return 0;
     }
-    # Update access timestamp (LRU touch) — reuses the `now` already read for
-    # the expiry check rather than taking a second clock reading on the hot path.
+    # LRU touch: the access stamp (reusing the `now` already read for the expiry check rather than taking a second
+    # clock reading on the hot path) and the front of the access list.
     store64(entry + 8, now);
+    if (load64(c + CACHE_A_HEAD) != entry) {
+        _cache_list_unlink(c, CACHE_A_HEAD, entry, CE_APREV);
+        _cache_list_push_front(c, CACHE_A_HEAD, entry, CE_APREV);
+    }
     var h = load64(c + CACHE_HITS);
     store64(c + CACHE_HITS, h + 1);
     return load64(entry);
 }
 
-# Evict the least recently used entry
+# Evict the least recently used entry: the tail of the access list.
 fn _cache_evict_lru(c) {
-    var m = load64(c + CACHE_ENTRIES);
-    var keys = map_keys(m);
-    var n = vec_len(keys);
-    if (n == 0) { return 0; }
-    var oldest_key = 0;
-    var oldest_time = 0x7FFFFFFFFFFFFFFF;
-    var i = 0;
-    while (i < n) {
-        var k = vec_get(keys, i);
-        var entry = map_get(m, k);
-        if (entry != 0) {
-            var t = load64(entry + 8);
-            if (t < oldest_time) {
-                oldest_time = t;
-                oldest_key = k;
-            }
-        }
-        i = i + 1;
-    }
-    if (oldest_key != 0) {
-        map_delete(m, oldest_key);
-        # Drop the embedding too. cache_evict_expired already did this; the LRU
-        # path did not, so under capacity pressure every eviction orphaned an
-        # index entry permanently. Because vec_push appends, the orphans
-        # collect at the HEAD, which is exactly where a configured max_search
-        # window looks — so hit rate decays toward zero.
-        semantic_remove(oldest_key);
-        var ev = load64(c + CACHE_EVICTIONS);
-        store64(c + CACHE_EVICTIONS, ev + 1);
-    }
+    var e = load64(c + CACHE_A_TAIL);
+    if (e == 0) { return 0; }
+    _cache_remove(c, e);
+    var ev = load64(c + CACHE_EVICTIONS);
+    store64(c + CACHE_EVICTIONS, ev + 1);
     return 0;
 }
 
 # Sweep every expired entry. Returns how many were removed. rust-old's
 # evict_expired (cache/mod.rs:207-214). hoosh has no background timer, so this
 # runs on capacity pressure (below) — reclaiming dead entries before evicting a
-# live one — and can be called directly by an operator path.
+# live one — and can be called directly by an operator path. The expired entries are the oldest created, so this
+# pops the creation list's tail until it reaches one that is not.
 fn cache_evict_expired(c) {
     var ttl = load64(c + CACHE_TTL_MS);
     if (ttl <= 0) { return 0; }
-    var m = load64(c + CACHE_ENTRIES);
-    var keys = map_keys(m);
-    var n = vec_len(keys);
     var now = hoosh_now_ms();
     var removed = 0;
-    var i = 0;
-    while (i < n) {
-        var k = vec_get(keys, i);
-        var entry = map_get(m, k);
-        if (entry != 0) {
-            if (_cache_expired(c, entry, now) == 1) {
-                map_delete(m, k);
-                semantic_remove(k);
-                removed = removed + 1;
-            }
-        }
-        i = i + 1;
+    var e = load64(c + CACHE_C_TAIL);
+    while (e != 0) {
+        if (_cache_expired(c, e, now) == 0) { break; }
+        _cache_remove(c, e);
+        removed = removed + 1;
+        e = load64(c + CACHE_C_TAIL);
     }
     if (removed > 0) {
         var ev = load64(c + CACHE_EVICTIONS);
@@ -154,15 +183,26 @@ fn cache_evict_expired(c) {
 fn cache_insert(c, key, value) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
     var m = load64(c + CACHE_ENTRIES);
-    var max = load64(c + CACHE_MAX);
-    if (map_count(m) >= max) {
-        # Reclaim expired entries first — evicting a live entry while dead ones
-        # sit in the map would throw away a usable response for no reason.
-        cache_evict_expired(c);
+    var old = map_get(m, key);
+    if (old != 0) {
+        # A second insert for a key replaces its entry. It frees no slot and takes none, so it evicts nothing
+        # (through 2.9.26 it evicted one entry at capacity anyway).
+        _cache_list_unlink(c, CACHE_A_HEAD, old, CE_APREV);
+        _cache_list_unlink(c, CACHE_C_HEAD, old, CE_CPREV);
+    } else {
+        var max = load64(c + CACHE_MAX);
         if (map_count(m) >= max) {
-            _cache_evict_lru(c);
+            # Reclaim expired entries first — evicting a live entry while dead ones
+            # sit in the map would throw away a usable response for no reason.
+            cache_evict_expired(c);
+            if (map_count(m) >= max) {
+                _cache_evict_lru(c);
+            }
         }
     }
-    map_set(m, key, _cache_entry_new(value));
+    var e = _cache_entry_new(key, value);
+    map_set(m, key, e);
+    _cache_list_push_front(c, CACHE_A_HEAD, e, CE_APREV);
+    _cache_list_push_front(c, CACHE_C_HEAD, e, CE_CPREV);
     return 0;
 }

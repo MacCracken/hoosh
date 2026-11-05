@@ -5,6 +5,149 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.10.0] — 2026-11-05
+
+**Request memory, measured, and its two big leaks fixed.** The roadmap's 2.10.0 item assumed about 1 KiB per
+request still accumulated, and called for a per-request arena. Measured first, with unique prompts through a local
+Ollama route, 2.9.26 kept **139 KB per buffered request and 79 KB per stream**. Once its response cache was full,
+which with mostly new prompts took about a minute, **every insert cost 524 KB and 4 ms**, under `_chat_lock`.
+
+2.10.0 fixes both. The residual is 5.6 KB per buffered request and 3.5 KB per stream, steady with the cache full.
+[ADR 013](docs/decisions/013-request-memory.md) (Proposed) records the measurements and the arena that will take
+that residual. **1727 assertions** in 165 groups. All gates are clean: fmt, lint, vet, deny, coverage (392/714,
+54%), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### How it was measured
+
+A real gateway with one Ollama route at a local fake backend, sent chat requests with unique prompts, so the
+response cache never answers (a repeated prompt never exercises the request path). Growth is `VmRSS` from
+`/proc/<pid>/status` after 200 warm-up requests. A scratch build logged `alloc_used()` at each phase of a request,
+sent one at a time, for the breakdown in ADR 013.
+
+| | 2.9.26 | 2.10.0 |
+|---|---|---|
+| buffered chat, per request | 139 KB | 5.6 KB |
+| streamed chat, per request | 79 KB | 3.5–4.2 KB |
+| an insert into a full 10000-entry cache | 524 KB, 4 ms | 64 B, about 2 µs |
+| 10500 requests (cache fills at 10000) | (20000 requests reached **5.3 GB**, at a sixth of the throughput) | 57 MB, steady, 12 s |
+
+### Fixed — a full response cache cost 524 KB and 4 ms per insert
+
+Once the cache held `max_entries` (10000 by default), every insert ran `cache_evict_expired` and then
+`_cache_evict_lru`. Each built `map_keys()` of the whole map, a fresh vector grown by doubling on the arena that
+never frees, and scanned every entry. The cost grew with the size: 3.9 KB per insert at 100 entries, 33 KB at
+1000, 524 KB at 10000. The scans ran under `_chat_lock`, so each one stalled every worker's chat for 4 ms.
+
+`cache.cyr` now threads two lists through each entry, by last access and by creation:
+- **A hit** moves its entry to the front of the access list.
+- **LRU eviction** pops the access list's tail.
+- **The expiry sweep** pops the creation list's tail while it is expired. The TTL is the same for every entry of a
+  cache, so the expired entries are always the oldest created.
+
+No scan and no allocation beyond the new 64-byte entry; every caller already holds `_chat_lock`. The semantics are
+unchanged: TTL from insertion, expired entries reclaimed before a live one is evicted, and both counters credited
+for an expiry. One edge changed: inserting a key already in the cache replaces its entry and evicts nothing (it
+evicted one entry at capacity before).
+
+### Fixed — the local client and local streams allocated per request
+
+- **The local client** (`http_req_local`, every local provider call) took a 128 KiB + 1 response buffer and a
+  2 KiB header buffer per call.
+- **A local stream** took 64 KiB + 4 KiB for its line and read buffers and 4 KiB for the backend's response head,
+  plus 2 KiB for its request head.
+
+2.9.3's per-thread arena covered only the remote (sandhi) path. Both now use per-thread scratch blocks, allocated
+once per thread (`http_client.cyr`: `_local_http_scratch`, slot 7; `stream_scratch`, slot 8). **The contract:** a
+local response lives until the same thread's next local request. Every caller was checked against it:
+- the provider forwards extract the text and token counts before anything else, and copy a provider's error body;
+- embeddings, model pull and delete, and Synapse write the body to the client at once;
+- the semantic embedding parses into its own vector;
+- the model listing copies each id;
+- the health probe reads only the status, on its own thread.
+
+A stream that cannot get its block answers 503 before it starts.
+
+**Checked live:** 8 client threads sent 400 requests, buffered and streamed, to a backend that echoes each
+prompt's number. Every response carried its own number.
+
+### Added — ADR 013, what a request's memory belongs to
+
+[ADR 013](docs/decisions/013-request-memory.md) (Proposed) breaks the remaining 6.2 KB of a buffered request down
+by phase. The response head alone is 792 bytes, and the assembly, including the cache insert and the event JSON,
+1,872. It separates request memory, dead once the response is written, from process memory that churns: cache
+values evicted later, event strings overwritten in the ring. Both leak today, because nothing frees.
+
+**The decision, for 2.10.x:**
+1. **A per-thread request arena**, reset when a worker starts a job and threaded explicitly through the chat path
+   with the stdlib's `_a` variants. A missed conversion leaks; it cannot corrupt.
+2. **Copies at the boundary** into process memory: the cache, the semantic index, events, audit, async batch, OTLP.
+   Poisoned on reset in the tests, so a pointer that crossed reads poison.
+3. **Free lists** for the process memory that churns.
+
+**Not chosen:** a thread-local default allocator in cyrius. It would catch the stdlib's allocations without
+call-site changes, but anything built lazily for the process during a request would land in the arena and be
+reset under its readers.
+
+### Benchmarks
+
+The same bench file, built on 2.9.26's tree and on 2.10.0's, run alternately for 7 rounds at load 2.6; medians.
+Every row is within ±4% except these:
+
+| row | 2.9.26 | 2.10.0 | |
+|---|---|---|---|
+| `cache_insert_full` (**new**: a full 10000-entry cache taking new keys) | 4.80 ms | 1.93 µs | about 2,500× faster |
+| `cache_insert` (one key, inserted again and again) | 97 ns | 203 ns | 2.1× slower |
+| `cost_record_live_catalog`, `metadata_lookup_live_catalog` | 581 / 486 ns | 537 / 443 ns | −8%, −9% on code this release did not touch |
+| `auth_verify_wrong_early` | 88 ns | 81 ns | the third-row placement effect of 2.9.26 gone with the new layout |
+
+**The recorded run** (load 2.17, the maintainer's call not to wait) agrees. Against 2.9.26's recorded rows,
+`cache_insert` is +105% and `cache_insert_full` appears at 1.89 µs. Four rows on code this release did not touch read
+5–20% faster: `cost_record_known_model` −20% (−4% in the A/B), the two live-catalog rows −15% and −10%, and
+`cache_get_miss` −5%. That is run-to-run variation, and the A/B is the comparison to trust.
+
+`cache_insert` times the replace path: the same key every time, into a cache that never fills. It now looks the
+key up once more before inserting, unlinks and relinks two lists, and allocates a 64-byte entry instead of 24.
+About 100 ns more per completion, in exchange for the 4 ms cliff. `cache_insert_full` is new because the old row
+never filled its cache, so no bench could see the cliff, or its fix.
+
+### Tests and mutations
+
+- **New `cache_o1_eviction`:**
+  - the exact LRU victim after reads reorder it;
+  - a replaced key evicts nothing, and is listed once, so a later eviction spares it;
+  - an expired entry dropped from the middle leaves both lists consistent for the sweep and LRU eviction after it;
+  - an evicted entry leaves the semantic index;
+  - a full 1000-entry cache allocates under 256 bytes per insert (it took 33 KB).
+- **The existing cache groups** (TTL, reads not extending a lifetime, the sweep, capacity preferring expired
+  entries, the case plain LRU gets wrong) run unchanged.
+- **Local client:** a request allocates under 1 KiB (it took 130 KB), and so does starting a local stream (its head
+  took 2 KiB). The response lands in the per-thread block; a second response is correct in the reused buffer;
+  another thread gets its own block; the stream block's regions do not overlap.
+
+A copy of the tree was changed 15 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| a hit not moving to the front; LRU evicting the most recent; the sweep from the newest; the sweep not stopping at a live entry | 3, 6, 6, 8 fail |
+| a replaced entry left listed; a replace evicting at capacity; a removal left on the creation list; the unlink not updating the tail | 2, 1 fail; hang; hang |
+| the old `map_keys` scans put back; the semantic index not cleaned on eviction | 1 fail each |
+| a response or header buffer per request again; either scratch block not kept per thread; a stream's head per stream again | 1 to 3 fail each |
+
+**The first-round survivors:** a replaced entry left on the lists, the semantic index left uncleaned, and the stream
+head's allocation. No test evicted after a replace, checked the index, or measured `http_post_stream`. All three
+were added.
+
+### Notes
+
+- The test file is 6,433 lines (was 6,298); the bench file is 533 (was 501), with one new row.
+- **The fake backend first had no trailing newline.** It sent its one stream line without one, which real Ollama's
+  NDJSON always has, and hoosh's local stream loop does not process an unterminated last line at end of stream.
+  Same on 2.9.26; harmless with Ollama, and noted here as a robustness gap.
+- **New `scripts/memory-growth.py`:** the measurement, self-contained, for the arena work to repeat. It runs a
+  fake Ollama backend, sends unique prompts buffered and then streamed, and reports bytes per request from
+  `VmRSS`. On 2.10.0 it reads 5.6 KB buffered and 3.5–4.2 KB streamed; RSS grows in 8 MB chunks, so the streamed
+  figure moves by a chunk between runs.
+
 ## [2.9.26] — 2026-11-05
 
 **2.9.25 could crash on its first burst of requests; this fixes it.** It also brings bote 3.8.12, makes
