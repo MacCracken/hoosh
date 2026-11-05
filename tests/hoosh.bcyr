@@ -1,8 +1,14 @@
-# hoosh.bcyr — hoosh gateway benchmarks (Wave 1: pure logic)
-# Benchmarks: routing, token budget, cache, cost, queue
+# hoosh.bcyr — hoosh gateway benchmarks, on the real src/ code.
 #
 # Run: cyrius bench tests/hoosh.bcyr
 #   or: cyrius build tests/hoosh.bcyr /tmp/hoosh_bench && /tmp/hoosh_bench
+#
+# 2.9.24: every row times the gateway's own functions. Through 2.9.23 this file included no src/ module and 62 of
+# its 65 functions were copies of src/ (the router, the cache, the pools, the DLP scanner, the rate limiter, cost
+# accounting, the audit step, the event ring, the work queue, ...), so a change to src/ could not move a row. It
+# now includes src/lib the way tests/hoosh.tcyr does, and each row calls the real function. Two rows were dropped:
+# queue_enqueue_dequeue and queue_5tier_sort timed a five-tier priority queue the gateway does not have (requests
+# go through wq.cyr). CHANGELOG 2.9.24 has each row's old-against-new numbers.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -14,6 +20,8 @@ include "lib/hashmap.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
 include "lib/chrono.cyr"
+include "lib/freelist.cyr"
+include "lib/bayan.cyr"
 include "lib/ct.cyr"
 include "lib/sigil.cyr"
 # NOTE: do NOT explicitly `include "lib/syscalls.cyr"` here — see the same note
@@ -21,814 +29,50 @@ include "lib/sigil.cyr"
 # (which takes `&sys_getrandom` since 6.2.28) ahead of this file's explicit
 # includes; an explicit syscalls here would land after it → single-pass
 # "undefined variable 'sys_getrandom'". Let syscalls auto-inject before tls.
+include "lib/sakshi.cyr"
+
+# src/lib, in tests/hoosh.tcyr's order (which follows src/main.cyr's), minus the two leaf modules nothing here
+# calls (cli.cyr, models.cyr).
+include "lib/ai-hwaccel.cyr"
 include "src/vendor/bote-core.cyr"
-
-# ================================================================
-# Inline all types from the test file (same definitions)
-# These will be factored into src/ modules during the actual port
-# ================================================================
-
-# Mirror of src/lib/batch.cyr _batch_split for the batch-parse bench.
-# Mirror of src/lib/metrics.cyr latency bucket-find (per-forward cost).
-fn _bench_lat_bound(i) {
-    if (i == 0) { return 5; }
-    if (i == 1) { return 10; }
-    if (i == 2) { return 25; }
-    if (i == 3) { return 50; }
-    if (i == 4) { return 100; }
-    if (i == 5) { return 250; }
-    if (i == 6) { return 500; }
-    if (i == 7) { return 1000; }
-    if (i == 8) { return 2500; }
-    if (i == 9) { return 5000; }
-    return 10000;
-}
-fn _bench_lat_bucket(ms) {
-    var b = 0;
-    while (b < 11 && ms > _bench_lat_bound(b)) { b = b + 1; }
-    return b;
-}
-
-# Mirror of src/lib/pool.cyr work-queue ring (per-request dispatch cost), minus
-# the mutex (measures the push/pop ring arithmetic).
-var _BWQ_MAX = 1024;
-var _bwq_ring = 0;
-var _bwq_head = 0;
-var _bwq_count = 0;
-fn _bench_wq_push(job) {
-    if (_bwq_count >= _BWQ_MAX) { return 0; }
-    store64(_bwq_ring + ((_bwq_head + _bwq_count) % _BWQ_MAX) * 8, job);
-    _bwq_count = _bwq_count + 1;
-    return 1;
-}
-fn _bench_wq_pop() {
-    if (_bwq_count == 0) { return 0; }
-    var j = load64(_bwq_ring + (_bwq_head % _BWQ_MAX) * 8);
-    _bwq_head = (_bwq_head + 1) % _BWQ_MAX;
-    _bwq_count = _bwq_count - 1;
-    return j;
-}
-
-fn _bench_batch_split(arr_ptr, arr_len) {
-    var items = vec_new();
-    var i = 0;
-    while (i < arr_len && load8(arr_ptr + i) != 91) { i = i + 1; }
-    if (i >= arr_len) { return items; }
-    i = i + 1;
-    var depth = 0;
-    var start = 0 - 1;
-    while (i < arr_len) {
-        var ch = load8(arr_ptr + i);
-        if (ch == 34) {
-            i = i + 1;
-            while (i < arr_len) {
-                var c2 = load8(arr_ptr + i);
-                if (c2 == 92) { i = i + 2; } else {
-                    if (c2 == 34) { break; }
-                    i = i + 1;
-                }
-            }
-            i = i + 1;
-        } else {
-            if (ch == 123 || ch == 91) {
-                if (depth == 0 && start < 0) { start = i; }
-                depth = depth + 1;
-                i = i + 1;
-            } else {
-                if (ch == 125 || ch == 93) {
-                    depth = depth - 1;
-                    i = i + 1;
-                    if (depth < 0) { break; }
-                    if (depth == 0 && start >= 0) {
-                        var slc = alloc(16);
-                        store64(slc, arr_ptr + start);
-                        store64(slc + 8, i - start);
-                        vec_push(items, slc);
-                        start = 0 - 1;
-                    }
-                } else {
-                    i = i + 1;
-                }
-            }
-        }
-    }
-    return items;
-}
-
-# Mirror of src/lib/mcp.cyr's bote_echo handler for the MCP benches.
-fn _bench_mcp_echo(args, claims) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
-    if (args != 0) { _json_emit_escaped(sb, args); }
-    str_builder_add_cstr(sb, "\"}],\"isError\":false}");
-    return str_data(str_builder_build(sb));
-}
-
-# Provider types
-enum Provider {
-    PROV_OLLAMA     = 0;
-    PROV_LLAMACPP   = 1;
-    PROV_SYNAPSE    = 2;
-    PROV_LMSTUDIO   = 3;
-    PROV_LOCALAI    = 4;
-    PROV_OPENAI     = 5;
-    PROV_ANTHROPIC  = 6;
-    PROV_DEEPSEEK   = 7;
-    PROV_MISTRAL    = 8;
-    PROV_GOOGLE     = 9;
-    PROV_GROQ       = 10;
-    PROV_GROK       = 11;
-    PROV_OPENROUTER = 12;
-    PROV_WHISPER    = 13;
-    PROV_COUNT      = 14;
-}
-
-fn provider_is_local(prov) {
-    if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
-    if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
-    return 0;
-}
-
-fn provider_name(prov) {
-    if (prov == PROV_OLLAMA) { return "ollama"; }
-    if (prov == PROV_LLAMACPP) { return "llamacpp"; }
-    if (prov == PROV_OPENAI) { return "openai"; }
-    if (prov == PROV_ANTHROPIC) { return "anthropic"; }
-    if (prov == PROV_DEEPSEEK) { return "deepseek"; }
-    return "unknown";
-}
-
-# Route struct
-enum RouteField {
-    ROUTE_SIZE       = 64;
-    ROUTE_PROVIDER   = 0;
-    ROUTE_PRIORITY   = 8;
-    ROUTE_PATTERNS   = 16;
-    ROUTE_PATTERNS_N = 24;
-    ROUTE_ENABLED    = 32;
-    ROUTE_BASE_URL   = 40;
-}
-
-fn route_new(prov, priority, base_url) {
-    var r = alloc(ROUTE_SIZE);
-    store64(r + ROUTE_PROVIDER, prov);
-    store64(r + ROUTE_PRIORITY, priority);
-    store64(r + ROUTE_PATTERNS, 0);
-    store64(r + ROUTE_PATTERNS_N, 0);
-    store64(r + ROUTE_ENABLED, 1);
-    store64(r + ROUTE_BASE_URL, base_url);
-    return r;
-}
-
-fn route_provider(r) { return load64(r + ROUTE_PROVIDER); }
-fn route_priority(r) { return load64(r + ROUTE_PRIORITY); }
-fn route_enabled(r) { return load64(r + ROUTE_ENABLED); }
-fn route_base_url(r) { return load64(r + ROUTE_BASE_URL); }
-
-fn route_set_patterns(r, patterns, count) {
-    store64(r + ROUTE_PATTERNS, patterns);
-    store64(r + ROUTE_PATTERNS_N, count);
-    return 0;
-}
-
-fn route_matches_model(r, model) {
-    var count = load64(r + ROUTE_PATTERNS_N);
-    if (count == 0) { return 1; }
-    var arr = load64(r + ROUTE_PATTERNS);
-    var i = 0;
-    while (i < count) {
-        var pattern = load64(arr + i * 8);
-        var plen = strlen(pattern);
-        if (plen > 0 && load8(pattern + plen - 1) == 42) {
-            if (memeq(model, pattern, plen - 1) == 1) { return 1; }
-        } else {
-            if (streq(model, pattern) == 1) { return 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Per-provider token estimation (mirrors src/lib/compact.cyr).
-var CHARS_PER_TOKEN_X10 = 40;
-
-fn chars_per_token_x10(prov) {
-    if (prov == PROV_OPENAI) { return 38; }
-    if (prov == PROV_DEEPSEEK) { return 38; }
-    if (prov == PROV_MISTRAL) { return 38; }
-    if (prov == PROV_GROQ) { return 38; }
-    if (prov == PROV_GROK) { return 38; }
-    if (prov == PROV_OPENROUTER) { return 38; }
-    if (prov == PROV_ANTHROPIC) { return 35; }
-    if (prov == PROV_OLLAMA) { return 37; }
-    if (prov == PROV_LLAMACPP) { return 37; }
-    if (prov == PROV_LMSTUDIO) { return 37; }
-    if (prov == PROV_LOCALAI) { return 37; }
-    return 40;
-}
-
-fn estimate_tokens(messages, msg_len, cpt_x10) {
-    var ratio = cpt_x10;
-    if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
-    return msg_len * 10 / ratio;
-}
-
-# DLP scanner (mirror of src/lib/dlp.cyr) — for the scan benchmark.
-enum DlpClass {
-    CLASS_PUBLIC       = 0;
-    CLASS_INTERNAL     = 1;
-    CLASS_CONFIDENTIAL = 2;
-    CLASS_RESTRICTED   = 3;
-}
-
-var _dlp_enabled = 1;
-var _dlp_default_level = 0;
-
-fn _dlp_is_digit(c) {
-    if (c >= 48 && c <= 57) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_upper(c) {
-    if (c >= 65 && c <= 90) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_lower(c) {
-    if (c >= 97 && c <= 122) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_alpha(c) {
-    if (_dlp_is_upper(c) == 1 || _dlp_is_lower(c) == 1) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_alnum(c) {
-    if (_dlp_is_alpha(c) == 1 || _dlp_is_digit(c) == 1) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_upper_alnum(c) {
-    if (_dlp_is_upper(c) == 1 || _dlp_is_digit(c) == 1) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_word(c) {
-    if (_dlp_is_alnum(c) == 1 || c == 95) { return 1; }
-    return 0;
-}
-
-fn _dlp_bound_before(t, i) {
-    if (i == 0) { return 1; }
-    if (_dlp_is_word(load8(t + i - 1)) == 0) { return 1; }
-    return 0;
-}
-
-fn _dlp_bound_after(t, e, len) {
-    if (e >= len) { return 1; }
-    if (_dlp_is_word(load8(t + e)) == 0) { return 1; }
-    return 0;
-}
-
-fn _dlp_digits_n(t, i, len, n) {
-    if (i + n > len) { return 0; }
-    var k = 0;
-    while (k < n) {
-        if (_dlp_is_digit(load8(t + i + k)) == 0) { return 0; }
-        k = k + 1;
-    }
-    return 1;
-}
-
-fn _dlp_match_ssn_at(t, i, len) {
-    if (i + 11 > len) { return 0; }
-    if (_dlp_digits_n(t, i, len, 3) == 0) { return 0; }
-    if (load8(t + i + 3) != 45) { return 0; }
-    if (_dlp_digits_n(t, i + 4, len, 2) == 0) { return 0; }
-    if (load8(t + i + 6) != 45) { return 0; }
-    if (_dlp_digits_n(t, i + 7, len, 4) == 0) { return 0; }
-    if (_dlp_bound_after(t, i + 11, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_is_phone_sep(c) {
-    if (c == 45 || c == 46 || c == 32) { return 1; }
-    return 0;
-}
-
-fn _dlp_match_phone_at(t, i, len) {
-    if (i + 12 > len) { return 0; }
-    if (_dlp_digits_n(t, i, len, 3) == 0) { return 0; }
-    if (_dlp_is_phone_sep(load8(t + i + 3)) == 0) { return 0; }
-    if (_dlp_digits_n(t, i + 4, len, 3) == 0) { return 0; }
-    if (_dlp_is_phone_sep(load8(t + i + 7)) == 0) { return 0; }
-    if (_dlp_digits_n(t, i + 8, len, 4) == 0) { return 0; }
-    if (_dlp_bound_after(t, i + 12, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_is_cc_sep(c) {
-    if (c == 45 || c == 32) { return 1; }
-    return 0;
-}
-
-fn _dlp_match_cc_at(t, i, len) {
-    if (_dlp_digits_n(t, i, len, 4) == 0) { return 0; }
-    var p = i + 4;
-    var g = 1;
-    while (g < 4) {
-        if (p < len && _dlp_is_cc_sep(load8(t + p)) == 1) { p = p + 1; }
-        if (_dlp_digits_n(t, p, len, 4) == 0) { return 0; }
-        p = p + 4;
-        g = g + 1;
-    }
-    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_ipv4_group(t, p, len) {
-    if (p >= len) { return 0 - 1; }
-    if (_dlp_is_digit(load8(t + p)) == 0) { return 0 - 1; }
-    var n = 1;
-    p = p + 1;
-    while (n < 3 && p < len && _dlp_is_digit(load8(t + p)) == 1) {
-        p = p + 1;
-        n = n + 1;
-    }
-    return p;
-}
-
-fn _dlp_match_ipv4_at(t, i, len) {
-    var p = _dlp_ipv4_group(t, i, len);
-    if (p < 0) { return 0; }
-    var g = 1;
-    while (g < 4) {
-        if (p >= len) { return 0; }
-        if (load8(t + p) != 46) { return 0; }
-        p = p + 1;
-        p = _dlp_ipv4_group(t, p, len);
-        if (p < 0) { return 0; }
-        g = g + 1;
-    }
-    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_apikey_prefix(t, i, len) {
-    if (i + 3 <= len) {
-        var c0 = load8(t + i);
-        if (c0 == 115 || c0 == 112) {
-            if (load8(t + i + 1) == 107 && load8(t + i + 2) == 45) {
-                return i + 3;
-            }
-        }
-    }
-    if (i + 6 <= len) {
-        if (load8(t + i) == 97 && load8(t + i + 1) == 112 && load8(t + i + 2) == 105) {
-            var p = i + 3;
-            if (p < len && (load8(t + p) == 95 || load8(t + p) == 45)) { p = p + 1; }
-            if (p + 3 <= len) {
-                if (load8(t + p) == 107 && load8(t + p + 1) == 101 && load8(t + p + 2) == 121) {
-                    p = p + 3;
-                    var sc = 0;
-                    var more = 1;
-                    while (more == 1 && sc < 5 && p < len) {
-                        var sep = load8(t + p);
-                        if (sep == 61 || sep == 58 || sep == 32) {
-                            p = p + 1;
-                            sc = sc + 1;
-                        } else {
-                            more = 0;
-                        }
-                    }
-                    if (sc >= 1) { return p; }
-                }
-            }
-        }
-    }
-    return 0 - 1;
-}
-
-fn _dlp_match_apikey_at(t, i, len) {
-    var p = _dlp_apikey_prefix(t, i, len);
-    if (p < 0) { return 0; }
-    var n = 0;
-    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
-        p = p + 1;
-        n = n + 1;
-    }
-    if (n < 20) { return 0; }
-    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_match_aws_at(t, i, len) {
-    if (i + 20 > len) { return 0; }
-    if (load8(t + i) != 65 || load8(t + i + 1) != 75) { return 0; }
-    if (load8(t + i + 2) != 73 || load8(t + i + 3) != 65) { return 0; }
-    var k = 0;
-    while (k < 16) {
-        if (_dlp_is_upper_alnum(load8(t + i + 4 + k)) == 0) { return 0; }
-        k = k + 1;
-    }
-    if (_dlp_bound_after(t, i + 20, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_is_gh_third(c) {
-    if (c == 112 || c == 111 || c == 117 || c == 115 || c == 114) { return 1; }
-    return 0;
-}
-
-fn _dlp_match_github_at(t, i, len) {
-    if (i + 4 > len) { return 0; }
-    if (load8(t + i) != 103 || load8(t + i + 1) != 104) { return 0; }
-    if (_dlp_is_gh_third(load8(t + i + 2)) == 0) { return 0; }
-    if (load8(t + i + 3) != 95) { return 0; }
-    var p = i + 4;
-    var n = 0;
-    while (p < len && _dlp_is_alnum(load8(t + p)) == 1) {
-        p = p + 1;
-        n = n + 1;
-    }
-    if (n < 36) { return 0; }
-    if (_dlp_bound_after(t, p, len) == 0) { return 0; }
-    return 1;
-}
-
-fn _dlp_is_email_local(c) {
-    if (_dlp_is_alnum(c) == 1) { return 1; }
-    if (c == 46 || c == 95 || c == 37 || c == 43 || c == 45) { return 1; }
-    return 0;
-}
-
-fn _dlp_is_email_domain(c) {
-    if (_dlp_is_alnum(c) == 1) { return 1; }
-    if (c == 46 || c == 45) { return 1; }
-    return 0;
-}
-
-fn _dlp_has_email(t, len) {
-    var i = 0;
-    while (i < len) {
-        if (load8(t + i) == 64) {
-            if (i >= 1 && _dlp_is_email_local(load8(t + i - 1)) == 1) {
-                var p = i + 1;
-                var seen = 0;
-                while (p < len && _dlp_is_email_domain(load8(t + p)) == 1) {
-                    if (load8(t + p) == 46) {
-                        if (seen == 1) {
-                            var q = p + 1;
-                            var ac = 0;
-                            while (q < len && _dlp_is_alpha(load8(t + q)) == 1) {
-                                ac = ac + 1;
-                                q = q + 1;
-                            }
-                            if (ac >= 2) { return 1; }
-                        }
-                    } else {
-                        seen = 1;
-                    }
-                    p = p + 1;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-fn dlp_scan_level(t, len) {
-    if (_dlp_enabled == 0) { return _dlp_default_level; }
-    if (len == 0) { return _dlp_default_level; }
-    var level = _dlp_default_level;
-    var i = 0;
-    while (i < len) {
-        if (_dlp_bound_before(t, i) == 1) {
-            if (_dlp_match_ssn_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
-            if (_dlp_match_cc_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
-            if (_dlp_match_apikey_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
-            if (_dlp_match_aws_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
-            if (_dlp_match_github_at(t, i, len) == 1) { return CLASS_RESTRICTED; }
-            if (_dlp_match_phone_at(t, i, len) == 1) {
-                if (level < CLASS_CONFIDENTIAL) { level = CLASS_CONFIDENTIAL; }
-            }
-            if (_dlp_match_ipv4_at(t, i, len) == 1) {
-                if (level < CLASS_INTERNAL) { level = CLASS_INTERNAL; }
-            }
-        }
-        i = i + 1;
-    }
-    if (level < CLASS_INTERNAL) {
-        if (_dlp_has_email(t, len) == 1) { level = CLASS_INTERNAL; }
-    }
-    return level;
-}
-
-# Router
-enum RouterField {
-    ROUTER_SIZE      = 40;
-    ROUTER_ROUTES    = 0;
-    ROUTER_COUNT     = 8;
-    ROUTER_STRATEGY  = 16;
-    ROUTER_RR_IDX    = 24;
-    ROUTER_LATENCIES = 32;
-}
-
-enum Strategy {
-    STRAT_PRIORITY       = 0;
-    STRAT_ROUND_ROBIN    = 1;
-    STRAT_LOWEST_LATENCY = 2;
-    STRAT_DIRECT         = 3;
-}
-
-fn router_new(routes, count, strategy) {
-    var rt = alloc(ROUTER_SIZE);
-    store64(rt + ROUTER_ROUTES, routes);
-    store64(rt + ROUTER_COUNT, count);
-    store64(rt + ROUTER_STRATEGY, strategy);
-    store64(rt + ROUTER_RR_IDX, 0);
-    store64(rt + ROUTER_LATENCIES, map_new());
-    var i = 1;
-    while (i < count) {
-        var key = load64(routes + i * 8);
-        var kp = route_priority(key);
-        var j = i - 1;
-        while (j >= 0) {
-            if (route_priority(load64(routes + j * 8)) <= kp) { break; }
-            store64(routes + (j + 1) * 8, load64(routes + j * 8));
-            j = j - 1;
-        }
-        store64(routes + (j + 1) * 8, key);
-        i = i + 1;
-    }
-    return rt;
-}
-
-fn router_select(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
-    var strategy = load64(rt + ROUTER_STRATEGY);
-    var cand = alloc(count * 8);
-    var cn = 0;
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1 && route_matches_model(r, model) == 1) {
-            store64(cand + cn * 8, r);
-            cn = cn + 1;
-        }
-        i = i + 1;
-    }
-    if (cn == 0) { return 0; }
-    if (strategy == STRAT_PRIORITY || strategy == STRAT_DIRECT) { return load64(cand); }
-    if (strategy == STRAT_ROUND_ROBIN) {
-        var idx = load64(rt + ROUTER_RR_IDX);
-        store64(rt + ROUTER_RR_IDX, idx + 1);
-        return load64(cand + (idx % cn) * 8);
-    }
-    return load64(cand);
-}
-
-# Token pool
-enum PoolField {
-    POOL_SIZE = 32; POOL_NAME = 0; POOL_CAPACITY = 8; POOL_USED = 16; POOL_RESERVED = 24;
-}
-
-fn pool_new(name, capacity) {
-    var p = alloc(POOL_SIZE);
-    store64(p + POOL_NAME, name);
-    store64(p + POOL_CAPACITY, capacity);
-    store64(p + POOL_USED, 0);
-    store64(p + POOL_RESERVED, 0);
-    return p;
-}
-
-fn pool_available(p) {
-    var taken = load64(p + POOL_USED) + load64(p + POOL_RESERVED);
-    var cap = load64(p + POOL_CAPACITY);
-    if (taken > cap) { return 0; }
-    return cap - taken;
-}
-
-fn pool_reserve(p, tokens) {
-    if (pool_available(p) < tokens) { return 0; }
-    store64(p + POOL_RESERVED, load64(p + POOL_RESERVED) + tokens);
-    return 1;
-}
-
-fn pool_commit(p, reserved, actual) {
-    var resv = load64(p + POOL_RESERVED);
-    if (resv >= reserved) { store64(p + POOL_RESERVED, resv - reserved); }
-    else { store64(p + POOL_RESERVED, 0); }
-    store64(p + POOL_USED, load64(p + POOL_USED) + actual);
-    return 0;
-}
-
-# 2.5.11: the bench mirrors now read a COARSE clock, matching production. The
-# real clock_now_ms is a 1.351 us syscall (no vDSO in cyrius) and was ~98% of a
-# cache hit and ~96% of a rate-limit check. A ticker refreshes a global in the
-# gateway; here a single reading stands in, which is what makes these numbers
-# comparable to the new production path rather than to the old syscall cost.
-var _b_coarse_ms = 0;
-fn _bench_now_ms() { return _b_coarse_ms; }
-
-# ── 2.5.10 mirrors: rate limit / cost / audit / events ──
-
-# Mirror of src/lib/ratelimit.cyr — token bucket, refilled from the clock.
-# Layout: rpm(0) tokens(8) last_ms(16).
-fn _bench_rl_new(rpm) {
-    var r = alloc(24);
-    store64(r, rpm);
-    store64(r + 8, rpm * 1000);
-    store64(r + 16, _bench_now_ms());
-    return r;
-}
-
-fn _bench_rl_check(r) {
-    var rpm = load64(r);
-    if (rpm <= 0) { return 1; }
-    var now = _bench_now_ms();
-    var elapsed = now - load64(r + 16);
-    var cur = load64(r + 8) + elapsed * rpm / 60;
-    var maxt = rpm * 1000;
-    if (cur > maxt) { cur = maxt; }
-    store64(r + 16, now);
-    if (cur < 1000) {
-        store64(r + 8, cur);
-        return 0;
-    }
-    store64(r + 8, cur - 1000);
-    return 1;
-}
-
-# Mirror of src/lib/pricing.cyr cost accumulation — local-first, then the model
-# table, then a linear scan over the per-(provider,base_url) record vec.
-fn _bench_price(model, prov) {
-    if (prov == 0 || prov == 1 || prov == 2 || prov == 3 || prov == 4) { return 0; }
-    if (streq(model, "gpt-4o") == 1) { return 2500 * 0x100000000 + 10000; }
-    if (streq(model, "claude-opus-4") == 1) { return 15000 * 0x100000000 + 75000; }
-    return 2500 * 0x100000000 + 10000;
-}
-
-fn _bench_cost_record(recs, prov, base_url, in_tok, out_tok, model) {
-    var n = vec_len(recs);
-    var rec = 0;
-    var i = 0;
-    while (i < n) {
-        var e = vec_get(recs, i);
-        if (load64(e) == prov) {
-            if (streq(load64(e + 8), base_url) == 1) { rec = e; i = n; }
-        }
-        i = i + 1;
-    }
-    if (rec == 0) {
-        rec = alloc(48);
-        store64(rec, prov);
-        store64(rec + 8, base_url);
-        store64(rec + 16, 0);
-        store64(rec + 24, 0);
-        store64(rec + 32, 0);
-        store64(rec + 40, 0);
-        vec_push(recs, rec);
-    }
-    var packed = _bench_price(model, prov);
-    var cost = in_tok * (packed / 0x100000000) / 1000 + out_tok * (packed % 0x100000000) / 1000;
-    store64(rec + 16, load64(rec + 16) + in_tok);
-    store64(rec + 24, load64(rec + 24) + out_tok);
-    store64(rec + 32, load64(rec + 32) + cost);
-    store64(rec + 40, load64(rec + 40) + 1);
-    return cost;
-}
-
-# Mirror of src/lib/audit.cyr's per-entry work: SHA-256 the entry fields, then
-# HMAC-SHA256 "<hash>:<prev>" with the chain key.
-fn _bench_audit_sign(key, key_len, event, message) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, event);
-    str_builder_add_cstr(sb, ":");
-    str_builder_add_cstr(sb, message);
-    var s = str_builder_build(sb);
-    var ehash = sha256_hex(str_data(s), str_len(s));
-    var sig_sb = str_builder_new();
-    str_builder_add_cstr(sig_sb, ehash);
-    str_builder_add_cstr(sig_sb, ":0000");
-    var sig_s = str_builder_build(sig_sb);
-    var digest = alloc(32);
-    hmac_sha256(key, key_len, str_data(sig_s), str_len(sig_s), digest);
-    return hex_encode(digest, 32);
-}
-
-# Mirror of src/lib/events.cyr's bounded recent-events ring.
-var _BEV_MAX = 128;
-var _bev_ring = 0;
-var _bev_head = 0;
-var _bev_count = 0;
-fn _bench_ev_init() {
-    _bev_ring = alloc(_BEV_MAX * 8);
-    _bev_head = 0;
-    _bev_count = 0;
-    return 0;
-}
-fn _bench_ev_publish(payload) {
-    store64(_bev_ring + (_bev_head % _BEV_MAX) * 8, payload);
-    _bev_head = _bev_head + 1;
-    if (_bev_count < _BEV_MAX) { _bev_count = _bev_count + 1; }
-    return 0;
-}
-
-# Cache — mirrors src/lib/cache.cyr including the 2.5.4 TTL check. The entry is
-# a struct (value / last_access_ms / created_ms), and cache_get compares the
-# entry's age against the TTL before serving. Modelling that matters: the old
-# bench mirror was a bare map lookup, so cache_get_hit measured something the
-# gateway does not actually run.
-# Layout: entries(0) max(8) hits(16) misses(24) evictions(32) enabled(40) ttl_ms(48)
-fn cache_new(max, enabled, ttl_secs) {
-    var c = alloc(56);
-    store64(c, map_new());
-    store64(c + 8, max);
-    store64(c + 16, 0);
-    store64(c + 24, 0);
-    store64(c + 32, 0);
-    store64(c + 40, enabled);
-    var ttl_ms = 0;
-    if (ttl_secs > 0) { ttl_ms = ttl_secs * 1000; }
-    store64(c + 48, ttl_ms);
-    return c;
-}
-
-fn cache_get(c, key) {
-    if (load64(c + 40) == 0) { return 0; }
-    var entry = map_get(load64(c), key);
-    if (entry == 0) { store64(c + 24, load64(c + 24) + 1); return 0; }
-    var now = _bench_now_ms();
-    var ttl = load64(c + 48);
-    if (ttl > 0) {
-        if (now - load64(entry + 16) >= ttl) {
-            map_delete(load64(c), key);
-            store64(c + 32, load64(c + 32) + 1);
-            store64(c + 24, load64(c + 24) + 1);
-            return 0;
-        }
-    }
-    store64(entry + 8, now);
-    store64(c + 16, load64(c + 16) + 1);
-    return load64(entry);
-}
-
-fn cache_insert(c, key, val) {
-    if (load64(c + 40) == 0) { return 0; }
-    var e = alloc(24);
-    var now = _bench_now_ms();
-    store64(e, val);
-    store64(e + 8, now);
-    store64(e + 16, now);
-    map_set(load64(c), key, e);
-    return 0;
-}
-
-# Queue
-enum QueuePriority {
-    PRI_CRITICAL = 0; PRI_HIGH = 1; PRI_NORMAL = 2; PRI_LOW = 3; PRI_BACKGROUND = 4; PRI_TIERS = 5;
-}
-
-fn queue_new() {
-    var q = alloc(PRI_TIERS * 8);
-    var i = 0;
-    while (i < PRI_TIERS) { store64(q + i * 8, vec_new()); i = i + 1; }
-    return q;
-}
-
-fn queue_enqueue(q, model, pool, rid, pri) {
-    var item = alloc(24);
-    store64(item, model); store64(item + 8, pool); store64(item + 16, rid);
-    vec_push(load64(q + pri * 8), item);
-    return 0;
-}
-
-fn queue_dequeue(q) {
-    var i = 0;
-    while (i < PRI_TIERS) {
-        var tier = load64(q + i * 8);
-        if (vec_len(tier) > 0) { var item = vec_get(tier, 0); vec_remove(tier, 0); return item; }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# ================================================================
-# Benchmark globals for callbacks
-# ================================================================
-
-var _b_router = 0;
-var _b_pool = 0;
-var _b_cache = 0;
-var _b_queue = 0;
-
-# ================================================================
-# BENCHMARKS
-# ================================================================
+include "src/vendor/majra.cyr"
+include "src/lib/types.cyr"
+include "src/lib/logging.cyr"
+include "src/lib/dlp.cyr"
+include "src/lib/ratelimit.cyr"
+include "src/lib/auth.cyr"
+include "src/lib/http_server.cyr"
+include "src/lib/jsonlite.cyr"
+include "src/lib/compact.cyr"
+include "src/lib/provider_err.cyr"
+include "src/lib/catalog.cyr"
+include "src/lib/outcome.cyr"
+include "src/lib/urlparse.cyr"
+include "src/lib/mcp.cyr"
+include "src/lib/compression.cyr"
+include "src/lib/semantic.cyr"
+include "src/lib/trace.cyr"
+include "src/lib/route.cyr"
+include "src/lib/cache.cyr"
+include "src/lib/http_client.cyr"
+include "src/lib/events.cyr"
+include "src/lib/hardware.cyr"
+include "src/lib/router.cyr"
+include "src/lib/health.cyr"
+# main.cyr's global; health.cyr names it.
+var _router = 0;
+include "src/lib/budget.cyr"
+include "src/lib/audit.cyr"
+include "src/lib/storage.cyr"
+include "src/lib/otlp.cyr"
+include "src/lib/provider.cyr"
+include "src/lib/retry.cyr"
+include "src/lib/reqparse.cyr"
+include "src/lib/cfgparse.cyr"
+include "src/lib/wq.cyr"
+include "src/lib/pricing.cyr"
+include "src/lib/metadata.cyr"
+include "src/lib/metrics.cyr"
 
 # 2.9.11: an 8-byte-aligned heap copy of a literal, for the strings a timed loop reads. String literals are packed
 # into .rodata back to back with no alignment, and the stdlib strlen (which streq calls twice) walks byte by byte
@@ -847,6 +91,12 @@ fn _b_s(lit) {
 fn main() {
     alloc_init();
 
+    # The gateway reads time from a coarse ticker (logging.cyr's hoosh_now_ms; 2.5.11): clock_now_ms is a 1.35 us
+    # syscall here, which was ~98% of a cache hit and ~96% of a rate-limit check. One reading stands in for the
+    # ticker, so the rows that read the clock time the production path, not the syscall.
+    _coarse_now_ms = clock_now_ms();
+    _coarse_started = 1;
+
     println("=== hoosh benchmarks ===");
     println("");
 
@@ -862,7 +112,7 @@ fn main() {
         store64(routes + i * 8, r);
         i = i + 1;
     }
-    _b_router = router_new(routes, 20, STRAT_PRIORITY);
+    var b_router = router_new(routes, 20, STRAT_PRIORITY);
 
     # ── Benchmark: route_select_20_providers ──────────────────────
     var b_llama3 = _b_s("llama3");
@@ -870,7 +120,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        router_select(_b_router, b_llama3);
+        router_select(b_router, b_llama3);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -880,7 +130,7 @@ fn main() {
     var rr_routes = alloc(10 * 8);
     i = 0;
     while (i < 10) {
-        var r = route_new(i % PROV_COUNT, 1, "http://localhost");
+        var r = route_new(i % PROV_COUNT, 1, _b_s("http://localhost"));
         store64(rr_routes + i * 8, r);
         i = i + 1;
     }
@@ -898,11 +148,12 @@ fn main() {
     bench_report(b);
 
     # ── Benchmark: pool_reserve_commit_cycle ──────────────────────
+    var b_pname = _b_s("bench");
     b = bench_new("pool_reserve_commit");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        var p = pool_new("bench", 1000000);
+        var p = pool_new(b_pname, 1000000);
         pool_reserve(p, 500);
         pool_commit(p, 500, 420);
         i = i + 1;
@@ -911,22 +162,22 @@ fn main() {
     bench_report(b);
 
     # ── Benchmark: pool_available ─────────────────────────────────
-    _b_pool = pool_new("bench", 1000000);
-    pool_reserve(_b_pool, 50000);
+    var b_pool = pool_new(b_pname, 1000000);
+    pool_reserve(b_pool, 50000);
 
     b = bench_new("pool_available");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        pool_available(_b_pool);
+        pool_available(b_pool);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
 
     # ── Benchmark: cache_get_hit ──────────────────────────────────
-    _b_cache = cache_new(10000, 1, 300);
-    cache_insert(_b_cache, _b_s("prompt-hash-1"), 42);
+    var b_cache = cache_new(10000, 1, 300);
+    cache_insert(b_cache, _b_s("prompt-hash-1"), 42);
     var b_hit = _b_s("prompt-hash-1");
     var b_miss = _b_s("nonexistent-key");
     var b_key = _b_s("key");
@@ -935,7 +186,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        cache_get(_b_cache, b_hit);
+        cache_get(b_cache, b_hit);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -946,7 +197,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        cache_get(_b_cache, b_miss);
+        cache_get(b_cache, b_miss);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -959,40 +210,6 @@ fn main() {
     i = 0;
     while (i < 10000) {
         cache_insert(ci_cache, b_key, i);
-        i = i + 1;
-    }
-    bench_batch_stop(b, 10000);
-    bench_report(b);
-
-    # ── Benchmark: queue_enqueue_dequeue ──────────────────────────
-    b = bench_new("queue_enqueue_dequeue");
-    bench_batch_start(b);
-    i = 0;
-    while (i < 10000) {
-        var q = queue_new();
-        queue_enqueue(q, "m", "p", "r", PRI_NORMAL);
-        queue_dequeue(q);
-        i = i + 1;
-    }
-    bench_batch_stop(b, 10000);
-    bench_report(b);
-
-    # ── Benchmark: queue_priority_sort (5 tiers) ──────────────────
-    b = bench_new("queue_5tier_sort");
-    bench_batch_start(b);
-    i = 0;
-    while (i < 10000) {
-        var q = queue_new();
-        queue_enqueue(q, "m", "p", "n", PRI_NORMAL);
-        queue_enqueue(q, "m", "p", "b", PRI_BACKGROUND);
-        queue_enqueue(q, "m", "p", "c", PRI_CRITICAL);
-        queue_enqueue(q, "m", "p", "l", PRI_LOW);
-        queue_enqueue(q, "m", "p", "h", PRI_HIGH);
-        queue_dequeue(q);
-        queue_dequeue(q);
-        queue_dequeue(q);
-        queue_dequeue(q);
-        queue_dequeue(q);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -1028,10 +245,10 @@ fn main() {
     bench_report(b);
 
     # ── Benchmark: dlp_scan_level on a clean prompt (per-request cost) ─
-    var dlp_txt = "Explain how Rust ownership and borrowing interact with lifetimes, and give a short worked example with a function that returns a reference.";
-    var dlp_len = strlen(dlp_txt);
-    var dlp_buf = alloc(dlp_len + 1);
-    memcpy(dlp_buf, dlp_txt, dlp_len);
+    # dlp.cyr is off by default; [dlp] enabled turns it on, as here.
+    dlp_configure(1, CLASS_PUBLIC);
+    var dlp_buf = _b_s("Explain how Rust ownership and borrowing interact with lifetimes, and give a short worked example with a function that returns a reference.");
+    var dlp_len = strlen(dlp_buf);
     b = bench_new("dlp_scan_clean_prompt");
     bench_batch_start(b);
     i = 0;
@@ -1043,13 +260,9 @@ fn main() {
     bench_report(b);
 
     # ── Benchmark: mcp_tools_list (bote dispatch) ─────────────────
-    # Full JSON-RPC parse → dispatch → tools/list result serialize, the
-    # per-request cost behind GET /v1/tools/list.
-    var mcp_reg = tool_registry_new();
-    var mcp_disp = dispatcher_new(mcp_reg);
-    var mcp_sch = schema_new("object", vec_new(), vec_new());
-    var mcp_td = tool_def_new("bote_echo", "Echo", mcp_sch);
-    dispatcher_register_tool(mcp_disp, mcp_td, &_bench_mcp_echo);
+    # Full JSON-RPC parse → dispatch → tools/list result serialize, the per-request cost behind GET /v1/tools/list,
+    # on the dispatcher mcp_init builds for the gateway (its bote_echo tool).
+    var mcp_disp = mcp_init();
     var b_mlist = _b_s("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
     var b_mcall = _b_s("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}");
 
@@ -1074,15 +287,14 @@ fn main() {
     bench_batch_stop(b, 10000);
     bench_report(b);
 
-    # ── Benchmark: batch_split_16 (POST /v1/batch request parsing) ─
-    var barr = "[{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"second\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"third\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"fourth\"}]}]";
-    barr = _b_s(barr);
+    # ── Benchmark: batch_split_4 (POST /v1/batch request parsing) ─
+    var barr = _b_s("[{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"hello world\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"second\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"third\"}]},{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"fourth\"}]}]");
     var barr_len = strlen(barr);
     b = bench_new("batch_split_4");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        _bench_batch_split(barr, barr_len);
+        _batch_split(barr, barr_len);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -1093,20 +305,22 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_lat_bucket(i % 12000);
+        _lat_bucket(i % 12000);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
 
     # ── Benchmark: work_queue_push_pop (per-request dispatch cost) ──
-    _bwq_ring = alloc(_BWQ_MAX * 8);
+    # wq.cyr's ring under its mutex: the accept loop's push, a worker's pop, and the worker's wq_done.
+    wq_init();
     b = bench_new("work_queue_push_pop");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_wq_push(i);
-        _bench_wq_pop();
+        wq_try_push(i + 1);
+        wq_pop();
+        wq_done();
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
@@ -1116,6 +330,7 @@ fn main() {
     # rust-old benched these (hot_path.rs / providers.rs); the port did not, so
     # the four things every single request pays for — auth compare, rate-limit
     # check, cost accounting, audit append — had no numbers at all.
+    # The auth rows time stdlib ct_eq_bytes_lens, the compare auth_check runs on each configured token.
 
     # Benchmark: auth_verify_token — constant-time compare on the hot path.
     # All three tokens are the SAME LENGTH on purpose. ct_eq_bytes_lens
@@ -1160,19 +375,19 @@ fn main() {
     bench_report(b);
 
     # Benchmark: rate_limit_check — token-bucket refill + take.
-    var _b_rl = _bench_rl_new(600);
+    var b_rl = hoosh_ratelimit_new(600);
     b = bench_new("rate_limit_check");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_rl_check(_b_rl);
+        hoosh_ratelimit_check(b_rl);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
 
     # Benchmark: cost_record — pricing lookup + accumulate, per completion.
-    var _b_costs = vec_new();
+    cost_reset();
     var b_oai = _b_s("https://api.openai.com");
     var b_gpt = _b_s("gpt-4o");
     var b_local = _b_s("http://localhost:11434");
@@ -1181,7 +396,7 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_cost_record(_b_costs, 5, b_oai, 1000, 500, b_gpt);
+        cost_record(PROV_OPENAI, b_oai, 1000, 500, b_gpt);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
@@ -1192,35 +407,40 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_cost_record(_b_costs, 0, b_local, 1000, 500, b_llama);
+        cost_record(PROV_OLLAMA, b_local, 1000, 500, b_llama);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
 
-    # Benchmark: audit_record — SHA-256 entry hash + HMAC signature per event.
-    # This is the most expensive thing on the success path after the forward.
+    # Benchmark: audit_record — one event on a chain: the entry hash (SHA-256), the HMAC signature over it and the
+    # previous hash, the entry linked in, and the oldest evicted once the chain holds max_entries (1000 here).
+    # Storage write-through is off, as without [[storage]].
     sha256_global_init();
-    var b_akey = _b_s("audit-key");
+    var b_chain = audit_chain_new(_b_s("audit-key"), 9, 1000);
     var b_aev = _b_s("inference.request");
+    var b_alvl = _b_s("info");
     var b_amsg = _b_s("completed");
+    var b_aprov = _b_s("openai");
     b = bench_new("audit_record_sign");
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        _bench_audit_sign(b_akey, 9, b_aev, b_amsg);
+        audit_record(b_chain, b_aev, b_alvl, b_amsg, b_aprov, b_gpt);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
     bench_report(b);
 
-    # Benchmark: event_publish — bounded ring append (no subscribers).
-    _bench_ev_init();
+    # Benchmark: event_publish — the bus publish (no subscribers) and the recent-events ring, under its lock.
+    events_init();
+    var b_topic = _b_s("providers/inference");
+    var b_ev = _b_s("{\"event\":\"inference_completed\"}");
     b = bench_new("event_publish_ring");
     bench_batch_start(b);
     i = 0;
     while (i < 100000) {
-        _bench_ev_publish(i);
+        event_emit(b_topic, b_ev);
         i = i + 1;
     }
     bench_batch_stop(b, 100000);

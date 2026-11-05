@@ -6,8 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-05 (**v2.9.23**: CHANGELOG, README stats, state, the roadmap's TOML item removed (fixed),
-> `SECURITY.md`'s token-contents line, the `cfgparse.cyr` row). Also 2026-11-05: **v2.9.22** (the mirror-drift item marked done, the
+> **Last refresh**: 2026-11-05 (**v2.9.24**: CHANGELOG, README stats, state, the roadmap's bench item marked done
+> and the pricing-scan item added, `development/performance.md`'s suite description and row list, `SECURITY.md`'s
+> authentication line, which described a digest compare the port never had). Also 2026-11-05: **v2.9.23** (the
+> TOML item, `SECURITY.md`'s token-contents line, the `cfgparse.cyr` row), **v2.9.22** (the mirror-drift item marked done, the
 > `models.cyr` and `jsonlite.cyr` rows, `jsonlite.cyr`'s stale header), **v2.9.21** (the list of what the test file copied, the six moved pieces' rows), **v2.9.20** (the `wq.cyr` / `pool.cyr` rows, the roadmap's bench-file
 > item, the CI coverage step's comment), **v2.9.19** (the `cli.cyr` row). On
 > 2026-11-04: **v2.9.18** (the `config.cyr` / `cfgparse.cyr` rows),

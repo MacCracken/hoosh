@@ -12,7 +12,7 @@ Cyrius-native, three pieces:
 
 | Piece | Role |
 |-------|------|
-| `tests/hoosh.bcyr` | The microbenchmark suite (self-contained, mirrors src hot paths) — run with `cyrius bench` |
+| `tests/hoosh.bcyr` | The microbenchmark suite, on the real `src/` code (since 2.9.24; it was copies before) — run with `cyrius bench` |
 | `scripts/bench-history.sh` | Runs the suite, appends a row per benchmark to `bench-history.csv`, regenerates `benchmarks.md` |
 | `bench-history.csv` | Full append-only history (timestamp, commit, branch, suite, benchmark, avg/min/max ns, iters) |
 | `benchmarks.md` | Canonical current view — baseline / previous / current columns with regression markers |
@@ -38,14 +38,15 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-25 CPU microbenchmarks over the per-request hot paths (no live backend — inference
-latency is backend-bound and not meaningful to micro-measure here):
+23 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
+function (no live backend — inference latency is backend-bound and not meaningful to
+micro-measure here). The clock-reading rows run on the production coarse clock, which
+the bench sets as the gateway's ticker would:
 
 - **Routing** — `route_select_20_providers`, `route_round_robin_10`,
   `route_matches_model`
 - **Budget** — `pool_reserve_commit`, `pool_available`
 - **Cache** — `cache_get_hit`, `cache_get_miss`, `cache_insert`
-- **Queue** — `queue_enqueue_dequeue`, `queue_5tier_sort`
 - **Tokens / DLP** — `estimate_tokens_per_provider`, `dlp_scan_clean_prompt`
 - **MCP** — `mcp_tools_list`, `mcp_tools_call`
 - **Batch / Observability** — `batch_split_4`, `latency_bucket_find`,
@@ -56,7 +57,10 @@ latency is backend-bound and not meaningful to micro-measure here):
   `audit_record_sign`
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
-`bench-history.sh` so the CSV + `benchmarks.md` pick it up.
+`bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a
+copy: through 2.9.23 the suite timed copies of `src/`, and five rows were timing far less
+work than the gateway does (CHANGELOG 2.9.24). Time heap strings (`_b_s`), never a bare
+literal in a timed loop (CHANGELOG 2.9.11).
 
 ### Reading the auth benchmarks
 

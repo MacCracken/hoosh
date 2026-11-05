@@ -72,12 +72,19 @@ fn metrics_latency_init() {
     return 0;
 }
 
+# The histogram bucket for a latency of `ms`: the first whose bound is >= ms, or NLAT_BUCKETS (the overflow slot)
+# past the last bound. 2.9.24: lifted out of metrics_record_latency so the bench times this search, not a copy.
+fn _lat_bucket(ms) {
+    var b = 0;
+    while (b < NLAT_BUCKETS && ms > _lat_bound(b)) { b = b + 1; }
+    return b;
+}
+
 # Record one provider request latency (ms). Atomic — concurrent batch workers.
 fn metrics_record_latency(prov, ms) {
     if (_lat_counts == 0) { return 0; }
     if (prov < 0 || prov >= PROV_COUNT) { return 0; }
-    var b = 0;
-    while (b < NLAT_BUCKETS && ms > _lat_bound(b)) { b = b + 1; }
+    var b = _lat_bucket(ms);
     _met_atomic_add(_lat_counts + (prov * (NLAT_BUCKETS + 1) + b) * 8, 1);
     _met_atomic_add(_lat_sum + prov * 8, ms);
     _met_atomic_add(_lat_count + prov * 8, 1);

@@ -30,20 +30,24 @@ The bands are a plan, not a promise. Every item was checked against the code and
     sockets and main.cyr's globals. Their testable parts were split out instead: `reqparse.cyr`, `cfgparse.cyr`,
     `cli.cyr`, `wq.cyr`, `models.cyr`, `otlp_export.cyr`'s pure half in `otlp.cyr`, and single functions moved into
     `jsonlite`, `provider`, `provider_err`, `router`, `hardware`, `health`, `metrics` and `http_client`.
-  - **How it was done, for the bench file next:** include each module for real; where a helper lives in a module
-    that needs the whole server, move it out first. Mutation-check each move: change the real function and confirm
-    a test fails (a hang counts; the CI test step has a 5-minute timeout since 2.9.4).
+  - **How it was done** (the bench file followed in 2.9.24): include each module for real; where a helper
+    lives in a module that needs the whole server, move it out first. Mutation-check each move: change the real
+    function and confirm a test fails (a hang counts; the CI test step has a 5-minute timeout since 2.9.4).
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
     `tests/`, so deleting a copy can lower it even when the real function now runs. Its header says so since 2.9.5.
-- **The bench file times copies, not `src/`** (found in 2.9.20). `tests/hoosh.bcyr` includes the stdlib and bote
-  but no `src/` module. 62 of its 65 functions are copies (the others are `main`, the `_b_s` string helper and a
-  stand-in clock): the route record and model match, the router's select, the token estimate, the DLP scanner, the
-  cache, the budget pool, a five-tier queue, `_batch_split`, the latency bucket search, the work-queue ring (with no
-  lock), the rate limiter, cost accounting, the audit signing step, the event ring and an MCP handler. So each of
-  the 25 rows measures a copy that can drift from `src/` as the test copies did. A real change in `src/` cannot move
-  them, and a regression there cannot show up in them. The test file has now proved which modules include cleanly,
-  so the same method applies: include them in the bench, delete the copies, and record each row's break in the
-  CHANGELOG with an old-against-new A/B. Next (2.9.23 fixed the TOML string-array reader found in 2.9.22).
+- **The bench file times the real code: done in 2.9.24.** Through 2.9.23 `tests/hoosh.bcyr` included no `src/`
+  module and 62 of its 65 functions were copies, so no change to `src/` could move a row. It now includes `src/lib`
+  as the test file does; its only functions are `main` and `_b_s`. Two rows that timed a priority queue the
+  gateway does not have were dropped (23 rows). The A/B is in CHANGELOG 2.9.24: five rows had been timing far less
+  work than the gateway does, the largest `cost_record_known_model` (155 ns copy, 3.28 µs real; the next item).
+- **Cost accounting scans the pricing table twice per completion** (found by 2.9.24's real bench, next).
+  `cost_record` → `estimate_cost_micro` calls `_pricing_row` twice, once through `pricing_known` and again for the
+  long-context tier. `_pricing_row` is a linear `streq` scan of the 81 compiled rows, and `strlen` walks each
+  unaligned literal key byte by byte. That is 3.28 µs per completion for `gpt-4o` (row 38), against 134 ns for a
+  local model; a dated id that matches only by prefix scans all 81 rows for the exact pass and 81 more for the
+  prefix, twice. It runs under `_chat_lock`. Fix: one lookup per completion, through an index built once in
+  `_pricing_init` (key → row, with key lengths for the prefix pass); bench `cost_record_known_model` before and
+  after.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

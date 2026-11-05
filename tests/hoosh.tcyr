@@ -3336,6 +3336,13 @@ fn main() {
     str_builder_add_cstr(linf, lname);
     str_builder_add_cstr(linf, "\",le=\"+Inf\"} 5\n");
     assert_eq(str_contains(lexp, str_builder_build(linf)), 1, "lat: +Inf counts every sample (5)");
+    # 2.9.24: the bucket search, lifted into _lat_bucket so the bench times it. A latency equal to a bound lands in
+    # that bucket; one past the last bound (10000 ms) is the overflow slot.
+    assert_eq(_lat_bucket(0), 0, "lat: 0 ms is the first bucket");
+    assert_eq(_lat_bucket(5), 0, "lat: 5 ms is still the first bucket (le=5)");
+    assert_eq(_lat_bucket(6), 1, "lat: 6 ms is the second");
+    assert_eq(_lat_bucket(10000), NLAT_BUCKETS - 1, "lat: 10000 ms is the last finite bucket");
+    assert_eq(_lat_bucket(10001), NLAT_BUCKETS, "lat: past it is the overflow slot");
     # Request and token counters.
     metrics_reset();
     metrics_record(10, 4);

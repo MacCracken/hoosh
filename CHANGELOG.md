@@ -5,6 +5,82 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.24] — 2026-11-05
+
+**The bench file times the real code.** Through 2.9.23 `tests/hoosh.bcyr` included no `src/` module, and 62 of its
+65 functions were copies of `src/`. So no change to the gateway could move a row, and five rows were timing far
+less work than the gateway does. It now includes `src/lib` as the test file does, and each row calls the
+gateway's own function. Its only functions are `main` and the `_b_s` string helper. 23 rows, down from 25.
+**1645 assertions** in 161 groups. All gates are clean: fmt, lint, vet, deny, coverage (377/701, 53%; see the
+notes), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — every row on the real function
+
+| row | through 2.9.23 (copy) | 2.9.24 (real) | what the copy left out |
+|---|---|---|---|
+| `event_publish_ring` | 5 ns | 176 ns (35×) | `event_emit`'s publish to the majra bus, and the lock on the recent-events ring |
+| `cost_record_known_model` | 155 ns | 3.28 µs (21×) | `_pricing_row`'s scan of the 81 pricing rows, twice per completion (a hard-coded 3-row `if` stood in) |
+| `work_queue_push_pop` | 9 ns | 157 ns (17×) | `wq.cyr`'s mutex (three lock round-trips per job: push, pop, `wq_done`), and `wq_done` itself |
+| `audit_record_sign` | 3.30 µs | 7.02 µs (2.1×) | the clock read (a syscall), the entry hash over all seven fields, the entry, its link and the eviction |
+| `route_round_robin_10` | 113 ns | 141 ns (1.25×) | the health check on each candidate (2.5.5) |
+| `cost_record_local_free` | 110 ns | 134 ns (1.22×) | the real local short-circuit and record lookup |
+| `pool_reserve_commit` | 30 ns | 36 ns (1.20×) | the negative-amount guards, and the storage write-through call (a no-op without `[[storage]]`) |
+| `mcp_tools_list` | 3.07 µs | 3.57 µs (1.16×) | the gateway's own `bote_echo` definition from `mcp_init`, whose description is longer |
+| `route_select_20_providers` | 778 ns | 835 ns (1.07×) | the health check |
+| the other 14 | | within ±4% | `pool_available`, the cache rows, `route_matches_model`, the token estimate, DLP, `mcp_tools_call`, `batch_split_4`, `latency_bucket_find`, `rate_limit_check` and the three auth rows |
+
+**How measured:** the two bench binaries were built from the same tree, the old file and the new, and run
+alternately for 7 rounds at load 2.2. The figures are the medians.
+
+**Dropped:** `queue_enqueue_dequeue` and `queue_5tier_sort`. They timed a five-tier priority queue that hoosh
+does not have: requests go through `wq.cyr`, and `GET /v1/queue/status` answers a constant. They were rust-old's
+rows, kept as copies.
+
+**Already real:** the three auth rows time stdlib `ct_eq_bytes_lens`, the compare `auth_check` runs on each
+configured token. They are unchanged.
+
+**How the rows run the real code:**
+- **The clock:** the gateway reads time from a coarse ticker (`hoosh_now_ms`, 2.5.11), so the bench sets the
+  coarse clock as the ticker would, and the cache, rate-limit and pool rows time the production path rather than
+  the 1.35 µs clock syscall. The copies had a frozen global for this.
+- **The real setup:** `mcp_init()` builds the dispatcher; `dlp_configure(1, ...)` turns DLP on, as `[dlp]
+  enabled` does (it is off by default); `wq_init`, `events_init`, `cost_reset` and `audit_chain_new` start their
+  modules.
+- **The audit row** runs `audit_record` on a chain of 1000 entries, so eviction is in the steady state.
+
+### Changed — `_lat_bucket(ms)` in `metrics.cyr`
+
+The histogram's bucket search was inline in `metrics_record_latency`. It is now `_lat_bucket(ms)`, which the
+recorder calls and `latency_bucket_find` times. New assertions pin it: a latency on a bound lands in that bucket,
+and one past the last bound lands in the overflow slot.
+
+### Found — cost accounting scans the pricing table twice per completion
+
+`cost_record` → `estimate_cost_micro` calls `_pricing_row` twice, once through `pricing_known` and once for the
+long-context tier. `_pricing_row` is a linear `streq` scan of the 81 compiled rows, and `strlen` walks each
+unaligned literal key byte by byte. For `gpt-4o` (row 38) that is 3.28 µs per completion, under `_chat_lock`. A
+dated id that matches only by prefix scans all 81 rows, then 81 more, twice. The copy priced three models with an
+`if`. Not changed here; the roadmap has it as the next item.
+
+### Fixed — `SECURITY.md` described a token compare the port never had
+
+It said tokens were pre-hashed at startup and compared as SHA-256 digests. `auth_check` compares the presented
+token with each configured one in constant time with `ct_eq_bytes_lens`, and the line now says so.
+
+### Notes
+
+- The bench file is 455 lines (was 1,235). The test file is 6,010 lines (was 6,003).
+- **Coverage** reads 377 of 701 functions, down from 403. 27 names left the count because only the deleted copies
+  named them: 25 of `dlp.cyr`'s scanner internals (`_dlp_is_digit`, `_dlp_match_ssn_at`, ...), `route_enabled`
+  and `route_priority`. All of them run: the `dlp_scan_level` row and the `dlp_scanner` test group call the
+  scanner, which calls each one. `scripts/coverage.sh` counts names, as its header says. One function is new
+  (`_lat_bucket`).
+- **The CSV history breaks at 2.9.24** for the rows in the table: each now measures the gateway's work, not a
+  copy's. Compare those rows across this boundary only with the A/B above.
+- **The recorded bench run** (load 2.14, the maintainer's call not to wait for a quiet machine) agrees with the
+  A/B. The same nine rows moved by the same amounts, and the other fourteen are within ±4% of 2.9.23. The two
+  dropped rows show as "—" in `benchmarks.md` until three newer runs push them out.
+
 ## [2.9.23] — 2026-11-05
 
 **Config string lists are read as TOML, so an auth token with a comma in it is one token again.** `cfgparse.cyr`'s

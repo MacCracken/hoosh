@@ -44,8 +44,11 @@ within 14 days of confirmation.
 
 - **API keys**: Keys are stored in memory and passed via HTTPS to providers.
   Never log or expose keys. Config Debug impls redact all sensitive fields.
-- **Authentication**: Token comparison uses constant-time SHA-256 digest
-  comparison to prevent timing attacks. Tokens are pre-hashed at startup.
+- **Authentication**: each configured token is compared with the presented one
+  in constant time (stdlib `ct_eq_bytes_lens`), so a wrong token costs the same
+  whether it differs early or late; the bench's `auth_verify_wrong_*` rows watch
+  this. (Through 2.9.23 this line said tokens were pre-hashed and compared as
+  SHA-256 digests; the port has never done that.)
 - **Token contents** (2.9.23): `[auth] tokens` is read as TOML, so a token may
   hold any characters. Through 2.9.22 a `,`, `]` or `"` inside a token split it,
   and each piece authenticated on its own; rotate any token holding those.
