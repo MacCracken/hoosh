@@ -46,6 +46,9 @@ within 14 days of confirmation.
   Never log or expose keys. Config Debug impls redact all sensitive fields.
 - **Authentication**: Token comparison uses constant-time SHA-256 digest
   comparison to prevent timing attacks. Tokens are pre-hashed at startup.
+- **Token contents** (2.9.23): `[auth] tokens` is read as TOML, so a token may
+  hold any characters. Through 2.9.22 a `,`, `]` or `"` inside a token split it,
+  and each piece authenticated on its own; rotate any token holding those.
 - **DLP patterns**: Regex patterns are compiled at startup. Custom patterns
   from config are validated for syntax but not for ReDoS resistance — use
   bounded quantifiers in custom patterns.

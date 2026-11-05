@@ -5,6 +5,86 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.23] — 2026-11-05
+
+**Config string lists are read as TOML, so an auth token with a comma in it is one token again.** `cfgparse.cyr`'s
+`_config_str_array` reads `[auth] tokens`, model patterns, `tls_pinned_certs` and `[hardware] disabled_backends`.
+It split the raw value text on `,` `]` `"` and spaces with no notion of a quote. It now reads arrays with bayan's
+own TOML array parser. **1640 assertions** in 161 groups. All gates are clean: fmt, lint, vet, deny, coverage
+(403/700, 57%), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Security — `tokens = ["abc,def"]` let `abc` and `def` authenticate
+
+Checked live on a 2.9.22 build, with `tokens = ["abc,def", "tok-2"]`:
+- `Bearer abc` and `Bearer def` were each accepted;
+- `Bearer abc,def`, the configured token, was refused.
+
+A `]` or a `"` inside a token split it the same way. **Who is affected:** deployments whose `[auth] tokens` hold
+a `,`, `]` or `"`. Tokens made of base64, hex or URL-safe characters never were. On 2.9.23, `abc,def` is one
+token, and neither piece authenticates. If any of your tokens holds those characters, rotate it: under 2.9.22 and
+earlier, each piece of it worked as a token on its own.
+
+### Fixed — what else the old reader got wrong
+
+Shown by running the old reader on each case before the fix:
+
+| config | through 2.9.22 | now |
+|---|---|---|
+| `models = ["we\"ird"]` | `we\` and `ird` | `we"ird` |
+| `models = ["x]y"]` | `x` and `y` | `x]y` |
+| a multi-line array with a `# comment` after an element | 5 elements: the line breaks and the comment text among them | its 2 elements |
+| `models = ['C:\path']` (a literal string) | `'C:\path'`, quotes included | `C:\path` |
+| `models = ["tab\there"]` | `tab\there`, undecoded | a real tab |
+| `models = [" lead"]` | `lead` | ` lead` |
+| `tokens = "a,b"` (a scalar) | `a` and `b` | `a,b` |
+| `tokens = "[x"` (a scalar) | `x` | `[x` |
+| `tls_pinned_certs = ["/certs/ca,1.pem"]` | two bundles, so the config was refused | one bundle |
+
+### Changed — `_config_str_array(pairs, key, out, max)`
+
+The reader takes the section's pairs and the key instead of the value's text. It looks up the pair, so it knows
+from bayan's parser whether the value was written as an array: `bayan_toml_pair_is_array`, not a guess from the
+first byte. A string such as `"[x"` therefore stays a string.
+- **An array** goes to `bayan_toml_array_parse`. Quotes are tracked, a basic string's escapes are decoded, a
+  literal string is kept verbatim, and comments and the whitespace between elements are skipped.
+- **Any other value** is one element, as before, so `tokens = "solo"` keeps working.
+- **Skipped:** empty elements (as before), and now an element holding a NUL byte (`\u0000`), with a warning. A C
+  string would cut such an element short, so `"abc\u0000def"` would otherwise become the token `abc`.
+
+The four callers pass their section and key. The binary grows by 4,144 bytes, now that bayan's array parser is
+linked in.
+
+**Checked live on the real binary:** with the multi-line, commented `tokens` above,
+- `abc,def` and `tok-2` authenticate; `abc`, `def` and the comment text (`# alice`) do not;
+- `/v1/models` lists `we"ird` and the literal `lit\x` as one id each;
+- all of this holds after `POST /v1/admin/reload`.
+
+### Tests
+
+**`config_str_array`** now parses real TOML through `_config_str_array`, rather than handing it text. It covers
+each row of the table above, an absent key, empty and NUL-holding elements, and the max bound. Then the real
+`auth_check` runs on what the reader returned for `tokens = ["abc,def"]`: the whole token authenticates, and
+neither piece does. **`rustold_provider_tls`:** a bundle path with a comma is one bundle.
+
+### Mutation-checked
+
+A copy of the tree was changed 8 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| **the 2.9.22 reader itself**, put back behind the new signature | 18 fail |
+| every value read as an array; no value read as an array | 6 fail; crash |
+| NUL-holding elements kept; empty elements kept; the max not enforced | 2, 2, 1 fail |
+| each element's last byte dropped; an absent key not guarded | crash, crash |
+
+### Notes
+
+- The test file is 6,003 lines (was 5,941).
+- **Benchmarks,** at load 2.65 (the maintainer's call, after nearly three hours without a quiet spell while other
+  sessions ran their suites): the 25 rows' median move is 0.0%, all within −0.9% and +2.6%. `tests/hoosh.bcyr`
+  is unchanged and times copies, so this release cannot move it.
+- `SECURITY.md` gains a line on token contents.
+
 ## [2.9.22] — 2026-11-05
 
 **The test file copies no `src/` code any more.** The last six copies, all of `handlers.cyr` code, were replaced

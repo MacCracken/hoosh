@@ -1313,6 +1313,18 @@ fn _t_pp(src) {
     return toml_section_pairs(vec_get(pv, 0));
 }
 
+# _config_str_array on key `key` of a TOML snippet's first `sect` section (2.9.23), into the 32-slot `out`.
+fn _t_strs(src, sect, key, out, max) {
+    var sv = bayan_toml_get_sections_by_cstr(toml_parse(str_from(src)), sect);
+    if (vec_len(sv) == 0) { return 0 - 9; }
+    return _config_str_array(toml_section_pairs(vec_get(sv, 0)), key, out, max);
+}
+
+# A request carrying `Authorization: Bearer <tok>`, for auth_check.
+fn _t_bearer_req(tok) {
+    return _t_cat(_t_cat("GET /v1/models HTTP/1.1\r\nAuthorization: Bearer ", tok), "\r\n\r\n");
+}
+
 # _config_tls_policy for a provider block with these keys (each raw TOML text, or 0 for absent) at `url`.
 fn _t_tls(pins, cert, key, url) {
     var sb = str_builder_new();
@@ -3592,22 +3604,65 @@ fn main() {
     test_group("config_str_array");
     # `tokens = ["a", "b", "c"]` must yield THREE tokens. Before 2.5.1 the raw
     # scalar was pushed as one, so no configured key ever matched.
+    # 2.9.23: the reader takes the section's pairs and the key, and reads an array with bayan's own parser.
     var csa_out = alloc(32 * 8);
-    var csa_n = _config_str_array("[\"alpha-key-111\", \"beta-key-222\", \"gamma-key-333\"]", csa_out, 32);
+    var csa_n = _t_strs("[auth]\ntokens = [\"alpha-key-111\", \"beta-key-222\", \"gamma-key-333\"]\n", "auth", "tokens",
+      csa_out, 32);
     assert_eq(csa_n, 3, "str_array: three elements parsed");
     assert_streq(load64(csa_out), "alpha-key-111", "str_array: first element");
     assert_streq(load64(csa_out + 8), "beta-key-222", "str_array: second element");
     assert_streq(load64(csa_out + 16), "gamma-key-333", "str_array: third element");
-    # A bare scalar stays a single element (single-token configs keep working).
-    var csa_n1 = _config_str_array("solo-token", csa_out, 32);
-    assert_eq(csa_n1, 1, "str_array: bare scalar → one element");
-    assert_streq(load64(csa_out), "solo-token", "str_array: bare scalar value");
-    # Empty array → zero elements (and must not write past `out`).
-    assert_eq(_config_str_array("[]", csa_out, 32), 0, "str_array: empty array → 0");
+    # A scalar stays a single element (single-token configs keep working).
+    assert_eq(_t_strs("[auth]\ntokens = \"solo-token\"\n", "auth", "tokens", csa_out, 32), 1,
+      "str_array: a string scalar is one element");
+    assert_streq(load64(csa_out), "solo-token", "str_array: scalar value");
+    # Empty array → zero elements (and must not write past `out`); an absent key → 0.
+    assert_eq(_t_strs("[auth]\ntokens = []\n", "auth", "tokens", csa_out, 32), 0, "str_array: empty array → 0");
+    assert_eq(_t_strs("[auth]\nother = 1\n", "auth", "tokens", csa_out, 32), 0, "str_array: absent key → 0");
     # Bound is enforced — the old inline models parser had 8 slots and NO
     # check, so a 9th pattern wrote past the allocation.
-    var csa_many = "[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\"]";
-    assert_eq(_config_str_array(csa_many, csa_out, 4), 4, "str_array: honors max bound");
+    var csa_many = "[auth]\ntokens = [\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\"]\n";
+    assert_eq(_t_strs(csa_many, "auth", "tokens", csa_out, 4), 4, "str_array: honors max bound");
+    # 2.9.23: quotes are tracked. Through 2.9.22 a `,` `]` or `"` inside a string ended the element.
+    assert_eq(_t_strs("[auth]\ntokens = [\"abc,def\", \"x]y\"]\n", "auth", "tokens", csa_out, 32), 2,
+      "str_array: a comma or bracket inside a string stays in it");
+    assert_streq(load64(csa_out), "abc,def", "str_array: abc,def is one element");
+    assert_streq(load64(csa_out + 8), "x]y", "str_array: x]y is one element");
+    var csa_esc = "[[providers]]\nmodels = [\"we\\\"ird\", \"tab\\there\"]\n";
+    assert_eq(_t_strs(csa_esc, "providers", "models", csa_out, 32), 2, "str_array: escaped quotes end no string");
+    assert_streq(load64(csa_out), "we\"ird", "str_array: a basic string's \\\" is decoded");
+    assert_streq(load64(csa_out + 8), "tab\there", "str_array: and its \\t");
+    assert_eq(_t_strs("[[providers]]\nmodels = ['C:\\path', \" lead\"]\n", "providers", "models", csa_out, 32), 2,
+      "str_array: literal and spaced strings");
+    assert_streq(load64(csa_out), "C:\\path", "str_array: a literal string loses its quotes, keeps its backslash");
+    assert_streq(load64(csa_out + 8), " lead", "str_array: a leading space inside quotes is kept");
+    # A multi-line array with comments: the comment and the line breaks are not elements.
+    var csa_ml = "[auth]\ntokens = [\n  \"secret-1\",  # alice\n  \"secret-2\",  # bob\n]\n";
+    assert_eq(_t_strs(csa_ml, "auth", "tokens", csa_out, 32), 2, "str_array: a commented multi-line array is two");
+    assert_streq(load64(csa_out + 8), "secret-2", "str_array: its second element");
+    # A scalar is read whole, even with a comma or a leading bracket in it.
+    assert_eq(_t_strs("[auth]\ntokens = \"a,b\"\n", "auth", "tokens", csa_out, 32), 1, "str_array: scalar a,b is one");
+    assert_eq(_t_strs("[auth]\ntokens = \"[x\"\n", "auth", "tokens", csa_out, 32), 1, "str_array: scalar [x is one");
+    assert_streq(load64(csa_out), "[x", "str_array: and keeps its bracket");
+    # Empty elements, and one holding a NUL (a C string would cut it short), are skipped.
+    assert_eq(_t_strs("[auth]\ntokens = [\"\", \"ab\\u0000cd\", \"ok\"]\n", "auth", "tokens", csa_out, 32), 1,
+      "str_array: empty and NUL-holding elements skipped");
+    assert_streq(load64(csa_out), "ok", "str_array: the rest kept");
+    # The point of it: through 2.9.22 `tokens = ["abc,def"]` made "abc" a token of its own. The real auth_check
+    # on what the reader returns:
+    var csa_tn = _t_strs("[auth]\ntokens = [\"abc,def\"]\n", "auth", "tokens", csa_out, 32);
+    var csa_toks = vec_new();
+    var csa_i = 0;
+    while (csa_i < csa_tn) {
+        vec_push(csa_toks, load64(csa_out + csa_i * 8));
+        csa_i = csa_i + 1;
+    }
+    var csa_r1 = _t_bearer_req("abc,def");
+    assert_eq(auth_check(csa_r1, strlen(csa_r1), csa_toks), 1, "str_array: the whole token authenticates");
+    var csa_r2 = _t_bearer_req("abc");
+    assert_eq(auth_check(csa_r2, strlen(csa_r2), csa_toks), 0, "str_array: a piece of it does not");
+    var csa_r3 = _t_bearer_req("def");
+    assert_eq(auth_check(csa_r3, strlen(csa_r3), csa_toks), 0, "str_array: nor the other piece");
 
     test_group("req_content_length");
     var rcl1 = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 4096\r\n\r\nbody";
@@ -4986,6 +5041,13 @@ fn main() {
     var tp2 = _t_tls(_t_cat(_t_cat("\"", tp_ca), "\""), 0, 0, tu);
     assert_eq(tp2 > 0 && load64(tp2 + SANDHI_TLS_POLICY_OFF_FLAGS) == SANDHI_TLS_POLICY_CUSTOM_TRUST, 1,
       "tls: a bare string works too");
+    # 2.9.23: a bundle path with a comma is one bundle. Through 2.9.22 it read as two and the config was refused.
+    var tp_cm = _t_cat(tp_dir, "ca,1.pem");
+    file_write_all(tp_cm, "x", 1);
+    var tp5 = _t_tls(_t_cat(_t_cat("[\"", tp_cm), "\"]"), 0, 0, tu);
+    assert_eq(tp5 > 0 && load64(tp5 + SANDHI_TLS_POLICY_OFF_FLAGS) == SANDHI_TLS_POLICY_CUSTOM_TRUST, 1,
+      "tls: a bundle path with a comma is one bundle");
+    sys_unlink(tp_cm);
     assert_eq(_t_tls(_t_cat(_t_cat(_t_cat(_t_cat("[\"", tp_ca), "\", \""), tp_c), "\"]"), 0, 0, tu), 0 - 1,
       "tls: two bundles refused (sandhi keeps one; the other would be dropped)");
     assert_eq(_t_tls("[\"/nonexistent-hoosh/ca.pem\"]", 0, 0, tu), 0 - 1, "tls: missing bundle refused");

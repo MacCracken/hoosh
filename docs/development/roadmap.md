@@ -35,12 +35,6 @@ The bands are a plan, not a promise. Every item was checked against the code and
     a test fails (a hang counts; the CI test step has a 5-minute timeout since 2.9.4).
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
     `tests/`, so deleting a copy can lower it even when the real function now runs. Its header says so since 2.9.5.
-- **TOML string arrays split quoted values** (found in 2.9.22, next). `cfgparse.cyr`'s `_config_str_array` does
-  not track quotes: a `,`, `]` or `"` inside a quoted element ends it, and leading spaces are dropped. A
-  configured pattern `"we\"ird"` became two ids. It reads model patterns, TLS pins, disabled backends and
-  `[auth] tokens`, so a token like `abc,def` is loaded as two tokens and `abc` alone authenticates. Fix: read each
-  element as a TOML basic string (escapes decoded, delimiters inside quotes kept), keep the bare-scalar form, and
-  test it with tokens, pins and patterns holding those bytes.
 - **The bench file times copies, not `src/`** (found in 2.9.20). `tests/hoosh.bcyr` includes the stdlib and bote
   but no `src/` module. 62 of its 65 functions are copies (the others are `main`, the `_b_s` string helper and a
   stand-in clock): the route record and model match, the router's select, the token estimate, the DLP scanner, the
@@ -49,7 +43,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
   the 25 rows measures a copy that can drift from `src/` as the test copies did. A real change in `src/` cannot move
   them, and a regression there cannot show up in them. The test file has now proved which modules include cleanly,
   so the same method applies: include them in the bench, delete the copies, and record each row's break in the
-  CHANGELOG with an old-against-new A/B. Next, now that the test file is done.
+  CHANGELOG with an old-against-new A/B. Next (2.9.23 fixed the TOML string-array reader found in 2.9.22).
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

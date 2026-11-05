@@ -317,7 +317,7 @@ fn load_config(path) {
             var models_str = bayan_toml_get_by_cstr(pp, "models");
             if (models_str != 0) {
                 var pats = alloc(MAX_MODEL_PATTERNS * 8);
-                var pat_count = _config_str_array(to_cstr(models_str), pats, MAX_MODEL_PATTERNS);
+                var pat_count = _config_str_array(pp, "models", pats, MAX_MODEL_PATTERNS);
                 if (pat_count > 0) {
                     route_set_patterns(route, pats, pat_count);
                 }
@@ -414,7 +414,7 @@ fn load_config(path) {
         var db_str = bayan_toml_get_by_cstr(hp, "disabled_backends");
         if (db_str != 0) {
             var dbs = alloc(MAX_DISABLED_BACKENDS * 8);
-            var dbn = _config_str_array(to_cstr(db_str), dbs, MAX_DISABLED_BACKENDS);
+            var dbn = _config_str_array(hp, "disabled_backends", dbs, MAX_DISABLED_BACKENDS);
             hardware_configure_backends(dbs, dbn);
         }
     }
@@ -479,7 +479,7 @@ fn load_config(path) {
             # on an empty vec).
             _auth_tokens = vec_new();
             var toks = alloc(MAX_AUTH_TOKENS * 8);
-            var tcount = _config_str_array(to_cstr(tok_str), toks, MAX_AUTH_TOKENS);
+            var tcount = _config_str_array(auth_p, "tokens", toks, MAX_AUTH_TOKENS);
             var tj = 0;
             while (tj < tcount) {
                 vec_push(_auth_tokens, load64(toks + tj * 8));

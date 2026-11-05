@@ -56,33 +56,54 @@ var MAX_MODEL_PATTERNS = 32;
 var MAX_AUTH_TOKENS = 32;
 var MAX_DISABLED_BACKENDS = 32;
 
-# Parse a TOML string array — `["a", "b"]` — into up to `max` freshly allocated
-# cstrs at `out`; returns the count. A bare scalar (`x = "solo"`) parses as a
-# single element, so single-value configs keep working.
-fn _config_str_array(raw, out, max) {
-    var n = strlen(raw);
+# The strings of TOML key `key` in the section `pairs`, as up to `max` freshly allocated cstrs at `out`; returns
+# the count, 0 when the key is absent. An array (`["a", "b"]`) gives its elements, read by bayan's own array
+# parser: quotes are tracked, so a `,` or `]` inside a string stays in it; a basic string's escapes are decoded and
+# a literal string ('...') is kept verbatim; comments and the whitespace between elements are skipped. Any other
+# value (`x = "solo"`) is one element, so single-value configs keep working. Empty elements are skipped, and so is
+# one holding a NUL byte (`\u0000`): a C string would cut it short, and a token "abc\u0000def" must not become
+# "abc".
+#
+# 2.9.23: through 2.9.22 this took the value's raw text and split it on `,` `]` `"` and spaces itself, with no
+# notion of a quote. A token "abc,def" loaded as two tokens, each of which authenticated; `"we\"ird"` became
+# `we\` and `ird`; a `# comment` inside a multi-line array, and the line breaks between its elements, became
+# elements; literal strings kept their quotes; escapes were never decoded. It reads `[auth] tokens`, model
+# patterns, `tls_pinned_certs` and `[hardware] disabled_backends`.
+fn _config_str_array(pairs, key, out, max) {
+    var pr = bayan_toml_get_pair_by_cstr(pairs, key);
+    if (pr == 0) { return 0; }
+    var v = bayan_toml_pair_value(pr);
+    if (v == 0) { return 0; }
+    var els = 0;
+    if (bayan_toml_pair_is_array(pr) == true) {
+        els = bayan_toml_array_parse(v);
+        if (els == 0) { return 0; }
+    } else {
+        els = vec_new();
+        vec_push(els, v);
+    }
     var count = 0;
     var i = 0;
-    while (i < n && count < max) {
-        var c = load8(raw + i);
-        if (c == 91 || c == 93 || c == 44 || c == 32 || c == 34) {
-            i = i + 1;
-        } else {
-            var s = i;
-            while (i < n) {
-                c = load8(raw + i);
-                if (c == 34 || c == 44 || c == 93) { break; }
-                i = i + 1;
-            }
-            var elen = i - s;
-            if (elen > 0) {
-                var e = alloc(elen + 1);
-                memcpy(e, raw + s, elen);
-                store8(e + elen, 0);
-                store64(out + count * 8, e);
-                count = count + 1;
-            }
+    while (i < vec_len(els) && count < max) {
+        var e = vec_get(els, i);
+        var n = str_len(e);
+        var p = str_data(e);
+        var j = 0;
+        while (j < n && load8(p + j) != 0) { j = j + 1; }
+        if (j < n) {
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "config: an element of `");
+            str_builder_add_cstr(sb, key);
+            str_builder_add_cstr(sb, "` holds a NUL byte; skipped");
+            hlog_warn(to_cstr(str_builder_build(sb)));
+        } elif (n > 0) {
+            var c = alloc(n + 1);
+            memcpy(c, p, n);
+            store8(c + n, 0);
+            store64(out + count * 8, c);
+            count = count + 1;
         }
+        i = i + 1;
     }
     return count;
 }
@@ -120,7 +141,7 @@ fn _config_tls_policy(pp, purl) {
     var pol = 0;
     if (pins != 0) {
         var arr = alloc(8 * 8);
-        var n = _config_str_array(to_cstr(pins), arr, 8);
+        var n = _config_str_array(pp, "tls_pinned_certs", arr, 8);
         if (n > 1) {
             hlog_error("config: tls_pinned_certs takes one PEM bundle; put the certificates in one file");
             return 0 - 1;
