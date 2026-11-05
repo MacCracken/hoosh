@@ -107,31 +107,7 @@ var _warming = 0;
 # HTTP route dispatch
 # ================================================================
 
-# Paths whose handler parses a request body — these are POST-only. Keep in sync
-# with the POST section of http_route below; a route missing here simply keeps
-# the old verb-agnostic behavior rather than breaking.
-fn _requires_post(path) {
-    if (streq(path, "/v1/chat/completions") == 1) { return 1; }
-    if (streq(path, "/v1/embeddings") == 1) { return 1; }
-    if (streq(path, "/v1/batch") == 1) { return 1; }
-    if (streq(path, "/v1/tokens/check") == 1) { return 1; }
-    if (streq(path, "/v1/tokens/reserve") == 1) { return 1; }
-    if (streq(path, "/v1/tokens/report") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/placement") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/cost") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/training-estimate") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/model-format") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/requirement-match") == 1) { return 1; }
-    if (streq(path, "/v1/hardware/simulate") == 1) { return 1; }
-    if (streq(path, "/v1/models/pull") == 1) { return 1; }
-    if (streq(path, "/v1/models/delete") == 1) { return 1; }
-    if (streq(path, "/v1/training/status") == 1) { return 1; }
-    if (streq(path, "/v1/cost/estimate") == 1) { return 1; }
-    if (streq(path, "/v1/cost/recommend") == 1) { return 1; }
-    if (streq(path, "/v1/tools/call") == 1) { return 1; }
-    if (streq(path, "/v1/models/refresh") == 1) { return 1; }
-    return 0;
-}
+# _requires_post (the POST-only, body-taking paths) is reqparse.cyr's since 2.9.21, so the tests check its list.
 
 fn http_route(cfd, method, path, buf, buf_len) {
     hlog_request(method, path);

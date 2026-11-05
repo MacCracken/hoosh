@@ -159,3 +159,32 @@ fn health_status_str(route) {
     if (route_healthy(route) == 1) { return "healthy"; }
     return "unhealthy";
 }
+
+# /v1/health's verdict: 1 unless the top-priority route (routes[0]; router_new sorts by priority) is marked down.
+# No routes is healthy. It reads the prober's state instead of connecting: /v1/health is exempt from the auth gate
+# and not rate limited, and its old inline probe was a bare blocking connect(2) with no deadline (and a possible
+# DNS resolve), so an unauthenticated caller could park a worker per request. 2.5.5 fixed exactly this in
+# /v1/health/providers. Through 2.9.20 this and health_body were inline in handlers.cyr's handle_health, and the
+# tests had a copy of the body.
+fn health_verdict(rt) {
+    if (load64(rt + ROUTER_COUNT) == 0) { return 1; }
+    if (route_healthy(load64(load64(rt + ROUTER_ROUTES))) == 0) { return 0; }
+    return 1;
+}
+
+# /v1/health's body. 2.7.0: `version` and `providers_configured`, as rust-old reported them (its conformance tests
+# required both); degraded keeps `providers_down`.
+fn health_body(healthy, version, count) {
+    var sb = str_builder_new();
+    if (healthy == 1) {
+        str_builder_add_cstr(sb, "{\"status\":\"ok\"");
+    } else {
+        str_builder_add_cstr(sb, "{\"status\":\"degraded\",\"providers_down\":1");
+    }
+    str_builder_add_cstr(sb, ",\"version\":\"");
+    str_builder_add_cstr(sb, version);
+    str_builder_add_cstr(sb, "\",\"providers_configured\":");
+    str_builder_add_int(sb, count);
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}

@@ -131,6 +131,61 @@ fn chat_rehead(env) {
     return to_cstr(str_builder_build(sb));
 }
 
+# Build an OpenAI-compatible chat-completion body. Moved here from handlers.cyr in 2.9.21, so the tests run it
+# rather than a copy of its usage block; it needs only the head above and outcome.cyr's finish names.
+#
+# 2.5.12: `usage` also carries `cost_micro_usd` and `provider`. Both were
+# already computed by the time this ran — `cost_record` prices the call with
+# `estimate_cost_micro` and the route knows its provider — and neither reached
+# the client, so a consumer had to re-implement hoosh's pricing table to report
+# a per-request cost, and had to guess the provider from the model name. That
+# guess is wrong whenever DLP re-routes a confidential request to a local
+# provider: hoosh bills $0 and the consumer prices it as remote.
+#
+# `cost_micro_usd` is integer micro-USD, the same unit `estimate_cost_micro`
+# returns, so a consumer never converts and never rounds. Both fields are
+# additive inside the existing `usage` object; an OpenAI-shaped client ignores
+# unknown fields. `provider` is the real serving route, not the requested one.
+fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
+    var sb = str_builder_new();
+    # 2.7.0: a fresh id and created time per completion (see provider_err.cyr).
+    chat_id_new();
+    sb_add_chat_head(sb, "chat.completion");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
+    str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
+    str_builder_add_cstr(sb, "\"content\":\"");
+    str_builder_add_cstr(sb, resp_text);
+    str_builder_add_cstr(sb, "\"");
+    var has_tools = 0;
+    if (tool_calls != 0) {
+        str_builder_add_cstr(sb, ",\"tool_calls\":");
+        str_builder_add_cstr(sb, tool_calls);
+        has_tools = 1;
+    }
+    # 2.8.0: the provider's own reason, mapped (outcome.cyr); "tool_calls" whenever calls are carried, unless the
+    # reply was cut short or declined.
+    str_builder_add_cstr(sb, "},\"finish_reason\":\"");
+    str_builder_add_cstr(sb, outcome_finish_name(outcome_finish_final(finish, has_tools)));
+    str_builder_add_cstr(sb, "\"}],");
+    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
+    str_builder_add_int(sb, ptok);
+    str_builder_add_cstr(sb, ",\"completion_tokens\":");
+    str_builder_add_int(sb, ctok);
+    str_builder_add_cstr(sb, ",\"total_tokens\":");
+    str_builder_add_int(sb, ptok + ctok);
+    str_builder_add_cstr(sb, ",\"cost_micro_usd\":");
+    str_builder_add_int(sb, cost_micro);
+    if (provider != 0) {
+        str_builder_add_cstr(sb, ",\"provider\":\"");
+        str_builder_add_cstr(sb, provider);
+        str_builder_add_cstr(sb, "\"");
+    }
+    str_builder_add_cstr(sb, "}}");
+    return str_builder_build(sb);
+}
+
 # PER-THREAD state (2.6.8). These four slots used to be process globals, which
 # was wrong from the moment the v2.4.0 worker pool landed: provider_err_reset()
 # and provider_err_set() run inside provider_forward, which every caller invokes

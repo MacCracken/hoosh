@@ -123,22 +123,6 @@ include "src/lib/wq.cyr"
 # Total: 64 bytes
 # ================================================================
 
-# Set model patterns as array of cstrings
-# Check if a route matches a model name
-# Find the first enabled route for a provider type (mirrors
-# handlers.cyr _router_find_provider, parameterized by routes array).
-fn _find_provider_route(routes, count, prov) {
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (route_provider(r) == prov) { return r; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 fn _ckey(model, body) {
     return _cache_key(model, body, strlen(body));
 }
@@ -386,78 +370,11 @@ fn _t_naive_digits(cs) {
     return v;
 }
 
-# ── 2.6.13 requirement-match snapshot mirror ──
-# Mirror of handle_hw_requirement_match's scan. A mirror registry is a vec of device
-# kinds; the scan returns the index of the first `want`, or -1. _t_hwreg stands in
-# for _hw_registry, and `swap_to` is the registry a concurrent hw_refresh installs
-# after the count is read (0 = none). snapshot 1 takes the count and every device
-# from one load, as 2.6.13 does; snapshot 0 reloads the global per device, as
-# before. -2 marks the index vec_get would have died on (_vec_die exits the worker).
-var _t_hwreg = 0;
-
-fn _t_req_scan(snapshot, swap_to, want) {
-    var reg = _t_hwreg;
-    var np = vec_len(reg);
-    if (swap_to != 0) { _t_hwreg = swap_to; }
-    var i = 0;
-    while (i < np) {
-        var cur = reg;
-        if (snapshot == 0) { cur = _t_hwreg; }
-        if (i >= vec_len(cur)) { return 0 - 2; }
-        if (vec_get(cur, i) == want) { return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
-}
-
-# handlers.cyr handle_health's body.
-fn _t_health_body(healthy, version, count) {
-    var sb = str_builder_new();
-    if (healthy == 1) {
-        str_builder_add_cstr(sb, "{\"status\":\"ok\"");
-    } else {
-        str_builder_add_cstr(sb, "{\"status\":\"degraded\",\"providers_down\":1");
-    }
-    str_builder_add_cstr(sb, ",\"version\":\"");
-    str_builder_add_cstr(sb, version);
-    str_builder_add_cstr(sb, "\",\"providers_configured\":");
-    str_builder_add_int(sb, count);
-    str_builder_add_cstr(sb, "}");
-    return to_cstr(str_builder_build(sb));
-}
-
-# handlers.cyr handle_metrics' token block (2.7.0, then the 2.6.x one).
-fn _t_tokens_block(p, c, old) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "# HELP hoosh_tokens_total Total tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
-    if (old == 1) {
-        str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
-        str_builder_add_int(sb, p);
-        str_builder_add_cstr(sb, "\nhoosh_tokens_completion_total ");
-        str_builder_add_int(sb, c);
-        str_builder_add_cstr(sb, "\n");
-        return to_cstr(str_builder_build(sb));
-    }
-    str_builder_add_cstr(sb, "hoosh_tokens_total{type=\"prompt\"} ");
-    str_builder_add_int(sb, p);
-    str_builder_add_cstr(sb, "\nhoosh_tokens_total{type=\"completion\"} ");
-    str_builder_add_int(sb, c);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_prompt_total Prompt tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_prompt_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
-    str_builder_add_int(sb, p);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_completion_total Completion tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_completion_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_completion_total ");
-    str_builder_add_int(sb, c);
-    str_builder_add_cstr(sb, "\n");
-    return to_cstr(str_builder_build(sb));
-}
-
-# 1 if every sample line's metric name has a `# TYPE <name> ` line before it.
+# 1 if every sample line's metric name has a `# TYPE <name> ` line before it. A histogram's or summary's samples
+# are its name plus `_bucket`, `_sum` or `_count` (Prometheus text format); a counter's or gauge's are its name.
 fn _t_prom_declared(text) {
     var types = vec_new();
+    var kinds = vec_new();
     var n = strlen(text);
     var i = 0;
     while (i < n) {
@@ -471,14 +388,17 @@ fn _t_prom_declared(text) {
             memcpy(nm, text + ns, ne - ns);
             store8(nm + ne - ns, 0);
             vec_push(types, nm);
+            var grouped = 0;
+            if (e - ne == 10 && memeq(text + ne, " histogram", 10) == 1) { grouped = 1; }
+            if (e - ne == 8 && memeq(text + ne, " summary", 8) == 1) { grouped = 1; }
+            vec_push(kinds, grouped);
         } elif (e > i && load8(text + i) != 35) {
             var se = i;
             while (se < e && load8(text + se) != 32 && load8(text + se) != 123) { se = se + 1; }
             var ok = 0;
             var t = 0;
             while (t < vec_len(types)) {
-                var tn = vec_get(types, t);
-                if (strlen(tn) == se - i && memeq(tn, text + i, se - i) == 1) { ok = 1; }
+                if (_t_prom_family(vec_get(types, t), vec_get(kinds, t), text + i, se - i) == 1) { ok = 1; }
                 t = t + 1;
             }
             if (ok == 0) { return 0; }
@@ -486,6 +406,20 @@ fn _t_prom_declared(text) {
         i = e + 1;
     }
     return 1;
+}
+
+# 1 when the sample name s[0..len) belongs to family `tn`: the name itself, or with `grouped` (a histogram or
+# summary) the name plus `_bucket`, `_sum` or `_count`.
+fn _t_prom_family(tn, grouped, s, len) {
+    var tl = strlen(tn);
+    if (len < tl || memeq(tn, s, tl) == 0) { return 0; }
+    var rest = len - tl;
+    if (rest == 0) { return 1; }
+    if (grouped == 0) { return 0; }
+    if (rest == 7 && memeq(s + tl, "_bucket", 7) == 1) { return 1; }
+    if (rest == 4 && memeq(s + tl, "_sum", 4) == 1) { return 1; }
+    if (rest == 6 && memeq(s + tl, "_count", 6) == 1) { return 1; }
+    return 0;
 }
 
 fn _t_sb_add_span(sb, p, n) {
@@ -678,15 +612,6 @@ fn _t_sampling_str(gen_mt, gen_tp, gen_pp, ollama) {
     var sb = str_builder_new();
     _sb_add_sampling(sb, genopts_new(0, gen_mt, gen_tp, gen_pp), ollama);
     return str_cstr(str_builder_build(sb));
-}
-
-# Mirror of src/main.cyr _requires_post — POST-only (body-taking) paths.
-fn _t_requires_post(path) {
-    if (streq(path, "/v1/chat/completions") == 1) { return 1; }
-    if (streq(path, "/v1/embeddings") == 1) { return 1; }
-    if (streq(path, "/v1/batch") == 1) { return 1; }
-    if (streq(path, "/v1/tools/call") == 1) { return 1; }
-    return 0;
 }
 
 # Prune a cstr messages-array literal; return the pruned cstr. prune_tool_pairs returns (ptr, len): a fresh cstr
@@ -894,29 +819,6 @@ fn _t_respond_capture(status, status_text, body, extra_hdr) {
     if (n < 0) { n = 0; }
     store8(buf + n, 0);
     return str_new(buf, n);
-}
-
-# The 2.5.12 usage block, mirroring handlers.cyr _chat_completion_body's tail.
-# MIRROR — the suite's established convention for handlers.cyr, which cannot be
-# included here (it pulls the whole server). Kept adjacent to the real thing in
-# review; the header-path test above is against real code.
-fn _t_usage_block(ptok, ctok, cost_micro, provider) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, ",\"completion_tokens\":");
-    str_builder_add_int(sb, ctok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, ptok + ctok);
-    str_builder_add_cstr(sb, ",\"cost_micro_usd\":");
-    str_builder_add_int(sb, cost_micro);
-    if (provider != 0) {
-        str_builder_add_cstr(sb, ",\"provider\":\"");
-        str_builder_add_cstr(sb, provider);
-        str_builder_add_cstr(sb, "\"");
-    }
-    str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
 }
 
 # ════════════════════════════════════════════════════════════════
@@ -2912,23 +2814,34 @@ fn main() {
     assert_eq(estimate_tokens(0, 100, 0), 25, "zero ratio falls back to 4.0");
 
     # ── Provider lifecycle: route lookup by provider ──────────────
+    # 2.9.21: router.cyr's own router_find_provider. handlers.cyr's _router_find_provider read main.cyr's _router, so
+    # the tests ran a copy over a bare array, which skipped router_new's priority sort.
     var lc_r1 = route_new(PROV_OPENAI, 1, "https://api.openai.com");
     var lc_r2 = route_new(PROV_OLLAMA, 2, "http://localhost:11434");
     var lc_r3 = route_new(PROV_SYNAPSE, 3, "http://localhost:5000");
-    var lc_routes = alloc(24);
-    store64(lc_routes, lc_r1);
-    store64(lc_routes + 8, lc_r2);
-    store64(lc_routes + 16, lc_r3);
-    assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), lc_r2,
-      "lifecycle: finds ollama route for pull/delete");
-    assert_eq(_find_provider_route(lc_routes, 3, PROV_SYNAPSE), lc_r3,
+    var lc_r4 = route_new(PROV_OLLAMA, 4, "http://backup:11434");
+    var lc_routes = alloc(32);
+    store64(lc_routes, lc_r4);   # listed first, but priority 4: router_new sorts it last
+    store64(lc_routes + 8, lc_r1);
+    store64(lc_routes + 16, lc_r2);
+    store64(lc_routes + 24, lc_r3);
+    var lc_rt = router_new(lc_routes, 4, STRAT_PRIORITY);
+    assert_eq(router_find_provider(lc_rt, PROV_OLLAMA), lc_r2,
+      "lifecycle: finds the higher-priority ollama route for pull/delete");
+    assert_eq(router_find_provider(lc_rt, PROV_SYNAPSE), lc_r3,
       "lifecycle: finds synapse route for training/sync");
-    assert_eq(_find_provider_route(lc_routes, 3, PROV_ANTHROPIC), 0,
+    assert_eq(router_find_provider(lc_rt, PROV_OPENAI), lc_r1, "lifecycle: the top route itself is found");
+    assert_eq(router_find_provider(lc_rt, PROV_ANTHROPIC), 0,
       "lifecycle: missing provider returns 0 (404)");
     # Disabled routes are skipped.
     route_set_enabled(lc_r2, 0);
-    assert_eq(_find_provider_route(lc_routes, 3, PROV_OLLAMA), 0,
-      "lifecycle: disabled ollama route skipped");
+    assert_eq(router_find_provider(lc_rt, PROV_OLLAMA), lc_r4,
+      "lifecycle: a disabled ollama route is skipped for the next one");
+    route_set_enabled(lc_r4, 0);
+    assert_eq(router_find_provider(lc_rt, PROV_OLLAMA), 0,
+      "lifecycle: no enabled ollama route returns 0");
+    assert_eq(router_find_provider(router_new(alloc(8), 0, STRAT_PRIORITY), PROV_OLLAMA), 0,
+      "lifecycle: an empty router returns 0");
 
     # ── http_client: generic method header (GET/POST/DELETE) ──────
     var hdr_buf = alloc(2048);
@@ -3939,16 +3852,46 @@ fn main() {
     assert_eq(257 > 256, 1, "count: 257 messages rejected");
 
     test_group("requires_post");
-    # Body-taking routes are POST-only; a GET used to reach the handler with an
-    # empty body and answer a confusing 400 instead of 405.
-    assert_eq(_t_requires_post("/v1/chat/completions"), 1, "post: chat is POST-only");
-    assert_eq(_t_requires_post("/v1/embeddings"), 1, "post: embeddings is POST-only");
-    assert_eq(_t_requires_post("/v1/tools/call"), 1, "post: tools/call is POST-only");
+    # Body-taking routes are POST-only; a GET used to reach the handler with an empty body and answer a confusing 400
+    # instead of 405. 2.9.21: reqparse.cyr's own _requires_post, over its whole list (the copy kept 4 of the 19).
+    var rpv = vec_new();
+    vec_push(rpv, "/v1/chat/completions");
+    vec_push(rpv, "/v1/embeddings");
+    vec_push(rpv, "/v1/batch");
+    vec_push(rpv, "/v1/tokens/check");
+    vec_push(rpv, "/v1/tokens/reserve");
+    vec_push(rpv, "/v1/tokens/report");
+    vec_push(rpv, "/v1/hardware/placement");
+    vec_push(rpv, "/v1/hardware/cost");
+    vec_push(rpv, "/v1/hardware/training-estimate");
+    vec_push(rpv, "/v1/hardware/model-format");
+    vec_push(rpv, "/v1/hardware/requirement-match");
+    vec_push(rpv, "/v1/hardware/simulate");
+    vec_push(rpv, "/v1/models/pull");
+    vec_push(rpv, "/v1/models/delete");
+    vec_push(rpv, "/v1/training/status");
+    vec_push(rpv, "/v1/cost/estimate");
+    vec_push(rpv, "/v1/cost/recommend");
+    vec_push(rpv, "/v1/tools/call");
+    vec_push(rpv, "/v1/models/refresh");
+    var rpi = 0;
+    while (rpi < vec_len(rpv)) {
+        assert_eq(_requires_post(vec_get(rpv, rpi)), 1, _t_cat("post: POST-only: ", vec_get(rpv, rpi)));
+        rpi = rpi + 1;
+    }
     # GET routes stay permissive on purpose — gating them would break clients
     # that POST today and gain nothing.
-    assert_eq(_t_requires_post("/v1/models"), 0, "post: models unenforced");
-    assert_eq(_t_requires_post("/v1/health"), 0, "post: health unenforced");
-    assert_eq(_t_requires_post("/metrics"), 0, "post: metrics unenforced");
+    assert_eq(_requires_post("/v1/models"), 0, "post: models unenforced");
+    assert_eq(_requires_post("/v1/health"), 0, "post: health unenforced");
+    assert_eq(_requires_post("/metrics"), 0, "post: metrics unenforced");
+    # So are the POST routes that take no body, and /v1/hardware/models answers both verbs.
+    assert_eq(_requires_post("/v1/costs/reset"), 0, "post: costs/reset takes no body, unenforced");
+    assert_eq(_requires_post("/v1/admin/reload"), 0, "post: admin/reload takes no body, unenforced");
+    assert_eq(_requires_post("/v1/catalog/sync"), 0, "post: catalog/sync takes no body, unenforced");
+    assert_eq(_requires_post("/v1/hardware/models"), 0, "post: hardware/models answers GET and POST");
+    # Exact paths only.
+    assert_eq(_requires_post("/v1/chat/completions/"), 0, "post: a trailing slash is another path");
+    assert_eq(_requires_post("/v1/batch/abc"), 0, "post: batch progress (GET /v1/batch/{id}) unenforced");
 
     # ── v2.5.3 provider correctness ──
     test_group("status_retryable");
@@ -4761,23 +4704,37 @@ fn main() {
       "caps: 9e15 M params wraps the training base");
 
     test_group("hardware_requirement_snapshot");
-    # 2.6.13: handle_hw_requirement_match takes the count and every profile from
-    # one load of _hw_registry. A refresh that swapped in a smaller registry between
-    # two loads made vec_get index past the end and exit the worker thread.
-    var rqa = vec_new();
-    vec_push(rqa, 0); vec_push(rqa, 1); vec_push(rqa, 2);   # CPU, CUDA, ROCm
-    var rqb = vec_new();
-    vec_push(rqb, 0);                                       # CPU only
-    _t_hwreg = rqa;
-    assert_eq(_t_req_scan(0, rqb, 9), 0 - 2, "req snapshot: two loads index past a smaller registry");
-    _t_hwreg = rqa;
-    assert_eq(_t_req_scan(1, rqb, 9), 0 - 1, "req snapshot: one load finishes the scan");
-    _t_hwreg = rqa;
-    assert_eq(_t_req_scan(1, rqb, 2), 2, "req snapshot: answers from the registry it started on");
-    _t_hwreg = rqa;
-    assert_eq(_t_req_scan(1, 0, 1), 1, "req snapshot: no refresh, first match");
-    _t_hwreg = rqa;
-    assert_eq(_t_req_scan(0, 0, 1), 1, "req snapshot: without a refresh the old read agreed");
+    # 2.9.21: hardware.cyr's own hw_requirement_find, over real registries (a copy scanned a vec of device kinds).
+    var rq_cpu = profile_cpu(68719476736);
+    var rq_gpu0 = profile_cuda(0, 25769803776);
+    var rq_gpu1 = profile_cuda(1, 85899345920);
+    var rq_tpu = profile_tpu(0, 4, TPU_V5E);
+    var rqd = vec_new();
+    vec_push(rqd, rq_cpu);
+    vec_push(rqd, rq_gpu0);
+    vec_push(rqd, rq_gpu1);
+    vec_push(rqd, rq_tpu);
+    var rqa = registry_from_profiles(rqd);
+    assert_eq(hw_requirement_find(rqa, REQ_GPU, 1), rq_gpu0, "req: the first GPU satisfies gpu");
+    assert_eq(hw_requirement_find(rqa, REQ_NONE, 1), rq_cpu, "req: none is met by the first device, the CPU");
+    assert_eq(hw_requirement_find(rqa, REQ_TPU, 4), rq_tpu, "req: a 4-chip TPU meets tpu with min_chips 4");
+    assert_eq(hw_requirement_find(rqa, REQ_TPU, 8), 0, "req: but not min_chips 8");
+    assert_eq(hw_requirement_find(rqa, REQ_GAUDI, 1), 0, "req: no Gaudi, no match");
+    assert_eq(hw_requirement_find(0, REQ_NONE, 1), 0, "req: no registry (not detected), no match");
+    # An unavailable device is passed over for the next one that qualifies.
+    profile_set_available(rq_gpu0, 0);
+    assert_eq(hw_requirement_find(rqa, REQ_GPU, 1), rq_gpu1, "req: an unavailable GPU is skipped");
+    profile_set_available(rq_gpu0, 1);
+    # 2.6.13: the scan reads only the registry it is handed. A refresh swaps _hw_registry mid-request, and through
+    # 2.6.12 the count and the profiles came from separate loads of it, so a smaller registry swapped in between
+    # made vec_get index past its end and exit the worker. Here _hw_registry is a one-CPU registry for the call.
+    var rq_saved = _hw_registry;
+    var rqc = vec_new();
+    vec_push(rqc, profile_cpu(68719476736));
+    _hw_registry = registry_from_profiles(rqc);
+    assert_eq(hw_requirement_find(rqa, REQ_GPU, 1), rq_gpu0, "req snapshot: answers from the registry it was given");
+    assert_eq(hw_requirement_find(rqa, REQ_TPU, 1), rq_tpu, "req snapshot: and scans all of it");
+    _hw_registry = rq_saved;
 
     # ── 2.7.0: the rest of rust-old ──
     test_group("rustold_config_cli");
@@ -4812,21 +4769,52 @@ fn main() {
     test_group("rustold_health_metrics");
     # /v1/health carries version and providers_configured (rust-old's conformance
     # tests required both); degraded keeps its 503 and providers_down.
-    var hb = _t_health_body(1, "2.7.0", 4);
+    # 2.9.21: health.cyr's own health_body and health_verdict (the body was a copy).
+    var hb = to_cstr(health_body(1, "2.7.0", 4));
     assert_streq(hb, "{\"status\":\"ok\",\"version\":\"2.7.0\",\"providers_configured\":4}", "health: ok body");
-    var hd = _t_health_body(0, "2.7.0", 4);
-    assert_eq(str_contains(str_from(hd), str_from("\"providers_down\":1,\"version\":\"2.7.0\"")), 1,
+    var hd = to_cstr(health_body(0, "2.7.0", 4));
+    assert_streq(hd, "{\"status\":\"degraded\",\"providers_down\":1,\"version\":\"2.7.0\",\"providers_configured\":4}",
       "health: degraded body keeps providers_down and adds version");
-    # /metrics: the old block declared hoosh_tokens_total and emitted other names.
-    assert_eq(_t_prom_declared(_t_tokens_block(10, 20, 1)), 0, "metrics: 2.6 samples were undeclared");
-    var tb = _t_tokens_block(10, 20, 0);
-    assert_eq(_t_prom_declared(tb), 1, "metrics: every sample is declared");
-    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"prompt\"} 10")), 1,
+    # The verdict is the top-priority route's health (router_new sorts by priority); no routes is healthy.
+    var hv1 = route_new(PROV_OLLAMA, 2, "http://localhost:11434");
+    var hv2 = route_new(PROV_OPENAI, 1, "https://api.openai.com");
+    var hvr = alloc(16);
+    store64(hvr, hv1);
+    store64(hvr + 8, hv2);
+    var hvrt = router_new(hvr, 2, STRAT_PRIORITY);
+    assert_eq(health_verdict(hvrt), 1, "health: ok while the top route is healthy");
+    store64(route_health(hv1) + HEALTH_OK, 0);
+    assert_eq(health_verdict(hvrt), 1, "health: a lower-priority route down does not degrade it");
+    store64(route_health(hv2) + HEALTH_OK, 0);
+    assert_eq(health_verdict(hvrt), 0, "health: the top-priority route down degrades it");
+    assert_eq(health_verdict(router_new(alloc(8), 0, STRAT_PRIORITY)), 1, "health: no routes is healthy");
+    # /metrics: 2.9.21 checks metrics.cyr's own metrics_render (a copy of its token block stood here). First the
+    # checker: the 2.6 token block declared hoosh_tokens_total and emitted other names.
+    var m26 = _t_cat("# HELP hoosh_tokens_total Total tokens processed\n# TYPE hoosh_tokens_total counter\n",
+      "hoosh_tokens_prompt_total 10\nhoosh_tokens_completion_total 20\n");
+    assert_eq(_t_prom_declared(m26), 0, "metrics: 2.6 samples were undeclared");
+    assert_eq(_t_prom_declared("# TYPE h histogram\nh_bucket{le=\"1\"} 1\nh_sum 1\nh_count 1\n"), 1,
+      "metrics: a histogram's _bucket, _sum and _count samples are its own");
+    assert_eq(_t_prom_declared("# TYPE c counter\nc_count 1\n"), 0, "metrics: a counter has no _count sample");
+    metrics_reset();
+    metrics_record(10, 20);
+    var tb = to_cstr(metrics_render());
+    assert_eq(_t_prom_declared(tb), 1, "metrics: every sample in the real body is declared");
+    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"prompt\"} 10\n")), 1,
       "metrics: rust-old's labelled prompt series");
-    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"completion\"} 20")), 1,
+    assert_eq(str_contains(str_from(tb), str_from("hoosh_tokens_total{type=\"completion\"} 20\n")), 1,
       "metrics: rust-old's labelled completion series");
-    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_tokens_prompt_total 10")), 1,
-      "metrics: the 2.x series is still there");
+    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_tokens_prompt_total 10\n")), 1,
+      "metrics: the 2.x prompt series is still there");
+    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_tokens_completion_total 20\n")), 1,
+      "metrics: the 2.x completion series is still there");
+    assert_eq(memeq(tb, "# HELP hoosh_requests_total ", 28), 1, "metrics: the body opens with the request counter");
+    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_requests_total 1\n")), 1, "metrics: one request counted");
+    assert_eq(str_contains(str_from(tb), str_from("# TYPE hoosh_provider_latency_ms histogram\n")), 1,
+      "metrics: the latency histogram recorded above is in it");
+    assert_eq(str_contains(str_from(tb), str_from("\nhoosh_events_published_total ")), 1,
+      "metrics: and the event bus counter closes it");
+    metrics_reset();
 
     test_group("rustold_completion_id");
     # Every completion used to be "chatcmpl-hoosh" with no `created`. These run
@@ -5791,7 +5779,8 @@ fn main() {
 
     # usage now carries the cost hoosh already computed, in the same integer
     # micro-USD unit estimate_cost_micro returns — no conversion, no rounding.
-    var u = _t_usage_block(1000, 500, 450, "openai");
+    # 2.9.21: the real _chat_completion_body (provider_err.cyr), not a copy of its usage block.
+    var u = _chat_completion_body("gpt-4o-mini", "hi", 1000, 500, 0, 450, "openai", FIN_STOP);
     assert_eq(str_contains(u, str_from("\"cost_micro_usd\":450")), 1,
       "usage: carries the integer micro-USD cost");
     assert_eq(str_contains(u, str_from("\"provider\":\"openai\"")), 1,
@@ -5799,6 +5788,25 @@ fn main() {
     whenever DLP re-routes a confidential request to a local one");
     assert_eq(str_contains(u, str_from("\"total_tokens\":1500")), 1,
       "usage: the pre-existing fields are unchanged");
+    # The whole envelope: the head chat_id_new just started, the message, the finish reason, then usage closing
+    # both objects.
+    var ue = str_builder_new();
+    sb_add_chat_head(ue, "chat.completion");
+    str_builder_add_cstr(ue, "\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"message\":");
+    str_builder_add_cstr(ue, "{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],");
+    str_builder_add_cstr(ue, "\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"total_tokens\":1500,");
+    str_builder_add_cstr(ue, "\"cost_micro_usd\":450,\"provider\":\"openai\"}}");
+    assert_streq(to_cstr(u), to_cstr(str_builder_build(ue)), "completion: the whole envelope");
+    # Tool calls ride in the message and make the finish "tool_calls", unless the reply was cut short.
+    var ut = to_cstr(_chat_completion_body("gpt-4o-mini", "", 3, 2, "[{\"id\":\"c1\"}]", 0, 0, FIN_STOP));
+    var ut_want = "\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\"}]},\"finish_reason\":\"tool_calls\"";
+    assert_eq(_t_has(ut, strlen(ut), ut_want), 1, "completion: tool calls in the message, finish tool_calls");
+    var utl = to_cstr(_chat_completion_body("gpt-4o-mini", "", 3, 2, "[{\"id\":\"c1\"}]", 0, 0, FIN_LENGTH));
+    assert_eq(_t_has(utl, strlen(utl), "\"finish_reason\":\"length\""), 1,
+      "completion: a cut-off reply with tool calls still says length");
+    var utn = to_cstr(_chat_completion_body("gpt-4o-mini", "x", 3, 2, 0, 0, 0, FIN_NONE));
+    assert_eq(_t_has(utn, strlen(utn), "\"finish_reason\":\"stop\""), 1,
+      "completion: no reason from the provider reads as stop");
 
     # cost_record now RETURNS what it accumulated, so the response body reports
     # the same value rather than a second computation that merely ought to agree.
@@ -5816,13 +5824,13 @@ fn main() {
       "usage: the response cost IS estimate_cost_micro, so it reconciles with /v1/costs");
 
     # A local provider is free, and that has to survive into the response.
-    var ul = _t_usage_block(1000, 1000, estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000),
-      "ollama");
+    var ul_cost = estimate_cost_micro("llama3", PROV_OLLAMA, 1000, 1000);
+    var ul = _chat_completion_body("llama3", "hi", 1000, 1000, 0, ul_cost, "ollama", FIN_STOP);
     assert_eq(str_contains(ul, str_from("\"cost_micro_usd\":0")), 1,
       "usage: a local model reports zero cost rather than omitting the field");
 
     # provider is optional in the builder; omitting it must not emit an empty key.
-    assert_eq(str_contains(_t_usage_block(1, 1, 0, 0), str_from("provider")), 0,
+    assert_eq(str_contains(_chat_completion_body("m", "x", 1, 1, 0, 0, 0, FIN_STOP), str_from("provider")), 0,
       "usage: an absent provider omits the field entirely");
 
     # ================================================================

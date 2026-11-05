@@ -6,35 +6,14 @@
 # Globals shared with main
 var _audit_entries = 1;
 
-# GET /v1/health
+# GET /v1/health. The verdict and the body are health.cyr's (2.9.21: health_verdict, health_body), so the tests run
+# them; this answers 200 or 503 by the verdict. One load of _router for both: a reload swaps it, and through 2.9.20
+# the routes and the count came from separate loads, so a reload between them could pair one router's count with
+# another's routes.
 fn handle_health(cfd) {
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var healthy = 1;
-    if (count > 0) {
-        # Serve from the background prober's state instead of connecting here.
-        # This endpoint is deliberately exempt from the auth gate and is not
-        # rate limited, and the inline socket was a bare blocking connect(2)
-        # with no deadline (and a possible DNS resolve), so an unauthenticated
-        # caller could park a worker per request. 2.5.5 fixed exactly this in
-        # handle_health_providers; handle_health was left behind.
-        var r = load64(routes);
-        if (route_healthy(r) == 0) { healthy = 0; }
-    }
-    # 2.7.0: version and providers_configured, as rust-old reported (its
-    # conformance tests required both).
-    var sb = str_builder_new();
-    if (healthy == 1) {
-        str_builder_add_cstr(sb, "{\"status\":\"ok\"");
-    } else {
-        str_builder_add_cstr(sb, "{\"status\":\"degraded\",\"providers_down\":1");
-    }
-    str_builder_add_cstr(sb, ",\"version\":\"");
-    str_builder_add_cstr(sb, HOOSH_VERSION);
-    str_builder_add_cstr(sb, "\",\"providers_configured\":");
-    str_builder_add_int(sb, count);
-    str_builder_add_cstr(sb, "}");
-    var body = str_builder_build(sb);
+    var rt = _router;
+    var healthy = health_verdict(rt);
+    var body = health_body(healthy, HOOSH_VERSION, load64(rt + ROUTER_COUNT));
     if (healthy == 1) { return http_json_ok(cfd, body); }
     return http_respond(cfd, "503", "Service Unavailable", to_cstr(body), str_len(body));
 }
@@ -548,21 +527,6 @@ fn handle_models_refresh(cfd) {
     return http_json_ok(cfd, str_builder_build(sb));
 }
 
-# Find the first enabled route for a provider type, or 0 if none.
-fn _router_find_provider(prov) {
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (route_provider(r) == prov) { return r; }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 # GET /api/tags — native Ollama-compatible model listing.
 # Emits each enabled route's model patterns in Ollama's tags shape so Ollama
 # clients pointed at the gateway can enumerate available models.
@@ -641,7 +605,7 @@ fn handle_model_pull(cfd, body_ptr, body_len) {
     if (model == 0) { return http_bad_request(cfd, "missing model"); }
     var model_cstr = to_cstr(model);
     if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
-    var route = _router_find_provider(PROV_OLLAMA);
+    var route = router_find_provider(_router, PROV_OLLAMA);
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no ollama provider configured");
     }
@@ -660,7 +624,7 @@ fn handle_model_delete(cfd, body_ptr, body_len) {
     if (model == 0) { return http_bad_request(cfd, "missing model"); }
     var model_cstr = to_cstr(model);
     if (strlen(model_cstr) == 0) { return http_bad_request(cfd, "empty model"); }
-    var route = _router_find_provider(PROV_OLLAMA);
+    var route = router_find_provider(_router, PROV_OLLAMA);
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no ollama provider configured");
     }
@@ -696,7 +660,7 @@ fn handle_synapse_training(cfd, body_ptr, body_len) {
         if (ok_ch == 0) { return http_bad_request(cfd, "invalid job_id"); }
         jci = jci + 1;
     }
-    var route = _router_find_provider(PROV_SYNAPSE);
+    var route = router_find_provider(_router, PROV_SYNAPSE);
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no synapse provider configured");
     }
@@ -710,7 +674,7 @@ fn handle_synapse_training(cfd, body_ptr, body_len) {
 
 # POST /v1/catalog/sync — Synapse sync_catalog.
 fn handle_synapse_sync(cfd) {
-    var route = _router_find_provider(PROV_SYNAPSE);
+    var route = router_find_provider(_router, PROV_SYNAPSE);
     if (route == 0) {
         return http_error(cfd, "404", "Not Found", "no synapse provider configured");
     }
@@ -1439,8 +1403,8 @@ fn handle_hw_model_format(cfd, body_ptr, body_len) {
 
 # POST /v1/hardware/requirement-match — does the detected hardware satisfy a
 # scheduler requirement? Body {requirement: "gpu"|"tpu"|..., min_chips?: N}.
-# No lock: the scan reads one snapshot of the registry (below). hw_refresh swaps
-# in a new registry rather than editing the current one.
+# No lock: the scan reads one snapshot of the registry (hw_requirement_find). hw_refresh
+# swaps in a new registry rather than editing the current one.
 fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
     var pairs = json_parse(str_new(body_ptr, body_len));
@@ -1452,24 +1416,8 @@ fn handle_hw_requirement_match(cfd, body_ptr, body_len) {
     var min_chips = 1;
     var mc_str = bayan_json_get_by_cstr(pairs, "min_chips");
     if (mc_str != 0) { min_chips = str_to_int(mc_str); }
-    var hit = 0;
-    # 2.6.13: one load of the registry for the count and every profile. Since
-    # 2.5.7 [hardware] refresh_interval_secs lets hw_refresh swap _hw_registry
-    # mid-request. With the count and the profiles on separate loads, a refresh
-    # that found fewer devices made vec_get call _vec_die(), which exits only the
-    # calling worker: the client hung, and sock_close and wq_done never ran.
-    # hw_summary_json has the same fix. The bump allocator never frees, so the
-    # snapshot stays valid after a swap.
-    var reg = _hw_registry;
-    if (reg != 0) {
-        var np = reg_num_profiles(reg);
-        var i = 0;
-        while (i < np && hit == 0) {
-            var p = reg_get_profile(reg, i);
-            if (requirement_satisfied(req, min_chips, p) == 1) { hit = p; }
-            i = i + 1;
-        }
-    }
+    # One load of _hw_registry: hw_requirement_find (hardware.cyr) scans the registry it is handed, never the global.
+    var hit = hw_requirement_find(_hw_registry, req, min_chips);
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"requirement\":\"");
     str_builder_add_cstr(sb, requirement_name(req));
@@ -1716,43 +1664,7 @@ fn handle_hw_compatible(cfd) {
 
 # GET /metrics
 fn handle_metrics(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "# HELP hoosh_requests_total Total inference requests\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_requests_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_requests_total ");
-    str_builder_add_int(sb, _met_requests);
-    # 2.7.0: hoosh_tokens_total carries its samples, split by a `type` label as
-    # rust-old emitted them. The family used to be declared with no samples of
-    # its own, and the numbers went out as hoosh_tokens_prompt_total and
-    # hoosh_tokens_completion_total, undeclared. Those two stay, now declared, so
-    # 2.x dashboards keep working.
-    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_total Total tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_total{type=\"prompt\"} ");
-    str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, "\nhoosh_tokens_total{type=\"completion\"} ");
-    str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_prompt_total Prompt tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_prompt_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_prompt_total ");
-    str_builder_add_int(sb, _met_prompt_tokens);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_tokens_completion_total Completion tokens processed\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_tokens_completion_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_tokens_completion_total ");
-    str_builder_add_int(sb, _met_comp_tokens);
-    str_builder_add_cstr(sb, "\n# HELP hoosh_providers_configured ");
-    str_builder_add_cstr(sb, "Number of configured providers\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_providers_configured gauge\n");
-    str_builder_add_cstr(sb, "hoosh_providers_configured ");
-    str_builder_add_int(sb, _met_providers);
-    str_builder_add_cstr(sb, "\n");
-    metrics_emit_latency(sb);
-    str_builder_add_cstr(sb, "# HELP hoosh_events_published_total Provider events published to the bus\n");
-    str_builder_add_cstr(sb, "# TYPE hoosh_events_published_total counter\n");
-    str_builder_add_cstr(sb, "hoosh_events_published_total ");
-    str_builder_add_int(sb, events_total_published());
-    str_builder_add_cstr(sb, "\n");
-    var body = str_builder_build(sb);
+    var body = metrics_render();
     var bd = to_cstr(body);
     var cr = make_crlf();
     var hdr = str_builder_new();
@@ -2477,59 +2389,8 @@ fn _embed_query_body(body_ptr, body_len) {
 
 # Build an OpenAI chat.completion response envelope (str). Shared by the live
 # chat path and cache warming so a warmed entry is byte-identical to a fresh one.
-# Build an OpenAI-compatible chat-completion body.
-#
-# 2.5.12: `usage` also carries `cost_micro_usd` and `provider`. Both were
-# already computed by the time this ran — `cost_record` prices the call with
-# `estimate_cost_micro` and the route knows its provider — and neither reached
-# the client, so a consumer had to re-implement hoosh's pricing table to report
-# a per-request cost, and had to guess the provider from the model name. That
-# guess is wrong whenever DLP re-routes a confidential request to a local
-# provider: hoosh bills $0 and the consumer prices it as remote.
-#
-# `cost_micro_usd` is integer micro-USD, the same unit `estimate_cost_micro`
-# returns, so a consumer never converts and never rounds. Both fields are
-# additive inside the existing `usage` object; an OpenAI-shaped client ignores
-# unknown fields. `provider` is the real serving route, not the requested one.
-fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
-    var sb = str_builder_new();
-    # 2.7.0: a fresh id and created time per completion (see provider_err.cyr).
-    chat_id_new();
-    sb_add_chat_head(sb, "chat.completion");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"message\":{\"role\":\"assistant\",");
-    str_builder_add_cstr(sb, "\"content\":\"");
-    str_builder_add_cstr(sb, resp_text);
-    str_builder_add_cstr(sb, "\"");
-    var has_tools = 0;
-    if (tool_calls != 0) {
-        str_builder_add_cstr(sb, ",\"tool_calls\":");
-        str_builder_add_cstr(sb, tool_calls);
-        has_tools = 1;
-    }
-    # 2.8.0: the provider's own reason, mapped (outcome.cyr); "tool_calls" whenever calls are carried, unless the
-    # reply was cut short or declined.
-    str_builder_add_cstr(sb, "},\"finish_reason\":\"");
-    str_builder_add_cstr(sb, outcome_finish_name(outcome_finish_final(finish, has_tools)));
-    str_builder_add_cstr(sb, "\"}],");
-    str_builder_add_cstr(sb, "\"usage\":{\"prompt_tokens\":");
-    str_builder_add_int(sb, ptok);
-    str_builder_add_cstr(sb, ",\"completion_tokens\":");
-    str_builder_add_int(sb, ctok);
-    str_builder_add_cstr(sb, ",\"total_tokens\":");
-    str_builder_add_int(sb, ptok + ctok);
-    str_builder_add_cstr(sb, ",\"cost_micro_usd\":");
-    str_builder_add_int(sb, cost_micro);
-    if (provider != 0) {
-        str_builder_add_cstr(sb, ",\"provider\":\"");
-        str_builder_add_cstr(sb, provider);
-        str_builder_add_cstr(sb, "\"");
-    }
-    str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
-}
+# _chat_completion_body, the chat.completion envelope, is provider_err.cyr's (2.9.21), beside the id and head it
+# opens with, so the tests run it.
 
 # POST /v1/chat/completions
 # ── Deferred response descriptor ──────────────

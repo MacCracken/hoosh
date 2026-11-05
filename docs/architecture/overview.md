@@ -74,11 +74,11 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | Module | Role |
 |--------|------|
 | `types.cyr` | Provider enum (`PROV_*`), `provider_name`, error codes, `HOOSH_VERSION` |
-| `router.cyr` / `route.cyr` | Provider selection (4 strategies) + route records |
+| `router.cyr` / `route.cyr` | Provider selection (4 strategies), the first enabled route of a provider type (2.9.21) + route records |
 | `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing |
 | `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building |
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
-| `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body |
+| `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`) |
 | `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, and the job constructors |
 | `pool.cyr` | Unified worker pool (v2.4.0) — 7 workers draining `wq.cyr`'s queue (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
@@ -87,7 +87,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring, span and batch JSON |
 | `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
-| `metrics.cyr` | Prometheus counters + per-provider latency histograms |
+| `metrics.cyr` | Prometheus counters + per-provider latency histograms; the `/metrics` body (`metrics_render`, 2.9.21) |
 | `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry + semantic (embedding cosine) cache |
 | `budget.cyr` | Named token pools (reserve → commit/release) |
 | `ratelimit.cyr` | Per-provider RPM token bucket (`hoosh_ratelimit_*` — majra exports colliding names) |
@@ -96,6 +96,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
 | `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
 | `urlparse.cyr` | Scheme-aware host / port of a base url (2.8.0 — the remote health probe had been reading `https://` urls as `localhost:80`) |
+| `provider_err.cyr` | The provider's own error kept and relayed (2.6.5), and the OpenAI envelope: completion id and head, `chat_rehead`, the `chat.completion` body (`_chat_completion_body`, 2.9.21 from `handlers.cyr`) |
 | `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09 |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
@@ -104,7 +105,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `cli.cyr` | The command line's flag parser (2.9.19 split from `main.cyr`): `--name value`, `-s value`, `--name=value`, positionals, `infer`'s model and prompt, over an argument vec |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
 | `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
-| `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends |
+| `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends; `/v1/health`'s verdict and body (2.9.21) |
 | `auth.cyr` | Bearer-token auth (constant-time) |
 | `logging.cyr` | Structured operational logging (sakshi) + the coarse clock ticker (`hoosh_now_ms`) |
 

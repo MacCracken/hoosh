@@ -45,10 +45,19 @@ The bands are a plan, not a promise. Every item was checked against the code and
       itself reads sockets and dispatches into `handlers.cyr`.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
-  - **What the test file still mirrors** (2.9.20): from `handlers.cyr`, the usage block of `_chat_completion_body`
-    and the requirement-match scan. 2.9.16–2.9.20 moved the handlers', `batch.cyr`'s and `config.cyr`'s
-    self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`, `main.cyr`'s flag parser into `cli.cyr`, and
-    `pool.cyr`'s work-queue ring into `wq.cyr`. **Next:** the two `handlers.cyr` pieces.
+  - **What the test file still copies** (a full scan of its helpers in 2.9.21), all from `handlers.cyr`:
+    - the embeddings helpers `_json_raw_value` and `_ollama_embed_to_openai`;
+    - the model listing's `_models_emit` and `_models_scan`;
+    - the pattern-is-literal check (`_models_from_catalog`, `handle_ollama_tags`);
+    - the local stream's keep-alive loop, whose copy re-declares `SSE_KEEPALIVE_S` and the I/O timeout;
+    - `handle_hw_simulate`'s `memory_bytes` token loop.
+
+    Through 2.9.20 this list named two pieces; the scan found the six above and four more. 2.9.16–2.9.21 moved the
+    handlers', `batch.cyr`'s and `config.cyr`'s self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`,
+    `main.cyr`'s flag parser into `cli.cyr`, `pool.cyr`'s work-queue ring into `wq.cyr`, and in 2.9.21 the
+    completion envelope, the provider lookup, the requirement scan, `/v1/health`'s verdict and body, the `/metrics`
+    body and the POST-only path list into `provider_err.cyr`, `router.cyr`, `hardware.cyr`, `health.cyr`,
+    `metrics.cyr` and `reqparse.cyr`. **Next:** the six above, then the bench file.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
     modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as
@@ -64,7 +73,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
   the 25 rows measures a copy that can drift from `src/` as the test copies did. A real change in `src/` cannot move
   them, and a regression there cannot show up in them. The test file has now proved which modules include cleanly,
   so the same method applies: include them in the bench, delete the copies, and record each row's break in the
-  CHANGELOG with an old-against-new A/B. This starts after the test file's last two `handlers.cyr` pieces.
+  CHANGELOG with an old-against-new A/B. This starts after the test file's last `handlers.cyr` copies.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-05 (**v2.9.20**: CHANGELOG, README stats, state, the roadmap's mirror list,
-> `architecture/overview.md`'s `wq.cyr` / `pool.cyr` rows, the roadmap's new bench-file item, the CI coverage step's
-> comment). Also 2026-11-05: **v2.9.19** (the `cli.cyr` row). On
+> **Last refresh**: 2026-11-05 (**v2.9.21**: CHANGELOG, README stats, state, the roadmap's list of what the test
+> file still copies (rescanned in full), `architecture/overview.md`'s module rows for the six moved pieces and a new
+> `provider_err.cyr` row). Also 2026-11-05: **v2.9.20** (the `wq.cyr` / `pool.cyr` rows, the roadmap's bench-file
+> item, the CI coverage step's comment), **v2.9.19** (the `cli.cyr` row). On
 > 2026-11-04: **v2.9.18** (the `config.cyr` / `cfgparse.cyr` rows),
 > **v2.9.17** (bote 3.8.9 in state), **v2.9.16**, **v2.9.15**, **v2.9.14** (`architecture/overview.md`'s module map
 > for the `otlp.cyr` / `otlp_export.cyr` split), **v2.9.13** (`scripts/shutdown-smoke.sh` and its CI step),

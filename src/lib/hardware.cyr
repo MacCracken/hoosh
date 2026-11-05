@@ -382,6 +382,26 @@ fn hw_gpu_count() {
     return reg_count_by_family(_hw_registry, FAMILY_GPU);
 }
 
+# The first profile in `reg` that satisfies requirement `req` with at least `min_chips`, or 0 (also for a null
+# registry). /v1/hardware/requirement-match answers from it.
+#
+# 2.6.13: the scan reads ONE registry, the one it is handed. Since 2.5.7 [hardware] refresh_interval_secs lets
+# hw_refresh swap _hw_registry mid-request. With the count and the profiles on separate loads of the global, a
+# refresh that found fewer devices made vec_get call _vec_die(), which exits only the calling worker: the client
+# hung, and sock_close and wq_done never ran. hw_summary_json has the same fix. The bump allocator never frees, so
+# the snapshot stays valid after a swap. 2.9.21 moved the scan here from the handler, so the tests run it.
+fn hw_requirement_find(reg, req, min_chips) {
+    if (reg == 0) { return 0; }
+    var np = reg_num_profiles(reg);
+    var i = 0;
+    while (i < np) {
+        var p = reg_get_profile(reg, i);
+        if (requirement_satisfied(req, min_chips, p) == 1) { return p; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # --- JSON summary for API responses ---
 
 fn hw_summary_json(sb) {

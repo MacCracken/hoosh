@@ -8,7 +8,8 @@
 #   - the hardware endpoints' inputs: _hoosh_req_from_str, _hw_blank, _hw_num_byte, _hw_whole_bounded,
 #     _hw_json_whole;
 #   - POST /v1/batch's body and status names (2.9.17, from batch.cyr): _batch_extract_requests, _batch_split,
-#     _batch_is_async, _batch_status_name and the BATCH_* status values.
+#     _batch_is_async, _batch_status_name and the BATCH_* status values;
+#   - which paths are POST-only (2.9.21, from main.cyr): _requires_post.
 # Requires: jsonlite.cyr (_top_key_value), catalog.cyr (catalog_req_effort), auth.cyr (auth_identity),
 # http_server.cyr (to_cstr), types.cyr (GEN_UNSET), sigil (sha256_hex), ai-hwaccel (REQ_*).
 
@@ -354,5 +355,32 @@ fn _batch_is_async(body, len) {
     var j = _top_key_value(body, len, "\"async\"", 7);
     if (j < 0) { return 0; }
     if (j + 4 <= len && memeq(body + j, "true", 4) == 1) { return 1; }
+    return 0;
+}
+
+# Paths whose handler parses a request body — these are POST-only; main.cyr's http_route answers 405 to any other
+# verb on them. Keep in sync with the POST section of http_route; a route missing here simply keeps the old
+# verb-agnostic behavior rather than breaking. /v1/models/refresh takes no body but runs a refresh, so it is here
+# too. Moved from main.cyr in 2.9.21: the tests' copy had kept 4 of these 19 paths.
+fn _requires_post(path) {
+    if (streq(path, "/v1/chat/completions") == 1) { return 1; }
+    if (streq(path, "/v1/embeddings") == 1) { return 1; }
+    if (streq(path, "/v1/batch") == 1) { return 1; }
+    if (streq(path, "/v1/tokens/check") == 1) { return 1; }
+    if (streq(path, "/v1/tokens/reserve") == 1) { return 1; }
+    if (streq(path, "/v1/tokens/report") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/placement") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/cost") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/training-estimate") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/model-format") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/requirement-match") == 1) { return 1; }
+    if (streq(path, "/v1/hardware/simulate") == 1) { return 1; }
+    if (streq(path, "/v1/models/pull") == 1) { return 1; }
+    if (streq(path, "/v1/models/delete") == 1) { return 1; }
+    if (streq(path, "/v1/training/status") == 1) { return 1; }
+    if (streq(path, "/v1/cost/estimate") == 1) { return 1; }
+    if (streq(path, "/v1/cost/recommend") == 1) { return 1; }
+    if (streq(path, "/v1/tools/call") == 1) { return 1; }
+    if (streq(path, "/v1/models/refresh") == 1) { return 1; }
     return 0;
 }

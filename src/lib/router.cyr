@@ -45,6 +45,23 @@ fn router_new(routes, count, strategy) {
     return rt;
 }
 
+# The first enabled route of provider type `prov`, in priority order, or 0 if none. The model-management and
+# training handlers use it to find the Ollama or Synapse route. It was handlers.cyr's _router_find_provider, over
+# main.cyr's _router; 2.9.21 moved it here, taking the router, so the tests run it.
+fn router_find_provider(rt, prov) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (route_provider(r) == prov) { return r; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn router_select(rt, model) {
     var routes = load64(rt + ROUTER_ROUTES);
     var count = load64(rt + ROUTER_COUNT);

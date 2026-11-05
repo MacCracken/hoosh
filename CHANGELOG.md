@@ -5,6 +5,101 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.21] — 2026-11-05
+
+**Six more copies in the test file replaced by the real code.** The roadmap named two pieces of `handlers.cyr`; a
+scan found four more in `handlers.cyr` and `main.cyr`. Each moved, unchanged apart from taking what it used to read
+from a global, into a module the tests already include. One copy had drifted: `_requires_post`'s copy listed 4 of
+its 19 paths. No behavior changed, except one read of `_router` in `/v1/health` (below). **1584 assertions** in 160
+groups. All gates are clean: fmt, lint, vet, deny, coverage (403/697, 57%; 36 of 42 modules included for real), the
+security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — each piece moved to an includable module
+
+| what | from | to |
+|---|---|---|
+| `_chat_completion_body`, the `chat.completion` envelope | `handlers.cyr` | `provider_err.cyr`, beside the id and head it opens with |
+| the first enabled route of a provider type: `router_find_provider(rt, prov)` | `handlers.cyr`'s `_router_find_provider(prov)` | `router.cyr` |
+| the requirement-match scan: `hw_requirement_find(reg, req, min_chips)` | `handle_hw_requirement_match` | `hardware.cyr` |
+| `/v1/health`'s verdict and body: `health_verdict(rt)`, `health_body(healthy, version, count)` | `handle_health` | `health.cyr` |
+| the `/metrics` body: `metrics_render()` | `handle_metrics` | `metrics.cyr` |
+| the POST-only paths: `_requires_post` | `main.cyr` | `reqparse.cyr` |
+
+The handlers now call these. `router_find_provider` and `health_verdict` take the router as an argument, and
+`hw_requirement_find` takes the registry, instead of reading `_router` or `_hw_registry`. The binary is the same
+size.
+
+### Fixed — `/v1/health` read `_router` twice
+
+`handle_health` took the routes and the count from two separate loads of `_router`. A config reload swaps that
+pointer, so a reload between the two loads could pair one router's count with another's routes: from no routes to
+some, that read `routes[0]` out of an empty array. It now loads `_router` once.
+
+### Changed — the tests run them for real
+
+**Gone:** `_t_usage_block`, `_find_provider_route`, `_t_req_scan` and `_t_hwreg`, `_t_health_body`,
+`_t_tokens_block` and `_t_requires_post`, plus two comments left over from copies deleted earlier.
+
+**New and rewritten assertions:**
+- **`_chat_completion_body`:** the whole envelope, exactly. Tool calls ride in the message and make the finish
+  `tool_calls`, but a cut-off reply still says `length`, and no reason from the provider reads as `stop`. The
+  three usage assertions now run on the real body.
+- **`router_find_provider`:** on a real router, so the priority sort applies. A route listed first with a lower
+  priority is found after the higher-priority one; disabled routes are skipped for the next match; the top route
+  itself is found; an empty router returns 0.
+- **`hw_requirement_find`:** on real ai-hwaccel registries: the first GPU, the CPU for `none`, a 4-chip TPU for
+  `min_chips` 4 but not 8, no Gaudi, no registry, an unavailable GPU skipped. **The 2.6.13 snapshot property** is now
+  tested on the real function: with `_hw_registry` set to a one-CPU registry, the scan still answers from, and walks
+  all of, the registry it was handed. The old copy modelled the race on a vec of device kinds.
+- **`/v1/health`:** both bodies exactly. The verdict follows the top-priority route: a lower-priority route down
+  leaves it `ok`, the top one down makes it degraded, and no routes is healthy.
+- **`/metrics`:** the checker that every sample is declared now runs on the whole real body, not a copied token
+  block. It learned that a histogram's `_bucket`, `_sum` and `_count` samples belong to it, and that a counter has
+  none (both tested). The real body is checked for the labelled and 2.x token series, the request count, the latency
+  histogram and the event counter.
+- **`_requires_post`:** all 19 paths, one assertion each. The GET routes, the POST routes that take no body
+  (`costs/reset`, `admin/reload`, `catalog/sync`) and `/v1/hardware/models` (both verbs) are unenforced, and a
+  trailing slash or `/v1/batch/{id}` is another path.
+
+### Mutation-checked
+
+A copy of the tree was changed 24 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| the envelope: `total_tokens` prompt only; `provider` never added; tools not setting the finish; the cost dropped; usage not closing the envelope | 2, 2, 1, 3, 1 fail |
+| `router_find_provider`: disabled routes taken; the scan starting past the top route; the provider test inverted | 3, 1, 6 fail |
+| `hw_requirement_find`: walking or counting `_hw_registry` instead of its argument; `min_chips` ignored; no null guard | crash, crash, 1, crash |
+| `health_verdict`: no empty-router guard; reading the second route. `health_body`: `providers_down` or the count dropped | crash, 1; 1, 2 |
+| `metrics_render`: a TYPE line dropped; the labelled completion series showing prompt tokens; the histogram or the event counter dropped | 1 fail each |
+| `_requires_post`: a path dropped (2 mutants); `/v1/batch` matched as a prefix; `costs/reset` enforced | 1 fail each |
+
+**The first-round survivor,** found before the run: no lookup hit the route at index 0, so a scan starting at 1
+would have passed. The test now finds the top route itself.
+
+### Notes
+
+- The test file is 5,965 lines (was 5,957).
+- **Benchmarks,** at load 1.0: the 25 rows' median move is 0.0%. Two rows of a few ns moved by 1 ns
+  (`pool_available` 5 → 4, `route_matches_model` 32 → 33), the rest within ±3%. `tests/hoosh.bcyr` is unchanged
+  and times copies, so this release cannot move it.
+- **Coverage** reads 403 of 697 functions. 5 new functions are referenced, and four names left the count:
+  `_router_find_provider` (gone from `src/`) and `handle_health`, `handle_metrics` and
+  `handle_hw_requirement_match`. Those three were "covered" only because the deleted copies' comments named them.
+  `scripts/coverage.sh`'s header describes this.
+- **What the test file still copies, found by this release's scan,** all from `handlers.cyr`:
+  - the embeddings helpers `_json_raw_value` and `_ollama_embed_to_openai`;
+  - the model listing's `_models_emit` and `_models_scan`;
+  - the pattern-is-literal check;
+  - the local stream's keep-alive loop. Its copy re-declares `SSE_KEEPALIVE_S` (`http_server.cyr`) and the I/O
+    timeout;
+  - `handle_hw_simulate`'s `memory_bytes` token loop.
+
+  The roadmap's list had named two pieces, and missed these six and the four this release took. The list is now in
+  the roadmap, and these six are next.
+- `/v1/health` is degraded only when the top-priority route is down, and `providers_down` is always 1. rust-old
+  always answered `ok`. This release keeps the port's own rule, and the tests now state it.
+
 ## [2.9.20] — 2026-11-05
 
 **The worker pool's work queue is tested for real.** The ring and the job constructors moved from `pool.cyr` into the
