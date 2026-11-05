@@ -6,16 +6,16 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-04 (**v2.9.18**: CHANGELOG, README stats, state, the roadmap's mirror list,
-> `architecture/overview.md`'s `config.cyr` / `cfgparse.cyr` rows). Earlier the same day: **v2.9.17** (bote 3.8.9 in
-> state), **v2.9.16**, **v2.9.15**, **v2.9.14** (`architecture/overview.md`'s module map for the `otlp.cyr` /
-> `otlp_export.cyr` split), **v2.9.13** (`scripts/shutdown-smoke.sh` and its CI step), **v2.9.12** (the
-> audit-restore item), **v2.9.11** (the roadmap's layout item), **v2.9.10**, **v2.9.9** (the `HW_MAX_MODEL_PARAMS`
-> comment in `hardware.cyr`), **v2.9.8**, **v2.9.7**, **v2.9.6** (the dependency scan), **v2.9.5**, **v2.9.4**,
-> **v2.9.3** (the pooling measurement, the sandhi TLS-allocator item), **v2.9.2** (README *Hardware data files*; the
-> roadmap re-banded; the rust-old retirement carried out), **v2.9.1** (cyrius 6.7.18; ADR 011's crypto-lane update),
-> **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and **v2.8.2** (cyrius 6.6.20); before that 2026-10-09
-> (**v2.8.1**).
+> **Last refresh**: 2026-11-05 (**v2.9.19**: CHANGELOG, README stats, state, the roadmap's mirror list,
+> `architecture/overview.md`'s `cli.cyr` row). On 2026-11-04: **v2.9.18** (the `config.cyr` / `cfgparse.cyr` rows),
+> **v2.9.17** (bote 3.8.9 in state), **v2.9.16**, **v2.9.15**, **v2.9.14** (`architecture/overview.md`'s module map
+> for the `otlp.cyr` / `otlp_export.cyr` split), **v2.9.13** (`scripts/shutdown-smoke.sh` and its CI step),
+> **v2.9.12** (the audit-restore item), **v2.9.11** (the roadmap's layout item), **v2.9.10**, **v2.9.9** (the
+> `HW_MAX_MODEL_PARAMS` comment in `hardware.cyr`), **v2.9.8**, **v2.9.7**, **v2.9.6** (the dependency scan),
+> **v2.9.5**, **v2.9.4**, **v2.9.3** (the pooling measurement, the sandhi TLS-allocator item), **v2.9.2** (README
+> *Hardware data files*; the roadmap re-banded; the rust-old retirement carried out), **v2.9.1** (cyrius 6.7.18; ADR
+> 011's crypto-lane update), **v2.9.0** (cyrius 6.7.9; the zugot-recipe step dropped) and **v2.8.2** (cyrius
+> 6.6.20); before that 2026-10-09 (**v2.8.1**).
 > The last FULL sweep was 2026-07-23 (**v2.5.11**, closing the rust-old parity arc), when every doc below was
 > re-read against the source.
 >

@@ -36,18 +36,17 @@ The bands are a plan, not a promise. Every item was checked against the code and
     after `route_is_remote` moved into `route.cyr` (2.9.10); `audit.cyr` (2.9.12); `budget.cyr` and `storage.cyr`
     (2.9.13; the persistence tests use a real patra database in `/tmp`); `otlp.cyr` and `provider.cyr`, after
     `otlp.cyr`'s I/O half moved to `otlp_export.cyr` (2.9.14); `retry.cyr` (2.9.15); `reqparse.cyr`, split from
-    `handlers.cyr` (2.9.16); `cfgparse.cyr`, split from `config.cyr` (2.9.18). `scripts/coverage.sh` prints the
-    current list: 34 of 40 modules.
+    `handlers.cyr` (2.9.16); `cfgparse.cyr`, split from `config.cyr` (2.9.18); `cli.cyr`, split from `main.cyr`
+    (2.9.19). `scripts/coverage.sh` prints the current list: 35 of 41 modules.
   - **Where the rest stand** (scan of 2.9.15):
     - `pool.cyr`, `batch.cyr`, `catalog_fetch.cyr` and `otlp_export.cyr` form one cycle through `pool.cyr`'s
       `wq_push` and job constructors, and `pool.cyr` dispatches into `handlers.cyr`.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
-  - **What the test file still mirrors** (2.9.18): `main.cyr`'s flag parser (`_flag_val` / `_positional` and the
-    `infer` arguments), `pool.cyr`'s work-queue ring, and from `handlers.cyr` the usage block of
-    `_chat_completion_body` and the requirement-match scan. 2.9.16–2.9.18 moved the handlers', `batch.cyr`'s and
-    `config.cyr`'s self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`. **Next:** the flag parser, which
-    reads `argv()` and needs a form that takes its arguments, then the work-queue ring.
+  - **What the test file still mirrors** (2.9.19): `pool.cyr`'s work-queue ring, and from `handlers.cyr` the
+    usage block of `_chat_completion_body` and the requirement-match scan. 2.9.16–2.9.19 moved the handlers',
+    `batch.cyr`'s and `config.cyr`'s self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`, and
+    `main.cyr`'s flag parser into `cli.cyr`. **Next:** the work-queue ring, then the two `handlers.cyr` pieces.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
     modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as

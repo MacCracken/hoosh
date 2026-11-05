@@ -5,6 +5,68 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.19] — 2026-11-05
+
+**The command line's flag parser is tested for real.** It moved from `main.cyr` into the new `cli.cyr`, in a form that
+takes its arguments as a vec rather than reading `argv()`. The test file's three copies are gone. No behavior
+changed. **1511 assertions** in 160 groups. All gates are clean: fmt, lint, vet, deny, coverage (392/692, 56%; **35
+of 41** modules included for real), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — `cli.cyr`, split from `main.cyr`
+
+`main.cyr`'s `_flag_val`, `_flag_set` and `_positional` read the process's `argv()`, so the tests kept copies over
+a vec. Their bodies moved, unchanged apart from reading a vec, into `src/lib/cli.cyr`:
+- `cli_flag_val(args, name, short)`: `--name value`, `-s value` and `--name=value`; a dangling flag is absent;
+- `cli_flag_set(args, name)`;
+- `cli_positional(args, n)`: the Nth argument after the subcommand, skipping flags and their values, with
+  `--stream` valueless;
+- **new:** `cli_infer_args(args, out)`, lifted out of `main()`'s `infer` branch. It is `-m`/`--model <model>
+  <prompt>`, rust-old's form, else `<model> <prompt>`;
+- `cli_args()`, which builds the vec from `argv()` once.
+
+`main.cyr` keeps one-line `_flag_val` / `_flag_set` / `_positional` wrappers over `cli_args()`, so its eleven call
+sites are unchanged.
+
+**Checked live on the real binary:**
+- `version` works;
+- `infer` with no arguments, or with only `-m llama3`, prints its usage;
+- `infer --server URL -m llama3 "hello there"` and `infer --server=URL llama3 hello` both reach the remote path;
+- the smoke test covers `serve -p`, `--bind` and `-c`.
+
+### Changed — the tests run it for real
+
+**Gone:** `_t_flag_val`, `_t_positional` and `_t_infer_args`. Their groups (`cli_flag_parsing`, `cli_positionals`,
+`rustold_config_cli`) call the real functions.
+
+**New assertions:**
+- `cli_flag_set`, which had no copy: a valueless flag is seen, an absent one is not, and argument 0 (the program)
+  is never a flag;
+- `cli_args`: one element per argument, element 0 the program, built once. The test calls `args_init()` first, as
+  `main()` does;
+- `--portal` is not `--port`.
+
+### Mutation-checked
+
+A copy of the tree was changed 10 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| the short form ignored; `--name=value` ignored; a dangling flag reading past the arguments | crash, crash, exit 1 |
+| `--portal` taken as `--port` | 1 fails |
+| `--stream` taking a value; `--name=value` skipping the next argument; the subcommand counted | crash, crash, 11 fail |
+| `cli_flag_set` counting the program name; `infer`'s `-m` form ignored; `cli_args` rebuilt every call | 1, crash, 1 |
+
+**The first-round survivor:** `--portal` taken as `--port` survived, because no test had a longer flag starting with
+a shorter one's name. That assertion was added.
+
+### Notes
+
+- The test file is 5,914 lines (was 5,961).
+- **Benchmarks,** at load 1.7: the bench binary differs from 2.9.18's only in the version digit. The 25 rows' median
+  move is −0.8%. All are within −3% and 0%, except `work_queue_push_pop` at 11 → 9 ns, back where 2.9.17 had it.
+- **What the test file still mirrors:** `pool.cyr`'s work-queue ring, and two pieces of `handlers.cyr` (the usage
+  block and the requirement-match scan). The ring is next.
+
 ## [2.9.18] — 2026-11-04
 
 **`config.cyr`'s self-contained helpers are tested for real, on real TOML and real files.** They moved into the new

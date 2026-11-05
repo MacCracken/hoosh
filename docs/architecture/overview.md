@@ -100,6 +100,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
 | `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string arrays, a provider's TLS policy and rate limit |
+| `cli.cyr` | The command line's flag parser (2.9.19 split from `main.cyr`): `--name value`, `-s value`, `--name=value`, positionals, `infer`'s model and prompt, over an argument vec |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
 | `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
 | `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends |

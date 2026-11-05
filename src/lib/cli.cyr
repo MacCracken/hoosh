@@ -1,0 +1,102 @@
+# cli.cyr — the command line's flag parser (2.9.19, split from main.cyr).
+#
+# main.cyr's _flag_val / _flag_set / _positional read the process's argv() directly, so the test suite could not
+# call them and kept copies over a vec of cstrs. These take that vec instead: `args` is argv as a vec, element 0
+# the program, element 1 the subcommand. main.cyr's wrappers pass cli_args(). Requires: vec, string, args (lib).
+
+# argv as a vec of cstrs, built once (the command line does not change).
+var _cli_args = 0;
+fn cli_args() {
+    if (_cli_args != 0) { return _cli_args; }
+    var v = vec_new();
+    var ac = argc();
+    var i = 0;
+    while (i < ac) {
+        vec_push(v, argv(i));
+        i = i + 1;
+    }
+    _cli_args = v;
+    return v;
+}
+
+# Value for `--name` / `-short` (short may be 0), or 0 when absent. Accepts `--name value`, `-s value` and
+# `--name=value`; a flag at the end with no value is absent.
+fn cli_flag_val(args, name, short) {
+    var ac = vec_len(args);
+    var nlen = strlen(name);
+    var i = 1;
+    while (i < ac) {
+        var a = vec_get(args, i);
+        if (streq(a, name) == 1) {
+            if (i + 1 < ac) { return vec_get(args, i + 1); }
+            return 0;
+        }
+        if (short != 0 && streq(a, short) == 1) {
+            if (i + 1 < ac) { return vec_get(args, i + 1); }
+            return 0;
+        }
+        # --name=value
+        if (memeq(a, name, nlen) == 1) {
+            if (load8(a + nlen) == 61) { return a + nlen + 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Whether a valueless flag is present.
+fn cli_flag_set(args, name) {
+    var ac = vec_len(args);
+    var i = 1;
+    while (i < ac) {
+        if (streq(vec_get(args, i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Nth positional argument after the subcommand (0-based), skipping flags and
+# their values. Returns 0 when absent.
+fn cli_positional(args, n) {
+    var ac = vec_len(args);
+    var seen = 0;
+    var i = 2;
+    while (i < ac) {
+        var a = vec_get(args, i);
+        if (load8(a) == 45) {
+            # A flag. Skip its value too unless it used --name=value form or is
+            # one of the known valueless flags.
+            if (streq(a, "--stream") == 0) {
+                var has_eq = 0;
+                var j = 0;
+                while (load8(a + j) != 0) {
+                    if (load8(a + j) == 61) { has_eq = 1; }
+                    j = j + 1;
+                }
+                if (has_eq == 0) { i = i + 1; }
+            }
+        } else {
+            if (seen == n) { return a; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `hoosh infer`'s model and prompt into out[0] / out[8] (either may be 0). 2.7.0: -m/--model <model> <prompt> is
+# rust-old's form. Without it, `-m llama3` took llama3 as the flag's value and left one positional.
+# (2.9.19: lifted out of main()'s infer branch.)
+fn cli_infer_args(args, out) {
+    var im = cli_flag_val(args, "--model", "-m");
+    var ip = 0;
+    if (im != 0) {
+        ip = cli_positional(args, 0);
+    } else {
+        im = cli_positional(args, 0);
+        ip = cli_positional(args, 1);
+    }
+    store64(out, im);
+    store64(out + 8, ip);
+    return 0;
+}
