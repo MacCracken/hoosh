@@ -5,7 +5,8 @@
 # dispatches on the type word. Nothing here touches a socket or a handler, so tests/hoosh.tcyr includes this file
 # and runs the real ring: through 2.9.19 it tested a copy of the ring arithmetic, without the lock or wq_done.
 #
-# Requires: alloc, store64/load64, mutex_new/mutex_lock/mutex_unlock (lib/sync.cyr), sleep_ms (lib/chrono.cyr).
+# Requires: alloc, store64/load64, mutex_new/mutex_lock/mutex_unlock (lib/sync.cyr), sleep_ms (lib/chrono.cyr),
+# str_builder (wq_status_json).
 
 var JOB_CONN = 0;
 var JOB_BATCH_ITEM = 1;
@@ -84,6 +85,30 @@ fn wq_done() {
     _wq_busy = _wq_busy - 1;
     mutex_unlock(_wq_lock);
     return 0;
+}
+
+# GET /v1/queue/status's body (2.9.26): the queue's real depth, both counts read under one lock. `queued` is
+# rust-old's key and `pending` the port's 2.x key, for the same count: jobs waiting for a worker. `processing` is
+# the jobs workers are serving, so the request that asks is one of them. Through 2.9.25 the endpoint answered a
+# constant {"pending":0,"processing":0}.
+fn wq_status_json() {
+    var q = 0;
+    var b = 0;
+    if (_wq_lock != 0) {
+        mutex_lock(_wq_lock);
+        q = _wq_count;
+        b = _wq_busy;
+        mutex_unlock(_wq_lock);
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"queued\":");
+    str_builder_add_int(sb, q);
+    str_builder_add_cstr(sb, ",\"pending\":");
+    str_builder_add_int(sb, q);
+    str_builder_add_cstr(sb, ",\"processing\":");
+    str_builder_add_int(sb, b);
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
 }
 
 # ── Job constructors ──

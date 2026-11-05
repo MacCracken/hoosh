@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-05 (**v2.9.25**: CHANGELOG, README stats, state, the roadmap's lookup item marked done,
-> `development/performance.md`'s live-catalog rows, `architecture/overview.md`'s new `keyindex.cyr` row and the
-> catalog row). Also 2026-11-05: **v2.9.24** (the bench item, `performance.md`'s suite description, `SECURITY.md`'s
+> **Last refresh**: 2026-11-05 (**v2.9.26**: CHANGELOG, README stats, state (version, bote 3.8.12), `SECURITY.md`'s
+> scope and considerations, which still described rust-old, `architecture/overview.md`'s `wq.cyr` row). Also
+> 2026-11-05: **v2.9.25** (the lookup item, `performance.md`'s live-catalog rows, the `keyindex.cyr` row),
+> **v2.9.24** (the bench item, `performance.md`'s suite description, `SECURITY.md`'s
 > authentication line), **v2.9.23** (the
 > TOML item, `SECURITY.md`'s token-contents line, the `cfgparse.cyr` row), **v2.9.22** (the mirror-drift item marked done, the
 > `models.cyr` and `jsonlite.cyr` rows, `jsonlite.cyr`'s stale header), **v2.9.21** (the list of what the test file copied, the six moved pieces' rows), **v2.9.20** (the `wq.cyr` / `pool.cyr` rows, the roadmap's bench-file

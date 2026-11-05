@@ -1017,9 +1017,9 @@ fn handle_heartbeat(cfd) {
 }
 
 # GET /v1/queue/status
+# GET /v1/queue/status: the work queue's real depth (wq.cyr's wq_status_json, 2.9.26; it was a constant).
 fn handle_queue_status(cfd) {
-    var body = "{\"pending\":0,\"processing\":0}";
-    return http_ok(cfd, body, strlen(body));
+    return http_json_ok(cfd, wq_status_json());
 }
 
 # GET /v1/hardware

@@ -20,6 +20,12 @@ enum RouterField {
 var LAT_UNMEASURED_MS = 50;
 var _lat_lock = 0;
 
+# The candidate list router_select (and its remote and local variants) builds per call. 2.9.26: on the calling
+# worker's stack for up to this many routes. Through 2.9.25 each call took count * 8 bytes from the arena that never
+# frees, 160 bytes a request with 20 routes, every chat request routing at least once. A gateway configured with
+# more routes than this still takes the heap, as before.
+const ROUTER_STACK_CANDIDATES = 64;
+
 fn router_new(routes, count, strategy) {
     if (_lat_lock == 0) { _lat_lock = mutex_new(); }
     var rt = alloc(ROUTER_SIZE);
@@ -66,7 +72,9 @@ fn router_select(rt, model) {
     var routes = load64(rt + ROUTER_ROUTES);
     var count = load64(rt + ROUTER_COUNT);
     var strategy = load64(rt + ROUTER_STRATEGY);
-    var cand = alloc(count * 8);
+    var cand_buf: i64[ROUTER_STACK_CANDIDATES];
+    var cand = &cand_buf;
+    if (count > ROUTER_STACK_CANDIDATES) { cand = alloc(count * 8); }
     var cn = 0;
     # 2.5.5: health-filtered candidate set. Before this the health map was
     # written only by the /v1/health/providers handler and read by nobody, so a
@@ -193,7 +201,9 @@ fn _router_select_remote(rt, model) {
     var routes = load64(rt + ROUTER_ROUTES);
     var count = load64(rt + ROUTER_COUNT);
     var strategy = load64(rt + ROUTER_STRATEGY);
-    var cand = alloc(count * 8);
+    var cand_buf: i64[ROUTER_STACK_CANDIDATES];
+    var cand = &cand_buf;
+    if (count > ROUTER_STACK_CANDIDATES) { cand = alloc(count * 8); }
     var cn = 0;
     var i = 0;
     while (i < count) {
@@ -224,7 +234,9 @@ fn router_select_local(rt, model) {
     var routes = load64(rt + ROUTER_ROUTES);
     var count = load64(rt + ROUTER_COUNT);
     var strategy = load64(rt + ROUTER_STRATEGY);
-    var cand = alloc(count * 8);
+    var cand_buf: i64[ROUTER_STACK_CANDIDATES];
+    var cand = &cand_buf;
+    if (count > ROUTER_STACK_CANDIDATES) { cand = alloc(count * 8); }
     var cn = 0;
     var i = 0;
     while (i < count) {

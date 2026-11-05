@@ -35,9 +35,16 @@ fn _pricing_tier(arr, idx, threshold, in_s, out_s) {
 
 var _PRICING_CAP = 81;
 
-# Built-in pricing table (model id -> input/output $/M x1000). Built once.
+# Built-in pricing table (model id -> input/output $/M x1000). Built once. Returns the table's index.
+#
+# 2.9.26: done only once the INDEX is published. Through 2.9.25 this returned as soon as _pricing_tbl was set,
+# which this function does before it builds the index, so a worker whose first lookup ran while another was still
+# building got a null index and the gateway died (no startup code builds the table: the first lookups are on the
+# workers). Now a worker that arrives mid-build builds a whole table of its own, uses it, and publishes it; the two
+# are the same, and the allocator never frees, so either stays valid.
 fn _pricing_init() {
-    if (_pricing_tbl != 0) { return 0; }
+    var have = _pricing_ix;
+    if (have != 0) { return have; }
     var arr = alloc(_PRICING_CAP * 48);
     # Anthropic — 2.8.0, Anthropic's published first-party rates (cached 2026-10-06). The 2.7.1 table had one
     # `claude-opus-4` row at $15/$75, which the longest-prefix match applied to EVERY Opus 4.x: Opus 4.5-4.8 cost
@@ -159,10 +166,11 @@ fn _pricing_init() {
     _pricing_add(arr, 79, "llama-3.3-70b", 590, 790);
     _pricing_add(arr, 80, "llama-3.1-8b", 50, 80);
     # 2.9.25: n before the table and the index last, so a worker that sees the index sees a whole table.
+    var ix = keyidx_rows(arr, _PRICING_CAP, 48);
     _pricing_n = _PRICING_CAP;
     _pricing_tbl = arr;
-    _pricing_ix = keyidx_rows(arr, _PRICING_CAP, 48);
-    return 0;
+    _pricing_ix = ix;
+    return ix;
 }
 
 # Provider-level fallback when a model is not in the table. Local providers are
@@ -189,10 +197,7 @@ fn _pricing_fallback(prov, out) {
 # index; it was two linear passes per lookup, with `strlen` on every key.
 fn _pricing_row(model) {
     var ix = _pricing_ix;
-    if (ix == 0) {
-        _pricing_init();
-        ix = _pricing_ix;
-    }
+    if (ix == 0) { ix = _pricing_init(); }
     return keyidx_find(ix, model);
 }
 

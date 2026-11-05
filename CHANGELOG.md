@@ -5,6 +5,132 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.26] — 2026-11-05
+
+**2.9.25 could crash on its first burst of requests; this fixes it.** It also brings bote 3.8.12, makes
+`/v1/queue/status` report the real work queue, stops routing from allocating on every request, and brings
+`SECURITY.md` in line with the port. **1695 assertions** in 164 groups. All gates are clean: fmt, lint, vet, deny,
+coverage (390/709, 55%), the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Fixed — 2.9.25's first concurrent lookups could crash the gateway
+
+2.9.25 indexed the pricing and metadata tables, and both are built lazily, on the first lookup. Nothing at
+startup builds them, so the first lookups run on the pool workers, and the build published the table before its
+index. A worker whose first lookup ran while another was mid-build found the table set and the index not: it
+looked up through a null index, and the process died.
+
+**Shown live:** fresh 2.9.25 gateways were each sent 14 concurrent `POST /v1/cost/estimate` requests as their
+first traffic. **4 of 8 died (SIGSEGV)**. 2.9.26 gateways: 0 of 8. Any gateway whose first requests overlap (two
+completions, a completion and `/v1/models`) could hit it.
+
+`_pricing_init` and `_meta_init` now build the index before publishing anything, return early only once the
+index is published, and return the index they found or built. A worker that arrives mid-build builds a whole
+table of its own and uses that.
+
+**The regression test** (`lookup_init_race`) resets both tables to unbuilt and runs six threads at their first
+lookups, three times, checking every answer. Against 2.9.25's `pricing.cyr` and against its `metadata.cyr`, the
+suite died with SIGSEGV in 3 of 3 runs each.
+
+### Changed — bote 3.8.9 → 3.8.12
+
+Synced with `./scripts/sync-bote.sh 3.8.12`; the bundle matches bote's 3.8.12 tag byte for byte.
+- **What it adds:** `patternProperties` and `additionalProperties` beside it are now judged, by the 3.8.11 regex
+  engine.
+- **What it fixes:** nine defects in 3.8.11, four of them denials of service in that engine: a registration that
+  never ended, uncharged match work, a class read member by member, and 12.8 MB kept per call through a
+  dispatcher's plain form. Registration also checks a schema's `$id`.
+- **Effect on hoosh:** none on behavior. hoosh's one tool, `bote_echo`, has an empty object schema, so nothing it
+  registers reaches the regex engine. Checked live: `/v1/tools/list` lists it, `/v1/tools/call` echoes its
+  arguments with a `é` escape intact, and an unknown tool answers JSON-RPC -32602.
+- The binary grows by 82 KB, mostly the engine. The default tag in `scripts/sync-bote.sh` is now 3.8.12.
+
+### Changed — `/v1/queue/status` reports the real queue
+
+It answered a constant `{"pending":0,"processing":0}`. It now reads the work queue's counts under its lock:
+`{"queued":N,"pending":N,"processing":M}`.
+- `queued` is rust-old's key, and `pending` is the port's 2.x key for the same count: jobs waiting for a worker.
+- `processing` counts jobs being served, so the request asking is one of them.
+
+Checked live: a fresh gateway answered `processing: 2`, the request itself and the boot-time catalog refresh. The
+body comes from the new `wq_status_json()` in `wq.cyr`.
+
+### Changed — routing stops allocating per request
+
+`router_select`, `router_select_local` and `_router_select_remote` each took `count * 8` bytes from the arena that
+never frees, for their candidate list: 160 bytes a request with 20 routes, and every chat request routes at least
+once. The list is now on the calling worker's stack, in a 64-slot typed array. A gateway with more than 64 routes
+takes the heap, as before. In the A/B below, `route_round_robin_10` (ten routes) is 11% faster.
+
+### Changed — `SECURITY.md` described rust-old
+
+Its scope and considerations still described rust-old in places. Each claim was checked against the code:
+- **Removed:** config `Debug` impls that redact keys, serde `Serialize`/`Deserialize` types, regex DLP patterns
+  "compiled at startup" with ReDoS advice, and a "constant-time SHA-256" token comparison. 2.9.24 corrected the
+  last one under Authentication but left it in Scope.
+- **Now stated:** how a key reaches its provider, and that it is not logged. The built-in DLP detectors are byte
+  scanners and `[[dlp_pattern]]` entries are literal substrings, so there is no regex engine to backtrack. Request
+  bodies are read by fuzzed byte scanners and capped at 1 MiB before anything is allocated. A random audit key
+  cannot carry a chain across restarts.
+- **New advice:** a key given to a plain `http://` route travels unencrypted.
+
+### Tests and mutations
+
+- **New:** `lookup_init_race` (above).
+- **New `router_no_alloc`:**
+  - `alloc_used()` is unchanged across 3000 selections over 20 routes, through all three select functions;
+  - round-robin still turns;
+  - 200 routes all matching come back as 200 different routes, which exercises the heap path;
+  - 65 routes, of which only the last matches, find it.
+- **The `pool` group** checks the status body empty, with two waiting and one in flight, and drained.
+
+| mutant | result |
+|---|---|
+| **2.9.25's `pricing.cyr`**, then **its `metadata.cyr`**, three runs each | crash in all six |
+| `router_select`, the remote and the local select taking the heap always | 1 fail each |
+| `router_select` never taking the heap (200 routes overrun the 64-slot buffer) | crash |
+| the status body's two counts swapped either way; the counts not read | 1 fail each |
+
+**The first-round survivors:**
+- **Partial init mutants:** reverting only the early-return check survived, because the index is now built before
+  the table is published, which leaves a single-store window. The faithful mutant is the whole 2.9.25 init.
+- **Swapped counts:** these survived while the test had one job waiting and one in flight. It now has two waiting.
+- **The heap path:** dropping it survived a 65-route test, a one-slot overrun. The test now uses 200 routes.
+
+### Benchmarks
+
+The same bench file, built on 2.9.25's tree and on 2.9.26's, run alternately for 7 rounds. The load was **6.6**
+throughout, as other sessions were compiling. At that load single rows swing several percent, but the two
+binaries alternate, so both see the same load.
+
+| row | 2.9.25 | 2.9.26 | |
+|---|---|---|---|
+| `route_round_robin_10` | 149 ns | 133 ns | −11%, the allocation gone |
+| `route_select_20_providers` | 854 ns | 848 ns | −1% (20 pattern matches dominate) |
+| `mcp_tools_list` / `mcp_tools_call` | 3.78 / 5.41 µs | 3.84 / 5.55 µs | +2% each (bote 3.8.12) |
+| the other 21 | | | within ±4%, except two moves on unchanged code at this load: `auth_verify_wrong_early` +8%, `metadata_lookup_live_catalog` −11% |
+
+### Notes
+
+- The test file is 6,298 lines (was 6,176).
+- **Checked, and not a bug: function-local arrays.** cyrius 5.5.36's notes say a plain `var x[N]` in a function
+  is hoisted to `.bss`, which would make it shared by every thread. `chat_id_new` and 2.9.25's
+  `estimate_cost_micro` each use one. On cyrius 6.7.18, a probe returning `&x` from the main thread and from a
+  spawned thread shows each its own stack address, for a bare `var x[16]` and a typed `var x: i64[64]` alike,
+  declared first in the function or after other statements. A stress run of 12,000 completion ids over six
+  threads found no duplicates. Neither needs a change.
+- **The 2.9.25 bench run was not recorded locally.** The run waiting for a quiet machine stopped without running,
+  so `bench-history.csv` goes from 2.9.24's rows to 2.9.26's. CI's own bench gate ran for 2.9.25.
+- **The recorded run** was at load 2.16, the maintainer's call not to wait. Against 2.9.24's recorded rows:
+  `cost_record_known_model` 3,284 → 273 ns and `cost_record_local_free` −15% (2.9.25's indexing),
+  `route_round_robin_10` −10% (this release), and the two live-catalog rows appear for the first time.
+- **`auth_verify_wrong_early` reads 94 ns against `wrong_late`'s 82.** It is placement, not the compare. Those
+  two rows exist to catch a compare that is not constant-time, so a build with their order swapped was run
+  three times: whichever row runs third is about 6 ns slower, early or late. In the same position, an early and
+  a late mismatch both cost 81–82 ns. bote's 82 KB moved the code, and the third timing loop landed on a less
+  favourable address. The A/B above shows the same gap.
+- **Still open, for the maintainer:** `/v1/health` is degraded only when the top-priority route is down, and
+  `providers_down` is always 1 (2.9.21's note).
+
 ## [2.9.25] — 2026-11-05
 
 **Lookups on the request path no longer scan.** 2.9.24's real bench showed cost accounting scanning the 81-row

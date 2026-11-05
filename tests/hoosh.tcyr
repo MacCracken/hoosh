@@ -1387,6 +1387,113 @@ fn _t2925_lookup_index() {
     return 0;
 }
 
+# 2.9.26: the first lookups of the compiled tables race their lazy build. Six threads at once, on tables reset to
+# unbuilt: through 2.9.25 a thread that arrived while another was building got a null index and the process died.
+var _t2926_bad = 0;
+fn _t2926_lookup_worker(n) {
+    var md = alloc(40);
+    var i = 0;
+    while (i < n) {
+        if (estimate_cost_micro("gpt-4o", PROV_OPENAI, 1000, 500) != 7500) { atomic_fetch_add(&_t2926_bad, 1); }
+        if (_meta_table_lookup("gpt-4o", md) != 1) { atomic_fetch_add(&_t2926_bad, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _t2926_request_path() {
+    test_group("lookup_init_race");
+    catalog_config_set(vec_new());
+    catalog_publish(vec_new());
+    var ri = 0;
+    while (ri < 3) {
+        _pricing_ix = 0;
+        _pricing_tbl = 0;
+        _pricing_n = 0;
+        _meta_ix = 0;
+        _meta_tbl = 0;
+        _meta_n = 0;
+        _t2926_bad = 0;
+        var ths = vec_new();
+        var t = 0;
+        while (t < 6) {
+            vec_push(ths, thread_create(&_t2926_lookup_worker, 500));
+            t = t + 1;
+        }
+        t = 0;
+        while (t < 6) {
+            thread_join(vec_get(ths, t));
+            t = t + 1;
+        }
+        assert_eq(atomic_load(&_t2926_bad), 0, "init race: six first lookups at once all answer right");
+        ri = ri + 1;
+    }
+    assert_eq(_pricing_ix != 0 && _meta_ix != 0, 1, "init race: both indexes published");
+    assert_eq(metadata_count(), _META_CAP, "init race: the metadata table is whole");
+
+    test_group("router_no_alloc");
+    # 2.9.26: router_select builds its candidate list on the stack. Through 2.9.25 every call took count * 8 bytes
+    # from the arena that never frees.
+    var rn_routes = alloc(20 * 8);
+    var rn_i = 0;
+    while (rn_i < 20) {
+        var rn_r = route_new(PROV_OLLAMA, rn_i + 1, "http://127.0.0.1:11434");
+        var rn_p = alloc(8);
+        store64(rn_p, "llama*");
+        route_set_patterns(rn_r, rn_p, 1);
+        store64(rn_routes + rn_i * 8, rn_r);
+        rn_i = rn_i + 1;
+    }
+    var rn_rt = router_new(rn_routes, 20, STRAT_ROUND_ROBIN);
+    var rn_first = router_select(rn_rt, "llama3");
+    var rn_u0 = alloc_used();
+    rn_i = 0;
+    while (rn_i < 1000) {
+        router_select(rn_rt, "llama3");
+        router_select_local(rn_rt, "llama3");
+        _router_select_remote(rn_rt, "llama3");
+        rn_i = rn_i + 1;
+    }
+    assert_eq(alloc_used() - rn_u0, 0, "router: 3000 selections over 20 routes allocate nothing");
+    assert_eq(rn_first != 0, 1, "router: and still select");
+    var rn_a = router_select(rn_rt, "llama3");
+    assert_eq(router_select(rn_rt, "llama3") != rn_a, 1, "router: round-robin still turns");
+    # More routes than the stack buffer holds: the heap, as before. 200 routes that all match, under round-robin:
+    # 200 selections must come back as 200 different routes, so the whole candidate list is intact.
+    var rb_routes = alloc(200 * 8);
+    rn_i = 0;
+    while (rn_i < 200) {
+        var rb_r = route_new(PROV_OLLAMA, 1, "http://127.0.0.1:11434");
+        store64(rb_routes + rn_i * 8, rb_r);
+        rn_i = rn_i + 1;
+    }
+    var rb_rt = router_new(rb_routes, 200, STRAT_ROUND_ROBIN);
+    var rb_seen = map_new();
+    rn_i = 0;
+    while (rn_i < 200) {
+        var rb_pick = router_select(rb_rt, "llama3");
+        var rb_k = _t_line("r", rb_pick, "");
+        map_set(rb_seen, rb_k, 1);
+        rn_i = rn_i + 1;
+    }
+    assert_eq(map_count(rb_seen), 200, "router: 200 routes, all 200 candidates intact (the heap path)");
+    # And 65, where only the last matches.
+    var rc_routes = alloc(65 * 8);
+    rn_i = 0;
+    while (rn_i < 65) {
+        var rc_r = route_new(PROV_OLLAMA, rn_i + 1, "http://127.0.0.1:11434");
+        var rc_p = alloc(8);
+        store64(rc_p, "llama*");
+        if (rn_i < 64) { store64(rc_p, "nomatch*"); }
+        route_set_patterns(rc_r, rc_p, 1);
+        store64(rc_routes + rn_i * 8, rc_r);
+        rn_i = rn_i + 1;
+    }
+    var rc_rt = router_new(rc_routes, 65, STRAT_PRIORITY);
+    assert_eq(route_priority(router_select(rc_rt, "llama3")), 65, "router: 65 routes, the one that matches is found");
+    return 0;
+}
+
 # 2.8.1: the model's own output ceiling. Over it a provider answers 400, not a trim (measured 2026-10-09: Haiku 4.5
 # refuses 65536, every current Claude refuses 131072).
 fn _t281_catalog_out_cap() {
@@ -3724,6 +3831,20 @@ fn main() {
     wq_init();
     assert_eq(wq_outstanding(), 0, "wq: wq_init clears queued and in-flight counts");
     assert_eq(wq_pop(), 0, "wq: wq_init leaves nothing to pop");
+    # 2.9.26: /v1/queue/status's body is the queue's real depth (it was a constant).
+    assert_streq(to_cstr(wq_status_json()), "{\"queued\":0,\"pending\":0,\"processing\":0}", "status: an empty queue");
+    wq_push(7);
+    wq_push(8);
+    wq_push(9);
+    wq_pop();
+    assert_streq(to_cstr(wq_status_json()), "{\"queued\":2,\"pending\":2,\"processing\":1}",
+      "status: two waiting, one being served");
+    wq_done();
+    wq_pop();
+    wq_done();
+    wq_pop();
+    wq_done();
+    assert_streq(to_cstr(wq_status_json()), "{\"queued\":0,\"pending\":0,\"processing\":0}", "status: drained");
     WQ_MAX = 8192;
     # Job layouts, as job_process in pool.cyr reads them.
     var jc = _job_conn(42);
@@ -6166,6 +6287,7 @@ fn main() {
     _t280_urlparse();
     _t281_catalog_out_cap();
     _t2925_lookup_index();
+    _t2926_request_path();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();
