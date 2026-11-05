@@ -37,16 +37,18 @@ The bands are a plan, not a promise. Every item was checked against the code and
     (2.9.13; the persistence tests use a real patra database in `/tmp`); `otlp.cyr` and `provider.cyr`, after
     `otlp.cyr`'s I/O half moved to `otlp_export.cyr` (2.9.14); `retry.cyr` (2.9.15); `reqparse.cyr`, split from
     `handlers.cyr` (2.9.16); `cfgparse.cyr`, split from `config.cyr` (2.9.18); `cli.cyr`, split from `main.cyr`
-    (2.9.19). `scripts/coverage.sh` prints the current list: 35 of 41 modules.
+    (2.9.19); `wq.cyr`, split from `pool.cyr` (2.9.20). `scripts/coverage.sh` prints the current list: 36 of 42
+    modules.
   - **Where the rest stand** (scan of 2.9.15):
-    - `pool.cyr`, `batch.cyr`, `catalog_fetch.cyr` and `otlp_export.cyr` form one cycle through `pool.cyr`'s
-      `wq_push` and job constructors, and `pool.cyr` dispatches into `handlers.cyr`.
+    - `pool.cyr`, `batch.cyr`, `catalog_fetch.cyr` and `otlp_export.cyr` formed one cycle through `pool.cyr`'s
+      `wq_push` and job constructors. Those are `wq.cyr`'s since 2.9.20, which the tests include; `pool.cyr`
+      itself reads sockets and dispatches into `handlers.cyr`.
     - `config.cyr` and `handlers.cyr` reach nearly everything. Their helpers move into includable modules one at
       a time (the `urlparse.cyr` split), or wait for the modules above.
-  - **What the test file still mirrors** (2.9.19): `pool.cyr`'s work-queue ring, and from `handlers.cyr` the
-    usage block of `_chat_completion_body` and the requirement-match scan. 2.9.16–2.9.19 moved the handlers',
-    `batch.cyr`'s and `config.cyr`'s self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`, and
-    `main.cyr`'s flag parser into `cli.cyr`. **Next:** the work-queue ring, then the two `handlers.cyr` pieces.
+  - **What the test file still mirrors** (2.9.20): from `handlers.cyr`, the usage block of `_chat_completion_body`
+    and the requirement-match scan. 2.9.16–2.9.20 moved the handlers', `batch.cyr`'s and `config.cyr`'s
+    self-contained helpers into `reqparse.cyr` and `cfgparse.cyr`, `main.cyr`'s flag parser into `cli.cyr`, and
+    `pool.cyr`'s work-queue ring into `wq.cyr`. **Next:** the two `handlers.cyr` pieces.
   - **The method:** include each module for real. Where a helper lives in a module that needs the whole server
     (`handlers.cyr`, `main.cyr`), split it out first, as `urlparse.cyr` was split from `http_client.cyr`. One or two
     modules per patch. Mutation-check each one: change the real function and confirm a test fails. A hang counts as
@@ -54,6 +56,15 @@ The bands are a plan, not a promise. Every item was checked against the code and
   - `scripts/coverage.sh` is a floor against *unwatched* code, not against drift. It counts a name appearing in
     `tests/`, so deleting a same-name copy can lower it even when the real function now runs. Its header says so
     since 2.9.5.
+- **The bench file times copies, not `src/`** (found in 2.9.20). `tests/hoosh.bcyr` includes the stdlib and bote
+  but no `src/` module. 62 of its 65 functions are copies (the others are `main`, the `_b_s` string helper and a
+  stand-in clock): the route record and model match, the router's select, the token estimate, the DLP scanner, the
+  cache, the budget pool, a five-tier queue, `_batch_split`, the latency bucket search, the work-queue ring (with no
+  lock), the rate limiter, cost accounting, the audit signing step, the event ring and an MCP handler. So each of
+  the 25 rows measures a copy that can drift from `src/` as the test copies did. A real change in `src/` cannot move
+  them, and a regression there cannot show up in them. The test file has now proved which modules include cleanly,
+  so the same method applies: include them in the bench, delete the copies, and record each row's break in the
+  CHANGELOG with an old-against-new A/B. This starts after the test file's last two `handlers.cyr` pieces.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

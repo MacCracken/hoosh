@@ -74,6 +74,7 @@ include "src/lib/events.cyr"
 include "src/lib/health.cyr"
 include "src/lib/otlp.cyr"
 include "src/lib/otlp_export.cyr"   # 2.9.14: the I/O half, split so provider.cyr needs only the pure one
+include "src/lib/wq.cyr"           # 2.9.20: the work-queue ring + job constructors, includable by the tests
 include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/cli.cyr"          # 2.9.19: the flag parser, over an argument vec the tests can build

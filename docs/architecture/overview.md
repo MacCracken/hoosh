@@ -79,7 +79,8 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building |
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
 | `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body |
-| `pool.cyr` | Unified worker pool (v2.4.0) — work-queue ring + 7 workers (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
+| `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, and the job constructors |
+| `pool.cyr` | Unified worker pool (v2.4.0) — 7 workers draining `wq.cyr`'s queue (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring |

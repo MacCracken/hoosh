@@ -121,11 +121,11 @@ jobs:
         run: cyrius deny src/main.cyr
 
       - name: Symbol coverage
-        # Not line coverage: hoosh's tests are a self-contained mirror and never
-        # execute src/, so a line number would be a flat 0%. This asserts every
-        # function in src/ is at least REFERENCED by the suites — a floor
-        # against adding code nothing watches. See scripts/coverage.sh for what
-        # it does and does not prove.
+        # Not line coverage: this asserts every function in src/ is at least
+        # REFERENCED by the suites — a floor against adding code nothing
+        # watches. Since 2.9.2 the test file includes src/lib modules for real
+        # (36 of 42 at 2.9.20; coverage.sh lists them). See scripts/coverage.sh
+        # for what it does and does not prove.
         run: ./scripts/coverage.sh 30
 
       - name: Security scan

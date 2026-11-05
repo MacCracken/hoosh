@@ -16,9 +16,6 @@
 # TLS block from CLONE_SETTLS, so they never call thread_local_init.
 
 var WORKER_COUNT = 7;
-var JOB_CONN = 0;
-var JOB_BATCH_ITEM = 1;
-var JOB_OTLP_EXPORT = 2;
 
 # Request read sizing. REQ_READ_CHUNK is the first (and, for almost every
 # request, only) recv; MAX_REQUEST_BODY caps the declared Content-Length and
@@ -27,106 +24,8 @@ var JOB_OTLP_EXPORT = 2;
 var REQ_READ_CHUNK = 65535;
 var MAX_REQUEST_BODY = 1048576;
 
-# ── Work queue: a bounded ring of job pointers + mutex. wq_pop is non-blocking
-# (returns 0 when empty) so workers + the sync-batch barrier can work-steal. ──
-var WQ_MAX = 8192;
-var _wq_ring = 0;
-var _wq_head = 0;       # pop cursor
-var _wq_count = 0;
-var _wq_busy = 0;      # jobs popped and currently being served (2.5.8)
-var _wq_lock = 0;
-
-# Outstanding work: still queued PLUS already popped and being served. The
-# shutdown drain (2.5.8) waits on this — queue depth alone misses every request
-# a worker is currently answering.
-fn wq_outstanding() {
-    mutex_lock(_wq_lock);
-    var n = _wq_count + _wq_busy;
-    mutex_unlock(_wq_lock);
-    return n;
-}
-
-fn wq_init() {
-    _wq_ring = alloc(WQ_MAX * 8);
-    _wq_lock = mutex_new();
-    return 0;
-}
-
-# Enqueue a job. Backpressure (sleep) when the ring is full — the accept loop
-# slows rather than dropping connections.
-fn wq_push(job) {
-    while (1 == 1) {
-        mutex_lock(_wq_lock);
-        if (_wq_count < WQ_MAX) {
-            store64(_wq_ring + ((_wq_head + _wq_count) % WQ_MAX) * 8, job);
-            _wq_count = _wq_count + 1;
-            mutex_unlock(_wq_lock);
-            return 0;
-        }
-        mutex_unlock(_wq_lock);
-        sleep_ms(1);
-    }
-    return 0;
-}
-
-# Non-blocking pop. Returns 0 when empty.
-fn wq_pop() {
-    mutex_lock(_wq_lock);
-    if (_wq_count == 0) {
-        mutex_unlock(_wq_lock);
-        return 0;
-    }
-    var job = load64(_wq_ring + (_wq_head % WQ_MAX) * 8);
-    _wq_head = (_wq_head + 1) % WQ_MAX;
-    _wq_count = _wq_count - 1;
-    # Hand off from "queued" to "in flight" under the SAME lock acquisition, so
-    # the pair is atomic and the hot path pays no extra lock. wq_done() clears
-    # it when the job finishes.
-    _wq_busy = _wq_busy + 1;
-    mutex_unlock(_wq_lock);
-    return job;
-}
-
-# Mark a popped job finished. Pairs with the increment inside wq_pop.
-fn wq_done() {
-    mutex_lock(_wq_lock);
-    _wq_busy = _wq_busy - 1;
-    mutex_unlock(_wq_lock);
-    return 0;
-}
-
-# ── Job constructors ──
-fn _job_conn(cfd) {
-    var j = alloc(16);
-    store64(j, JOB_CONN);
-    store64(j + 8, cfd);
-    return j;
-}
-
-# A batch item: [type, req_ptr, req_len, result_slot, completed_ctr, failed_ctr].
-# completed_ctr / failed_ctr are absolute addresses of atomic counters (the batch
-# barrier reads completed_ctr; failed_ctr may be 0 to skip failure accounting).
-fn job_batch_item(req_ptr, req_len, slot, completed_ctr, failed_ctr) {
-    var j = alloc(48);
-    store64(j, JOB_BATCH_ITEM);
-    store64(j + 8, req_ptr);
-    store64(j + 16, req_len);
-    store64(j + 24, slot);
-    store64(j + 32, completed_ctr);
-    store64(j + 40, failed_ctr);
-    return j;
-}
-
-# An OTLP/JSON export POST: [type, doc_ptr, doc_len]. The exporter thread
-# enqueues this for an https collector so a worker does the TLS (through 2.9.0
-# only a worker could; see the header).
-fn job_otlp_export(doc_ptr, doc_len) {
-    var j = alloc(24);
-    store64(j, JOB_OTLP_EXPORT);
-    store64(j + 8, doc_ptr);
-    store64(j + 16, doc_len);
-    return j;
-}
+# The work queue (wq_push / wq_pop / wq_done) and the job constructors are wq.cyr's, included just before this
+# file (2.9.20: split out so the tests run the real ring instead of a copy of it).
 
 # Read one full HTTP request off the connection, route it, close. Runs on a
 # worker thread.

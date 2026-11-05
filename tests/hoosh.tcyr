@@ -105,6 +105,9 @@ include "src/lib/cfgparse.cyr"
 # 2.9.19: the command line's flag parser, split from main.cyr as cli.cyr; it takes the arguments as a vec, so the
 # tests run it instead of a copy.
 include "src/lib/cli.cyr"
+# 2.9.20: the worker pool's work queue and job constructors, split from pool.cyr as wq.cyr; the copy here had no
+# lock, no in-flight count and a push that refused instead of waiting.
+include "src/lib/wq.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -190,30 +193,12 @@ fn _t_lat_slot(prov, b) {
     return load64(_lat_counts + (prov * (NLAT_BUCKETS + 1) + b) * 8);
 }
 
-# Mirror of src/lib/pool.cyr work-queue ring (FIFO + wrap-around), minus the
-# mutex (single-threaded test of the ring logic).
-var _T_WQ_MAX = 4;
-var _t_wq_ring = 0;
-var _t_wq_head = 0;
-var _t_wq_count = 0;
-fn _t_wq_init() {
-    _t_wq_ring = alloc(_T_WQ_MAX * 8);
-    _t_wq_head = 0;
-    _t_wq_count = 0;
+# 2.9.20: wq_push on a thread, for the backpressure test: it returns only once a pop has made room.
+var _t_wq_pushed = 0;
+fn _t_wq_pusher(job) {
+    wq_push(job);
+    atomic_store(&_t_wq_pushed, 1);
     return 0;
-}
-fn _t_wq_push(job) {
-    if (_t_wq_count >= _T_WQ_MAX) { return 0; }
-    store64(_t_wq_ring + ((_t_wq_head + _t_wq_count) % _T_WQ_MAX) * 8, job);
-    _t_wq_count = _t_wq_count + 1;
-    return 1;
-}
-fn _t_wq_pop() {
-    if (_t_wq_count == 0) { return 0; }
-    var j = load64(_t_wq_ring + (_t_wq_head % _T_WQ_MAX) * 8);
-    _t_wq_head = (_t_wq_head + 1) % _T_WQ_MAX;
-    _t_wq_count = _t_wq_count - 1;
-    return j;
 }
 
 # ── 2.5.2 request-path fidelity ──
@@ -3721,23 +3706,81 @@ fn main() {
     assert_eq(_t_has(gb, strlen(gb), "\"tools\":[{\"functionDeclarations\":[{\"name\":\"get_w\""), 1,
       "provider: OpenAI tools become Gemini functionDeclarations");
 
-    # ── Worker-pool work queue (FIFO ring + wrap-around) ──────────
+    # ── Worker-pool work queue: wq.cyr's real ring (2.9.20) ─────────
     test_group("pool");
-    _t_wq_init();
-    assert_eq(_t_wq_pop(), 0, "wq: empty pop → 0");
-    _t_wq_push(101); _t_wq_push(102); _t_wq_push(103);
-    assert_eq(_t_wq_pop(), 101, "wq: FIFO order (1)");
-    assert_eq(_t_wq_pop(), 102, "wq: FIFO order (2)");
+    # A 4-slot ring, so the wrap and the full case come quickly. WQ_MAX is restored below.
+    WQ_MAX = 4;
+    wq_init();
+    assert_eq(wq_pop(), 0, "wq: empty pop → 0");
+    assert_eq(wq_outstanding(), 0, "wq: nothing outstanding at start");
+    assert_eq(wq_try_push(101), 1, "wq: push into an empty ring");
+    wq_push(102);
+    wq_push(103);
+    assert_eq(wq_outstanding(), 3, "wq: three queued");
+    assert_eq(wq_pop(), 101, "wq: FIFO order (1)");
+    assert_eq(wq_pop(), 102, "wq: FIFO order (2)");
+    # Popped jobs stay outstanding until wq_done: the shutdown drain waits on queued + in flight.
+    assert_eq(wq_outstanding(), 3, "wq: popped jobs still outstanding");
+    wq_done();
+    wq_done();
+    assert_eq(wq_outstanding(), 1, "wq: wq_done ends a popped job");
     # Wrap-around: head advanced, push past the physical end.
-    _t_wq_push(104); _t_wq_push(105); _t_wq_push(106);
-    assert_eq(_t_wq_pop(), 103, "wq: FIFO across wrap (3)");
-    assert_eq(_t_wq_pop(), 104, "wq: FIFO across wrap (4)");
-    assert_eq(_t_wq_pop(), 105, "wq: FIFO across wrap (5)");
-    assert_eq(_t_wq_pop(), 106, "wq: FIFO across wrap (6)");
-    assert_eq(_t_wq_pop(), 0, "wq: drained → 0");
-    # Full ring rejects the overflow push.
-    _t_wq_push(1); _t_wq_push(2); _t_wq_push(3); _t_wq_push(4);
-    assert_eq(_t_wq_push(5), 0, "wq: full ring rejects push");
+    wq_push(104);
+    wq_push(105);
+    wq_push(106);
+    assert_eq(wq_try_push(107), 0, "wq: full ring refuses wq_try_push");
+    assert_eq(wq_outstanding(), 4, "wq: a refused push queues nothing");
+    assert_eq(wq_pop(), 103, "wq: FIFO across wrap (3)");
+    assert_eq(wq_pop(), 104, "wq: FIFO across wrap (4)");
+    assert_eq(wq_pop(), 105, "wq: FIFO across wrap (5)");
+    assert_eq(wq_pop(), 106, "wq: FIFO across wrap (6)");
+    assert_eq(wq_pop(), 0, "wq: drained → 0");
+    assert_eq(wq_outstanding(), 4, "wq: drained, four still in flight");
+    var wqd = 0;
+    while (wqd < 4) {
+        wq_done();
+        wqd = wqd + 1;
+    }
+    assert_eq(wq_outstanding(), 0, "wq: all done");
+    # wq_push on a full ring waits instead of dropping the job, and goes through once a pop makes room.
+    wq_push(1);
+    wq_push(2);
+    wq_push(3);
+    wq_push(4);
+    _t_wq_pushed = 0;
+    var wq_th = thread_create(&_t_wq_pusher, 5);
+    sleep_ms(30);
+    assert_eq(atomic_load(&_t_wq_pushed), 0, "wq: wq_push waits on a full ring");
+    assert_eq(wq_pop(), 1, "wq: pop makes room");
+    thread_join(wq_th);
+    assert_eq(atomic_load(&_t_wq_pushed), 1, "wq: the waiting push went through");
+    assert_eq(wq_pop(), 2, "wq: order kept after backpressure (2)");
+    assert_eq(wq_pop(), 3, "wq: order kept after backpressure (3)");
+    assert_eq(wq_pop(), 4, "wq: order kept after backpressure (4)");
+    assert_eq(wq_pop(), 5, "wq: the waited job is last");
+    # wq_init starts the ring empty again, whatever was queued or in flight.
+    wq_push(6);
+    wq_init();
+    assert_eq(wq_outstanding(), 0, "wq: wq_init clears queued and in-flight counts");
+    assert_eq(wq_pop(), 0, "wq: wq_init leaves nothing to pop");
+    WQ_MAX = 8192;
+    # Job layouts, as job_process in pool.cyr reads them.
+    var jc = _job_conn(42);
+    assert_eq(load64(jc), JOB_CONN, "job: conn type");
+    assert_eq(load64(jc + 8), 42, "job: conn fd at +8");
+    var jb = job_batch_item(1000, 17, 2000, 3000, 4000);
+    assert_eq(load64(jb), JOB_BATCH_ITEM, "job: batch item type");
+    assert_eq(load64(jb + 8), 1000, "job: batch request pointer at +8");
+    assert_eq(load64(jb + 16), 17, "job: batch request length at +16");
+    assert_eq(load64(jb + 24), 2000, "job: batch result slot at +24");
+    assert_eq(load64(jb + 32), 3000, "job: batch completed counter at +32");
+    assert_eq(load64(jb + 40), 4000, "job: batch failed counter at +40");
+    var jo = job_otlp_export(5000, 9);
+    assert_eq(load64(jo), JOB_OTLP_EXPORT, "job: otlp export type");
+    assert_eq(load64(jo + 8), 5000, "job: otlp document at +8");
+    assert_eq(load64(jo + 16), 9, "job: otlp document length at +16");
+    assert_eq(JOB_CONN != JOB_BATCH_ITEM && JOB_BATCH_ITEM != JOB_OTLP_EXPORT && JOB_OTLP_EXPORT != JOB_CONN, 1,
+      "job: the three types are distinct");
 
     # ── Hardware: requirement-string → REQ_* enum ────────────────
     test_group("hardware");

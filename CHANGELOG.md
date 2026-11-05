@@ -5,6 +5,74 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.20] — 2026-11-05
+
+**The worker pool's work queue is tested for real.** The ring and the job constructors moved from `pool.cyr` into the
+new `wq.cyr`, which the tests include. Their copy of the ring is gone. No behavior changed. **1540 assertions** in 160
+groups. All gates are clean: fmt, lint, vet, deny, coverage (402/693, 58%; **36 of 42** modules included for real),
+the security scan, the four fuzz targets and the shutdown smoke test.
+
+### Changed — `wq.cyr`, split from `pool.cyr`
+
+`pool.cyr` reads sockets and dispatches into the handlers, so it cannot be included in the tests. The part that does
+neither moved, unchanged, into `src/lib/wq.cyr`, included just before `pool.cyr`:
+- the `JOB_CONN`, `JOB_BATCH_ITEM` and `JOB_OTLP_EXPORT` types;
+- the ring: `WQ_MAX`, `wq_init`, `wq_push`, `wq_pop`, `wq_done` and `wq_outstanding`;
+- the job constructors `_job_conn`, `job_batch_item` and `job_otlp_export`.
+
+There are two small changes:
+- **new:** `wq_try_push(job)` queues a job if there is room and returns 1, or returns 0 when the ring is full.
+  `wq_push` is now a loop over it that sleeps 1 ms between tries, which is what it did before;
+- `wq_init` also zeroes the queued and in-flight counts. `pool_start` calls it once, before any worker exists, when
+  both are already 0.
+
+The binary is the same size as before the split.
+
+### Changed — the tests run it for real
+
+**Gone:** the copy of the ring (`_T_WQ_MAX`, `_t_wq_ring`, `_t_wq_head`, `_t_wq_count`, `_t_wq_init`, `_t_wq_push`,
+`_t_wq_pop`). It had no lock and no in-flight count, and its push refused a full ring, which the real one never
+does.
+
+**The `pool` group** sets `WQ_MAX` to 4 and runs the real ring. It checks:
+- FIFO order, including across the wrap;
+- a full ring refusing `wq_try_push` and queueing nothing;
+- popped jobs counted as outstanding until `wq_done`. The shutdown drain waits on that count;
+- `wq_push` on a full ring waiting, not dropping the job. A thread pushes into a full ring, is still waiting 30 ms
+  later, and finishes once the main thread pops; its job comes out last;
+- `wq_init` emptying a ring that holds queued and in-flight jobs;
+- the three job layouts, field by field, as `job_process` reads them.
+
+### Mutation-checked
+
+A copy of the tree was changed 18 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| `wq_try_push` filling one slot too many; reporting success as 2; ignoring the head when placing a job | 8, 1, 9 fail |
+| `wq_push` trying once and dropping the job | 2 fail |
+| `wq_pop` with its empty check off; not counting the job in flight; not advancing the head | 17, 5, 9 fail |
+| `wq_done` not clearing the in-flight count; `wq_outstanding` counting only the queue | 4, 2 fail |
+| `wq_init` keeping the queued count; keeping the in-flight count | 1, 1 |
+| each job constructor's type, and each field it stores (7 mutants) | 1 or 2 fail each |
+
+**The first-round survivor,** found before the run: the `wq_init` test ran on an empty ring, so dropping its
+queued-count reset would have passed. The test now queues a job first.
+
+### Notes
+
+- The test file is 5,957 lines (was 5,914).
+- **Benchmarks,** at load 1.4: the 25 rows' median move is −0.8%, all within −3% and +2.3%. `tests/hoosh.bcyr` is
+  unchanged and includes nothing from `src/`; its `work_queue_push_pop` row times its own lock-free copy of the
+  ring, so this release cannot move it.
+- **What the test file still mirrors:** two pieces of `handlers.cyr`, the usage block of `_chat_completion_body`
+  and the requirement-match scan. They are next.
+- **Found: the bench file is a mirror too.** `tests/hoosh.bcyr` includes no `src/` module; 62 of its 65 functions
+  are copies, so every bench row times a copy of `src/`, and a change to `src/` cannot move a row. The roadmap has
+  it as the item after the test file's.
+- The CI coverage step's comment said the tests "never execute src/". That has been untrue since 2.9.2, and the
+  comment now says so.
+
 ## [2.9.19] — 2026-11-05
 
 **The command line's flag parser is tested for real.** It moved from `main.cyr` into the new `cli.cyr`, in a form that
