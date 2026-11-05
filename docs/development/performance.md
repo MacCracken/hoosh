@@ -38,7 +38,7 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-23 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
+25 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
 function (no live backend — inference latency is backend-bound and not meaningful to
 micro-measure here). The clock-reading rows run on the production coarse clock, which
 the bench sets as the gateway's ticker would:
@@ -55,6 +55,9 @@ the bench sets as the gateway's ticker would:
   `auth_verify_token`, `auth_verify_wrong_late`, `auth_verify_wrong_early`,
   `rate_limit_check`, `cost_record_known_model`, `cost_record_local_free`,
   `audit_record_sign`
+- **With a live catalog** (three routes listing 100 models each, as a gateway with
+  `catalog = "live"` routes has) — `cost_record_live_catalog`,
+  `metadata_lookup_live_catalog` (2.9.25)
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a

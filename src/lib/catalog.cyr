@@ -490,7 +490,8 @@ enum CatRecField {
     CAT_R_CHECKED  = 24;     # clock ms of the last fetch, 0 = never
     CAT_R_ENTRIES  = 32;     # vec of entries from the last GOOD fetch, or 0
     CAT_R_GOOD_MS  = 40;     # clock ms of the last good fetch, 0 = never
-    CAT_R_SIZE     = 48;
+    CAT_R_INDEX    = 48;     # 2.9.25: catalog_index_new over CAT_R_ENTRIES, or 0
+    CAT_R_SIZE     = 56;
 }
 
 fn catalog_record_new(prov, base_url) {
@@ -505,6 +506,7 @@ fn catalog_record_new(prov, base_url) {
     store64(r + CAT_R_CHECKED, 0);
     store64(r + CAT_R_ENTRIES, 0);
     store64(r + CAT_R_GOOD_MS, 0);
+    store64(r + CAT_R_INDEX, 0);
     return r;
 }
 
@@ -527,9 +529,19 @@ fn catalog_record_note(r, status, entries, now_ms) {
     store64(r + CAT_R_STATUS, status);
     store64(r + CAT_R_CHECKED, now_ms);
     if (status == 200 && entries != 0) {
+        store64(r + CAT_R_INDEX, catalog_index_new(entries));
         store64(r + CAT_R_ENTRIES, entries);
         store64(r + CAT_R_GOOD_MS, now_ms);
     }
+    return 0;
+}
+
+# A refresh keeps a route's last good list when it does not ask that route again: copy it, its time and its index
+# from the previous snapshot's record. (catalog_fetch.cyr copied the entries and the time by hand through 2.9.24.)
+fn catalog_record_carry(r, prev) {
+    store64(r + CAT_R_INDEX, load64(prev + CAT_R_INDEX));
+    store64(r + CAT_R_ENTRIES, cat_r_entries(prev));
+    store64(r + CAT_R_GOOD_MS, cat_r_good_ms(prev));
     return 0;
 }
 
@@ -592,11 +604,85 @@ fn catalog_entries_find(es, model) {
     return 0;
 }
 
+# ── Lookup index (2.9.25) ──
+# catalog_entries_find is two linear passes, `streq` then the dated check, over every entry, and the hot paths ran
+# it over every route's list: per request (catalog_find_on for the output cap, metadata_lookup for compaction)
+# and per completion (cost_record, under _chat_lock). With three routes listing 100 models each, a model on the
+# third cost ~20 us a lookup. The index answers the same question from two maps built once, when a list is
+# published: the exact id, and the alias of each dated id (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`).
+# The first entry wins in each, as the linear passes found the first. Neither the list nor the index changes after
+# it is built, so lookups take no lock.
+#
+# Layout: entries(0) exact map(8) dated map(16) — 24 bytes. The entries pointer says which list it indexes.
+
+# `id` without its "-" + eight digits snapshot suffix, as a fresh cstr; 0 when `id` has no such suffix. The other
+# half of catalog_is_dated.
+fn _cat_dated_alias(id) {
+    var n = strlen(id);
+    if (n < 9) { return 0; }
+    var al = n - 9;
+    if (load8(id + al) != 45) { return 0; }
+    var i = al + 1;
+    while (i < n) {
+        var c = load8(id + i);
+        if (c < 48 || c > 57) { return 0; }
+        i = i + 1;
+    }
+    var a = alloc(al + 1);
+    memcpy(a, id, al);
+    store8(a + al, 0);
+    return a;
+}
+
+fn catalog_index_new(es) {
+    var ix = alloc(24);
+    var ex = map_new();
+    var dt = map_new();
+    var n = vec_len(es);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(es, i);
+        var id = cat_e_id(e);
+        if (id != 0) {
+            if (map_has(ex, id) == 0) { map_set(ex, id, e); }
+            var alias = _cat_dated_alias(id);
+            if (alias != 0) {
+                if (map_has(dt, alias) == 0) { map_set(dt, alias, e); }
+            }
+        }
+        i = i + 1;
+    }
+    store64(ix, es);
+    store64(ix + 8, ex);
+    store64(ix + 16, dt);
+    return ix;
+}
+
+# catalog_entries_find's answer from an index: the exact id, else the dated snapshot of an alias.
+fn catalog_index_find(ix, model) {
+    if (model == 0) { return 0; }
+    var e = map_get(load64(ix + 8), model);
+    if (e != 0) { return e; }
+    return map_get(load64(ix + 16), model);
+}
+
+# The entry for `model` in record `r`'s list: through its index when the index is over the list the record holds,
+# else the linear find.
+fn catalog_record_entry(r, model) {
+    var es = cat_r_entries(r);
+    if (es == 0) { return 0; }
+    var ix = load64(r + CAT_R_INDEX);
+    if (ix != 0) {
+        if (load64(ix) == es) { return catalog_index_find(ix, model); }
+    }
+    return catalog_entries_find(es, model);
+}
+
 # The live entry for `model` on the route (prov, base_url), or 0 when that route never listed it.
 fn catalog_find_on(prov, base_url, model) {
     var r = catalog_record_find(_cat_snap, prov, base_url);
     if (r == 0) { return 0; }
-    return catalog_entries_find(cat_r_entries(r), model);
+    return catalog_record_entry(r, model);
 }
 
 # The first live entry for `model` on any route, or 0 — for the route-agnostic lookups (context window, price).
@@ -606,7 +692,7 @@ fn catalog_find_any(model) {
     var n = vec_len(snap);
     var i = 0;
     while (i < n) {
-        var e = catalog_entries_find(cat_r_entries(vec_get(snap, i)), model);
+        var e = catalog_record_entry(vec_get(snap, i), model);
         if (e != 0) { return e; }
         i = i + 1;
     }
@@ -617,8 +703,16 @@ fn catalog_find_any(model) {
 # Set by load_config; replaced whole on reload. They win over everything a provider or the compiled table says,
 # because they are the only source an operator controls.
 var _cat_cfg = 0;
+var _cat_cfg_ix = 0;     # 2.9.25: catalog_index_new over _cat_cfg
 
-fn catalog_config_set(v) { _cat_cfg = v; return 0; }
+# The index first, then the list: a reader that pairs a new index with the old list sees they differ and scans.
+fn catalog_config_set(v) {
+    var ix = 0;
+    if (v != 0) { ix = catalog_index_new(v); }
+    _cat_cfg_ix = ix;
+    _cat_cfg = v;
+    return 0;
+}
 
 # An operator's block laid over what a provider said about the same model: a copy of `live` with every field the
 # block sets replacing the provider's, marked `config`. A block that only prices a model must not erase the
@@ -642,7 +736,15 @@ fn catalog_merge(cfg, live) {
     return e;
 }
 fn catalog_config() { return _cat_cfg; }
-fn catalog_config_find(model) { return catalog_entries_find(_cat_cfg, model); }
+fn catalog_config_find(model) {
+    var v = _cat_cfg;
+    if (v == 0) { return 0; }
+    var ix = _cat_cfg_ix;
+    if (ix != 0) {
+        if (load64(ix) == v) { return catalog_index_find(ix, model); }
+    }
+    return catalog_entries_find(v, model);
+}
 
 # ── refresh scheduling ──
 

@@ -5,6 +5,109 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.25] — 2026-11-05
+
+**Lookups on the request path no longer scan.** 2.9.24's real bench showed cost accounting scanning the 81-row
+pricing table twice per completion. Measuring with a live catalog showed a larger cost on the same path: every
+lookup scanned every route's model list, so with three routes of 100 models, `cost_record` took 22 µs per
+completion (under `_chat_lock`) and `metadata_lookup` took 20 µs per request. The pricing and metadata tables
+and every published model list are now indexed when built, and `estimate_cost_micro` looks each source up once.
+The answers are unchanged. **1682 assertions** in 162 groups. All gates are clean: fmt, lint, vet, deny, coverage
+(387/708, 54%), the security scan, the four fuzz targets and the shutdown smoke test.
+
+The roadmap item was the pricing table. The catalog scan sits on the same path and is about seven times its
+cost, so this release takes both.
+
+### Changed — the numbers
+
+The same bench file, built on 2.9.24's `src/` and on 2.9.25's, run alternately for 7 rounds at load 1.6–2.2;
+medians:
+
+| row | 2.9.24 | 2.9.25 | |
+|---|---|---|---|
+| `cost_record_known_model` (no live catalog) | 3.36 µs | 234 ns | 14× faster |
+| `cost_record_live_catalog` (**new row**) | 23.11 µs | 587 ns | 39× faster |
+| `metadata_lookup_live_catalog` (**new row**) | 21.10 µs | 482 ns | 44× faster |
+| `cost_record_local_free` | 140 ns | 121 ns | a local provider now returns first |
+| the other 21 rows | | | within ±4%, except `batch_split_4` (+8%) on unchanged code |
+
+The two new rows publish three routes listing 100 models each, with the model 51st on the third, as a gateway
+with `catalog = "live"` routes has. Per chat request, a live catalog had cost about 50 µs of string scanning: the
+output-cap lookup, the compaction lookup and the cost record. It now costs about 1.5 µs.
+
+### Changed — how
+
+- **New `keyindex.cyr`:** an index over a compiled table whose rows start with a key. A map from key to row
+  answers the exact match, with the first row winning as the linear pass did. The longest-prefix pass compares
+  precomputed key lengths before it touches bytes. Through 2.9.24 both tables ran `streq` on every row and then
+  `strlen` on every key, and `strlen` walks each unaligned literal byte by byte. `pricing.cyr` and `metadata.cyr`
+  build their index once, when their table is built, and publish the index pointer last.
+- **`catalog.cyr` indexes each published list:** one map for the exact id and one for the alias of each dated id
+  (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`), the first entry winning in each. A record builds its index
+  in `catalog_record_note`, when it takes a good list.
+  - The new `catalog_record_carry` moves a previous record's list together with its index and time; the refresh
+    in `catalog_fetch.cyr` copied the list and time by hand.
+  - `catalog_config_set` indexes the operator's `[[models]]` blocks.
+  - **Lookups trust an index only if it was built from the list the record or config holds now;** otherwise they
+    run the linear `catalog_entries_find`, which stays as the reference and the fallback.
+- **`estimate_cost_micro` looks up each source once:** the operator's block, then the live catalog, then the
+  table, then the provider-level guess, and the table's long-context tier unless an operator block names the
+  model. Through 2.9.24 it ran `pricing_lookup` and then looked up the table and the operator's block again. It
+  no longer takes 16 bytes from the never-freeing arena per completion: the fallback's scratch is on the stack.
+- **The init race is narrower:** both tables now set their row count before the table pointer, and publish the
+  index last. Before, a worker could see the table with a row count of 0 on the very first concurrent lookup.
+
+**Checked live:** the same config was run on a 2.9.24 build and on 2.9.25, with two providers and two `[[models]]`
+blocks, one priced, one setting only `max_output`. `/v1/cost/estimate` gave the same answer for all 11 models
+tried:
+- exact ids (`gpt-4o`) and dated ids found by prefix (`gpt-4o-2024-08-06`, `claude-opus-4-5-20251101`);
+- Haiku and Sonnet 5.5 past their long-context thresholds, and GPT-5.5;
+- the priced block found by its dated alias (`my-tuned`), and the unpriced block suppressing Haiku's tier;
+- an unknown Anthropic model and an unknown OpenAI model at their provider guesses.
+
+### Tests
+
+**A new `lookup_index` group:**
+- **`keyindex`** on a small table: an exact key, a duplicated key answering with its first row, the longest
+  prefix, a shorter prefix when it is the longest, and keys one byte or more longer than the model never matching.
+- **Every row** of the real pricing and metadata tables is found by its own key through the real index.
+- **The catalog index matches `catalog_entries_find` on every probe:**
+  - the exact id beats an earlier dated one, and the first dated snapshot of an alias wins;
+  - neither 7 digits, nor a letter among the 8, nor a `_` separator is a snapshot suffix;
+  - the empty alias behaves as before.
+- **Record paths:** a good fetch indexes its list; a failed fetch keeps the list and its index; a carried record
+  keeps it; an index over another list is not used. **Config:** the operator's blocks are indexed, and blocks set
+  without their index are scanned.
+- **`estimate_cost_micro`:**
+  - the operator's price wins, and a provider's listed price beats both the table and the provider guess;
+  - an operator block without a price suppresses the tier, and without the block the tier applies;
+  - an unknown model gets the provider's guess;
+  - a hosted model's name served by a local provider is free.
+
+### Mutation-checked
+
+A copy of the tree was changed 19 ways, and every mutant is caught:
+
+| mutant | result |
+|---|---|
+| `keyindex`: the last duplicate winning; the last of an equal-length prefix winning; each key length one short; no prefix pass | 1, 1, 4 fail; crash |
+| catalog index: the last duplicate id or dated snapshot winning; the suffix digits unchecked; the empty alias refused; no dated lookup | 2, 3, 1, 2, 8 fail |
+| a record trusting a stale index; no index built on a good fetch; the index not carried | 2 fail; crash; 1 fail |
+| config: no index built; a stale index trusted | crash; 1 fail |
+| `estimate_cost_micro`: the tier ignoring the operator block; the operator's or the provider's price skipped; the fallback reading the wrong half; local providers priced | 1 fail each, the last 3 |
+
+Two changes no test can catch, because they only make lookups slow: skipping the exact map (the prefix pass finds
+an exact key as its own longest prefix) and scanning instead of using an index. The bench rows above are their
+guard.
+
+### Notes
+
+- The test file is 6,176 lines (was 6,010); the bench file is 501 (was 455), with two new rows.
+- **One unexplained test failure.** In ten runs of the unmutated suite during the mutation check, the first
+  reported a failure whose assertion was not captured. It did not reproduce in the next nine runs, and every
+  mutant's failure names an assertion tied to its change. The machine was under load from other sessions.
+- **Coverage** reads 387 of 708 functions: 7 functions are new, all referenced.
+
 ## [2.9.24] — 2026-11-05
 
 **The bench file times the real code.** Through 2.9.23 `tests/hoosh.bcyr` included no `src/` module, and 62 of its

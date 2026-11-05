@@ -1,0 +1,67 @@
+# keyindex.cyr — an index over a compiled table whose rows start with a key cstr (2.9.25).
+#
+# pricing.cyr's and metadata.cyr's tables answer "this model's row": the row whose key is the model, else the row
+# whose key is the model's longest prefix. Through 2.9.24 both did that with two linear passes per lookup, `streq`
+# then `strlen` + `memeq` on every row, and `strlen` walks each unaligned literal key byte by byte. With 81 pricing
+# rows that was 1.6 us per lookup for `gpt-4o`, twice per completion under `_chat_lock`.
+#
+# The index is built once, when the table is: a map from key to row for the exact match (the first row wins, as
+# the linear pass did), and every key's length, so the prefix pass compares lengths before it touches bytes. The
+# table and the index are never changed after they are built, so lookups take no lock; the owner publishes the
+# index pointer last.
+#
+# Layout: map(0) klen(8) arr(16) n(24) stride(32) — 40 bytes.
+
+var KX_MAP = 0;
+var KX_KLEN = 8;
+var KX_ARR = 16;
+var KX_N = 24;
+var KX_STRIDE = 32;
+
+# Index the `n` rows of `stride` bytes at `arr`; each row's first word is its key cstr.
+fn keyidx_rows(arr, n, stride) {
+    var ix = alloc(40);
+    var m = map_new();
+    var kl = alloc(n * 8 + 8);
+    var i = 0;
+    while (i < n) {
+        var row = arr + i * stride;
+        var key = load64(row);
+        store64(kl + i * 8, strlen(key));
+        if (map_has(m, key) == 0) { map_set(m, key, row); }
+        i = i + 1;
+    }
+    store64(ix + KX_MAP, m);
+    store64(ix + KX_KLEN, kl);
+    store64(ix + KX_ARR, arr);
+    store64(ix + KX_N, n);
+    store64(ix + KX_STRIDE, stride);
+    return ix;
+}
+
+# The row whose key is `model`, else the row whose key is `model`'s longest prefix (the first of equal length), or
+# 0. The same answer the two linear passes gave.
+fn keyidx_find(ix, model) {
+    var row = map_get(load64(ix + KX_MAP), model);
+    if (row != 0) { return row; }
+    var kl = load64(ix + KX_KLEN);
+    var arr = load64(ix + KX_ARR);
+    var n = load64(ix + KX_N);
+    var stride = load64(ix + KX_STRIDE);
+    var ml = strlen(model);
+    var best = 0;
+    var best_len = 0;
+    var i = 0;
+    while (i < n) {
+        var klen = load64(kl + i * 8);
+        if (klen > best_len && klen <= ml) {
+            var r = arr + i * stride;
+            if (memeq(model, load64(r), klen) == 1) {
+                best = r;
+                best_len = klen;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}

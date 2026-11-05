@@ -40,14 +40,11 @@ The bands are a plan, not a promise. Every item was checked against the code and
   as the test file does; its only functions are `main` and `_b_s`. Two rows that timed a priority queue the
   gateway does not have were dropped (23 rows). The A/B is in CHANGELOG 2.9.24: five rows had been timing far less
   work than the gateway does, the largest `cost_record_known_model` (155 ns copy, 3.28 µs real; the next item).
-- **Cost accounting scans the pricing table twice per completion** (found by 2.9.24's real bench, next).
-  `cost_record` → `estimate_cost_micro` calls `_pricing_row` twice, once through `pricing_known` and again for the
-  long-context tier. `_pricing_row` is a linear `streq` scan of the 81 compiled rows, and `strlen` walks each
-  unaligned literal key byte by byte. That is 3.28 µs per completion for `gpt-4o` (row 38), against 134 ns for a
-  local model; a dated id that matches only by prefix scans all 81 rows for the exact pass and 81 more for the
-  prefix, twice. It runs under `_chat_lock`. Fix: one lookup per completion, through an index built once in
-  `_pricing_init` (key → row, with key lengths for the prefix pass); bench `cost_record_known_model` before and
-  after.
+- **Lookups on the request path no longer scan: done in 2.9.25.** 2.9.24's real bench showed `cost_record` scanning
+  the 81-row pricing table twice per completion (3.28 µs). Measuring with a live catalog showed the larger cost:
+  every lookup scanned every route's model list, 22 µs per `cost_record` (under `_chat_lock`) and 20 µs per
+  `metadata_lookup` with three routes of 100 models. Both tables and every published list are now indexed when
+  built, and `estimate_cost_micro` looks each source up once (CHANGELOG 2.9.25: 14×, 39× and 44× faster).
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
   (2026-11-04):

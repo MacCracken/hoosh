@@ -96,10 +96,11 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |
 | `dlp.cyr` | PII/secret scanner + privacy-aware routing |
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
-| `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
+| `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers, the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling, and since 2.9.25 an index over each published list (exact id and dated alias) so lookups do not scan (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
 | `urlparse.cyr` | Scheme-aware host / port of a base url (2.8.0 — the remote health probe had been reading `https://` urls as `localhost:80`) |
 | `provider_err.cyr` | The provider's own error kept and relayed (2.6.5), and the OpenAI envelope: completion id and head, `chat_rehead`, the `chat.completion` body (`_chat_completion_body`, 2.9.21 from `handlers.cyr`) |
 | `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
+| `keyindex.cyr` | An index over a compiled table of key-first rows (2.9.25): the exact key through a map, then the longest prefix by precomputed key lengths; pricing and metadata look up through it |
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09 |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |

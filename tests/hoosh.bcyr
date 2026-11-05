@@ -70,6 +70,7 @@ include "src/lib/retry.cyr"
 include "src/lib/reqparse.cyr"
 include "src/lib/cfgparse.cyr"
 include "src/lib/wq.cyr"
+include "src/lib/keyindex.cyr"
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
 include "src/lib/metrics.cyr"
@@ -412,6 +413,51 @@ fn main() {
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
+
+    # 2.9.25: the same two lookups with a live catalog, as a gateway with catalog = "live" routes has one: three
+    # routes listing 100 models each, the model the 51st on the third. Through 2.9.24 every lookup scanned the lists
+    # linearly (cost_record 22 us, metadata_lookup 20 us here); catalog.cyr indexes each list when it is published.
+    var lc_snap = vec_new();
+    var lc_r = 0;
+    while (lc_r < 3) {
+        var lc_rec = catalog_record_new(PROV_OPENAI, _b_s("https://api.openai.com"));
+        var lc_es = vec_new();
+        var lc_k = 0;
+        while (lc_k < 100) {
+            var lc_id = _b_s("some-listed-model-name-0000");
+            store8(lc_id + 23, 48 + lc_r);
+            store8(lc_id + 24, 48 + lc_k / 10);
+            store8(lc_id + 25, 48 + lc_k % 10);
+            if (lc_r == 2 && lc_k == 50) { lc_id = _b_s("gpt-4o"); }
+            vec_push(lc_es, catalog_entry_new(lc_id, CATSRC_LIVE));
+            lc_k = lc_k + 1;
+        }
+        catalog_record_note(lc_rec, 200, lc_es, 1);
+        vec_push(lc_snap, lc_rec);
+        lc_r = lc_r + 1;
+    }
+    catalog_publish(lc_snap);
+    b = bench_new("cost_record_live_catalog");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        cost_record(PROV_OPENAI, b_oai, 1000, 500, b_gpt);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    var lc_md = alloc(40);
+    b = bench_new("metadata_lookup_live_catalog");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        metadata_lookup(b_gpt, lc_md);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+    catalog_publish(0);
 
     # Benchmark: audit_record — one event on a chain: the entry hash (SHA-256), the HMAC signature over it and the
     # previous hash, the entry linked in, and the oldest evicted once the chain holds max_entries (1000 here).

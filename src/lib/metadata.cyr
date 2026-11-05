@@ -16,6 +16,7 @@ enum ModelTier {
 
 var _meta_tbl = 0;
 var _meta_n = 0;
+var _meta_ix = 0;     # 2.9.25: keyindex.cyr's index over the table, published last by _meta_init
 
 # Entry: key(0) ctx(8) tier(16) vision(24) tools(32) sys(40) listed(48) — 56 bytes.
 #
@@ -173,8 +174,10 @@ fn _meta_init() {
     _meta_add(arr, 104, "nomic-embed-text", 8192, TIER_ECONOMY, 0, 0, 0, 0);
     _meta_add(arr, 105, "text-embedding-3-large", 8191, TIER_STANDARD, 0, 0, 0, 0);
     _meta_add(arr, 106, "text-embedding-3-small", 8191, TIER_ECONOMY, 0, 0, 0, 0);
-    _meta_tbl = arr;
+    # 2.9.25: n before the table and the index last, so a worker that sees the index sees a whole table.
     _meta_n = _META_CAP;
+    _meta_tbl = arr;
+    _meta_ix = keyidx_rows(arr, _META_CAP, 56);
     return 0;
 }
 
@@ -199,39 +202,16 @@ fn _meta_copy(e, out) {
 
 # The compiled table alone: exact, then longest prefix. Returns 1 if found.
 fn _meta_table_lookup(model, out) {
-    _meta_init();
-    var ml = strlen(model);
-    var i = 0;
-    while (i < _meta_n) {
-        var e = _meta_tbl + i * 56;
-        if (streq(model, load64(e)) == 1) {
-            _meta_copy(e, out);
-            return 1;
-        }
-        i = i + 1;
+    # 2.9.25: through keyindex.cyr's index (exact, then longest prefix); it was two linear passes per lookup.
+    var ix = _meta_ix;
+    if (ix == 0) {
+        _meta_init();
+        ix = _meta_ix;
     }
-    var best = 0 - 1;
-    var best_len = 0;
-    i = 0;
-    while (i < _meta_n) {
-        var e = _meta_tbl + i * 56;
-        var key = load64(e);
-        var kl = strlen(key);
-        if (kl <= ml) {
-            if (memeq(model, key, kl) == 1) {
-                if (kl > best_len) {
-                    best_len = kl;
-                    best = i;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    if (best >= 0) {
-        _meta_copy(_meta_tbl + best * 56, out);
-        return 1;
-    }
-    return 0;
+    var row = keyidx_find(ix, model);
+    if (row == 0) { return 0; }
+    _meta_copy(row, out);
+    return 1;
 }
 
 # Fold a catalog entry's known fields over `out` (2.8.0): a known context window and vision bit win; an unknown

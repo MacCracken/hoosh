@@ -191,10 +191,7 @@ fn catalog_refresh_all() {
                 if (catalog_record_find(snap, prov, base) == 0) {
                     var nr = catalog_record_new(prov, base);
                     var prev = catalog_record_find(old, prov, base);
-                    if (prev != 0) {
-                        store64(nr + CAT_R_ENTRIES, cat_r_entries(prev));
-                        store64(nr + CAT_R_GOOD_MS, cat_r_good_ms(prev));
-                    }
+                    if (prev != 0) { catalog_record_carry(nr, prev); }   # the last good list, its time and index
                     if (route_catalog_live(r) == 1) {
                         var es = vec_new();
                         var st = catalog_fetch_route(r, es);

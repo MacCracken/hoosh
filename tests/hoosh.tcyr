@@ -140,6 +140,7 @@ fn _compress(s) {
 # Per-token pricing + model metadata: 2.8.0 includes the REAL pricing.cyr and metadata.cyr here (they were
 # mirrors, and the roadmap's "mirror drift" twice let src go wrong while the mirror stayed right — 2.5.6 pricing,
 # 2.5.7 audit). Both need only the Provider enum + provider_is_local above and catalog.cyr (included at the top).
+include "src/lib/keyindex.cyr"
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
 # 2.9.5: request/token counters and the per-provider latency histogram, for real (the bucket loop was mirrored).
@@ -1219,6 +1220,170 @@ fn _t280_urlparse() {
     assert_streq(url_host("http://"), "localhost", "url: an empty host falls back to localhost, unchanged");
     assert_streq(url_host("collector.local:4318"), "collector.local", "url: a bare host:port");
     assert_eq(url_port("collector.local:4318"), 4318, "url: ...and its port");
+    return 0;
+}
+
+# 2.9.25: the lookup indexes. keyindex.cyr over a compiled table; catalog.cyr's index over a model list, against
+# catalog_entries_find, the linear find it replaced on the hot paths (kept as the reference and the fallback).
+fn _t2925_lookup_index() {
+    test_group("lookup_index");
+    # keyindex over a small table of 16-byte rows: key(0), value(8).
+    var kt = alloc(6 * 16);
+    store64(kt, "gpt-4o");
+    store64(kt + 8, 1);
+    store64(kt + 16, "gpt-4o-mini");
+    store64(kt + 24, 2);
+    store64(kt + 32, "gpt-4");
+    store64(kt + 40, 3);
+    store64(kt + 48, "gpt-4o");
+    store64(kt + 56, 4);
+    store64(kt + 64, "claude-opus-4");
+    store64(kt + 72, 5);
+    store64(kt + 80, "claude-opus");
+    store64(kt + 88, 6);
+    var kx = keyidx_rows(kt, 6, 16);
+    assert_eq(load64(keyidx_find(kx, "gpt-4o-mini") + 8), 2, "keyidx: an exact key");
+    assert_eq(load64(keyidx_find(kx, "gpt-4o") + 8), 1, "keyidx: a duplicate key answers with its first row");
+    assert_eq(load64(keyidx_find(kx, "gpt-4o-2024-08-06") + 8), 1, "keyidx: the longest prefix (gpt-4o, not gpt-4)");
+    assert_eq(load64(keyidx_find(kx, "gpt-4-turbo") + 8), 3, "keyidx: a shorter prefix when that is the longest");
+    assert_eq(load64(keyidx_find(kx, "claude-opus-4-20250514") + 8), 5, "keyidx: claude-opus-4 over claude-opus");
+    assert_eq(keyidx_find(kx, "gpt"), 0, "keyidx: a key longer than the model is no prefix of it");
+    assert_eq(keyidx_find(kx, "claude-opu"), 0, "keyidx: nor is one a single byte longer");
+    assert_eq(keyidx_find(kx, "mistral-large"), 0, "keyidx: no row");
+    # Every row of the real pricing and metadata tables is found by its own key through the real index.
+    _pricing_row("gpt-4o");
+    assert_eq(_pricing_ix != 0, 1, "keyidx: the pricing index is published by the first lookup");
+    var pk = 0;
+    var pk_bad = 0;
+    while (pk < _pricing_n) {
+        var prow = _pricing_tbl + pk * 48;
+        if (_pricing_row(load64(prow)) != prow) { pk_bad = pk_bad + 1; }
+        pk = pk + 1;
+    }
+    assert_eq(pk_bad, 0, "keyidx: every pricing row is found by its key");
+    var md = alloc(40);
+    var mk = 0;
+    var mk_bad = 0;
+    while (mk < _meta_n) {
+        var mrow = _meta_tbl + mk * 56;
+        if (_meta_table_lookup(load64(mrow), md) != 1 || load64(md) != load64(mrow + 8)) { mk_bad = mk_bad + 1; }
+        mk = mk + 1;
+    }
+    assert_eq(mk_bad, 0, "keyidx: every metadata row is found by its key");
+    # catalog_index_new / catalog_index_find against catalog_entries_find.
+    var ces = vec_new();
+    var c_m_d = catalog_entry_new("m-20250101", CATSRC_LIVE);
+    var c_m = catalog_entry_new("m", CATSRC_LIVE);
+    var c_n1 = catalog_entry_new("n-20250101", CATSRC_LIVE);
+    var c_n2 = catalog_entry_new("n-20250202", CATSRC_LIVE);
+    var c_d1 = catalog_entry_new("dup", CATSRC_LIVE);
+    var c_d2 = catalog_entry_new("dup", CATSRC_LIVE);
+    vec_push(ces, c_m_d);
+    vec_push(ces, c_m);
+    vec_push(ces, c_n1);
+    vec_push(ces, c_n2);
+    vec_push(ces, c_d1);
+    vec_push(ces, c_d2);
+    vec_push(ces, catalog_entry_new("p-2025010", CATSRC_LIVE));
+    vec_push(ces, catalog_entry_new("q-2025010a", CATSRC_LIVE));
+    vec_push(ces, catalog_entry_new("r_20250101", CATSRC_LIVE));
+    vec_push(ces, catalog_entry_new("-20250101", CATSRC_LIVE));
+    var cix = catalog_index_new(ces);
+    assert_eq(catalog_index_find(cix, "m"), c_m, "catalog index: the exact id beats an earlier dated one");
+    assert_eq(catalog_index_find(cix, "n"), c_n1, "catalog index: the first dated snapshot of an alias");
+    assert_eq(catalog_index_find(cix, "dup"), c_d1, "catalog index: the first of a duplicated id");
+    var cprobes = vec_new();
+    vec_push(cprobes, "m");
+    vec_push(cprobes, "m-20250101");
+    vec_push(cprobes, "n");
+    vec_push(cprobes, "n-20250202");
+    vec_push(cprobes, "dup");
+    vec_push(cprobes, "p");
+    vec_push(cprobes, "q");
+    vec_push(cprobes, "r");
+    vec_push(cprobes, "");
+    vec_push(cprobes, "absent");
+    vec_push(cprobes, "p-2025010");
+    var cpi = 0;
+    var c_bad = 0;
+    while (cpi < vec_len(cprobes)) {
+        var cpr = vec_get(cprobes, cpi);
+        if (catalog_index_find(cix, cpr) != catalog_entries_find(ces, cpr)) { c_bad = c_bad + 1; }
+        cpi = cpi + 1;
+    }
+    assert_eq(c_bad, 0, "catalog index: the same answer as the linear find for every probe");
+    assert_eq(catalog_index_find(cix, "p"), 0, "catalog index: seven digits is no snapshot suffix");
+    assert_eq(catalog_index_find(cix, ""), catalog_entries_find(ces, ""), "catalog index: the empty alias as before");
+    # A record builds its index when it takes a list, a refresh carries it, and a stale index is not trusted.
+    var crec = catalog_record_new(PROV_OPENAI, "https://api.openai.com");
+    catalog_record_note(crec, 200, ces, 5);
+    assert_eq(load64(crec + CAT_R_INDEX) != 0, 1, "catalog index: a good fetch indexes its list");
+    assert_eq(load64(load64(crec + CAT_R_INDEX)), ces, "catalog index: ...the list it holds");
+    assert_eq(catalog_record_entry(crec, "n"), c_n1, "catalog index: the record answers through it");
+    catalog_record_note(crec, 500, 0, 6);
+    assert_eq(catalog_record_entry(crec, "m"), c_m, "catalog index: a failed fetch keeps the list and its index");
+    var cnr = catalog_record_new(PROV_OPENAI, "https://api.openai.com");
+    catalog_record_carry(cnr, crec);
+    assert_eq(load64(cnr + CAT_R_INDEX), load64(crec + CAT_R_INDEX), "catalog index: a carried record keeps it");
+    assert_eq(cat_r_good_ms(cnr), 5, "catalog index: ...with the list's time");
+    var ces2 = vec_new();
+    var c_z = catalog_entry_new("z", CATSRC_LIVE);
+    vec_push(ces2, c_z);
+    store64(cnr + CAT_R_ENTRIES, ces2);
+    assert_eq(catalog_record_entry(cnr, "z"), c_z, "catalog index: an index over another list is not used");
+    assert_eq(catalog_record_entry(cnr, "m"), 0, "catalog index: ...so the old list's entries are not answered");
+    # The operator's blocks: indexed when set; an index paired with another list is not used.
+    var cfv = vec_new();
+    var cf_e = catalog_entry_new("my-model-20250101", CATSRC_CONFIG);
+    vec_push(cfv, cf_e);
+    catalog_config_set(cfv);
+    assert_eq(catalog_config_find("my-model"), cf_e, "catalog index: the operator's blocks, through their index");
+    assert_eq(load64(_cat_cfg_ix), cfv, "catalog index: built over the blocks set");
+    var cfv2 = vec_new();
+    var cf_e2 = catalog_entry_new("other", CATSRC_CONFIG);
+    vec_push(cfv2, cf_e2);
+    _cat_cfg = cfv2;
+    assert_eq(catalog_config_find("other"), cf_e2, "catalog index: blocks without their index are scanned");
+    catalog_config_set(0);
+    assert_eq(catalog_config_find("my-model"), 0, "catalog index: no blocks, no answer");
+    catalog_config_set(vec_new());
+    # estimate_cost_micro: one lookup of each kind. An operator block that names the model without a price keeps
+    # the table's base rate and suppresses its long-context tier; an unknown model gets the provider's guess.
+    var ctv = vec_new();
+    var ct_e = catalog_entry_new("claude-haiku-5-5", CATSRC_CONFIG);
+    store64(ct_e + CAT_E_MAXOUT, 4096);
+    vec_push(ctv, ct_e);
+    catalog_config_set(ctv);
+    assert_eq(estimate_cost_micro("claude-haiku-5-5", PROV_ANTHROPIC, 100001, 1000), 10500,
+      "cost: an operator block without a price suppresses the long-context tier");
+    catalog_config_set(vec_new());
+    assert_eq(estimate_cost_micro("claude-haiku-5-5", PROV_ANTHROPIC, 100001, 1000), 52500,
+      "cost: without it, the tier applies");
+    assert_eq(estimate_cost_micro("claude-next-9", PROV_ANTHROPIC, 1000, 1000), 18000,
+      "cost: an unknown Anthropic model at the provider's $3/$15 guess");
+    assert_eq(estimate_cost_micro("anything", PROV_LMSTUDIO, 1000, 1000), 0, "cost: a local provider is free");
+    assert_eq(estimate_cost_micro("llama-3.3-70b", PROV_OLLAMA, 1000, 1000), 0,
+      "cost: a hosted model's name served locally is free, not the table's Groq rate");
+    var cpv = vec_new();
+    var cp_e = catalog_entry_new("claude-next-9", CATSRC_CONFIG);
+    store64(cp_e + CAT_E_IN_PRICE, 7000);
+    store64(cp_e + CAT_E_OUT_PRICE, 21000);
+    vec_push(cpv, cp_e);
+    catalog_config_set(cpv);
+    assert_eq(estimate_cost_micro("claude-next-9", PROV_ANTHROPIC, 1000, 1000), 28000, "cost: the operator's price");
+    catalog_config_set(vec_new());
+    var cor = vec_new();
+    vec_push(cor, _t280_e_or);
+    var cor_r = catalog_record_new(PROV_OPENROUTER, "https://openrouter.ai/api");
+    catalog_record_note(cor_r, 200, cor, 9000);
+    var cor_s = vec_new();
+    vec_push(cor_s, cor_r);
+    catalog_publish(cor_s);
+    assert_eq(estimate_cost_micro(cat_e_id(_t280_e_or), PROV_OPENROUTER, 1000, 1000),
+      cat_e_in_price(_t280_e_or) + cat_e_out_price(_t280_e_or), "cost: a provider's listed price is used");
+    assert_eq(cat_e_in_price(_t280_e_or) + cat_e_out_price(_t280_e_or) != 12500, 1,
+      "cost: ...which is not OpenRouter's $2.50/$10 guess, so the two cannot be confused");
+    catalog_publish(vec_new());
     return 0;
 }
 
@@ -6000,6 +6165,7 @@ fn main() {
     _t280_openai_extras();
     _t280_urlparse();
     _t281_catalog_out_cap();
+    _t2925_lookup_index();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

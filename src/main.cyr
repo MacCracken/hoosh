@@ -37,6 +37,7 @@ include "src/lib/types.cyr"
 include "src/lib/catalog.cyr"
 include "src/lib/dlp.cyr"
 include "src/lib/compression.cyr"
+include "src/lib/keyindex.cyr"      # 2.9.25: the exact + longest-prefix index for pricing.cyr and metadata.cyr
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
 include "src/lib/semantic.cyr"
