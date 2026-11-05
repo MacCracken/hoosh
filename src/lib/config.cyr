@@ -1,155 +1,9 @@
 # config.cyr — TOML configuration loader for hoosh.cyml
-# Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr
+# Requires: types.cyr, route.cyr, router.cyr, budget.cyr, cache.cyr, metrics.cyr, cfgparse.cyr (its
+#           self-contained helpers since 2.9.18)
 # Reads: [[server]], [[providers]], [[cache]], [[budgets]], [[auth]]
 
-# Routing strategy from [server] strategy (default priority). Maps the four
-# implemented strategies; an unknown value falls back to priority.
-fn strategy_from_str(s) {
-    if (streq(s, "round-robin") == 1 || streq(s, "roundrobin") == 1) { return STRAT_ROUND_ROBIN; }
-    if (streq(s, "lowest-latency") == 1 || streq(s, "lowest_latency") == 1) { return STRAT_LOWEST_LATENCY; }
-    if (streq(s, "direct") == 1) { return STRAT_DIRECT; }
-    return STRAT_PRIORITY;
-}
 var _route_strategy = 0;   # STRAT_PRIORITY
-
-# Expand a config value: "$NAME" -> getenv("NAME"), so secrets (API keys)
-# live in the environment, not in hoosh.cyml. Returns 0 if the env var is
-# unset; passes non-"$" values through unchanged.
-fn _config_expand_env(value) {
-    if (value == 0) { return 0; }
-    if (load8(value) != 36) { return value; }
-    var name = value + 1;
-    # Accept ${NAME} as well as $NAME. `load8(value) == 36` was already true
-    # for the braced form, so getenv("{NAME}") simply missed and the value was
-    # dropped with no diagnostic.
-    var n = strlen(name);
-    if (n > 2 && load8(name) == 123 && load8(name + n - 1) == 125) {
-        var inner = alloc(n - 1);
-        if (inner == 0) { return 0; }
-        memcpy(inner, name + 1, n - 2);
-        store8(inner + n - 2, 0);
-        name = inner;
-    }
-    var got = getenv(name);
-    if (got == 0) {
-        # An unset variable used to be dropped silently: the route kept
-        # ROUTE_API_KEY = 0, _provider_headers skipped the auth block, and the
-        # request went upstream with NO credential — surfacing as a provider
-        # 401 the operator naturally blamed on the provider.
-        var sb = str_builder_new();
-        str_builder_add_cstr(sb, "config: environment variable is not set: ");
-        str_builder_add_cstr(sb, name);
-        var msg = to_cstr(str_builder_build(sb));
-        hlog_warn(msg);
-    }
-    return got;
-}
-
-# Bounds for the TOML string arrays below. The old inline `models` parser
-# allocated 8 slots and never checked, so a 9th pattern wrote past the end.
-var MAX_MODEL_PATTERNS = 32;
-var MAX_AUTH_TOKENS = 32;
-var MAX_DISABLED_BACKENDS = 32;
-
-# Parse a TOML string array — `["a", "b"]` — into up to `max` freshly allocated
-# cstrs at `out`; returns the count. A bare scalar (`x = "solo"`) parses as a
-# single element, so single-value configs keep working.
-fn _config_str_array(raw, out, max) {
-    var n = strlen(raw);
-    var count = 0;
-    var i = 0;
-    while (i < n && count < max) {
-        var c = load8(raw + i);
-        if (c == 91 || c == 93 || c == 44 || c == 32 || c == 34) {
-            i = i + 1;
-        } else {
-            var s = i;
-            while (i < n) {
-                c = load8(raw + i);
-                if (c == 34 || c == 44 || c == 93) { break; }
-                i = i + 1;
-            }
-            var elen = i - s;
-            if (elen > 0) {
-                var e = alloc(elen + 1);
-                memcpy(e, raw + s, elen);
-                store8(e + elen, 0);
-                store64(out + count * 8, e);
-                count = count + 1;
-            }
-        }
-    }
-    return count;
-}
-
-# Dotted-quad text for a packed network-byte-order IPv4 (0x0100007F ->
-# "127.0.0.1"), for the startup banner. Octets are LSB-first.
-fn bind_addr_str(addr) {
-    var sb = str_builder_new();
-    str_builder_add_int(sb, addr & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 8) & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 16) & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 24) & 0xFF);
-    return to_cstr(str_builder_build(sb));
-}
-
-# Per-provider TLS policy (2.7.0): rust-old's tls_pinned_certs / client_cert /
-# client_key (config.rs:281-287). tls_pinned_certs were PEM files trusted as the
-# ONLY roots for that provider (reqwest tls_certs_only), which is sandhi's trust
-# store; the client pair is sandhi mTLS. sandhi takes one trust bundle, so the
-# certificates go in one PEM file. Returns the policy, 0 for none, or -1 when the
-# block would silently weaken TLS (several bundles, a missing file, half an mTLS
-# pair), which fails the config load rather than falling back to the system roots.
-fn _config_tls_policy(pp, purl) {
-    var pins = bayan_toml_get_by_cstr(pp, "tls_pinned_certs");
-    var ccert = bayan_toml_get_by_cstr(pp, "client_cert");
-    var ckey = bayan_toml_get_by_cstr(pp, "client_key");
-    if (pins == 0 && ccert == 0 && ckey == 0) { return 0; }
-    if (memeq(purl, "https", 5) == 0) {
-        hlog_warn("config: tls_pinned_certs / client_cert / client_key apply to https providers; ignored");
-        return 0;
-    }
-    var pol = 0;
-    if (pins != 0) {
-        var arr = alloc(8 * 8);
-        var n = _config_str_array(to_cstr(pins), arr, 8);
-        if (n > 1) {
-            hlog_error("config: tls_pinned_certs takes one PEM bundle; put the certificates in one file");
-            return 0 - 1;
-        }
-        if (n == 1) {
-            var bundle = load64(arr);
-            if (file_exists(bundle) == 0) {
-                hlog_error("config: tls_pinned_certs bundle not found");
-                return 0 - 1;
-            }
-            pol = sandhi_tls_policy_new_trust_store(bundle);
-            if (pol == 0) { return 0 - 1; }
-        }
-    }
-    if (ccert != 0 || ckey != 0) {
-        if (ccert == 0 || ckey == 0) {
-            hlog_error("config: client_cert and client_key must be set together");
-            return 0 - 1;
-        }
-        var cc = to_cstr(ccert);
-        var ck = to_cstr(ckey);
-        if (file_exists(cc) == 0 || file_exists(ck) == 0) {
-            hlog_error("config: client_cert or client_key file not found");
-            return 0 - 1;
-        }
-        var m = sandhi_tls_policy_new_mtls(cc, ck);
-        if (m == 0) { return 0 - 1; }
-        pol = sandhi_tls_policy_combine(pol, m);
-    }
-    if (pol != 0 && sandhi_tls_policy_enforcement_available() == 0) {
-        hlog_warn("config: TLS policy set but this build cannot enforce it; the route will fail closed");
-    }
-    return pol;
-}
 
 # One [[models]] block -> a CATSRC_CONFIG catalog entry, or 0 (refused, with a warning). Keys:
 #   id = "claude-opus-5-5"          required; the id a client sends
@@ -434,11 +288,8 @@ fn load_config(path) {
                 }
             }
 
-            # Parse rate limit (RPM). 2.7.0: rust-old's key, `rate_limit_rpm`, is
-            # accepted too; ADR 004 documents it, and a config carried over from
-            # rust-old used to run with no limit at all. `rate_limit` wins if both.
-            var rpm_str = bayan_toml_get_by_cstr(pp, "rate_limit");
-            if (rpm_str == 0) { rpm_str = bayan_toml_get_by_cstr(pp, "rate_limit_rpm"); }
+            # Parse rate limit (RPM): cfgparse.cyr's _config_rate_limit_str (2.9.18).
+            var rpm_str = _config_rate_limit_str(pp);
             if (rpm_str != 0) {
                 route_set_rate_limit(route, str_to_int(rpm_str));
             }

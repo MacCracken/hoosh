@@ -5,6 +5,81 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.9.18] — 2026-11-04
+
+**`config.cyr`'s self-contained helpers are tested for real, on real TOML and real files.** They moved into the new
+`cfgparse.cyr`. The test file's five copies of them are gone, including one that reduced the TLS policy's decisions
+to boolean flags. No behavior changed. **1503 assertions** in 160 groups. All gates are clean: fmt, lint, vet, deny,
+coverage (390/687, 56%; **34 of 40** modules included for real), the security scan, the four fuzz targets and the
+shutdown smoke test.
+
+### Changed — `cfgparse.cyr`, split from `config.cyr`
+
+`config.cyr`'s `load_config` reaches nearly every module, so the tests could not include it. These moved out,
+verbatim, into `src/lib/cfgparse.cyr`, included just before `config.cyr`:
+- `strategy_from_str`, `_config_expand_env` (`$NAME` / `${NAME}`), `_config_str_array` with its `MAX_*` bounds, and
+  `bind_addr_str`;
+- `_config_tls_policy`, a provider block's TLS policy (0 for none, -1 to refuse the config);
+- **new:** `_config_rate_limit_str`, lifted out of `load_config`'s provider loop. It picks `rate_limit`, else
+  rust-old's `rate_limit_rpm`.
+
+These need only bayan's TOML getters, the environment, the file system and sandhi's TLS-policy constructors. The
+constructors record paths and parse nothing until a connection, so tests can use empty files.
+
+**Checked live:** a gateway started with a config holding two providers (one with `rate_limit_rpm`, one with
+`rate_limit` and a `$PATH` key) and `strategy = "roundrobin"` loads both routes and exits cleanly on SIGTERM.
+
+### Changed — the tests run them for real
+
+**The copies:**
+- `_config_str_array` was identical;
+- `strategy_from_str` used inlined numbers rather than the `STRAT_*` constants;
+- `bind_addr_str` used another string helper;
+- `_t_rpm_key` chose between two numbers instead of reading a provider block;
+- `_t_tls_policy_kind` re-implemented `_config_tls_policy`'s decisions over boolean flags, with sandhi and the file
+  system reduced to `files_ok`.
+
+**Now:**
+- **TLS policy:** the tests build real `[[providers]]` blocks (`_t_pp`, `_t_tls`) and call the real
+  `_config_tls_policy` against temp files in `/tmp`, removed afterwards. Each policy's flags are read back from
+  sandhi: a trust store, mTLS, and the two combined. Refusals covered: two bundles, a missing bundle, half an mTLS
+  pair, and a missing key file.
+- **Rate limit:** read from a real provider block.
+- **Added:** `$NAME` and `${NAME}` expansion (against `PATH`), a plain value passing through, an unset variable
+  giving 0, and the `roundrobin` / `lowest_latency` aliases.
+
+### Mutation-checked
+
+A copy of the tree was changed 14 ways; 13 mutants are caught and one is equivalent:
+
+| mutant | result |
+|---|---|
+| the `roundrobin` alias dropped; `direct` unknown | 1 fails each |
+| `${NAME}` not unwrapped; a plain value read as a variable name | crash each |
+| `_config_str_array` ignoring `max`; `bind_addr_str` with reversed octets | 1 and 2 fail |
+| TLS policy on an http route; two bundles accepted; a missing bundle or key file accepted | 1 fails each |
+| mTLS not combined with the trust store | 1 fails |
+| `rate_limit_rpm` not read; `rate_limit_rpm` winning over `rate_limit` | 1 fails each |
+| the half-mTLS-pair check removed | survives (equivalent) |
+
+**The equivalent mutant:** without the half-pair check, the missing half fails the file-exists check and the
+function still returns -1. Only the log line differs.
+
+**The first-round survivor:** the `roundrobin` alias survived; its assertion was added.
+
+### Notes
+
+- The test file is 5,961 lines (was 5,978).
+- **Benchmarks:** the bench binary differs from 2.9.17's only in the version digit. On a quiet machine (load 1.3)
+  the 25 rows' median move against 2.9.17 is +1.2%. All are within −4% and +4%, except the two smallest rows'
+  nanosecond steps: `work_queue_push_pop` 9 → 11 ns and `pool_available` 4 → 5 ns.
+- **What the test file still mirrors:**
+  - `main.cyr`'s flag parser, which reads `argv()` and needs a form that takes its arguments;
+  - `pool.cyr`'s work-queue ring;
+  - from `handlers.cyr`, the usage block and the requirement-match scan.
+
+  The flag parser is next.
+
 ## [2.9.17] — 2026-11-04
 
 **bote 3.8.9, and `/v1/batch` reads only its top-level `async` and `requests`.** The batch fix turned up when

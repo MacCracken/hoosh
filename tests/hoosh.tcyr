@@ -99,6 +99,9 @@ include "src/lib/retry.cyr"
 # 2.9.16: handlers.cyr's pure request helpers, split out as reqparse.cyr and included for real. Their copies here had
 # drifted: the cache key without the caller's identity, and the tools / numeric-field scans matching nested keys.
 include "src/lib/reqparse.cyr"
+# 2.9.18: config.cyr's self-contained helpers, split out as cfgparse.cyr and included for real: strategy names,
+# $NAME expansion, TOML string arrays, the bind address text, a provider block's TLS policy and rate limit.
+include "src/lib/cfgparse.cyr"
 
 # ================================================================
 # Error types, providers, routing strategy, generation options, retry classification: src/lib/types.cyr,
@@ -182,15 +185,6 @@ fn _etools(s) {
 # PROV_COUNT x (NLAT_BUCKETS + 1), the last slot per provider being the overflow).
 fn _t_lat_slot(prov, b) {
     return load64(_lat_counts + (prov * (NLAT_BUCKETS + 1) + b) * 8);
-}
-
-# Mirror of src/lib/config.cyr strategy_from_str (STRAT_* values inlined:
-# priority=0 round-robin=1 lowest-latency=2 direct=3).
-fn _t_strategy_from_str(s) {
-    if (streq(s, "round-robin") == 1 || streq(s, "roundrobin") == 1) { return 1; }
-    if (streq(s, "lowest-latency") == 1 || streq(s, "lowest_latency") == 1) { return 2; }
-    if (streq(s, "direct") == 1) { return 3; }
-    return 0;
 }
 
 # Mirror of src/lib/pool.cyr work-queue ring (FIFO + wrap-around), minus the
@@ -478,13 +472,6 @@ fn _t_req_scan(snapshot, swap_to, want) {
     return 0 - 1;
 }
 
-# ── 2.7.0 rust-old parity mirrors ──
-# config.cyr: `rate_limit`, else rust-old's `rate_limit_rpm`.
-fn _t_rpm_key(rl, rl_rpm) {
-    if (rl != 0) { return rl; }
-    return rl_rpm;
-}
-
 # main.cyr infer: -m/--model <model> <prompt> (rust-old), else <model> <prompt>.
 # out: model(8) prompt(8).
 fn _t_infer_args(args, out) {
@@ -734,30 +721,6 @@ fn _t_keepalive(reads, out) {
     return 0;
 }
 
-# config.cyr _config_tls_policy's decisions, with sandhi and the file system
-# reduced to flags. Returns -1 (config refused), 0 (no policy), or a bitmask:
-# 1 trust bundle, 2 mTLS.
-fn _t_tls_policy_kind(pins, cert, key, url, files_ok) {
-    if (pins == 0 && cert == 0 && key == 0) { return 0; }
-    if (memeq(url, "https", 5) == 0) { return 0; }
-    var kind = 0;
-    if (pins != 0) {
-        var arr = alloc(64);
-        var n = _t_config_str_array(pins, arr, 8);
-        if (n > 1) { return 0 - 1; }
-        if (n == 1) {
-            if (files_ok == 0) { return 0 - 1; }
-            kind = kind | 1;
-        }
-    }
-    if (cert != 0 || key != 0) {
-        if (cert == 0 || key == 0) { return 0 - 1; }
-        if (files_ok == 0) { return 0 - 1; }
-        kind = kind | 2;
-    }
-    return kind;
-}
-
 # ── 2.5.7 compaction role matcher ──
 # 2.9.3: _msg_role_is / _cmp_ws are compact.cyr's own (included for real), no longer mirrored.
 # Scan a messages array for a system message the way compact_messages does.
@@ -802,50 +765,6 @@ fn _t_requires_post(path) {
     if (streq(path, "/v1/batch") == 1) { return 1; }
     if (streq(path, "/v1/tools/call") == 1) { return 1; }
     return 0;
-}
-
-# Mirror of src/lib/config.cyr _config_str_array — TOML string-array parse
-# into up to `max` cstrs at `out`, returning the count.
-fn _t_config_str_array(raw, out, max) {
-    var n = strlen(raw);
-    var count = 0;
-    var i = 0;
-    while (i < n && count < max) {
-        var c = load8(raw + i);
-        if (c == 91 || c == 93 || c == 44 || c == 32 || c == 34) {
-            i = i + 1;
-        } else {
-            var s = i;
-            while (i < n) {
-                c = load8(raw + i);
-                if (c == 34 || c == 44 || c == 93) { break; }
-                i = i + 1;
-            }
-            var elen = i - s;
-            if (elen > 0) {
-                var e = alloc(elen + 1);
-                memcpy(e, raw + s, elen);
-                store8(e + elen, 0);
-                store64(out + count * 8, e);
-                count = count + 1;
-            }
-        }
-    }
-    return count;
-}
-
-# Mirror of src/lib/config.cyr bind_addr_str — packed network-order IPv4 to
-# dotted quad (octets are LSB-first).
-fn _t_bind_addr_str(addr) {
-    var sb = str_builder_new();
-    str_builder_add_int(sb, addr & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 8) & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 16) & 0xFF);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_int(sb, (addr >> 24) & 0xFF);
-    return str_cstr(str_builder_build(sb));
 }
 
 # Prune a cstr messages-array literal; return the pruned cstr. prune_tool_pairs returns (ptr, len): a fresh cstr
@@ -1697,6 +1616,35 @@ fn _t_cat(a, b) {
     str_builder_add_cstr(sb, a);
     str_builder_add_cstr(sb, b);
     return str_data(str_builder_build(sb));
+}
+
+# The first [[providers]] block of a TOML snippet, as load_config sees it (2.9.18, for cfgparse.cyr).
+fn _t_pp(src) {
+    var pv = bayan_toml_get_sections_by_cstr(toml_parse(str_from(src)), "providers");
+    if (vec_len(pv) == 0) { return 0; }
+    return toml_section_pairs(vec_get(pv, 0));
+}
+
+# _config_tls_policy for a provider block with these keys (each raw TOML text, or 0 for absent) at `url`.
+fn _t_tls(pins, cert, key, url) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[[providers]]\ntype = \"openai\"\n");
+    if (pins != 0) {
+        str_builder_add_cstr(sb, "tls_pinned_certs = ");
+        str_builder_add_cstr(sb, pins);
+        str_builder_add_cstr(sb, "\n");
+    }
+    if (cert != 0) {
+        str_builder_add_cstr(sb, "client_cert = \"");
+        str_builder_add_cstr(sb, cert);
+        str_builder_add_cstr(sb, "\"\n");
+    }
+    if (key != 0) {
+        str_builder_add_cstr(sb, "client_key = \"");
+        str_builder_add_cstr(sb, key);
+        str_builder_add_cstr(sb, "\"\n");
+    }
+    return _config_tls_policy(_t_pp(str_data(str_builder_build(sb))), url);
 }
 
 fn _t_has(buf, len, cstr) {
@@ -3865,11 +3813,14 @@ fn main() {
 
     # ── Routing strategy config + lowest-latency pick (2.4.5) ────
     test_group("routing_strategy");
-    assert_eq(_t_strategy_from_str("priority"), 0, "strat: priority → 0");
-    assert_eq(_t_strategy_from_str("round-robin"), 1, "strat: round-robin → 1");
-    assert_eq(_t_strategy_from_str("lowest-latency"), 2, "strat: lowest-latency → 2");
-    assert_eq(_t_strategy_from_str("direct"), 3, "strat: direct → 3");
-    assert_eq(_t_strategy_from_str("bogus"), 0, "strat: unknown → priority");
+    assert_eq(strategy_from_str("priority"), 0, "strat: priority → 0");
+    assert_eq(strategy_from_str("round-robin"), 1, "strat: round-robin → 1");
+    assert_eq(strategy_from_str("lowest-latency"), 2, "strat: lowest-latency → 2");
+    assert_eq(strategy_from_str("direct"), 3, "strat: direct → 3");
+    assert_eq(strategy_from_str("bogus"), 0, "strat: unknown → priority");
+    # 2.9.18: the real names, and the alias spellings config files use.
+    assert_eq(strategy_from_str("roundrobin"), STRAT_ROUND_ROBIN, "strat: roundrobin is round-robin");
+    assert_eq(strategy_from_str("lowest_latency"), STRAT_LOWEST_LATENCY, "strat: lowest_latency is lowest-latency");
     # Lowest-latency, on the real router (2.9.9). A route with no latency recorded counts as LAT_UNMEASURED_MS:
     # it is tried while every measured route is slower, and loses to one measured faster. The copy this replaced
     # ranked it 0 ms, and since a failed forward records no latency, a route that never succeeded won every pick.
@@ -3885,21 +3836,21 @@ fn main() {
     # `tokens = ["a", "b", "c"]` must yield THREE tokens. Before 2.5.1 the raw
     # scalar was pushed as one, so no configured key ever matched.
     var csa_out = alloc(32 * 8);
-    var csa_n = _t_config_str_array("[\"alpha-key-111\", \"beta-key-222\", \"gamma-key-333\"]", csa_out, 32);
+    var csa_n = _config_str_array("[\"alpha-key-111\", \"beta-key-222\", \"gamma-key-333\"]", csa_out, 32);
     assert_eq(csa_n, 3, "str_array: three elements parsed");
     assert_streq(load64(csa_out), "alpha-key-111", "str_array: first element");
     assert_streq(load64(csa_out + 8), "beta-key-222", "str_array: second element");
     assert_streq(load64(csa_out + 16), "gamma-key-333", "str_array: third element");
     # A bare scalar stays a single element (single-token configs keep working).
-    var csa_n1 = _t_config_str_array("solo-token", csa_out, 32);
+    var csa_n1 = _config_str_array("solo-token", csa_out, 32);
     assert_eq(csa_n1, 1, "str_array: bare scalar → one element");
     assert_streq(load64(csa_out), "solo-token", "str_array: bare scalar value");
     # Empty array → zero elements (and must not write past `out`).
-    assert_eq(_t_config_str_array("[]", csa_out, 32), 0, "str_array: empty array → 0");
+    assert_eq(_config_str_array("[]", csa_out, 32), 0, "str_array: empty array → 0");
     # Bound is enforced — the old inline models parser had 8 slots and NO
     # check, so a 9th pattern wrote past the allocation.
     var csa_many = "[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\"]";
-    assert_eq(_t_config_str_array(csa_many, csa_out, 4), 4, "str_array: honors max bound");
+    assert_eq(_config_str_array(csa_many, csa_out, 4), 4, "str_array: honors max bound");
 
     test_group("req_content_length");
     var rcl1 = "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 4096\r\n\r\nbody";
@@ -3935,9 +3886,9 @@ fn main() {
 
     test_group("bind_addr_str");
     # Packed network-byte-order IPv4, octets LSB-first.
-    assert_streq(_t_bind_addr_str(0x0100007F), "127.0.0.1", "bind: loopback default");
-    assert_streq(_t_bind_addr_str(0), "0.0.0.0", "bind: INADDR_ANY");
-    assert_streq(_t_bind_addr_str(0xBA01A8C0), "192.168.1.186", "bind: LAN address");
+    assert_streq(bind_addr_str(0x0100007F), "127.0.0.1", "bind: loopback default");
+    assert_streq(bind_addr_str(0), "0.0.0.0", "bind: INADDR_ANY");
+    assert_streq(bind_addr_str(0xBA01A8C0), "192.168.1.186", "bind: LAN address");
 
     # ── v2.5.2 request-path fidelity: sampling params + validation ──
     test_group("req_num_milli");
@@ -4836,9 +4787,13 @@ fn main() {
     test_group("rustold_config_cli");
     # [[providers]] rate_limit_rpm is rust-old's (and ADR 004's) key; it used to be
     # ignored, so a carried-over config ran with no limit. rate_limit wins if both.
-    assert_eq(_t_rpm_key(0, 60), 60, "cfg: rate_limit_rpm alone is read");
-    assert_eq(_t_rpm_key(600, 60), 600, "cfg: rate_limit wins over rate_limit_rpm");
-    assert_eq(_t_rpm_key(0, 0), 0, "cfg: neither set means no limit");
+    # 2.9.18: the real _config_rate_limit_str, on a real [[providers]] block (a copy chose between two numbers).
+    assert_streq(to_cstr(_config_rate_limit_str(_t_pp("[[providers]]\nrate_limit_rpm = 60\n"))), "60",
+      "cfg: rate_limit_rpm alone is read");
+    var rl_both = _t_pp("[[providers]]\nrate_limit = 600\nrate_limit_rpm = 60\n");
+    assert_streq(to_cstr(_config_rate_limit_str(rl_both)), "600", "cfg: rate_limit wins over rate_limit_rpm");
+    var rl_none = _t_pp("[[providers]]\ntype = \"openai\"\n");
+    assert_eq(_config_rate_limit_str(rl_none), 0, "cfg: neither set means no limit");
     # `hoosh infer -m llama3 "hi"` is rust-old's form; -m used to swallow the model.
     var ia = alloc(16);
     var iv = vec_new();
@@ -5053,18 +5008,46 @@ fn main() {
     # [[providers]] tls_pinned_certs / client_cert / client_key (rust-old
     # config.rs:281-287) become a sandhi TLS policy on the route. Anything that
     # would silently weaken TLS refuses the config instead.
+    # 2.9.18: the real _config_tls_policy on real [[providers]] blocks, against real files. sandhi's constructors
+    # record the paths and parse nothing until a connection, so empty files do. The copy here reduced sandhi and the
+    # file system to flags.
     var tu = "https://api.example.com";
-    assert_eq(_t_tls_policy_kind(0, 0, 0, tu, 1), 0, "tls: no keys, no policy");
-    assert_eq(_t_tls_policy_kind("[\"/etc/hoosh/ca.pem\"]", 0, 0, tu, 1), 1, "tls: one bundle is a trust store");
-    assert_eq(_t_tls_policy_kind("/etc/hoosh/ca.pem", 0, 0, tu, 1), 1, "tls: a bare string works too");
-    assert_eq(_t_tls_policy_kind("[\"a.pem\", \"b.pem\"]", 0, 0, tu, 1), 0 - 1,
+    var tp_dir = _t_line("/tmp/hoosh-tcyr-", sys_getpid(), "-");
+    var tp_ca = _t_cat(tp_dir, "ca.pem");
+    var tp_c = _t_cat(tp_dir, "c.pem");
+    var tp_k = _t_cat(tp_dir, "k.pem");
+    file_write_all(tp_ca, "x", 1);
+    file_write_all(tp_c, "x", 1);
+    file_write_all(tp_k, "x", 1);
+    assert_eq(_t_tls(0, 0, 0, tu), 0, "tls: no keys, no policy");
+    var tp1 = _t_tls(_t_cat(_t_cat("[\"", tp_ca), "\"]"), 0, 0, tu);
+    assert_eq(tp1 > 0 && load64(tp1 + SANDHI_TLS_POLICY_OFF_FLAGS) == SANDHI_TLS_POLICY_CUSTOM_TRUST, 1,
+      "tls: one bundle is a trust store");
+    var tp2 = _t_tls(_t_cat(_t_cat("\"", tp_ca), "\""), 0, 0, tu);
+    assert_eq(tp2 > 0 && load64(tp2 + SANDHI_TLS_POLICY_OFF_FLAGS) == SANDHI_TLS_POLICY_CUSTOM_TRUST, 1,
+      "tls: a bare string works too");
+    assert_eq(_t_tls(_t_cat(_t_cat(_t_cat(_t_cat("[\"", tp_ca), "\", \""), tp_c), "\"]"), 0, 0, tu), 0 - 1,
       "tls: two bundles refused (sandhi keeps one; the other would be dropped)");
-    assert_eq(_t_tls_policy_kind("[\"a.pem\"]", 0, 0, tu, 0), 0 - 1, "tls: missing bundle refused");
-    assert_eq(_t_tls_policy_kind(0, "c.pem", "k.pem", tu, 1), 2, "tls: cert + key is mTLS");
-    assert_eq(_t_tls_policy_kind("ca.pem", "c.pem", "k.pem", tu, 1), 3, "tls: trust store and mTLS combine");
-    assert_eq(_t_tls_policy_kind(0, "c.pem", 0, tu, 1), 0 - 1, "tls: half an mTLS pair refused");
-    assert_eq(_t_tls_policy_kind("ca.pem", 0, 0, "http://127.0.0.1:11434", 1), 0,
+    assert_eq(_t_tls("[\"/nonexistent-hoosh/ca.pem\"]", 0, 0, tu), 0 - 1, "tls: missing bundle refused");
+    var tp3 = _t_tls(0, tp_c, tp_k, tu);
+    assert_eq(tp3 > 0 && load64(tp3 + SANDHI_TLS_POLICY_OFF_FLAGS) == SANDHI_TLS_POLICY_MTLS, 1,
+      "tls: cert + key is mTLS");
+    var tp4 = _t_tls(_t_cat(_t_cat("\"", tp_ca), "\""), tp_c, tp_k, tu);
+    assert_eq(load64(tp4 + SANDHI_TLS_POLICY_OFF_FLAGS), SANDHI_TLS_POLICY_CUSTOM_TRUST | SANDHI_TLS_POLICY_MTLS,
+      "tls: trust store and mTLS combine");
+    assert_eq(_t_tls(0, tp_c, 0, tu), 0 - 1, "tls: half an mTLS pair refused");
+    assert_eq(_t_tls(0, tp_c, "/nonexistent-hoosh/k.pem", tu), 0 - 1, "tls: a missing key file refused");
+    assert_eq(_t_tls(_t_cat(_t_cat("\"", tp_ca), "\""), 0, 0, "http://127.0.0.1:11434"), 0,
       "tls: plain-http routes ignore it");
+    sys_unlink(tp_ca);
+    sys_unlink(tp_c);
+    sys_unlink(tp_k);
+    # $NAME / ${NAME} expansion keeps secrets out of hoosh.cyml (PATH is set wherever the suite runs).
+    assert_streq(_config_expand_env("plain-key"), "plain-key", "env: a plain value passes through");
+    assert_streq(_config_expand_env("$PATH"), getenv("PATH"), "env: $NAME expands");
+    assert_streq(_config_expand_env("${PATH}"), getenv("PATH"), "env: ${NAME} expands");
+    assert_eq(_config_expand_env("$HOOSH_TCYR_SURELY_UNSET_9"), 0, "env: an unset variable is 0 (and warned)");
+    assert_eq(_config_expand_env(0), 0, "env: no value, no expansion");
     # Remote streams now carry deadlines; they had none. No total deadline, so a
     # long generation is not cut, unlike the 10-minute total on plain requests.
     # 2.9.14: the real _remote_stream_opts / _remote_http_opts_for, read back through sandhi's getters (this

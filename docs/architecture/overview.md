@@ -98,7 +98,8 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09 |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
-| `config.cyr` | `hoosh.cyml` (TOML) parsing + `$ENV` key expansion |
+| `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
+| `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string arrays, a provider's TLS policy and rate limit |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
 | `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
 | `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends |

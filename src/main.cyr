@@ -76,6 +76,7 @@ include "src/lib/otlp.cyr"
 include "src/lib/otlp_export.cyr"   # 2.9.14: the I/O half, split so provider.cyr needs only the pure one
 include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
+include "src/lib/cfgparse.cyr"     # 2.9.18: config.cyr's self-contained helpers, includable by the tests
 include "src/lib/config.cyr"
 
 # ================================================================
