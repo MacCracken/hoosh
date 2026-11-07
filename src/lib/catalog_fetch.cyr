@@ -28,6 +28,7 @@ var CAT_READ_MS = 15000;
 var CAT_TOTAL_MS = 20000;
 var CAT_MAX_BYTES = 4194304;
 var CAT_MAX_PAGES = 10;     # Anthropic / Google pagination bound (1000 models a page)
+var CAT_MAX_SHOW = 256;     # 2.10.2: Ollama tags asked about per refresh; a box past this keeps the rest unknown
 var JOB_CATALOG_REFRESH = 3;
 
 fn _cat_family(prov) {
@@ -140,6 +141,37 @@ fn _cat_fetch_google(route, es) {
     return 200;
 }
 
+# 2.10.2: Ollama's tags say nothing about what a model does, so each is asked: POST /api/show, one local unbilled
+# call per tag and refresh. It is the only word on an embedder like `bge-m3` (catalog_parse_ollama_show). The answer
+# holds the whole template and license, so each goes in the scratch arena, reset before the next. A tag that is
+# refused stays as it was, and a server that stops answering ends the round: each try could take CAT_TOTAL_MS.
+fn _cat_ollama_show(route, es) {
+    var url = _cat_url(route_base_url(route), "/api/show");
+    var hdrs = _provider_headers(route);
+    var opts = _cat_opts_for(route);
+    var n = vec_len(es);
+    if (n > CAT_MAX_SHOW) { n = CAT_MAX_SHOW; }
+    var body[300];                     # {"model":"<id>"}, and catalog_id_ok holds an id to 255 quote-free bytes
+    var i = 0;
+    while (i < n) {
+        reset_via(_cat_arena);
+        var e = vec_get(es, i);
+        var id = cat_e_id(e);
+        var il = strlen(id);
+        memcpy(&body, "{\"model\":\"", 10);
+        memcpy(&body + 10, id, il);
+        memcpy(&body + 10 + il, "\"}", 2);
+        var r = sandhi_http_post_opts_a(_cat_arena, url, hdrs, &body, il + 12, opts);
+        if (r == 0) { return 0; }
+        if (sandhi_http_err_kind(r) != SANDHI_OK) { return 0; }
+        if (sandhi_http_status(r) == 200) {
+            catalog_parse_ollama_show(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), e);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # OpenAI-compatible (GET /v1/models) and Ollama (GET /api/tags): one page.
 fn _cat_fetch_simple(route, es, fam) {
     var path = "/v1/models";
@@ -155,6 +187,7 @@ fn _cat_fetch_simple(route, es, fam) {
         n = catalog_parse_openai(_cat_arena, sandhi_http_body(r), sandhi_http_body_len(r), es, 1);
     }
     if (n < 0) { return 0 - 2; }
+    if (fam == CATFAM_OLLAMA) { _cat_ollama_show(route, es); }
     return 200;
 }
 

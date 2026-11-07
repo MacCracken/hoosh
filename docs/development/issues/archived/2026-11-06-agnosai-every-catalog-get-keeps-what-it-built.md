@@ -1,8 +1,8 @@
-# Every `GET /v1/models/catalog` keeps what it built, for good — OPEN
+# Every `GET /v1/models/catalog` keeps what it built, for good — RESOLVED
 
-**Status:** 🟡 **OPEN** — measured 2026-11-06 on hoosh 2.10.1 (`ad87652`, the tip). ADR 013's arena has not reached this
+**Status:** ✅ **RESOLVED** in hoosh 2.10.2 ([CHANGELOG](../../../../CHANGELOG.md), *Changed — request memory*). Fix (b), with its key of three pointers: `models_catalog_body` holds the body and rebuilds when the router, the snapshot or `[[models]]` changes. **A GET keeps 176 bytes at 200 Claude-shaped entries**, against the 1 KiB this asked for and 409 KB on 2.10.1 with the same harness. The cached body alone would not have reached that, as ADR 013's table puts about 1.7 KB around any handler, so a response head is on the stack now as well. `/v1/models` and `/api/tags` took fix (a) with the thread's arena: 304 and 160 bytes. `scripts/memory-growth.py --get` repeats these, and `scripts/wire-smoke.py` races reads against reloads and refreshes. **agnosai can relax `_AGN_CAT_REREAD_MS`.**
 path.
-**Placement:** unpinned — backlog. ADR 013 puts the model listings third, after chat and embeddings.
+**Placement:** 2.10.2.
 **Discovered:** 2026-11-06 during agnosai 2.3.1 (its roadmap B33, ADR 030), when review asked what one re-read of the
 catalog costs the gateway.
 **Severity:** Medium — nothing fails, and memory only goes up.

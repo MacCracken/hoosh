@@ -93,6 +93,23 @@ fn _json_extract_str(body, len, key, keylen) {
     return text;
 }
 
+# 2.10.2: a JSON string's body as the text it stands for, a fresh cstr. _json_extract_str and bayan's pairs keep a
+# value's escapes, which is right for one that goes back into JSON whole (a chat reply), and wrong for a value on its
+# way into a sentence: escaped again it reads `\\"`, and a clip can cut an escape in half. The stdlib's decoder takes
+# all of RFC 8259 §7: Ollama is written in Go, whose encoder writes `<` as `\u003c`.
+fn _json_text(raw) {
+    var t = str_json_unescape_cstr(raw, strlen(raw));
+    if (t == 0) { return ""; }
+    return t;
+}
+
+# The string value of the first `"<key>"` field as the text it stands for; "" as _json_extract_str.
+fn _json_extract_text(body, len, key, keylen) {
+    var raw = _json_extract_str(body, len, key, keylen);
+    if (strlen(raw) == 0) { return raw; }
+    return _json_text(raw);
+}
+
 # Integer value of the first `"<key>"` field, whitespace-tolerant. 0 if absent.
 fn _json_extract_int(body, len, key, keylen) {
     if (body == 0) { return 0; }

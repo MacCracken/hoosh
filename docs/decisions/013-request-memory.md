@@ -1,6 +1,6 @@
 # ADR-013: What a request's memory belongs to
 
-**Status:** Proposed (2.10.0). 2.10.0 ships the two fixes in "Done in 2.10.0"; the arena is planned for 2.10.x.
+**Status:** Proposed (2.10.0). 2.10.0 and 2.10.2 ship the fixes in their "Done" sections; the chat path's arena is planned for 2.10.x.
 **Date:** 2026-11-05
 
 ## Context
@@ -53,6 +53,22 @@ So two kinds of memory are mixed today:
    strings, and, when enabled, audit entries past `max_entries` and OTLP spans. These are meant to outlive the
    request but are evicted or overwritten later, and then leak because nothing frees.
 
+## Done in 2.10.2
+
+The issue on `GET /v1/models/catalog` measured the listings: 413 KB kept per GET at 200 Claude-shaped entries, about 74 chats'
+worth, for no provider tokens.
+
+- **The catalog holds its body**, rebuilt when the router, the snapshot or `[[models]]` changes (`models_catalog_body`). A cache
+  rather than an arena, because nothing on that path takes anything from the request, and a held body also saves the build.
+- **`/v1/models` and `/api/tags` take decision 1 below**, ahead of its order: they reach no keeper, so there is no boundary to
+  copy across. They use the thread's `_remote_arena()`. A builder there starts with 64 KiB of room in the arena, since
+  `str_builder_add_cstr` and friends grow on the global heap, so an answer past that leaks as it did, and cannot corrupt.
+- **A response head is on the stack**, so the write phase in the table above keeps nothing.
+
+**After all three:** 176 bytes per catalog GET, 304 per `/v1/models` and 160 per `/api/tags`, all under the 1 KiB target at 200
+entries. `scripts/memory-growth.py --get` repeats it, and reports `alloc_used()` from a scratch build that serves
+`GET /v1/debug/alloc-used`, since VmRSS moves in whole chunks at these sizes.
+
 ## Decision
 
 Treat the two kinds separately.
@@ -67,8 +83,8 @@ Treat the two kinds separately.
   hoosh's own helpers (`to_cstr_a` first), handed the arena by `_chat_prep`, `_chat_forward`, `_chat_assemble`
   and `_resp_write`.
 - **Anything not converted stays on the global heap.** A missed conversion leaks, as today; it cannot corrupt.
-- **Order:** the chat path first (most traffic and most of the bytes), then embeddings, the model listings, the
-  hardware endpoints and the rest.
+- **Order:** the chat path first (most traffic and most of the bytes), then embeddings, the hardware endpoints and the
+  rest. The model listings went first, in 2.10.2.
 
 ### 2. The boundary: what crosses into process memory is copied
 

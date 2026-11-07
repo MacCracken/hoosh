@@ -59,6 +59,11 @@ the bench sets as the gateway's ticker would:
 - **With a live catalog** (three routes listing 100 models each, as a gateway with
   `catalog = "live"` routes has) — `cost_record_live_catalog`,
   `metadata_lookup_live_catalog` (2.9.25)
+- **The model listings at 200 entries** (2.10.2) — `catalog_body_build_200`, what every
+  `GET /v1/models/catalog` did through 2.10.1 and one per change does now; `catalog_body_held_200`,
+  every other GET; `models_list_200_arena`, `GET /v1/models`' body in the thread's arena
+- **A provider's refusal** (2.10.2) — `provider_err_set_utf8_511b`, the clip over three-byte UTF-8,
+  the slow branch of the error path
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a

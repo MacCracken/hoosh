@@ -1,7 +1,7 @@
-# The catalog cannot say a model's tier, whether it takes tools, or whether it chats — OPEN
+# The catalog cannot say a model's tier, whether it takes tools, or whether it chats — RESOLVED
 
-**Status:** 🟡 **OPEN** — checked 2026-11-06 on hoosh 2.10.1 (`ad87652`, the tip) against stub providers.
-**Placement:** unpinned — backlog. Three additive fields, each useful alone.
+**Status:** ✅ **RESOLVED** in hoosh 2.10.2 ([CHANGELOG](../../../../CHANGELOG.md), *Added*; [ADR 012's addendum](../../../decisions/012-live-model-catalog.md#addendum-2102-tier-kind-and-tools)). All three fields, absent when nobody said. `[[models]]` takes `tools` and `kind`. `kind` is `chat`, `embedding` or `other`, and it covers Ollama's tags: `details.family` and `capabilities` from `POST /api/show` both exist, as this guessed (checked on a live Ollama 0.40.14 with hand-built GGUFs: `["embedding"]` with family `bert`, and `["completion","tools"]`, read through a real gateway). The words stayed a verdict and did not grow. A live entry also carries the table's context window and vision now. `gpt-6-sol` and `gpt-6-luna` read `tools: true`, the table's word, and the addendum says why; `[[models]] tools = false` is the override. **An OpenAI-compatible model with no row has no `kind`, on purpose,** so agnosai's words stay for that one case.
+**Placement:** 2.10.2.
 **Discovered:** 2026-11-06 during agnosai 2.3.1 (its roadmap B33, ADR 030), choosing a model per tier from
 `GET /v1/models/catalog`.
 **Severity:** Medium — a wrong model and a provider's 400 on a shipping consumer, with a per-tier override as the

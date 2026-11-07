@@ -17,14 +17,15 @@
 #                                              request builder can stop sending a shape the model rejects
 #   Google       GET /v1beta/models            models[]; only those supporting generateContent
 #   OpenAI-like  GET /v1/models                data[].id, minus non-chat families (embeddings, speech, images)
-#   Ollama       GET /api/tags                 models[].name
+#   Ollama       GET /api/tags                 models[].name, details.family; POST /api/show per tag for `capabilities`
 #
 # This file is the PURE half: the parsers, the entry and snapshot records, the lookups, the request-shaping
 # decision and the JSON a catalog entry is written as. It reaches nothing in types.cyr, route.cyr or main.cyr, so
 # the test binary includes it for real instead of mirroring it (the roadmap's "mirror drift" problem). The I/O —
-# which routes, their credentials, the pool job and the endpoints — is handlers.cyr's (catalog_refresh_*).
+# which routes, their credentials, the pool job and the endpoints — is catalog_fetch.cyr's.
 #
-# Requires: string, str, vec, alloc, atomic (lib) and bayan (the JSON value parser).
+# Requires: string, str, vec, alloc, atomic (lib) and bayan (the JSON value parser). Functions it calls that are
+# defined later: tier_name (metadata.cyr), sb_add_json_escaped (provider_err.cyr).
 
 enum CatFamily {
     CATFAM_OPENAI    = 0;    # GET /v1/models: {"data":[{"id":...}]}
@@ -74,7 +75,16 @@ enum CatEntryField {
     CAT_E_TIER      = 88;    # TIER_* from metadata.cyr, -1 unknown (config only)
     CAT_E_LISTED    = 96;    # 1 = offered in /v1/models/catalog, 0 = known for lookups only
     CAT_E_REASON    = 104;   # takes reasoning_effort on an OpenAI-compatible API: 1 / 0 / -1 unknown (config)
-    CAT_E_SIZE      = 112;
+    CAT_E_TOOLS     = 112;   # 2.10.2: takes tools on the API hoosh calls: 1 / 0 / -1 unknown
+    CAT_E_KIND      = 120;   # 2.10.2: CAT_KIND_*, -1 unknown
+    CAT_E_SIZE      = 128;
+}
+
+# What a model is for (2.10.2). `other` says it is neither of the first two: speech, images, moderation.
+enum CatKind {
+    CAT_KIND_CHAT      = 1;
+    CAT_KIND_EMBEDDING = 2;
+    CAT_KIND_OTHER     = 3;
 }
 
 fn catalog_entry_new(id, source) {
@@ -93,6 +103,8 @@ fn catalog_entry_new(id, source) {
     store64(e + CAT_E_TIER, 0 - 1);
     store64(e + CAT_E_LISTED, 1);
     store64(e + CAT_E_REASON, 0 - 1);
+    store64(e + CAT_E_TOOLS, 0 - 1);
+    store64(e + CAT_E_KIND, 0 - 1);
     return e;
 }
 
@@ -109,6 +121,8 @@ fn cat_e_out_price(e) { return load64(e + CAT_E_OUT_PRICE); }
 fn cat_e_tier(e) { return load64(e + CAT_E_TIER); }
 fn cat_e_listed(e) { return load64(e + CAT_E_LISTED); }
 fn cat_e_reason(e) { return load64(e + CAT_E_REASON); }
+fn cat_e_tools(e) { return load64(e + CAT_E_TOOLS); }
+fn cat_e_kind(e) { return load64(e + CAT_E_KIND); }
 
 # ── copying out of the parse arena ──
 # Provider bodies are parsed into a scratch arena that is reset after every route (see handlers.cyr), so nothing
@@ -257,6 +271,7 @@ fn catalog_parse_anthropic(a, body, len, out, more, last) {
             store64(e + CAT_E_CTX, _cat_get_int(m, "max_input_tokens"));
             store64(e + CAT_E_MAXOUT, _cat_get_int(m, "max_tokens"));
             _cat_anthropic_caps(e, bayan_json_v_obj_get_by_cstr(m, "capabilities"));
+            store64(e + CAT_E_KIND, CAT_KIND_CHAT);     # 2.10.2: this list holds Messages API models and nothing else
             vec_push(out, e);
         }
         i = i + 1;
@@ -293,6 +308,11 @@ fn catalog_parse_google(a, body, len, out, next) {
                 store64(e + CAT_E_DISPLAY, _cat_get_cstr(m, "displayName"));
                 store64(e + CAT_E_CTX, _cat_get_int(m, "inputTokenLimit"));
                 store64(e + CAT_E_MAXOUT, _cat_get_int(m, "outputTokenLimit"));
+                # 2.10.2: generateContent is what makes it a chat model, but for the image and speech models that
+                # answer the same method.
+                var gk = catalog_id_kind(id);
+                if (gk < 0) { gk = CAT_KIND_CHAT; }
+                store64(e + CAT_E_KIND, gk);
                 vec_push(out, e);
             }
         }
@@ -333,6 +353,15 @@ fn catalog_openai_nonchat(id) {
     if (_cat_has(id, "babbage") == 1) { return 1; }
     if (_cat_has(id, "sora") == 1) { return 1; }
     return 0;
+}
+
+# 2.10.2: what the words can say about an id, CAT_KIND_* or -1. A match is a fact and a miss is not: `bge-m3` holds
+# none of them. So the words never call a model chat, and a list that is not filtered (Ollama's tags, a route's
+# literal pattern) gets the verdict as a field instead.
+fn catalog_id_kind(id) {
+    if (_cat_has(id, "embed") == 1) { return CAT_KIND_EMBEDDING; }
+    if (catalog_openai_nonchat(id) == 1) { return CAT_KIND_OTHER; }
+    return 0 - 1;
 }
 
 # A USD-per-TOKEN decimal string (OpenRouter's pricing.prompt, e.g. "0.000003") as micro-USD per 1K tokens
@@ -461,6 +490,24 @@ fn catalog_usd_per_mtok_scaled(s) {
 
 # ── Ollama ──
 
+# 2.10.2: does a tag's `details` name an embedding architecture? bert, nomic-bert and the like are all embedders in
+# Ollama, and this is the provider's own field, not the model's name, so it needs no word list and no second call.
+# POST /api/show says more and says it for every model (catalog_parse_ollama_show); this answers on an Ollama too old
+# to, or for a tag that call did not reach.
+fn _cat_ollama_embed_family(det) {
+    if (det == 0) { return 0; }
+    var fam = bayan_json_v_str(bayan_json_v_obj_get_by_cstr(det, "family"));
+    if (fam == 0) { return 0; }
+    var n = str_len(fam);
+    var d = str_data(fam);
+    var i = 0;
+    while (i + 4 <= n) {
+        if (memeq(d + i, "bert", 4) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Parse Ollama's GET /api/tags. Returns the list's length, or -1.
 fn catalog_parse_ollama(a, body, len, out) {
     var v = bayan_json_v_parse_buf_a(a, body, len);
@@ -472,10 +519,34 @@ fn catalog_parse_ollama(a, body, len, out) {
         var m = bayan_json_v_arr_get(models, i);
         var id = _cat_get_cstr(m, "name");
         if (id == 0) { id = _cat_get_cstr(m, "model"); }
-        if (catalog_id_ok(id) == 1) { vec_push(out, catalog_entry_new(id, CATSRC_LIVE)); }
+        if (catalog_id_ok(id) == 1) {
+            var e = catalog_entry_new(id, CATSRC_LIVE);
+            if (_cat_ollama_embed_family(bayan_json_v_obj_get_by_cstr(m, "details")) == 1) {
+                store64(e + CAT_E_KIND, CAT_KIND_EMBEDDING);
+            }
+            vec_push(out, e);
+        }
         i = i + 1;
     }
     return n;
+}
+
+# 2.10.2: Ollama's POST /api/show on entry `e`: `capabilities` lists what the model does, in Ollama's words
+# (completion, embedding, tools, vision, ...). Its list is the only thing that tells a chat model from an embedder
+# whose name and family say nothing, and it is the provider's word on tools, so it wins over the table. A model can
+# hold both of the first two, and then it chats. An Ollama from before `capabilities` leaves `e` as it was. Returns
+# 1 when the list was read.
+fn catalog_parse_ollama_show(a, body, len, e) {
+    var v = bayan_json_v_parse_buf_a(a, body, len);
+    var caps = bayan_json_v_obj_get_by_cstr(v, "capabilities");
+    if (bayan_json_v_is_arr(caps) == 0) { return 0; }
+    if (bayan_json_v_arr_len(caps) == 0) { return 0; }
+    if (_cat_arr_has(caps, "completion") == 1) { store64(e + CAT_E_KIND, CAT_KIND_CHAT); }
+    elif (_cat_arr_has(caps, "embedding") == 1) { store64(e + CAT_E_KIND, CAT_KIND_EMBEDDING); }
+    else { store64(e + CAT_E_KIND, CAT_KIND_OTHER); }
+    store64(e + CAT_E_TOOLS, _cat_arr_has(caps, "tools"));
+    store64(e + CAT_E_VISION, _cat_arr_has(caps, "vision"));
+    return 1;
 }
 
 # ── per-route records and the published snapshot ──
@@ -732,6 +803,8 @@ fn catalog_merge(cfg, live) {
     }
     if (cat_e_tier(cfg) >= 0) { store64(e + CAT_E_TIER, cat_e_tier(cfg)); }
     if (cat_e_reason(cfg) >= 0) { store64(e + CAT_E_REASON, cat_e_reason(cfg)); }
+    if (cat_e_tools(cfg) >= 0) { store64(e + CAT_E_TOOLS, cat_e_tools(cfg)); }
+    if (cat_e_kind(cfg) >= 0) { store64(e + CAT_E_KIND, cat_e_kind(cfg)); }
     store64(e + CAT_E_LISTED, cat_e_listed(cfg));
     return e;
 }
@@ -1009,22 +1082,9 @@ fn catalog_req_include_usage(body, len) {
 
 # ── the JSON a catalog entry is written as ──
 
-# Append `s` as the body of a JSON string. Ids are vetted by catalog_id_ok, but display names and base urls come
-# from config and providers: a quote or a control byte must not break the body (2.7.1 wrote base_url raw into
-# /v1/health/providers, and a quote in it made the whole answer unparseable).
-fn catalog_add_esc(sb, s) {
-    if (s == 0) { return 0; }
-    var i = 0;
-    while (load8(s + i) != 0) {
-        var c = load8(s + i) & 255;
-        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
-        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
-        elif (c < 32 || c == 127) { str_builder_putc(sb, 32); }
-        else { str_builder_putc(sb, c); }
-        i = i + 1;
-    }
-    return 0;
-}
+# Ids are vetted by catalog_id_ok, but display names and base urls come from config and providers: a quote or a
+# control byte must not break the body (2.7.1 wrote base_url raw into /v1/health/providers, and a quote in it made
+# the whole answer unparseable). So all of it goes through sb_add_json_escaped.
 
 fn _cat_add_bool(sb, b) {
     if (b == 1) { str_builder_add_cstr(sb, "true"); } else { str_builder_add_cstr(sb, "false"); }
@@ -1036,12 +1096,19 @@ fn _cat_add_caps(sb, e) {
     var vis = cat_e_vision(e);
     var think = cat_e_think(e);
     var eff = cat_e_effort(e);
-    if (vis < 0 && think < 0 && eff < 0) { return 0; }
+    var tools = cat_e_tools(e);
+    if (vis < 0 && think < 0 && eff < 0 && tools < 0) { return 0; }
     str_builder_add_cstr(sb, ",\"capabilities\":{");
     var first = 1;
     if (vis >= 0) {
         str_builder_add_cstr(sb, "\"vision\":");
         _cat_add_bool(sb, vis);
+        first = 0;
+    }
+    if (tools >= 0) {
+        if (first == 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"tools\":");
+        _cat_add_bool(sb, tools);
         first = 0;
     }
     if (think >= 0) {
@@ -1084,16 +1151,24 @@ fn catalog_source_name(src) {
     return "builtin";
 }
 
+fn catalog_kind_name(k) {
+    if (k == CAT_KIND_CHAT) { return "chat"; }
+    if (k == CAT_KIND_EMBEDDING) { return "embedding"; }
+    if (k == CAT_KIND_OTHER) { return "other"; }
+    return 0;
+}
+
 # One /v1/models/catalog element. The first three fields are the pre-2.8.0 shape, so a client that reads only
 # id / owned_by is unaffected. `routes` is a vec of base-url cstrs: every enabled route whose patterns match the
 # id, in router order — the routes router_select chooses among, so a client can join a model to the health of
 # the routes that would actually serve it. Prices are micro-USD per 1K tokens and are written only when known
-# (in_price / out_price >= 0).
+# (in_price / out_price >= 0). 2.10.2: `tier` and `kind`, and `tools` in capabilities, omitted like the rest when
+# nobody said, so a client can tell "no" from "unknown".
 fn catalog_emit_entry(sb, e, owned_by, routes, in_price, out_price) {
     str_builder_add_cstr(sb, "{\"id\":\"");
-    catalog_add_esc(sb, cat_e_id(e));
+    sb_add_json_escaped(sb, cat_e_id(e));
     str_builder_add_cstr(sb, "\",\"object\":\"model\",\"owned_by\":\"");
-    catalog_add_esc(sb, owned_by);
+    sb_add_json_escaped(sb, owned_by);
     str_builder_add_cstr(sb, "\",\"source\":\"");
     str_builder_add_cstr(sb, catalog_source_name(cat_e_source(e)));
     str_builder_add_cstr(sb, "\"");
@@ -1104,7 +1179,7 @@ fn catalog_emit_entry(sb, e, owned_by, routes, in_price, out_price) {
         while (i < n) {
             if (i > 0) { str_builder_add_cstr(sb, ","); }
             str_builder_add_cstr(sb, "\"");
-            catalog_add_esc(sb, vec_get(routes, i));
+            sb_add_json_escaped(sb, vec_get(routes, i));
             str_builder_add_cstr(sb, "\"");
             i = i + 1;
         }
@@ -1112,7 +1187,7 @@ fn catalog_emit_entry(sb, e, owned_by, routes, in_price, out_price) {
     }
     if (cat_e_display(e) != 0) {
         str_builder_add_cstr(sb, ",\"display_name\":\"");
-        catalog_add_esc(sb, cat_e_display(e));
+        sb_add_json_escaped(sb, cat_e_display(e));
         str_builder_add_cstr(sb, "\"");
     }
     if (cat_e_ctx(e) > 0) {
@@ -1122,6 +1197,17 @@ fn catalog_emit_entry(sb, e, owned_by, routes, in_price, out_price) {
     if (cat_e_maxout(e) > 0) {
         str_builder_add_cstr(sb, ",\"max_output_tokens\":");
         str_builder_add_int(sb, cat_e_maxout(e));
+    }
+    if (cat_e_tier(e) >= 0) {
+        str_builder_add_cstr(sb, ",\"tier\":\"");
+        str_builder_add_cstr(sb, tier_name(cat_e_tier(e)));
+        str_builder_add_cstr(sb, "\"");
+    }
+    var kn = catalog_kind_name(cat_e_kind(e));
+    if (kn != 0) {
+        str_builder_add_cstr(sb, ",\"kind\":\"");
+        str_builder_add_cstr(sb, kn);
+        str_builder_add_cstr(sb, "\"");
     }
     _cat_add_caps(sb, e);
     if (in_price >= 0 && out_price >= 0) {

@@ -108,6 +108,13 @@ jobs:
         timeout-minutes: 2
         run: ./scripts/shutdown-smoke.sh build/hoosh
 
+      - name: Wire smoke
+        # 2.10.2: what a strict client reads off a real gateway at stub providers: every provider refusal and error
+        # path is JSON, the catalog's tier, tools and kind, the held body under reloads. handlers.cyr reads main.cyr's
+        # globals, so the unit tests cannot reach a whole request.
+        timeout-minutes: 3
+        run: python3 scripts/wire-smoke.py build/hoosh
+
       - name: Test suite
         # 2.9.4: the suite runs in ~2 s. Some regressions HANG it instead of failing an assertion (the
         # embedding parser's no-progress guard and exponent clamp: their tests loop forever without them),

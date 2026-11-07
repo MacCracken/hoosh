@@ -80,6 +80,8 @@ fn retry_forward(cfg, route, model, prompt, msg_raw, msg_len, tools_raw, tools_l
 # Returns backend fd or -1.
 # 2.6.1: `tools_raw/tools_len` added and threaded to provider_forward_stream — the local
 # streaming path had no tools parameter at all (see provider_forward_stream's note).
+# 2.10.2: a permanent failure ends the loop, as in retry_forward. A local stream had no such stop, so a model the
+# backend does not have held the client and a worker for the whole backoff schedule before the same 404.
 fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var max = retry_max(cfg);
     var attempt = 0;
@@ -87,6 +89,7 @@ fn retry_forward_stream(cfg, route, model, msg_raw, msg_len, tools_raw, tools_le
         var fd = provider_forward_stream(
           route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
         if (fd >= 0) { return fd; }
+        if (fd == FWD_PERMANENT) { return 0 - 1; }
         if (attempt >= max) { return 0 - 1; }
         var delay = retry_delay_ms(cfg, attempt);
         sleep_ms(delay);

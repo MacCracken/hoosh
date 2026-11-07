@@ -13,6 +13,8 @@ var _route_strategy = 0;   # STRAT_PRIORITY
 #   max_output = 128000             output ceiling
 #   tier = "premium"                economy | standard | premium | reasoning (for /v1/cost/recommend)
 #   vision = true
+#   tools = false                   whether it takes tools (2.10.2), for the catalog and /v1/cost/recommend
+#   kind = "chat"                   chat | embedding | other (2.10.2), for a model nothing else can tell apart
 #   reasoning = true                an OpenAI-compatible model that takes reasoning_effort (forwarded only then)
 #   listed = false                  known for lookups, not offered by /v1/models/catalog
 fn _config_model(mp) {
@@ -56,6 +58,18 @@ fn _config_model(mp) {
         if (str_eq_cstr(ti, "standard") == 1) { store64(e + CAT_E_TIER, TIER_STANDARD); }
         if (str_eq_cstr(ti, "premium") == 1) { store64(e + CAT_E_TIER, TIER_PREMIUM); }
         if (str_eq_cstr(ti, "reasoning") == 1) { store64(e + CAT_E_TIER, TIER_REASONING); }
+    }
+    var to = bayan_toml_get_by_cstr(mp, "tools");
+    if (to != 0) {
+        if (str_eq_cstr(to, "true") == 1) { store64(e + CAT_E_TOOLS, 1); }
+        if (str_eq_cstr(to, "false") == 1) { store64(e + CAT_E_TOOLS, 0); }
+    }
+    var ki = bayan_toml_get_by_cstr(mp, "kind");
+    if (ki != 0) {
+        if (str_eq_cstr(ki, "chat") == 1) { store64(e + CAT_E_KIND, CAT_KIND_CHAT); }
+        elif (str_eq_cstr(ki, "embedding") == 1) { store64(e + CAT_E_KIND, CAT_KIND_EMBEDDING); }
+        elif (str_eq_cstr(ki, "other") == 1) { store64(e + CAT_E_KIND, CAT_KIND_OTHER); }
+        else { hlog_warn("config: a [[models]] kind is not chat, embedding or other: ignored"); }
     }
     var re = bayan_toml_get_by_cstr(mp, "reasoning");
     if (re != 0) {

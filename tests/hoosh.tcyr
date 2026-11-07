@@ -955,12 +955,12 @@ fn _t280_catalog_emit_entry() {
     var esb = str_builder_new();
     catalog_emit_entry(esb, _t280_e_s46, "anthropic", urls, 3000, 15000);
     var ej = to_cstr(str_builder_build(esb));
-    assert_streq(ej, "{\"id\":\"claude-sonnet-4-6\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\",\"routes\":[\"https://api.anthropic.com\",\"https://q\\\"uote.example\"],\"display_name\":\"Claude Sonnet 4.6\",\"context_window\":1000000,\"max_output_tokens\":128000,\"capabilities\":{\"vision\":true,\"thinking\":[\"adaptive\",\"budget\"],\"effort\":[\"low\",\"medium\",\"high\",\"max\"]},\"pricing\":{\"input_micro_usd_per_1k\":3000,\"output_micro_usd_per_1k\":15000}}",
+    assert_streq(ej, "{\"id\":\"claude-sonnet-4-6\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\",\"routes\":[\"https://api.anthropic.com\",\"https://q\\\"uote.example\"],\"display_name\":\"Claude Sonnet 4.6\",\"context_window\":1000000,\"max_output_tokens\":128000,\"kind\":\"chat\",\"capabilities\":{\"vision\":true,\"thinking\":[\"adaptive\",\"budget\"],\"effort\":[\"low\",\"medium\",\"high\",\"max\"]},\"pricing\":{\"input_micro_usd_per_1k\":3000,\"output_micro_usd_per_1k\":15000}}",
       "emit: the 2.4.9 fields first, then source / routes / limits / capabilities / pricing; a quote in a url is escaped");
     var esb2 = str_builder_new();
     catalog_emit_entry(esb2, _t280_e_bare, "anthropic", 0, 0 - 1, 0 - 1);
-    assert_streq(to_cstr(str_builder_build(esb2)), "{\"id\":\"claude-bare\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\"}",
-      "emit: nothing unknown is written (omit-until-present)");
+    assert_streq(to_cstr(str_builder_build(esb2)), "{\"id\":\"claude-bare\",\"object\":\"model\",\"owned_by\":\"anthropic\",\"source\":\"live\",\"kind\":\"chat\"}",
+      "emit: nothing unknown is written (omit-until-present), and Anthropic's list is of chat models");
 
     return 0;
 }
@@ -1227,6 +1227,485 @@ fn _t280_urlparse() {
 
 # 2.9.25: the lookup indexes. keyindex.cyr over a compiled table; catalog.cyr's index over a model list, against
 # catalog_entries_find, the linear find it replaced on the hot paths (kept as the reference and the fallback).
+# ════════════════════════════════════════════════════════════════
+# 2.10.2 — error bodies are JSON, a listing keeps nothing, and the catalog says tier, tools and kind. A whole request
+# is scripts/wire-smoke.py's: handlers.cyr reads main.cyr's globals.
+# ════════════════════════════════════════════════════════════════
+
+# A literal as a heap copy: the JSON readers terminate what they read.
+fn _t_copy(s) {
+    var n = strlen(s);
+    var c = alloc(n + 1);
+    memcpy(c, s, n);
+    store8(c + n, 0);
+    return c;
+}
+
+# The body http_error (which = 0) or http_bad_request (1) writes for `msg`, through a pipe.
+fn _t2102_writer_body(which, msg) {
+    var fds = alloc(8);
+    if (sys_pipe(fds) < 0) { return ""; }
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    if (which == 0) { http_error(wfd, "502", "Bad Gateway", msg); }
+    else { http_bad_request(wfd, msg); }
+    sys_close(wfd);
+    var buf = alloc(8192);
+    var n = sys_read(rfd, buf, 8191);
+    sys_close(rfd);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    var i = 0;
+    while (i + 3 < n) {
+        if (memeq(buf + i, "\r\n\r\n", 4) == 1) { return buf + i + 4; }
+        i = i + 1;
+    }
+    return "";
+}
+
+# _provider_err_capture on a provider's body (a heap copy: the extractors terminate what they read). The stored text.
+fn _t2102_capture(body) {
+    _provider_err_capture(400, _t_copy(body), strlen(body));
+    return provider_last_error_msg();
+}
+
+# A JSON string field of the object at `key` of a body, as bayan's parser reads it: 0 when the body does not have it.
+fn _t2102_err_field(body, field) {
+    var a = arena_allocator_growable(4096);
+    var v = bayan_json_v_parse_buf_a(a, body, strlen(body));
+    var e = bayan_json_v_obj_get_by_cstr(v, "error");
+    if (e == 0) { return 0; }
+    return _cat_dup_str(bayan_json_v_str(bayan_json_v_obj_get_by_cstr(e, field)));
+}
+
+fn _t2102_error_writers() {
+    test_group("error_writers");
+    var spoof = "nope\",\"type\":\"spoofed\",\"injected\":\"yes";
+    assert_streq(_t2102_writer_body(0, "a \"q\" \\ b"),
+      "{\"error\":{\"message\":\"a \\\"q\\\" \\\\ b\",\"type\":\"server_error\"}}", "http_error: msg is escaped");
+    assert_streq(_t2102_writer_body(1, "missing 'model' (e.g. \"70b\")"),
+      "{\"error\":{\"message\":\"missing 'model' (e.g. \\\"70b\\\")\",\"type\":\"invalid_request_error\"}}",
+      "http_bad_request: hoosh's own quote too");
+    var re = _resp_err("502", "Bad Gateway", spoof, "upstream_error");
+    var rb = load64(re + 16);
+    assert_eq(load64(re + 24), strlen(rb), "_resp_err: the length is the body's");
+    assert_streq(_t2102_err_field(rb, "type"), "upstream_error", "_resp_err: a provider cannot set the type");
+    assert_eq(_t2102_err_field(rb, "injected"), 0, "_resp_err: nor add a key to the error object");
+    assert_eq(_t_has(rb, strlen(rb), "\"injected\":"), 0, "_resp_err: the words stay inside the message");
+    assert_streq(_t2102_err_field(_t2102_writer_body(0, spoof), "type"), "server_error", "http_error: same");
+    assert_eq(_t2102_err_field(_t2102_writer_body(0, spoof), "injected"), 0, "http_error: no key added");
+    # Batch answers embed a body as it stands, so a failed item is read through the same parser.
+    var ol = "upstream provider returned HTTP 404: {\"error\": \"model 'llama3.2:1b' not found\"}";
+    var re2 = _resp_err("502", "Bad Gateway", ol, "upstream_error");
+    assert_eq(_t_has(load64(re2 + 16), load64(re2 + 24), "not found\\\"}\""), 1, "_resp_err: Ollama's refusal is in the string");
+    var sb = str_builder_new();
+    sb_add_json_escaped(sb, "a\x7fb\tc");
+    assert_streq(to_cstr(str_builder_build(sb)), "a b c", "escaper: byte 127 and control bytes are spaces");
+    return 0;
+}
+
+fn _t2102_error_capture() {
+    test_group("error_capture");
+    assert_streq(_t2102_capture("{\"error\":{\"message\":\"the \\\"quoted\\\" parameter is invalid\"}}"),
+      "the \"quoted\" parameter is invalid", "capture: `message` is stored as the text it stands for");
+    var cm = provider_err_client_msg();
+    assert_streq(cm, "upstream provider returned HTTP 400: the \"quoted\" parameter is invalid", "capture: the client's sentence");
+    var se = upstream_error_sse_body("m", 400, provider_last_error_msg());
+    assert_eq(_t_has(se, strlen(se), "the \\\"quoted\\\" parameter"), 1, "capture: a stream frame escapes it once");
+    assert_eq(_t_has(se, strlen(se), "\\\\"), 0, "capture: and does not double a backslash");
+    assert_streq(_t2102_capture("{\"error\":{\"message\":\"a \\u003cmodel\\u003e \\u0026 caf\\u00e9 \\ud83d\\ude00\"}}"),
+      "a <model> & caf\xc3\xa9 \xf0\x9f\x98\x80", "capture: every RFC 8259 escape, as Go's encoder writes them");
+    assert_streq(_t2102_capture("{\"message\":\"line one\\nline two\"}"), "line one line two", "capture: still one line");
+    assert_streq(_t2102_capture("{\"error\": \"model 'x' not found\"}"), "{\"error\": \"model 'x' not found\"}",
+      "capture: no `message`: the raw body, as Ollama's refusal needs");
+    assert_streq(_t2102_capture("<html lang=\"en\">"), "<html lang=\"en\">", "capture: nor from a proxy's page");
+    # A message that reaches the clip inside what was an escape: 510 bytes, then \"tail\".
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
+    var i = 0;
+    while (i < 510) { str_builder_putc(sb, 120); i = i + 1; }
+    str_builder_add_cstr(sb, "\\\"tail\\\"\"}}");
+    var clipped = _t2102_capture(to_cstr(str_builder_build(sb)));
+    assert_eq(strlen(clipped), 511, "capture: the clip falls on plain text");
+    assert_eq(load8(clipped + 510), 34, "capture: at the quote, whole");
+    var rc = _resp_err("502", "Bad Gateway", provider_err_client_msg(), "upstream_error");
+    assert_streq(_t2102_err_field(load64(rc + 16), "type"), "upstream_error", "capture: a clipped message cannot eat the close");
+    # An SSE frame's message goes through the same decode.
+    assert_streq(_json_text("a\\\"b\\\\c"), "a\"b\\c", "text: a value on its way into a sentence");
+    assert_streq(_json_text(""), "", "text: empty");
+    assert_streq(_json_extract_text(_t_copy("{\"other\":1}"), 11, "message", 7), "", "text: no such key");
+    var fr = _t_copy("{\"type\":\"error\",\"error\":{\"message\":\"no \\\"such\\\" model\"}}");
+    assert_streq(_sse_error_message(fr, strlen(fr)), "no \"such\" model", "sse: the frame's message is plain text");
+    return 0;
+}
+
+fn _t2102_error_utf8() {
+    test_group("error_utf8");
+    assert_eq(_pe_utf8_seq("\xc3\xa9", 2), 2, "utf8: two bytes");
+    assert_eq(_pe_utf8_seq("\xe4\xb8\xad", 3), 3, "utf8: three");
+    assert_eq(_pe_utf8_seq("\xf0\x9f\x98\x80", 4), 4, "utf8: four");
+    assert_eq(_pe_utf8_seq("\xe4\xb8", 2), 0, "utf8: one cut short");
+    assert_eq(_pe_utf8_seq("\x80\x80", 2), 0, "utf8: a continuation byte starts nothing");
+    assert_eq(_pe_utf8_seq("\xc0\x80", 2), 0, "utf8: overlong");
+    assert_eq(_pe_utf8_seq("\xe0\x80\x80", 3), 0, "utf8: overlong, three bytes");
+    assert_eq(_pe_utf8_seq("\xf0\x80\x80\x80", 4), 0, "utf8: overlong, four bytes");
+    assert_eq(_pe_utf8_seq("\xed\xa0\x80", 3), 0, "utf8: a surrogate");
+    assert_eq(_pe_utf8_seq("\xf4\x90\x80\x80", 4), 0, "utf8: past U+10FFFF");
+    assert_eq(_pe_utf8_seq("\xf5\x80\x80\x80", 4), 0, "utf8: not a lead byte");
+    assert_eq(_pe_utf8_seq("\xe4\x41\x41", 3), 0, "utf8: a lead byte and ASCII");
+    # A long message of three-byte characters clips between two of them: 170 characters, not 170 and a piece.
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < 400) { str_builder_add_cstr(sb, "\xe4\xb8\xad"); i = i + 1; }
+    var cjk = str_builder_build(sb);
+    provider_err_set(400, str_data(cjk), str_len(cjk));
+    var m = provider_last_error_msg();
+    assert_eq(strlen(m), 510, "clip: on a character boundary");
+    assert_eq(_pe_utf8_seq(m + 507, 3), 3, "clip: the last character is whole");
+    provider_err_set(400, "caf\xe9 x", 6);
+    assert_streq(provider_last_error_msg(), "caf  x", "set: a byte that is not UTF-8 is a space");
+    provider_err_set(400, "ab\xe4\xb8", 4);
+    assert_streq(provider_last_error_msg(), "ab  ", "set: as is a character the body cut short");
+    provider_err_set(400, "caf\xc3\xa9", 5);
+    assert_streq(provider_last_error_msg(), "caf\xc3\xa9", "set: real UTF-8 is kept");
+    # Whatever a provider sends, what is kept is one line of well-formed UTF-8 that fits. Random bytes, weighted to
+    # the lead and continuation bytes that reach the branches above.
+    var rb = alloc(1200);
+    var seed = 0x2B7E1516;
+    var bad = 0;
+    var round = 0;
+    while (round < 3000) {
+        var n = 1 + round % 1200;
+        var j = 0;
+        while (j < n) {
+            seed = (seed * 6364136223846793005 + 1442695040888963407) & 0x7FFFFFFFFFFFFFFF;
+            var b = (seed >> 24) & 255;
+            if (round % 3 == 0) { b = 128 | b; }
+            store8(rb + j, b);
+            j = j + 1;
+        }
+        provider_err_set(502, rb, n);
+        var kept = provider_last_error_msg();
+        var kn = strlen(kept);
+        if (kn > PROVIDER_ERR_MSG_CAP - 1) { bad = bad + 1; }
+        var q = 0;
+        while (q < kn) {
+            var kc = load8(kept + q) & 255;
+            if (kc < 32 || kc == 127) { bad = bad + 1; q = q + 1; }
+            elif (kc < 128) { q = q + 1; }
+            else {
+                var ks = _pe_utf8_seq(kept + q, kn - q);
+                if (ks == 0) { bad = bad + 1; q = q + 1; } else { q = q + ks; }
+            }
+        }
+        round = round + 1;
+    }
+    assert_eq(bad, 0, "set: any bytes at all come out as well-formed UTF-8, one line, within the cap");
+    provider_err_reset();
+    return 0;
+}
+
+fn _t2102_response_head() {
+    test_group("response_head");
+    var buf = alloc(16);
+    assert_eq(_head_add(buf, buf + 4, "abcdefgh") - buf, 4, "head: a part is cut at the end of the buffer");
+    assert_eq(memeq(buf, "abcd", 4), 1, "head: and what fits is written");
+    assert_eq(_head_add_int(buf, buf + 8, 0) - buf, 1, "head: zero");
+    assert_eq(load8(buf), 48, "head: is written as 0");
+    assert_eq(_head_add_int(buf, buf + 8, 1234567) - buf, 7, "head: a length");
+    assert_eq(memeq(buf, "1234567", 7), 1, "head: in decimal");
+    assert_eq(_head_add_int(buf, buf + 3, 1234567) - buf, 0, "head: a length that does not fit is left out whole");
+    var out = _t_respond_capture("200", "OK", "{}", "X-Hoosh-Cache: HIT");
+    assert_streq(to_cstr(out),
+      "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 2\r\nX-Hoosh-Cache: HIT\r\n\r\n{}",
+      "head: the same bytes as ever");
+    var fds = alloc(8);
+    sys_pipe(fds);
+    var u0 = alloc_used();
+    http_respond_h(load32(fds + 4), "200", "OK", "{}", 2, 0);
+    assert_eq(alloc_used() - u0, 0, "head: a response takes nothing from the heap (ADR 013: it kept 792 bytes)");
+    sys_close(load32(fds));
+    sys_close(load32(fds + 4));
+    return 0;
+}
+
+fn _t2102_catalog_kind() {
+    test_group("catalog_kind");
+    assert_eq(catalog_id_kind("text-embedding-3-small"), CAT_KIND_EMBEDDING, "words: an embedder");
+    assert_eq(catalog_id_kind("nomic-embed-text:latest"), CAT_KIND_EMBEDDING, "words: on Ollama too");
+    assert_eq(catalog_id_kind("whisper-1"), CAT_KIND_OTHER, "words: speech is neither");
+    assert_eq(catalog_id_kind("dall-e-3"), CAT_KIND_OTHER, "words: images are neither");
+    assert_eq(catalog_id_kind("bge-m3"), 0 - 1, "words: no match says nothing");
+    assert_eq(catalog_id_kind("gpt-6-astra"), 0 - 1, "words: and never says chat");
+    assert_eq(cat_e_kind(catalog_entry_new("x", CATSRC_LIVE)), 0 - 1, "entry: kind starts unknown");
+    assert_eq(cat_e_tools(catalog_entry_new("x", CATSRC_LIVE)), 0 - 1, "entry: so do tools");
+
+    var a = arena_allocator_growable(65536);
+    var es = vec_new();
+    var more = alloc(8);
+    var last = alloc(8);
+    var ab = _t_copy("{\"data\":[{\"id\":\"claude-new-9\"}],\"has_more\":false}");
+    catalog_parse_anthropic(a, ab, strlen(ab), es, more, last);
+    assert_eq(cat_e_kind(vec_get(es, 0)), CAT_KIND_CHAT, "anthropic: its list is of chat models");
+    var gs = vec_new();
+    var nx = alloc(8);
+    var gb = _t_copy("{\"models\":[{\"name\":\"models/gemini-9\",\"supportedGenerationMethods\":[\"generateContent\"]},{\"name\":\"models/gemini-9-flash-image\",\"supportedGenerationMethods\":[\"generateContent\"]},{\"name\":\"models/gemini-embedding-1\",\"supportedGenerationMethods\":[\"embedContent\"]}]}");
+    catalog_parse_google(a, gb, strlen(gb), gs, nx);
+    assert_eq(vec_len(gs), 2, "google: an embedder stays off the list");
+    assert_eq(cat_e_kind(vec_get(gs, 0)), CAT_KIND_CHAT, "google: generateContent is chat");
+    assert_eq(cat_e_kind(vec_get(gs, 1)), CAT_KIND_OTHER, "google: but for an image model, which answers it too");
+
+    var os = vec_new();
+    var ob = _t_copy("{\"models\":[{\"name\":\"llama3.2:8b\",\"details\":{\"family\":\"llama\"}},{\"name\":\"bge-m3:latest\",\"details\":{\"family\":\"bert\"}},{\"name\":\"nomic-embed-text:latest\",\"details\":{\"family\":\"nomic-bert\"}},{\"name\":\"bare:1b\"}]}");
+    assert_eq(catalog_parse_ollama(a, ob, strlen(ob), os), 4, "ollama: every tag is listed");
+    assert_eq(cat_e_kind(vec_get(os, 0)), 0 - 1, "ollama: a chat family says nothing by itself");
+    assert_eq(cat_e_kind(vec_get(os, 1)), CAT_KIND_EMBEDDING, "ollama: bert is an embedder, whatever the tag is called");
+    assert_eq(cat_e_kind(vec_get(os, 2)), CAT_KIND_EMBEDDING, "ollama: nomic-bert too");
+    assert_eq(cat_e_kind(vec_get(os, 3)), 0 - 1, "ollama: a tag with no details");
+
+    var e = catalog_entry_new("m", CATSRC_LIVE);
+    var sb = _t_copy("{\"license\":\"x\",\"capabilities\":[\"completion\",\"tools\"]}");
+    assert_eq(catalog_parse_ollama_show(a, sb, strlen(sb), e), 1, "show: read");
+    assert_eq(cat_e_kind(e), CAT_KIND_CHAT, "show: completion is chat");
+    assert_eq(cat_e_tools(e), 1, "show: tools");
+    assert_eq(cat_e_vision(e), 0, "show: the list is an answer on vision too");
+    var e2 = catalog_entry_new("m", CATSRC_LIVE);
+    var sb2 = _t_copy("{\"capabilities\":[\"embedding\"]}");
+    catalog_parse_ollama_show(a, sb2, strlen(sb2), e2);
+    assert_eq(cat_e_kind(e2), CAT_KIND_EMBEDDING, "show: embedding");
+    assert_eq(cat_e_tools(e2), 0, "show: no tools");
+    var e3 = catalog_entry_new("m", CATSRC_LIVE);
+    var sb3 = _t_copy("{\"capabilities\":[\"embedding\",\"completion\",\"vision\"]}");
+    catalog_parse_ollama_show(a, sb3, strlen(sb3), e3);
+    assert_eq(cat_e_kind(e3), CAT_KIND_CHAT, "show: a model that does both chats");
+    assert_eq(cat_e_vision(e3), 1, "show: vision");
+    var e4 = catalog_entry_new("m", CATSRC_LIVE);
+    var sb4 = _t_copy("{\"capabilities\":[\"image\"]}");
+    catalog_parse_ollama_show(a, sb4, strlen(sb4), e4);
+    assert_eq(cat_e_kind(e4), CAT_KIND_OTHER, "show: neither");
+    var e5 = catalog_entry_new("m", CATSRC_LIVE);
+    store64(e5 + CAT_E_KIND, CAT_KIND_EMBEDDING);
+    var sb5 = _t_copy("{\"details\":{},\"template\":\"t\"}");
+    assert_eq(catalog_parse_ollama_show(a, sb5, strlen(sb5), e5), 0, "show: an old Ollama has no list");
+    assert_eq(cat_e_kind(e5), CAT_KIND_EMBEDDING, "show: and what the tag said stands");
+    assert_eq(cat_e_tools(e5), 0 - 1, "show: and tools stay unknown");
+    var sb6 = _t_copy("{\"capabilities\":[]}");
+    assert_eq(catalog_parse_ollama_show(a, sb6, strlen(sb6), e5), 0, "show: an empty list says nothing");
+    assert_eq(catalog_parse_ollama_show(a, _t_copy("not json"), 8, e5), 0, "show: nor does a body that is not JSON");
+    reset_via(a);
+    return 0;
+}
+
+fn _t2102_catalog_lend() {
+    test_group("catalog_lend");
+    var e = metadata_lend(catalog_entry_new("gpt-6-astra", CATSRC_LIVE));
+    assert_eq(cat_e_tier(e), TIER_PREMIUM, "lend: a live entry gets the table's tier");
+    assert_eq(cat_e_tools(e), 0, "lend: tools, and `no` is an answer");
+    assert_eq(cat_e_vision(e), 1, "lend: vision");
+    assert_eq(cat_e_ctx(e), 1050000, "lend: the context window");
+    assert_eq(cat_e_kind(e), CAT_KIND_CHAT, "lend: kind");
+    assert_eq(cat_e_source(e), CATSRC_LIVE, "lend: and it stays a live entry");
+    var dated = metadata_lend(catalog_entry_new("gpt-6-astra-2026-09-01", CATSRC_LIVE));
+    assert_eq(cat_e_tier(dated), TIER_PREMIUM, "lend: a dated id finds its row by prefix");
+    var u = catalog_entry_new("gpt-99-new", CATSRC_LIVE);
+    var ul = metadata_lend(u);
+    assert_eq(cat_e_tier(ul), 0 - 1, "lend: no row, no tier (metadata_lookup's STANDARD is the optimizer's)");
+    assert_eq(cat_e_tools(ul), 0 - 1, "lend: no tools");
+    assert_eq(cat_e_vision(ul), 0 - 1, "lend: no vision");
+    assert_eq(cat_e_ctx(ul), 0 - 1, "lend: no context window");
+    assert_eq(cat_e_kind(ul), 0 - 1, "lend: no kind");
+    assert_neq(ul, u, "lend: a copy, as a published entry is never written");
+    var said = catalog_entry_new("gpt-6-astra", CATSRC_CONFIG);
+    store64(said + CAT_E_TOOLS, 1);
+    store64(said + CAT_E_TIER, TIER_ECONOMY);
+    store64(said + CAT_E_VISION, 0);
+    store64(said + CAT_E_CTX, 5000);
+    var sl = metadata_lend(said);
+    assert_eq(cat_e_tools(sl), 1, "lend: what an entry says stands");
+    assert_eq(cat_e_tier(sl), TIER_ECONOMY, "lend: its tier");
+    assert_eq(cat_e_vision(sl), 0, "lend: its vision");
+    assert_eq(cat_e_ctx(sl), 5000, "lend: its context window");
+    var emb = metadata_lend(catalog_entry_new("nomic-embed-text:latest", CATSRC_LIVE));
+    assert_eq(cat_e_kind(emb), CAT_KIND_EMBEDDING, "lend: an embedder's row");
+    assert_eq(cat_e_tools(emb), 0, "lend: which takes no tools");
+    assert_eq(cat_e_kind(metadata_lend(catalog_entry_new("starcoder2", CATSRC_BUILTIN))), CAT_KIND_CHAT,
+      "lend: tools 0 and sys 0 do not make a row an embedder");
+    # The longest prefix can name another model. `mistral` and `gpt-4o` are chat rows.
+    var pe = metadata_lend(catalog_entry_new("mistral-embed", CATSRC_LIVE));
+    assert_eq(cat_e_kind(pe), CAT_KIND_EMBEDDING, "lend: the words over a chat row's prefix");
+    assert_eq(cat_e_tier(pe), 0 - 1, "lend: and that row lends it nothing");
+    assert_eq(cat_e_tools(pe), 0 - 1, "lend: not tools");
+    assert_eq(cat_e_ctx(pe), 0 - 1, "lend: not a context window");
+    var pt = metadata_lend(catalog_entry_new("gpt-4o-transcribe", CATSRC_LIVE));
+    assert_eq(cat_e_kind(pt), CAT_KIND_OTHER, "lend: speech over a chat row's prefix");
+    assert_eq(cat_e_tier(pt), 0 - 1, "lend: lends nothing there either");
+    var pk = catalog_entry_new("qwen3:8b", CATSRC_LIVE);
+    store64(pk + CAT_E_KIND, CAT_KIND_EMBEDDING);
+    assert_eq(cat_e_tools(metadata_lend(pk)), 0 - 1, "lend: nor to a model the provider called something else");
+    assert_eq(cat_e_kind(metadata_lend(pk)), CAT_KIND_EMBEDDING, "lend: and the provider's word stands");
+
+    # catalog_merge carries the two new fields, and an operator's block reaches the optimizer.
+    var cfg = catalog_entry_new("op-model", CATSRC_CONFIG);
+    store64(cfg + CAT_E_TOOLS, 0);
+    store64(cfg + CAT_E_KIND, CAT_KIND_OTHER);
+    var live = catalog_entry_new("op-model", CATSRC_LIVE);
+    store64(live + CAT_E_TOOLS, 1);
+    store64(live + CAT_E_KIND, CAT_KIND_CHAT);
+    store64(live + CAT_E_CTX, 9000);
+    var mg = catalog_merge(cfg, live);
+    assert_eq(cat_e_tools(mg), 0, "merge: the operator's tools");
+    assert_eq(cat_e_kind(mg), CAT_KIND_OTHER, "merge: the operator's kind");
+    var bare = catalog_entry_new("op-model", CATSRC_CONFIG);
+    assert_eq(cat_e_tools(catalog_merge(bare, live)), 1, "merge: a block that does not say leaves the provider's word");
+    assert_eq(cat_e_kind(catalog_merge(bare, live)), CAT_KIND_CHAT, "merge: for kind too");
+    var cv = vec_new();
+    var ce = catalog_entry_new("gpt-5.5", CATSRC_CONFIG);
+    store64(ce + CAT_E_TOOLS, 0);
+    vec_push(cv, ce);
+    catalog_config_set(cv);
+    var md = alloc(40);
+    metadata_lookup("gpt-5.5", md);
+    assert_eq(load64(md + 24), 0, "optimizer: `[[models]] tools = false` reaches meets_requirements");
+    assert_eq(meets_requirements(md, TIER_ECONOMY, 0, 1, 0, 100), 0, "optimizer: so a request with tools passes it over");
+    catalog_config_set(0);
+    metadata_lookup("gpt-5.5", md);
+    assert_eq(load64(md + 24), 1, "optimizer: and the row's own word returns with the block gone");
+
+    # On the wire.
+    var sb = str_builder_new();
+    catalog_emit_entry(sb, e, "openai", 0, 0 - 1, 0 - 1);
+    assert_streq(to_cstr(str_builder_build(sb)),
+      "{\"id\":\"gpt-6-astra\",\"object\":\"model\",\"owned_by\":\"openai\",\"source\":\"live\",\"context_window\":1050000,\"tier\":\"premium\",\"kind\":\"chat\",\"capabilities\":{\"vision\":true,\"tools\":false}}",
+      "emit: tier and kind, and tools beside vision, `false` written");
+    var sb2 = str_builder_new();
+    catalog_emit_entry(sb2, ul, "openai", 0, 0 - 1, 0 - 1);
+    assert_streq(to_cstr(str_builder_build(sb2)), "{\"id\":\"gpt-99-new\",\"object\":\"model\",\"owned_by\":\"openai\",\"source\":\"live\"}",
+      "emit: a model nobody knows says nothing");
+    var sb3 = str_builder_new();
+    var only = catalog_entry_new("t", CATSRC_LIVE);
+    store64(only + CAT_E_TOOLS, 1);
+    catalog_emit_entry(sb3, only, "o", 0, 0 - 1, 0 - 1);
+    var oj = to_cstr(str_builder_build(sb3));
+    assert_eq(_t_has(oj, strlen(oj), "\"capabilities\":{\"tools\":true}"), 1, "emit: tools alone needs no comma");
+    assert_streq(catalog_kind_name(CAT_KIND_EMBEDDING), "embedding", "kind: its word");
+    assert_eq(catalog_kind_name(0 - 1), 0, "kind: unknown has none");
+    return 0;
+}
+
+# A router of one remote route over `pats` (a vec of cstrs).
+fn _t2102_router(base, pats) {
+    var r = route_new(PROV_OPENAI, 1, base);
+    var n = vec_len(pats);
+    var pv = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(pv + i * 8, vec_get(pats, i));
+        i = i + 1;
+    }
+    route_set_patterns(r, pv, n);
+    var rs = alloc(8);
+    store64(rs, r);
+    return router_new(rs, 1, STRAT_PRIORITY);
+}
+
+fn _t2102_catalog_held() {
+    test_group("catalog_held");
+    catalog_publish(0);
+    catalog_config_set(0);
+    _cat_held = 0;
+    var pats = vec_new();
+    vec_push(pats, "gpt-6-astra");
+    vec_push(pats, "whisper-1");
+    var rt = _t2102_router("https://held.example", pats);
+    var b1 = models_catalog_body(rt);
+    var j1 = to_cstr(b1);
+    assert_eq(_t_has(j1, strlen(j1), "\"id\":\"gpt-6-astra\""), 1, "held: the body lists the route's literal");
+    assert_eq(_t_has(j1, strlen(j1), "\"tier\":\"premium\""), 1, "held: with the new fields");
+    assert_eq(_t_has(j1, strlen(j1), "\"kind\":\"other\""), 1, "held: on the table path too");
+    var u0 = alloc_used();
+    var b2 = models_catalog_body(rt);
+    assert_eq(b2, b1, "held: the same body, not a copy");
+    assert_eq(alloc_used() - u0, 0, "held: a GET allocates nothing (2.10.1 kept 413 KB at 200 entries)");
+    # Each input, replaced, is a rebuild.
+    var pats2 = vec_new();
+    vec_push(pats2, "gpt-6-astra");
+    var rt2 = _t2102_router("https://held.example", pats2);
+    var b3 = models_catalog_body(rt2);
+    var j3 = to_cstr(b3);
+    assert_neq(b3, b1, "held: a new router is a new body");
+    assert_eq(_t_has(j3, strlen(j3), "whisper-1"), 0, "held: a reload's removed pattern is gone at once");
+    var cv = vec_new();
+    var ce = catalog_entry_new("gpt-6-astra", CATSRC_CONFIG);
+    store64(ce + CAT_E_TIER, TIER_ECONOMY);
+    vec_push(cv, ce);
+    catalog_config_set(cv);
+    var b4 = models_catalog_body(rt2);
+    var j4 = to_cstr(b4);
+    assert_neq(b4, b3, "held: new [[models]] is a new body");
+    assert_eq(_t_has(j4, strlen(j4), "\"tier\":\"economy\""), 1, "held: and says so");
+    catalog_config_set(0);
+    var snap = vec_new();
+    var rec = catalog_record_new(PROV_OPENAI, "https://held.example");
+    var es = vec_new();
+    vec_push(es, catalog_entry_new("gpt-6-astra", CATSRC_LIVE));
+    catalog_record_note(rec, 200, es, 1);
+    vec_push(snap, rec);
+    catalog_publish(snap);
+    var j5 = to_cstr(models_catalog_body(rt2));
+    assert_eq(_t_has(j5, strlen(j5), "\"source\":\"live\""), 1, "held: a new snapshot is a new body");
+    assert_eq(_t_has(j5, strlen(j5), "\"tools\":false"), 1, "held: and a live entry carries the table's word on tools");
+    # An unchanged read after each change goes back to holding.
+    var b6 = models_catalog_body(rt2);
+    assert_eq(models_catalog_body(rt2), b6, "held: and it holds again");
+    # A record whose key is older than the inputs is not served: going back to a router is a rebuild, not its old body.
+    assert_neq(models_catalog_body(rt), b6, "held: only the latest body is kept");
+    catalog_publish(0);
+    _cat_held = 0;
+    return 0;
+}
+
+fn _t2102_listing_arena() {
+    test_group("listing_arena");
+    catalog_publish(0);
+    var pats = vec_new();
+    vec_push(pats, "gpt-6-*");
+    vec_push(pats, "my-ft-model");
+    var rt = _t2102_router("https://list.example", pats);
+    var want = to_cstr(models_list_json(rt));
+    assert_eq(_t_has(want, strlen(want), "my-ft-model"), 1, "listing: the default allocator's answer");
+    var a = arena_allocator_growable(262144);
+    var sc = catalog_entry_new("x", CATSRC_LIVE);       # keep the table's lazy init out of the measure
+    metadata_lend(sc);
+    var u0 = alloc_used();
+    var got = models_list_json_a(a, rt);
+    var used = alloc_used() - u0;
+    assert_streq(to_cstr(got), want, "listing: the same bytes from the arena");
+    assert_eq(used, 0, "listing: nothing on the heap that never frees (2.10.1 kept 60.8 KB at 200 tags)");
+    reset_via(a);
+    assert_streq(to_cstr(models_list_json_a(a, rt)), want, "listing: and again after a reset");
+    # Past the builder's room in the arena it grows on the heap and is still right.
+    var i = 0;
+    var many = vec_new();
+    while (i < 1500) {
+        var id = alloc(64);
+        memcpy(id, "a-model-with-a-long-name-for-the-listing-000000", 47);
+        store8(id + 43, 48 + (i / 1000) % 10);
+        store8(id + 44, 48 + (i / 100) % 10);
+        store8(id + 45, 48 + (i / 10) % 10);
+        store8(id + 46, 48 + i % 10);
+        vec_push(many, id);
+        i = i + 1;
+    }
+    var big = _t2102_router("https://big.example", many);
+    var a2 = arena_allocator_growable(4096);
+    var body = models_list_json_a(a2, big);
+    assert_gt(str_len(body), MODELS_SB_ROOM, "listing: a body past the builder's room");
+    var bj = to_cstr(body);
+    assert_eq(_t_has(bj, strlen(bj), "listing-001499\""), 1, "listing: whole to its last entry");
+    assert_eq(memeq(bj + strlen(bj) - 2, "]}", 2), 1, "listing: and closed");
+    return 0;
+}
+
 fn _t2925_lookup_index() {
     test_group("lookup_index");
     # keyindex over a small table of 16-byte rows: key(0), value(8).
@@ -1267,7 +1746,7 @@ fn _t2925_lookup_index() {
     var mk = 0;
     var mk_bad = 0;
     while (mk < _meta_n) {
-        var mrow = _meta_tbl + mk * 56;
+        var mrow = _meta_tbl + mk * _META_ROW;
         if (_meta_table_lookup(load64(mrow), md) != 1 || load64(md) != load64(mrow + 8)) { mk_bad = mk_bad + 1; }
         mk = mk + 1;
     }
@@ -4614,10 +5093,36 @@ fn main() {
     sys_read(rfs_fd, rfs_buf, 63);
     sys_close(rfs_fd);
     _t_ms_stop_wait(rfs_th, rf_p);
+    # 2.10.2: a permanent refusal ends a stream's retries, as retry_forward's above, and keeps what the provider said.
+    rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 404 Not Found\r\n\r\n{\"error\":\"model 'x' not found\"}");
+    rfs_fd = retry_forward_stream(rf_cfg, rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    _t_ms_stop_wait(rfs_th, rf_p);
+    assert_eq(rfs_fd, 0 - 1, "retry stream: a 404 fails");
+    assert_eq(_t_ms_count, 1, "retry stream: ...at once: a permanent error is not retried");
+    assert_eq(provider_last_error_status(), 404, "retry stream: the provider's status is kept");
+    var rfs_cm = provider_err_client_msg();
+    assert_eq(_t_has(rfs_cm, strlen(rfs_cm), "not found"), 1, "retry stream: and its words");
+    rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 404 Not Found\r\n\r\n{}");
+    var rfs_direct = provider_forward_stream(rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    _t_ms_stop_wait(rfs_th, rf_p);
+    assert_eq(rfs_direct, FWD_PERMANENT, "stream: provider_forward_stream says permanent, as provider_forward does");
+    rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 500 Internal Server Error\r\n\r\n{}");
+    assert_eq(retry_forward_stream(rf_cfg, rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0), 0 - 1,
+      "retry stream: a 5xx fails in the end");
+    _t_ms_stop_wait(rfs_th, rf_p);
+    assert_eq(_t_ms_count, 3, "retry stream: ...after the first attempt and max_retries (2) more");
+    rfs_th = _t_ms_start(rf_lfd, "HTTP/1.0 429 Too Many Requests\r\n\r\n{}");
+    retry_forward_stream(rf_cfg, rfs_route, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
+    _t_ms_stop_wait(rfs_th, rf_p);
+    assert_eq(_t_ms_count, 3, "retry stream: a 429 is retried too");
     sys_close(rf_lfd);
     var rfs_dead = route_new(PROV_OLLAMA, 1, _t_base_url(rf_p));
+    # 2.10.2: the error state is per thread, and a worker's last refusal must not answer for the next request.
+    provider_err_set(404, "another client's model is not found", 35);
     var rfs_dead_fd = retry_forward_stream(rf_cfg, rfs_dead, "llama3", rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
     assert_eq(rfs_dead_fd, 0 - 1, "retry stream: -1 when every attempt is refused");
+    assert_eq(provider_last_error_status(), 0, "stream: a failure to connect leaves no status from an earlier request");
+    assert_streq(provider_err_client_msg(), "provider backend unreachable", "stream: and is reported as what it is");
     var rf_dead_r = retry_forward(rf_cfg, rfs_dead, "llama3", 0, rfs_msgs, strlen(rfs_msgs), 0, 0, 0);
     assert_eq(rf_dead_r, 0, "retry: 0 when every attempt is refused");
     _router = rf_saved_router;
@@ -5332,12 +5837,12 @@ fn main() {
     var tags = "{\"models\":[{\"name\":\"llama3.2:3b\",\"model\":\"llama3.2:3b\"},{\"name\":\"phi3:mini\"},{\"name\":\"llama3.2:3b\"}]}";
     var msb = str_builder_new();
     var mseen = vec_new();
-    assert_eq(_models_scan(msb, mseen, mr, tags, strlen(tags), "name", 4), 3, "models: three names listed");
+    assert_eq(_models_scan(default_alloc(), msb, mseen, mr, tags, strlen(tags), "name", 4), 3, "models: three names listed");
     assert_eq(vec_len(mseen), 1, "models: unroutable and duplicate ids skipped");
     assert_streq(to_cstr(str_builder_build(msb)), "{\"id\":\"llama3.2:3b\",\"object\":\"model\",\"owned_by\":\"ollama\"}",
       "models: entry shape");
     var mesb = str_builder_new();
-    assert_eq(_models_emit(mesb, vec_new(), "we\"ird\\id", 9, "openai"), 1, "models: an odd id is emitted");
+    assert_eq(_models_emit(default_alloc(), mesb, vec_new(), "we\"ird\\id", 9, "openai"), 1, "models: an odd id is emitted");
     var mes_want = "{\"id\":\"we\\\"ird\\\\id\",\"object\":\"model\",\"owned_by\":\"openai\"}";
     assert_streq(to_cstr(str_builder_build(mesb)), mes_want, "models: the id is JSON-escaped");
     assert_eq(_cat_literal("qwen3:8b"), 1, "models: a literal pattern is a model id");
@@ -6456,6 +6961,14 @@ fn main() {
     _t281_catalog_out_cap();
     _t2925_lookup_index();
     _t2926_request_path();
+    _t2102_error_writers();
+    _t2102_error_capture();
+    _t2102_error_utf8();
+    _t2102_response_head();
+    _t2102_catalog_kind();
+    _t2102_catalog_lend();
+    _t2102_catalog_held();
+    _t2102_listing_arena();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

@@ -73,6 +73,7 @@ include "src/lib/wq.cyr"
 include "src/lib/keyindex.cyr"
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
+include "src/lib/models.cyr"
 include "src/lib/metrics.cyr"
 
 # 2.9.11: an 8-byte-aligned heap copy of a literal, for the strings a timed loop reads. String literals are packed
@@ -491,6 +492,73 @@ fn main() {
     bench_report(b);
     catalog_publish(0);
 
+    # 2.10.2: the model listings at 200 entries, the size where a GET kept 413 KB. catalog_body_build is what every
+    # GET /v1/models/catalog did through 2.10.1 and one in a change does now; catalog_body_held is every other GET.
+    var mc_pat = alloc(8);
+    store64(mc_pat, _b_s("claude-*"));
+    var mc_base = _b_s("https://api.example");
+    var mc_route = route_new(PROV_ANTHROPIC, 1, mc_base);
+    route_set_patterns(mc_route, mc_pat, 1);
+    var mc_routes = alloc(8);
+    store64(mc_routes, mc_route);
+    var mc_rt = router_new(mc_routes, 1, STRAT_PRIORITY);
+    var mc_es = vec_new();
+    var mc_i = 0;
+    while (mc_i < 200) {
+        var mc_id = _b_s("claude-opus-5-5-20260000");
+        store8(mc_id + 21, 48 + mc_i / 100);
+        store8(mc_id + 22, 48 + (mc_i / 10) % 10);
+        store8(mc_id + 23, 48 + mc_i % 10);
+        var mc_e = catalog_entry_new(mc_id, CATSRC_LIVE);
+        store64(mc_e + CAT_E_DISPLAY, _b_s("Claude Opus 5.5"));
+        store64(mc_e + CAT_E_CTX, 1000000);
+        store64(mc_e + CAT_E_MAXOUT, 128000);
+        store64(mc_e + CAT_E_VISION, 1);
+        store64(mc_e + CAT_E_THINK, CAT_THINK_ADAPTIVE | CAT_THINK_DISABLE);
+        store64(mc_e + CAT_E_EFFORT, 31);
+        store64(mc_e + CAT_E_KIND, CAT_KIND_CHAT);
+        vec_push(mc_es, mc_e);
+        mc_i = mc_i + 1;
+    }
+    var mc_rec = catalog_record_new(PROV_ANTHROPIC, mc_base);
+    catalog_record_note(mc_rec, 200, mc_es, 1);
+    var mc_snap = vec_new();
+    vec_push(mc_snap, mc_rec);
+    catalog_publish(mc_snap);
+    b = bench_new("catalog_body_build_200");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100) {
+        models_catalog_json(mc_rt);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100);
+    bench_report(b);
+
+    models_catalog_body(mc_rt);
+    b = bench_new("catalog_body_held_200");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 1000000) {
+        models_catalog_body(mc_rt);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 1000000);
+    bench_report(b);
+
+    var mc_arena = arena_allocator_growable(262144);
+    b = bench_new("models_list_200_arena");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 1000) {
+        reset_via(mc_arena);
+        models_list_json_a(mc_arena, mc_rt);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 1000);
+    bench_report(b);
+    catalog_publish(0);
+
     # Benchmark: audit_record — one event on a chain: the entry hash (SHA-256), the HMAC signature over it and the
     # previous hash, the entry linked in, and the oldest evicted once the chain holds max_entries (1000 here).
     # Storage write-through is off, as without [[storage]].
@@ -519,6 +587,26 @@ fn main() {
     i = 0;
     while (i < 100000) {
         event_emit(b_topic, b_ev);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # 2.10.2: a provider's refusal, clipped to whole characters: 511 bytes of three-byte UTF-8, the slow branch. Last,
+    # with main's thread-local block installed here as the gateway does at startup: provider_err's state is per thread.
+    crypto_tls_main_init();
+    var pe_sb = str_builder_new();
+    i = 0;
+    while (i < 400) {
+        str_builder_add_cstr(pe_sb, _b_s("\xe4\xb8\xad"));
+        i = i + 1;
+    }
+    var pe_s = str_builder_build(pe_sb);
+    b = bench_new("provider_err_set_utf8_511b");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        provider_err_set(400, str_data(pe_s), str_len(pe_s));
         i = i + 1;
     }
     bench_batch_stop(b, 100000);

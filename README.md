@@ -19,7 +19,7 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.3 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 1737 assertions, 165 groups, 0 failures |
+| **Tests** | 1890 assertions, 172 groups, 0 failures |
 | **Benchmarks** | 25 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
@@ -177,7 +177,7 @@ request cost. A `HIT` costs nothing.
 | GET | `/v1/health` | Health check (probes first provider) |
 | GET | `/v1/health/providers` | Per-route health, failure counts, probe interval, last catalog answer (`catalog_status`: a 401 is a rejected key) |
 | GET | `/v1/models` | List models across configured providers (the live catalog's ids, local backends asked live) |
-| GET | `/v1/models/catalog` | The model catalog a picker reads: ids asked of each provider live (2.8.0), with serving routes, context window, capabilities and known prices |
+| GET | `/v1/models/catalog` | The model catalog a picker reads: ids asked of each provider live (2.8.0), with serving routes, context window, tier, kind (`chat`, `embedding`, `other`), capabilities (`tools`, vision, thinking) and known prices, each absent when nobody said |
 | POST | `/v1/models/refresh` | Ask every live route for its models now; answers with each route's `catalog_status` |
 | GET | `/api/tags` | List models, native Ollama-compatible shape |
 | POST | `/v1/chat/completions` | Inference (OpenAI-compatible) |
@@ -268,7 +268,7 @@ neither. `hoosh serve` logs a warning when either file is missing.
 ## Testing
 
 ```bash
-# Run tests (1737 assertions across 165 groups)
+# Run tests (1890 assertions across 172 groups)
 cyrius test tests/hoosh.tcyr
 
 # Run benchmarks (25 operations)

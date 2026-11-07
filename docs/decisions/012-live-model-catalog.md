@@ -68,6 +68,9 @@ what the client asked for, exactly as before.
 `[[models]]` `max_output_tokens`, else the provider's listed ceiling (`catalog_out_cap`), because a provider refuses a
 request over it with a 400 rather than trimming it. The thinking budget is planned against the trimmed figure.
 
+**2.10.2:** an entry says `tier`, `kind` and `capabilities.tools`, because a client choosing a model needs them and was
+reading them from prices and a list of words. See the addendum below.
+
 ## Consequences
 
 - A new model appears in every client's picker at the next refresh, priced and shaped correctly, with no hoosh
@@ -94,3 +97,38 @@ request over it with a 400 rather than trimming it. The thinking budget is plann
 - **A separate banked catalog thread.** sigil now has 64 lanes, so a thread could hold one; but the pool already
   owns TLS for every other bankless background (the OTLP exporter enqueues to it), and one mechanism is easier to
   reason about than two.
+
+## Addendum (2.10.2): tier, kind and tools
+
+agnosai chooses a model per tier from the catalog, and could not say which model was which: it read a tier from prices, could
+not keep an agent with tools off `gpt-6-astra`, and sent an embedder like `bge-m3` to chat.
+
+**Every field is absent when nobody said.** A client must be able to tell "no" from "unknown". That rules out
+`metadata_lookup` as the source: its defaults for a model with no row (STANDARD, tools on) suit the optimizer and would read as
+facts on the wire. `metadata_lend` fills in only what the table holds.
+
+**Whoever spoke first, wins.** An operator's block, then the provider, then the words, then the table's row.
+
+| Field | `[[models]]` | The provider | The words | The table |
+|---|---|---|---|---|
+| `tier` | `tier` | nobody publishes one | | the row |
+| `capabilities.tools` | `tools` | Ollama's `capabilities` | | the row |
+| `capabilities.vision`, `context_window` | `vision`, `context` | as before, and Ollama's `capabilities` for vision | | the row, live entries too |
+| `kind` | `kind` | Anthropic's list, Google's `generateContent`, Ollama's `details.family` and `capabilities` | a match | the row |
+
+- **`kind` is one word**, `chat`, `embedding` or `other`, not an `endpoints` list. It answers what clients ask, and it can
+  grow. `other` says "neither". A model that does both reads `chat`, since the failure to prevent is an embedder sent to chat.
+- **The words never say chat.** A match means a model is not one, and a miss means nothing: `bge-m3` holds none of them. So
+  an OpenAI-compatible model with no row has no `kind`, and that is the honest answer. The list stays filtered, and dropping is
+  not how `bge-m3` was answered: a client that wants an embedder has to be able to find one.
+- **A row lends only to a model of its own kind.** The lookup goes by longest prefix, so `gpt-4o` and `mistral` would otherwise
+  describe `gpt-4o-transcribe` and `mistral-embed`.
+- **Ollama costs one local `POST /api/show` per tag per refresh**, at most 256, because `/api/tags` says nothing about what a
+  model does. A refused tag stays as it was, and a server that stops answering ends the round. `details.family` needs no call and
+  answers for an embedder on an Ollama from before `capabilities`.
+- **`gpt-6-sol` and `gpt-6-luna` read `tools: true`.** They take tools on Chat Completions only at reasoning effort `none`, and
+  the column says what a request can do, as `meets_requirements` reads it. A client sending another effort with tools hears the
+  provider's refusal. An operator who wants them off a picker sets `tools = false`.
+
+Google's and OpenAI's embedders stay off the catalog's list. Listing them would hand a client that reads no `kind` a model it
+cannot chat with.

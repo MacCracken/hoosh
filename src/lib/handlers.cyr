@@ -45,7 +45,7 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     if (route == 0) {
         var nsb = str_builder_new();
         str_builder_add_cstr(nsb, "No provider configured for model '");
-        _json_escape_into(nsb, model, strlen(model));
+        str_builder_add_cstr(nsb, _json_text(model));      # 2.10.2: text: http_error escapes, once
         str_builder_add_cstr(nsb, "'");
         return http_error(cfd, "404", "Not Found", to_cstr(str_builder_build(nsb)));
     }
@@ -133,148 +133,14 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
 }
 
 # GET /v1/models. The listing is models.cyr's (2.9.22: models_list_json and its helpers), so the tests run it.
+# 2.10.2: built in this thread's scratch arena (provider.cyr _remote_arena), and written before the next use of it.
 fn handle_models(cfd) {
-    return http_json_ok(cfd, models_list_json(_router));
+    return http_json_ok(cfd, models_list_json_a(_remote_arena(), _router));
 }
 
-# ── GET /v1/models/catalog (2.4.9; 2.8.0: asked of the providers) ──
-#
-# Concrete, switchable model ids — never provider names, never glob patterns — each tagged with the provider
-# that would route it as `owned_by`. 2.8.0: a route in live catalog mode is offered for what ITS provider listed
-# at the last refresh (catalog_fetch.cyr); a static route, or a live one that has not answered yet, for the
-# compiled table's listed ids its patterns match, as before. The operator's [[models]] blocks come first. Only ids
-# an enabled route matches appear. Each entry is catalog_emit_entry's shape (catalog.cyr): the 2.4.9 fields, then
-# `source`, `routes` (every enabled route matching the id, in router order — the set router_select chooses
-# among, so a client can join a model to the health of the routes that would serve it), and whatever the provider
-# or the operator said about it: display_name, context_window, max_output_tokens, capabilities, pricing.
-
-# Every enabled route whose patterns match `model`, in router (priority) order.
-fn _cat_routes_for(model) {
-    var out = vec_new();
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            if (route_matches_model(r, model) == 1) { vec_push(out, r); }
-        }
-        i = i + 1;
-    }
-    return out;
-}
-
-fn _cat_seen(seen, id) {
-    var n = vec_len(seen);
-    var i = 0;
-    while (i < n) {
-        if (streq(vec_get(seen, i), id) == 1) { return 1; }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# A compiled-table row as a catalog entry, so a static route's ids carry the same fields a live one's do.
-fn _cat_table_entry(k) {
-    var e = catalog_entry_new(k, CATSRC_BUILTIN);
-    var md = alloc(40);
-    if (_meta_table_lookup(k, md) == 1) {
-        store64(e + CAT_E_CTX, load64(md));
-        store64(e + CAT_E_VISION, load64(md + 16));
-    }
-    return e;
-}
-
-# Emit entry `e` once, with the routes that would serve it and its price when one is known. An operator's
-# [[models]] block for the same id lends its fields to a provider's entry (the operator's word wins).
-fn _cat_emit(sb, seen, e) {
-    var id = cat_e_id(e);
-    if (_cat_seen(seen, id) == 1) { return 0; }
-    var rs = _cat_routes_for(id);
-    if (vec_len(rs) == 0) { return 0; }
-    if (vec_len(seen) > 0) { str_builder_add_cstr(sb, ","); }
-    vec_push(seen, id);
-    var urls = vec_new();
-    var i = 0;
-    while (i < vec_len(rs)) {
-        vec_push(urls, route_base_url(vec_get(rs, i)));
-        i = i + 1;
-    }
-    var r0 = vec_get(rs, 0);
-    var px = alloc(16);
-    var pin = 0 - 1;
-    var pout = 0 - 1;
-    if (pricing_known(id, route_provider(r0), px) == 1) {
-        pin = load64(px);
-        pout = load64(px + 8);
-    }
-    catalog_emit_entry(sb, e, provider_name(route_provider(r0)), urls, pin, pout);
-    return 1;
-}
-
-# A provider's (or the table's) entry, unless the operator's [[models]] block for it says listed = false.
-fn _cat_emit_unless_hidden(sb, seen, e) {
-    var ce = catalog_config_find(cat_e_id(e));
-    if (ce != 0) {
-        if (cat_e_listed(ce) == 0) { return 0; }
-    }
-    return _cat_emit(sb, seen, e);
-}
-
+# GET /v1/models/catalog. The body is models.cyr's since 2.10.2, built once per change and held.
 fn handle_models_catalog(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var seen = vec_new();
-    var cfg = catalog_config();
-    if (cfg != 0) {
-        var ci = 0;
-        while (ci < vec_len(cfg)) {
-            var ce = vec_get(cfg, ci);
-            if (cat_e_listed(ce) == 1) { _cat_emit(sb, seen, catalog_merge(ce, catalog_find_any(cat_e_id(ce)))); }
-            ci = ci + 1;
-        }
-    }
-    var routes = load64(_router + ROUTER_ROUTES);
-    var count = load64(_router + ROUTER_COUNT);
-    var i = 0;
-    while (i < count) {
-        var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
-            var rec = _models_live_record(r);
-            if (rec != 0) {
-                var es = cat_r_entries(rec);
-                var j = 0;
-                while (j < vec_len(es)) {
-                    var e = vec_get(es, j);
-                    if (route_matches_model(r, cat_e_id(e)) == 1) { _cat_emit_unless_hidden(sb, seen, e); }
-                    j = j + 1;
-                }
-            } else {
-                var n = metadata_count();
-                var k = 0;
-                while (k < n) {
-                    if (metadata_listed(k) == 1) {
-                        var key = metadata_key(k);
-                        if (route_matches_model(r, key) == 1) {
-                            _cat_emit_unless_hidden(sb, seen, _cat_table_entry(key));
-                        }
-                    }
-                    k = k + 1;
-                }
-                var pats = load64(r + ROUTE_PATTERNS);
-                var pn = load64(r + ROUTE_PATTERNS_N);
-                var p = 0;
-                while (p < pn) {
-                    var pat = load64(pats + p * 8);
-                    if (_cat_literal(pat) == 1) { _cat_emit_unless_hidden(sb, seen, _cat_table_entry(pat)); }
-                    p = p + 1;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "]}");
-    return http_json_ok(cfd, str_builder_build(sb));
+    return http_json_ok(cfd, models_catalog_body(_router));
 }
 
 # _cat_literal is models.cyr's since 2.9.22.
@@ -300,7 +166,7 @@ fn handle_models_refresh(cfd) {
         str_builder_add_cstr(sb, "{\"provider\":\"");
         str_builder_add_cstr(sb, provider_name(cat_r_prov(rec)));
         str_builder_add_cstr(sb, "\",\"base_url\":\"");
-        catalog_add_esc(sb, cat_r_base(rec));
+        sb_add_json_escaped(sb, cat_r_base(rec));
         str_builder_add_cstr(sb, "\",\"catalog_status\":");
         str_builder_add_int(sb, cat_r_status(rec));
         str_builder_add_cstr(sb, ",\"catalog_models\":");
@@ -316,7 +182,8 @@ fn handle_models_refresh(cfd) {
 # Emits each enabled route's model patterns in Ollama's tags shape so Ollama
 # clients pointed at the gateway can enumerate available models.
 fn handle_ollama_tags(cfd) {
-    var sb = str_builder_new();
+    var a = _remote_arena();          # 2.10.2: nothing of this outlives the write (see models_list_json_a)
+    var sb = _models_sb(a);
     str_builder_add_cstr(sb, "{\"models\":[");
     var routes = load64(_router + ROUTER_ROUTES);
     var count = load64(_router + ROUTER_COUNT);
@@ -349,7 +216,7 @@ fn handle_ollama_tags(cfd) {
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
-    return http_json_ok(cfd, str_builder_build(sb));
+    return http_json_ok(cfd, str_builder_build_a(a, sb));
 }
 
 # Build a {"name":"<model>"} body cstr for Ollama pull/delete. Returns a
@@ -823,7 +690,7 @@ fn handle_health_providers(cfd) {
         str_builder_add_cstr(sb, "\",\"base_url\":\"");
         # 2.8.0: escaped. 2.7.1 wrote the url raw, so a quote in an operator's base_url made the whole body
         # unparseable, and a client (thoth's picker) read every route's health as "unavailable".
-        catalog_add_esc(sb, route_base_url(r));
+        sb_add_json_escaped(sb, route_base_url(r));
         str_builder_add_cstr(sb, "\",\"status\":\"");
         str_builder_add_cstr(sb, health_status_str(r));
         str_builder_add_cstr(sb, "\",\"enabled\":");
@@ -1493,7 +1360,7 @@ fn _range_err(field, milli, lo, hi) {
 fn _pool_err(name) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "Token pool '");
-    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, _json_text(name));        # 2.10.2: text: _resp_err escapes, once
     str_builder_add_cstr(sb, "' does not exist");
     return to_cstr(str_builder_build(sb));
 }
@@ -1934,8 +1801,9 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
       _retry_cfg, route, model, msg_raw, msg_len, tools_raw, tools_len, gen);
     if (bfd < 0) {
         _stream_meter(route, model, bpool, est_tokens, oc, gen, 0);   # 2.8.0: nothing served, nothing billed
-        return http_error(cfd, "502", "Bad Gateway",
-          "provider backend unreachable");
+        # 2.10.2: what the provider said. This fixed string called a 404 unreachable; provider_err_client_msg says
+        # that only when nothing answered.
+        return http_error(cfd, "502", "Bad Gateway", provider_err_client_msg());
     }
     # 2.10.0: the line and read buffers are this thread's stream scratch (http_client.cyr), not 68 KiB a stream.
     var sscr = stream_scratch();
@@ -2141,47 +2009,7 @@ fn _embed_query_body(body_ptr, body_len) {
 # opens with, so the tests run it.
 
 # POST /v1/chat/completions
-# ── Deferred response descriptor ──────────────
-# A response that _chat_produce *returns* instead of writing to a socket,
-# so a batch worker can collect the body off the accept thread. Layout
-# (32 bytes): status cstr(+0), status_text cstr(+8), body cstr(+16),
-# body_len(+24). _resp_write replays it through http_respond.
-fn _resp_new(status, status_text, body_cstr, body_len) {
-    var r = alloc(40);
-    store64(r, status);
-    store64(r + 8, status_text);
-    store64(r + 16, body_cstr);
-    store64(r + 24, body_len);
-    store64(r + 32, 0);
-    return r;
-}
-
-# Attach one extra response header — a `Name: value` cstr, no CRLF.
-#
-# 2.5.12: used for `X-Hoosh-Cache`, so a client can tell a cache hit from a
-# fresh inference. Before this the two were byte-indistinguishable, which meant
-# a caching consumer double-counted spend on every hit.
-fn _resp_set_header(r, hdr) {
-    store64(r + 32, hdr);
-    return r;
-}
-
-# Error-response descriptor mirroring http_error / http_bad_request bodies.
-fn _resp_err(status, status_text, msg, etype) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
-    str_builder_add_cstr(sb, "\",\"type\":\"");
-    str_builder_add_cstr(sb, etype);
-    str_builder_add_cstr(sb, "\"}}");
-    var b = str_builder_build(sb);
-    return _resp_new(status, status_text, to_cstr(b), str_len(b));
-}
-
-fn _resp_write(cfd, r) {
-    return http_respond_h(cfd, load64(r), load64(r + 8), load64(r + 16), load64(r + 24),
-      load64(r + 32));
-}
+# The deferred response descriptor (_resp_new, _resp_err and the rest) is http_server.cyr's since 2.10.2.
 
 # ── Chat request preparation (shared by streaming + non-streaming) ─────
 # Runs validation, routing, DLP, response/semantic cache, rate limiting,

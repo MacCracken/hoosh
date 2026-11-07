@@ -5,6 +5,110 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.10.2] — 2026-11-07
+
+**The three issues agnosai filed, all fixed.** An error with a quote in it was not JSON, every `GET /v1/models/catalog`
+kept what it built on the heap that never frees, and the catalog could not say a model's tier, whether it takes tools or
+whether it chats. **1890 assertions** in 172 groups. All gates are clean: fmt, lint, vet, deny, coverage (417/732, 56%), the
+security scan, the four fuzz targets, the shutdown smoke test and the new wire smoke test.
+
+⚠ **What changes on the wire.** The catalog gains `tier`, `kind` and `capabilities.tools`, and a live entry now carries the
+table's context window and vision when its provider did not say them. All of it is additive. An error's `message` now reads
+as plain text. A refresh of an Ollama route now makes one `POST /api/show` per tag.
+
+### Fixed
+
+- **Every error body is JSON, and a provider cannot write into one.** `http_error`, `http_bad_request` and `_resp_err` pasted
+  `msg` between quotes, and for an upstream failure it holds a provider's bytes. So a provider with no `message` key, Ollama's
+  404 among them, or a proxy's `<html lang="en">` page gave the client a body it could not parse. One such item spoiled a whole
+  `/v1/batch` answer, a 200 that embeds each item's body as it stands. A body of `nope","type":"spoofed","injected":"yes` wrote
+  keys into hoosh's `error` object. All three writers escape now, and `POST /v1/hardware/cost` and `/training-estimate` stop
+  breaking on their own `"70b"`.
+- **A provider's message is stored as text.** `_json_extract_str` keeps a value's escapes, so the clip could cut one in half
+  and swallow the closing quote, and a streamed error reached the client with its backslashes doubled. `_provider_err_capture`
+  and `_sse_error_message` decode first, through the stdlib's `str_json_unescape_cstr`, all of RFC 8259 §7. `\"` alone is not
+  enough: Ollama is written in Go, whose encoder writes `<` as `<`.
+- **The clip falls on a whole character, and what is kept is UTF-8.** It fell on a byte, so a long message in any language but
+  English could end inside a character, and a strict client refused the body. A character that does not fit is left out, and a
+  byte that is not UTF-8 (a proxy's Latin-1 page) becomes a space, as a control byte does.
+- **A local stream's refusal says what it was, at once.** A provider's 404 on a local streamed chat came back as `provider backend
+  unreachable`, a fixed string, which sends an operator to the wrong place. It is the provider's own answer now. It also came
+  back late: `retry_forward` has stopped on a permanent 4xx since 2.5.3, and `retry_forward_stream` never did, so a model the
+  backend does not have held the client and a worker for the whole backoff schedule first. `provider_forward_stream` returns
+  `FWD_PERMANENT` now, and resets the per-thread error as `provider_forward` does, so a stream that cannot connect cannot report
+  the worker's last refusal.
+- **A client's text in an error reads as the client wrote it.** `Token pool '…'` and `No provider configured for model '…'` held
+  the request's raw JSON slice, and the second escaped it as well. Both are decoded, so the writer escapes once.
+
+### Added
+
+- **`GET /v1/models/catalog` says `tier`, `kind` and `capabilities.tools`.** Each is **absent when nobody said**, so a client
+  can tell "no" from "unknown". [ADR 012](docs/decisions/012-live-model-catalog.md) has the addendum.
+  - **`tier`** is `economy`, `standard`, `premium` or `reasoning`: `[[models]]`, then the table.
+  - **`tools`** is `[[models]]`, then the provider, then the table. It is on live entries too, so `gpt-6-astra` says `false`.
+  - **`kind`** is `chat`, `embedding` or `other`. Anthropic's list is of chat models and Google's `generateContent` says chat.
+    On Ollama, `details.family` in the tags names an embedding architecture, and `capabilities` in `POST /api/show` is the
+    provider's word on all of it, tools and vision included. It is the only thing that tells `bge-m3` from a chat model.
+- **`metadata_lend`** fills in what the table knows, without `metadata_lookup`'s defaults, which would read as facts. A row lends
+  only to a model of its own kind: the lookup goes by longest prefix, and the `gpt-4o` row says nothing true of
+  `gpt-4o-transcribe`. The word filter's verdict is a field now, for the lists it does not filter. A match says what a model is
+  not, and a miss says nothing, so the words never call a model chat.
+- **`[[models]]` takes `tools` and `kind`**, the operator's word as everywhere. `tools = false` also reaches `/v1/cost/recommend`.
+- **`scripts/wire-smoke.py`** runs a real gateway at stub providers and reads every answer as a strict client does: each row of
+  the error issue, a permanent refusal asked once, the catalog's fields, the held body under reloads, and reads racing reloads
+  and refreshes. CI runs it. 29 of its checks fail on 2.10.1.
+- **`scripts/memory-growth.py --get PATH --tags N --shape claude`** measures the model listings.
+
+### Changed — request memory
+
+- **`GET /v1/models/catalog` holds its body.** It takes nothing from the request, so one body serves every caller, rebuilt when
+  the router, the snapshot or `[[models]]` changes. Each of the three is replaced whole, and they are read before the build, so
+  a change mid-build costs one more build, never a stale body. The snapshot alone would not do: a reload replaces `_router` at
+  once, and the old snapshot serves until the refresh it starts publishes. A reader takes no lock.
+- **`/v1/models` and `/api/tags` build in the thread's scratch arena**, the first listings to take ADR 013's decision 1.
+- **A response head is written on the stack.** It kept 792 bytes per response, whatever the handler had done.
+- **`catalog_add_esc` is gone.** It was `sb_add_json_escaped` but for byte 127.
+
+### Changed — dependency pins
+
+None. cyrius 6.7.18, ai-hwaccel 2.5.6, bote 3.8.15 and majra 2.13.0 are their latest tags, and sigil 3.13.15 and sandhi 1.13.7
+come with cyrius. The vendored bundles and `data/` match those tags (`models.json` unwrapped, as CLAUDE.md requires).
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (1737 → 1890): the three writers through a pipe, capture and decode, UTF-8 at every edge of the clip with
+  3,000 rounds of random bytes, the head, every parser's `kind`, `metadata_lend`, the held body with each input replaced in turn,
+  and a stream's retries.
+  `alloc_used()` guards hold a held GET, a listing and a response head to zero bytes on the heap.
+- **`tests/hoosh.bcyr`** (26 → 30): `catalog_body_build_200`, `catalog_body_held_200`, `models_list_200_arena` and
+  `provider_err_set_utf8_511b`.
+- `_resp_new`, `_resp_err` and the rest moved from `handlers.cyr` to `http_server.cyr`, and the catalog's builder to `models.cyr`,
+  so the tests run them.
+
+### Sizes and performance
+
+Kept per request. 2.10.1 is VmRSS over 1,000 GETs. 2.10.2 is `alloc_used()` over 4,000, from a scratch build with a route that
+reports it, as VmRSS moves in whole chunks.
+
+| | 2.10.1 | 2.10.2 |
+|---|---:|---:|
+| `GET /v1/models/catalog`, 200 Claude-shaped entries | 409 KB | **176 bytes** |
+| `GET /v1/models/catalog`, 200 bare Ollama tags | 237 KB | **176 bytes** |
+| `GET /v1/models`, 200 bare Ollama tags | 60.8 KB | **304 bytes** |
+| buffered chat (VmRSS over 6,000, in 2 MiB steps) | ~5.6 KB | ~4.5 KB |
+
+A held catalog answers in 9 ns where a build takes about 3 ms at 200 entries.
+
+| | 2.10.1 | 2.10.2 | |
+|---|---:|---:|---:|
+| x86_64 | 4,030,584 | 4,039,000 | +0.2% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,625,656 | 2,634,072 | +0.3% |
+
+On the benchmarks, `cost_record_live_catalog` reads 13% up in the one recorded run (657 → 745 ns). Nine alternated runs of each
+build on the finished tree show no regression: its median is 636 → 555 ns on a busy machine, 2.10.1's own range reaching 852. An
+earlier pass on a quiet machine had every row compared within 3%. So that is the row's spread, in neither direction. The
+warning sets are identical on aarch64 and AGNOS.
+
 ## [2.10.1] — 2026-11-06
 
 **hoosh serves on AGNOS, and bote moves to its latest.** Through 2.10.0, hoosh on AGNOS logged that it was serving and never

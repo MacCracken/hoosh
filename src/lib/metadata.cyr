@@ -18,14 +18,18 @@ var _meta_tbl = 0;
 var _meta_n = 0;
 var _meta_ix = 0;     # 2.9.25: keyindex.cyr's index over the table, published last by _meta_init
 
-# Entry: key(0) ctx(8) tier(16) vision(24) tools(32) sys(40) listed(48) — 56 bytes.
-#
+# Entry: key(0) ctx(8) tier(16) vision(24) tools(32) sys(40) listed(48) kind(56) — 64 bytes.
+var _META_ROW = 64;
+
 # `listed` (2.8.0) separates the ids a provider actually serves from the FAMILY PREFIXES this table also needs for
 # its longest-prefix match: `claude-opus-4` is how a dated `claude-opus-4-20250514` finds Opus 4.0's row, but it
 # is not a model id, and 2.7.1's catalog offered it (and `claude-sonnet-4`) to clients as one. A row with
 # listed = 0 still answers lookups; it is never offered by the static catalog.
+#
+# `kind` (2.10.2, CAT_KIND_*) is CHAT on every row but _meta_add_embedder's. tools = 0 and sys = 0 are no marker
+# for it: `starcoder2` has both, and it is listed.
 fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys, listed) {
-    var e = arr + idx * 56;
+    var e = arr + idx * _META_ROW;
     store64(e, key);
     store64(e + 8, ctx);
     store64(e + 16, tier);
@@ -33,6 +37,14 @@ fn _meta_add(arr, idx, key, ctx, tier, vision, tools, sys, listed) {
     store64(e + 32, tools);
     store64(e + 40, sys);
     store64(e + 48, listed);
+    store64(e + 56, CAT_KIND_CHAT);
+    return 0;
+}
+
+# An embedding model: no chat, no vision, no tools, never offered as a chat model by the static catalog.
+fn _meta_add_embedder(arr, idx, key, ctx, tier) {
+    _meta_add(arr, idx, key, ctx, tier, 0, 0, 0, 0);
+    store64(arr + idx * _META_ROW + 56, CAT_KIND_EMBEDDING);
     return 0;
 }
 
@@ -47,7 +59,7 @@ var _META_CAP = 107;
 fn _meta_init() {
     var have = _meta_ix;
     if (have != 0) { return have; }
-    var arr = alloc(_META_CAP * 56);
+    var arr = alloc(_META_CAP * _META_ROW);
     # Anthropic — 2.8.0, from the Models API itself (GET /v1/models, 2026-10-09: max_input_tokens and the
     # capability tree per model). The 2.7.1 rows were `claude-opus-4`, `claude-sonnet-4`, `claude-3.5-haiku` (never an
     # id), `claude-3-5-haiku`, `claude-3-5-sonnet` and `claude-3-haiku` (all retired). The live catalog
@@ -77,7 +89,9 @@ fn _meta_init() {
     # anything shut down or with an announced shutdown (kept, so old traffic still finds its context window), and
     # for family PREFIXES. A provider's live list is what a gateway offers; these are the fallback.
     # OpenAI. gpt-6-astra and gpt-6.1-sol take no function calling on Chat Completions (the Responses API only), so
-    # tools = 0 here; gpt-6-sol / gpt-6-luna take tools on Chat Completions only at reasoning effort `none`.
+    # tools = 0 here; gpt-6-sol / gpt-6-luna take tools on Chat Completions only at reasoning effort `none`. They
+    # stay 1: the optimizer and the catalog read this column, it says what a request CAN do, and a client that sends
+    # another effort with tools hears the provider's refusal. `[[models]] tools = false` keeps them from a picker.
     _meta_add(arr, 19, "gpt-6-astra", 1050000, TIER_PREMIUM, 1, 0, 1, 1);
     _meta_add(arr, 20, "gpt-6.1-sol", 1050000, TIER_STANDARD, 1, 0, 1, 1);
     _meta_add(arr, 21, "gpt-6-sol", 1050000, TIER_STANDARD, 1, 1, 1, 1);
@@ -175,11 +189,11 @@ fn _meta_init() {
     _meta_add(arr, 102, "phi-3", 128000, TIER_ECONOMY, 0, 0, 1, 0);
     _meta_add(arr, 103, "phi-4", 16384, TIER_ECONOMY, 0, 0, 1, 0);
     # Embedding models: no chat capability, never listed as one.
-    _meta_add(arr, 104, "nomic-embed-text", 8192, TIER_ECONOMY, 0, 0, 0, 0);
-    _meta_add(arr, 105, "text-embedding-3-large", 8191, TIER_STANDARD, 0, 0, 0, 0);
-    _meta_add(arr, 106, "text-embedding-3-small", 8191, TIER_ECONOMY, 0, 0, 0, 0);
+    _meta_add_embedder(arr, 104, "nomic-embed-text", 8192, TIER_ECONOMY);
+    _meta_add_embedder(arr, 105, "text-embedding-3-large", 8191, TIER_STANDARD);
+    _meta_add_embedder(arr, 106, "text-embedding-3-small", 8191, TIER_ECONOMY);
     # 2.9.25: n before the table and the index last, so a worker that sees the index sees a whole table.
-    var ix = keyidx_rows(arr, _META_CAP, 56);
+    var ix = keyidx_rows(arr, _META_CAP, _META_ROW);
     _meta_n = _META_CAP;
     _meta_tbl = arr;
     _meta_ix = ix;
@@ -190,10 +204,10 @@ fn _meta_init() {
 fn metadata_count() { _meta_init(); return _meta_n; }
 
 # The model-id key (cstr) of row i, 0 <= i < metadata_count().
-fn metadata_key(i) { _meta_init(); return load64(_meta_tbl + i * 56); }
+fn metadata_key(i) { _meta_init(); return load64(_meta_tbl + i * _META_ROW); }
 
 # 1 when row i is an id worth offering (not a family prefix, not retired) — the static catalog's filter (2.8.0).
-fn metadata_listed(i) { _meta_init(); return load64(_meta_tbl + i * 56 + 48); }
+fn metadata_listed(i) { _meta_init(); return load64(_meta_tbl + i * _META_ROW + 48); }
 
 # Copy entry e's fields into out: ctx(0) tier(8) vision(16) tools(24) sys(32).
 fn _meta_copy(e, out) {
@@ -230,6 +244,7 @@ fn _meta_from_entry(e, out, have) {
     if (cat_e_ctx(e) > 0) { store64(out, cat_e_ctx(e)); }
     if (cat_e_vision(e) >= 0) { store64(out + 16, cat_e_vision(e)); }
     if (cat_e_tier(e) >= 0) { store64(out + 8, cat_e_tier(e)); }
+    if (cat_e_tools(e) >= 0) { store64(out + 24, cat_e_tools(e)); }
     if (have == 0 && load64(out) <= 0) { return 0; }   # no context window anywhere: not usable metadata
     return 1;
 }
@@ -245,6 +260,36 @@ fn metadata_lookup(model, out) {
     var cfg = catalog_config_find(model);
     if (cfg != 0) { have = _meta_from_entry(cfg, out, have) | have; }
     return have;
+}
+
+# 2.10.2: entry `e` with what the compiled table knows filled into what `e` does not say, for the catalog's answer.
+# metadata_lookup cannot be this: its defaults for a model with no row (STANDARD, tools on) suit the optimizer and
+# would read as facts on the wire. Here a model nobody knows keeps its unknowns, which the catalog omits.
+#
+# The order is whoever spoke first: `e` itself (an operator's block, or what the provider said), then the words
+# (catalog_id_kind), then the row. A row lends only to a model of its own kind, since the lookup goes by longest
+# prefix: the `gpt-4o` row describes `gpt-4o-transcribe` in nothing but its name, and `mistral` is no row for
+# `mistral-embed`.
+fn metadata_lend(e) {
+    var out = alloc(CAT_E_SIZE);
+    memcpy(out, e, CAT_E_SIZE);
+    var id = cat_e_id(e);
+    var kind = cat_e_kind(out);
+    if (kind < 0) { kind = catalog_id_kind(id); }
+    var ix = _meta_ix;
+    if (ix == 0) { ix = _meta_init(); }
+    var row = keyidx_find(ix, id);
+    if (row != 0) {
+        if (kind < 0) { kind = load64(row + 56); }
+        if (kind == load64(row + 56)) {
+            if (cat_e_ctx(out) <= 0) { store64(out + CAT_E_CTX, load64(row + 8)); }
+            if (cat_e_tier(out) < 0) { store64(out + CAT_E_TIER, load64(row + 16)); }
+            if (cat_e_vision(out) < 0) { store64(out + CAT_E_VISION, load64(row + 24)); }
+            if (cat_e_tools(out) < 0) { store64(out + CAT_E_TOOLS, load64(row + 32)); }
+        }
+    }
+    store64(out + CAT_E_KIND, kind);
+    return out;
 }
 
 # Minimum tier a request needs (mirrors CostOptimizer::classify_complexity).

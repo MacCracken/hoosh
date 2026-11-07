@@ -25,23 +25,26 @@ health_check_interval_secs = 30
 # The model catalog (GET /v1/models/catalog, GET /v1/models) is asked of each "live" route's provider — Anthropic's
 # /v1/models (with each model's context window and the thinking modes and effort levels it accepts, which shape
 # the request hoosh sends it), Gemini's /v1beta/models, an OpenAI-compatible /v1/models (minus embeddings, speech,
-# image, moderation and realtime models), Ollama's /api/tags — at startup, on a reload, on
-# POST /v1/models/refresh, and every refresh_secs. Each list is one unbilled GET. A route that has not answered
-# lists the compiled table's ids its patterns match, as before.
+# image, moderation and realtime models), Ollama's /api/tags plus one POST /api/show per tag, which is what tells a
+# chat model from an embedder — at startup, on a reload, on POST /v1/models/refresh, and every refresh_secs. Each list
+# is one unbilled GET. A route that has not answered lists the compiled table's ids its patterns match, as before.
 # [catalog]
 # refresh_secs = 21600   # six hours; 0 = only at startup, reload and POST /v1/models/refresh
 
 # The operator's word on a model, over anything a provider or the compiled table says: its price (USD per
-# million tokens — both sides, or it stays unpriced), context window, tier, and whether an OpenAI-compatible
-# model takes reasoning_effort. Use it for a model released after this hoosh, or a fine-tune.
+# million tokens — both sides, or it stays unpriced), context window, tier, whether it takes tools, what it is for,
+# and whether an OpenAI-compatible model takes reasoning_effort. Use it for a model released after this hoosh, a
+# fine-tune, or to correct what the catalog says.
 # [[models]]
 # id = "claude-opus-5-5"
 # input_per_mtok = "4.00"
 # output_per_mtok = "20.00"
 # context = 1000000
 # max_output = 128000
-# tier = "premium"       # economy | standard | premium | reasoning (for /v1/cost/recommend)
+# tier = "premium"       # economy | standard | premium | reasoning (for the catalog and /v1/cost/recommend)
 # vision = true
+# tools = true           # whether it takes tools (for the catalog and /v1/cost/recommend)
+# kind = "chat"          # chat | embedding | other (for the catalog)
 # reasoning = true       # OpenAI-compatible routes: forward reasoning_effort (o-series and GPT-5 take it)
 # listed = false         # known for lookups and pricing, not offered by the catalog
 

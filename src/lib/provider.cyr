@@ -1221,11 +1221,14 @@ fn _extract_openai_tool_calls(rb, rbl) {
 # Providers answer with JSON like {"error":{"message":"…","type":"…"}}; `message` is what an operator
 # needs. Fall back to the RAW body when there is no such field — a proxy in front of the provider may
 # answer in HTML, and a clipped HTML page still beats silence. The extraction lives here because
-# `_json_extract_str` does; the bounding, sanitising and rendering live in provider_err.cyr, which the
-# test binary can include (this file reaches `_router`, a main.cyr global, and cannot be).
+# `_json_extract_str` does; the bounding, sanitising and rendering live in provider_err.cyr.
+#
+# 2.10.2: `message` is decoded here, so what provider_err_set clips and every writer escapes is plain text. It was
+# stored escaped: a clip could leave a `\` that swallowed the closing quote, and an SSE error reached the client
+# with its backslashes doubled.
 fn _provider_err_capture(status, body, blen) {
     if (body == 0 || blen <= 0) { return provider_err_set(status, 0, 0); }
-    var msg = _json_extract_str(body, blen, "message", 7);
+    var msg = _json_extract_text(body, blen, "message", 7);
     if (strlen(msg) > 0) { return provider_err_set(status, msg, strlen(msg)); }
     return provider_err_set(status, body, blen);
 }
@@ -1399,7 +1402,7 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
 
 # Open a streaming connection to provider.
 # Returns backend fd (caller reads chunks + closes).
-# Returns -1 on connection failure.
+# Returns -1 on a failure worth retrying, or FWD_PERMANENT (2.10.2) on one that is not, as provider_forward does.
 # 2.6.1: `tools_raw/tools_len` were added. They had never existed on this path — the local
 # streaming body was built with a hardcoded `0, 0`, so a locally-served model was asked WITHOUT
 # the caller's tools and answered, correctly, that it had none. Remote providers were unaffected
@@ -1407,6 +1410,9 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
 # symptom read as "only cloud models can use tools". Since `[hoosh].stream` defaults on in
 # clients, this was the default local experience.
 fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, tools_len, gen) {
+    # 2.10.2: as provider_forward. The slot is per thread, and the handler reads it for its 502: without this, a stream
+    # that could not connect reported whatever this worker's last request was refused for, another client's included.
+    provider_err_reset();
     # Local-only fast path: raw fd + sys_read can't decrypt TLS. Remote
     # providers stream incrementally via sandhi_http_stream in the handler
     # (handle_chat_stream's remote branch) and never reach here.
@@ -1442,9 +1448,11 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
             var er = sys_read(fd, ebuf, 1023);
             if (er > 0) { elen = er; }
         }
-        provider_err_set(sst, ebuf, elen);
+        _provider_err_capture(sst, ebuf, elen);
         hlog_warn(provider_err_log_line());
         sys_close(fd);
+        # 2.10.2: a 4xx that is not 408/429 fails the same on every attempt, as in provider_forward.
+        if (status_retryable(sst) == 0) { return FWD_PERMANENT; }
         return 0 - 1;
     }
     return fd;

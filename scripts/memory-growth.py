@@ -9,8 +9,15 @@ backend (started here, in a thread), sent chat requests with UNIQUE prompts so t
 RSS grows in whole chunks (the allocator maps 8 MB at a time), so use a few thousand requests or more. Each run
 uses two sockets per request; a long run right after another can run out of ephemeral ports (TIME_WAIT).
 
+2.10.2: --get PATH sends that GET instead of chats, for the model listings, with the fake's list at --tags N models.
+--shape claude lists them from a `type = "anthropic"` route, whose entries carry the capability tree; the default is
+bare Ollama tags. In this mode the output also says what a GET kept if the gateway serves GET /v1/debug/alloc-used,
+which only a scratch build does (see ADR 013).
+
 Usage: scripts/memory-growth.py [build/hoosh] [requests]   (defaults: build/hoosh, 3000)
+       scripts/memory-growth.py build/hoosh 3000 --get /v1/models/catalog --tags 200 --shape claude
 """
+import argparse
 import http.server
 import json
 import os
@@ -23,8 +30,21 @@ import time
 import urllib.request
 
 
+def claude_model(i):
+    """One entry of Anthropic's GET /v1/models, with the capability tree."""
+    return {"id": f"claude-opus-5-5-2026{i:04d}", "type": "model", "display_name": f"Claude Opus 5.5 ({i})",
+            "created_at": "2026-10-01T00:00:00Z", "max_input_tokens": 1000000, "max_tokens": 128000,
+            "capabilities": {"image_input": {"supported": True},
+                             "thinking": {"types": {"adaptive": {"supported": True}, "enabled": {"supported": False},
+                                                    "disabled": {"supported": True}}},
+                             "effort": {"supported": True, "low": {"supported": True}, "medium": {"supported": True},
+                                        "high": {"supported": True}, "xhigh": {"supported": True},
+                                        "max": {"supported": True}}}}
+
+
 class FakeOllama(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
+    tags = 1
 
     def log_message(self, *args):
         pass
@@ -39,7 +59,10 @@ class FakeOllama(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/tags"):
-            self._send({"models": [{"name": "llama3:latest", "model": "llama3:latest"}]})
+            names = ["llama3:latest"] + [f"llama3-pad{i}:latest" for i in range(1, self.tags)]
+            self._send({"models": [{"name": n, "model": n} for n in names]})
+        elif self.path.startswith("/v1/models"):
+            self._send({"data": [claude_model(i) for i in range(self.tags)], "has_more": False})
         else:
             self._send({}, 404)
 
@@ -71,15 +94,16 @@ def rss_kib(pid):
     return 0
 
 
-def run(binary, n, stream):
+def run(binary, n, stream, get=None, shape="ollama"):
     backend = Server(("127.0.0.1", 0), FakeOllama)
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     probe = Server(("127.0.0.1", 0), FakeOllama)
     port = probe.server_address[1]
     probe.server_close()
+    kind, pattern = ("anthropic", "claude-*") if shape == "claude" else ("ollama", "llama*")
     cfg = (f'[server]\nbind = "127.0.0.1"\nport = {port}\nhealth_check_interval_secs = 0\n\n'
-           f'[[providers]]\ntype = "ollama"\nbase_url = "http://127.0.0.1:{backend.server_address[1]}"\n'
-           f'priority = 1\nmodels = ["llama*"]\n')
+           f'[[providers]]\ntype = "{kind}"\nbase_url = "http://127.0.0.1:{backend.server_address[1]}"\n'
+           f'priority = 1\nmodels = ["{pattern}"]\n')
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "hoosh.cyml")
         with open(path, "w") as f:
@@ -104,23 +128,45 @@ def run(binary, n, stream):
                                              headers={"Content-Type": "application/json"}, method="POST")
                 return urllib.request.urlopen(req, timeout=10).read()
 
+            def fetch(i):
+                return urllib.request.urlopen(url + get, timeout=10).read()
+
+            def alloc_used():
+                try:
+                    return int(urllib.request.urlopen(url + "/v1/debug/alloc-used", timeout=2).read())
+                except (OSError, ValueError):
+                    return None
+
+            once = fetch if get else chat
+            if get:
+                # The first refresh runs on a worker; wait until the catalog has what the fake lists.
+                want = {"ollama": b"llama3-pad", "claude": b"claude-opus-5-5-2026"}[shape]
+                for _ in range(200):
+                    if FakeOllama.tags == 1 or want in fetch(0):
+                        break
+                    time.sleep(0.05)
             for i in range(200):
-                chat(i)
+                once(i)
             time.sleep(0.5)
             before = rss_kib(gw.pid)
+            used0 = alloc_used() if get else None
             ok = 0
             t0 = time.time()
             for i in range(200, 200 + n):
                 try:
-                    chat(i)
+                    once(i)
                     ok += 1
                 except OSError:
                     pass
+            used1 = alloc_used() if get else None
             time.sleep(0.5)
             after = rss_kib(gw.pid)
-            kind = "streamed" if stream else "buffered"
-            print(f"{kind}: {ok}/{n} ok in {time.time() - t0:.1f}s; VmRSS {before} -> {after} KiB, "
-                  f"{(after - before) * 1024 / max(ok, 1):.0f} bytes per request")
+            what = get or ("streamed" if stream else "buffered")
+            line = (f"{what}: {ok}/{n} ok in {time.time() - t0:.1f}s; VmRSS {before} -> {after} KiB, "
+                    f"{(after - before) * 1024 / max(ok, 1):.0f} bytes per request")
+            if used0 is not None and used1 is not None:
+                line += f"; alloc_used +{(used1 - used0) / max(ok, 1):.0f} bytes per request"
+            print(line)
         finally:
             gw.terminate()
             gw.wait(timeout=10)
@@ -128,8 +174,17 @@ def run(binary, n, stream):
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "build/hoosh"
-    n = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
-    run(binary, n, False)
-    time.sleep(2)
-    run(binary, n, True)
+    ap = argparse.ArgumentParser(description="how much a running gateway keeps per request")
+    ap.add_argument("binary", nargs="?", default="build/hoosh")
+    ap.add_argument("requests", nargs="?", type=int, default=3000)
+    ap.add_argument("--get", help="send this GET instead of chats")
+    ap.add_argument("--tags", type=int, default=1, help="models the fake backend lists")
+    ap.add_argument("--shape", choices=("ollama", "claude"), default="ollama")
+    args = ap.parse_args()
+    FakeOllama.tags = args.tags
+    if args.get:
+        run(args.binary, args.requests, False, args.get, args.shape)
+    else:
+        run(args.binary, args.requests, False)
+        time.sleep(2)
+        run(args.binary, args.requests, True)

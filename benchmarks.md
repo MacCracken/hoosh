@@ -1,37 +1,41 @@
 # Benchmarks
 
-Latest: **2026-11-07T02:13:03Z** — commit `9749dd9`
+Latest: **2026-11-07T08:36:35Z** — commit `6f634f4`
 
 ## hoosh
 
-| Benchmark | Baseline (`c6e6c39`) | Previous (`8c46669`) | Current (`9749dd9`) |
+| Benchmark | Baseline (`8c46669`) | Previous (`9749dd9`) | Current (`6f634f4`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 833 ns | 843 ns | 837 ns |
-| `route_round_robin_10` | 127 ns | 127 ns | 125 ns |
-| `pool_reserve_commit` | 38 ns | 37 ns | 37 ns |
-| `pool_available` | 5 ns | 5 ns | 4 ns **-20%** |
-| `cache_get_hit` | 126 ns | 127 ns | 127 ns |
-| `cache_get_miss` | 60 ns | 57 ns **-5%** | 56 ns **-7%** |
-| `cache_insert` | 98 ns | 201 ns +105% | 200 ns +104% |
-| `route_matches_model` | 33 ns | 32 ns **-3%** | 31 ns **-6%** |
-| `estimate_tokens_per_provider` | 9 ns | 9 ns | 9 ns |
-| `dlp_scan_clean_prompt` | 4.40 us | 4.36 us | 4.17 us **-5%** |
-| `mcp_tools_list` | 3.69 us | 3.62 us | 3.49 us **-5%** |
-| `mcp_tools_call` | 5.36 us | 5.26 us | 5.12 us **-4%** |
-| `batch_split_4` | 779 ns | 781 ns | 767 ns |
-| `latency_bucket_find` | 57 ns | 57 ns | 55 ns **-4%** |
-| `work_queue_push_pop` | 159 ns | 158 ns | 151 ns **-5%** |
-| `auth_verify_token` | 82 ns | 82 ns | 78 ns **-5%** |
-| `auth_verify_wrong_late` | 82 ns | 81 ns | 79 ns **-4%** |
-| `auth_verify_wrong_early` | 94 ns | 82 ns **-13%** | 78 ns **-17%** |
-| `rate_limit_check` | 9 ns | 9 ns | 9 ns |
-| `cost_record_known_model` | 273 ns | 218 ns **-20%** | 210 ns **-23%** |
-| `cost_record_local_free` | 114 ns | 113 ns | 111 ns |
-| `cost_record_live_catalog` | 636 ns | 542 ns **-15%** | 657 ns +3% |
-| `metadata_lookup_live_catalog` | 496 ns | 449 ns **-9%** | 575 ns +16% |
-| `audit_record_sign` | 7.23 us | 7.06 us | 7.00 us **-3%** |
-| `event_publish_ring` | 182 ns | 183 ns | 182 ns |
-| `cache_insert_full` | — | 1.89 us | 1.92 us |
+| `route_select_20_providers` | 843 ns | 837 ns | 900 ns +7% |
+| `route_round_robin_10` | 127 ns | 125 ns | 154 ns +21% |
+| `pool_reserve_commit` | 37 ns | 37 ns | 41 ns +11% |
+| `pool_available` | 5 ns | 4 ns **-20%** | 5 ns |
+| `cache_get_hit` | 127 ns | 127 ns | 141 ns +11% |
+| `cache_get_miss` | 57 ns | 56 ns | 64 ns +12% |
+| `cache_insert` | 201 ns | 200 ns | 222 ns +10% |
+| `cache_insert_full` | 1.89 us | 1.92 us | 2.08 us +10% |
+| `route_matches_model` | 32 ns | 31 ns **-3%** | 36 ns +12% |
+| `estimate_tokens_per_provider` | 9 ns | 9 ns | 10 ns +11% |
+| `dlp_scan_clean_prompt` | 4.36 us | 4.17 us **-4%** | 4.82 us +11% |
+| `mcp_tools_list` | 3.62 us | 3.49 us **-4%** | 3.99 us +10% |
+| `mcp_tools_call` | 5.26 us | 5.12 us | 5.87 us +12% |
+| `batch_split_4` | 781 ns | 767 ns | 861 ns +10% |
+| `latency_bucket_find` | 57 ns | 55 ns **-4%** | 64 ns +12% |
+| `work_queue_push_pop` | 158 ns | 151 ns **-4%** | 171 ns +8% |
+| `auth_verify_token` | 82 ns | 78 ns **-5%** | 89 ns +9% |
+| `auth_verify_wrong_late` | 81 ns | 79 ns | 89 ns +10% |
+| `auth_verify_wrong_early` | 82 ns | 78 ns **-5%** | 89 ns +9% |
+| `rate_limit_check` | 9 ns | 9 ns | 10 ns +11% |
+| `cost_record_known_model` | 218 ns | 210 ns **-4%** | 296 ns +36% |
+| `cost_record_local_free` | 113 ns | 111 ns | 125 ns +11% |
+| `cost_record_live_catalog` | 542 ns | 657 ns +21% | 745 ns +37% |
+| `metadata_lookup_live_catalog` | 449 ns | 575 ns +28% | 581 ns +29% |
+| `audit_record_sign` | 7.06 us | 7.00 us | 7.13 us |
+| `event_publish_ring` | 183 ns | 182 ns | 185 ns |
+| `catalog_body_build_200` | — | — | 3.29 ms |
+| `catalog_body_held_200` | — | — | 9 ns |
+| `models_list_200_arena` | — | — | 1.41 ms |
+| `provider_err_set_utf8_511b` | — | — | 4.44 us |
 
 ---
 

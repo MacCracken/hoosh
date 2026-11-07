@@ -1,7 +1,7 @@
-# An error with a quote in it is not JSON — OPEN
+# An error with a quote in it is not JSON — RESOLVED
 
-**Status:** 🟡 **OPEN** — measured 2026-11-06 on hoosh 2.10.1 (`ad87652`, the tip) against a stub provider.
-**Placement:** unpinned — backlog. A small change, with no dependency on the request arena.
+**Status:** ✅ **RESOLVED** in hoosh 2.10.2 ([CHANGELOG](../../../../CHANGELOG.md), *Fixed*). Every row below parses, row 4 decodes to the provider's sentence, and the spoof writes nothing; `scripts/wire-smoke.py` runs them against a real gateway on every CI run, and 12 of its error checks fail on 2.10.1. The seen-in-passing 404 on a local stream is fixed too, and a permanent refusal now ends a stream's retries, as it ends a buffered chat's. Three things went differently from what is filed here: `http_error` could call the escaper as the tree stood, as a function resolves wherever it is defined, so nothing moved and `catalog_add_esc` folded into `sb_add_json_escaped`; the decode is the stdlib's `str_json_unescape_cstr`, as `_json_unesc_span` leaves `\u003c` escaped, which is how Go writes `<`; and two messages did reach the writers holding a request's raw JSON slice (`Token pool '…'` and `No provider configured for model '…'`), so both decode first. The clip also falls on a whole UTF-8 character now. **agnosai can drop `_agnosai_hoosh_detail_a`'s scan.**
+**Placement:** 2.10.2.
 **Discovered:** 2026-11-06 during agnosai 2.3.1 (its roadmap B33, ADR 030), when a model an Ollama-shaped provider
 no longer had came back to agnosai as a bare `hoosh returned HTTP 502`.
 **Severity:** Medium — agnosai has a workaround. A `/v1/batch` client has none, as one failed item spoils the whole

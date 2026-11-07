@@ -25,36 +25,56 @@ fn to_cstr(s) {
     return buf;
 }
 
+# `s` written at p, as much of it as fits before `end`. Returns the new p.
+fn _head_add(p, end, s) {
+    var n = strlen(s);
+    if (n > end - p) { n = end - p; }
+    memcpy(p, s, n);
+    return p + n;
+}
+
+# `v` in decimal at p, or none of it when it does not fit before `end`. Returns the new p.
+fn _head_add_int(p, end, v) {
+    var t[24];
+    var n = fmt_int_buf(v, &t);
+    if (n > end - p) { return p; }
+    memcpy(p, &t, n);
+    return p + n;
+}
+
 # Respond with one optional extra header line.
 #
 # `extra_hdr` is a NUL-terminated `Name: value` cstr with no CRLF of its own, or
 # 0 for none. Added in 2.5.12 to carry `X-Hoosh-Cache`; kept as a separate entry
 # point so the ten existing `http_respond` call sites are untouched.
+#
+# 2.10.2: the head is written on this stack. A builder and two copies kept 792 bytes per response on the heap that
+# never frees (ADR 013), whatever the handler had done. Every part of a head is a short constant but the length, so
+# 512 bytes is room to spare; a part that did not fit would be cut, not written past the end.
 fn http_respond_h(cfd, status, status_text, body, body_len, extra_hdr) {
     var cr = make_crlf();
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_cstr(sb, status);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, status_text);
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Type: application/json");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: *");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Length: ");
-    str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, cr);
+    var head[512];
+    var end = &head + 512;
+    var p = _head_add(&head, end, "HTTP/1.1 ");
+    p = _head_add(p, end, status);
+    p = _head_add(p, end, " ");
+    p = _head_add(p, end, status_text);
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Content-Type: application/json");
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Access-Control-Allow-Origin: *");
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Connection: close");
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Content-Length: ");
+    p = _head_add_int(p, end, body_len);
+    p = _head_add(p, end, cr);
     if (extra_hdr != 0) {
-        str_builder_add_cstr(sb, extra_hdr);
-        str_builder_add_cstr(sb, cr);
+        p = _head_add(p, end, extra_hdr);
+        p = _head_add(p, end, cr);
     }
-    str_builder_add_cstr(sb, cr);
-    var header = str_builder_build(sb);
-    var hdr_cstr = to_cstr(header);
-    sys_write(cfd, hdr_cstr, str_len(header));
+    p = _head_add(p, end, cr);
+    sys_write(cfd, &head, p - &head);
     sys_write(cfd, body, body_len);
     return 0;
 }
@@ -144,10 +164,14 @@ fn http_not_found(cfd) {
     return http_respond(cfd, "404", "Not Found", body, strlen(body));
 }
 
+# 2.10.2: the three writers of hoosh's error envelope (these two and _resp_err) escape `msg`. They pasted it between
+# quotes, and for an upstream failure it holds a provider's bytes: a `"` in it ended the JSON string early, so the
+# client could not read the answer, and a provider could write keys into hoosh's `error` object. A batch answer embeds
+# each item's body as it stands, so one such item spoiled the items around it.
 fn http_bad_request(cfd, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
+    sb_add_json_escaped(sb, msg);
     str_builder_add_cstr(sb, "\",\"type\":\"invalid_request_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
@@ -171,11 +195,54 @@ fn http_payload_too_large(cfd) {
 fn http_error(cfd, status, status_text, msg) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
-    str_builder_add_cstr(sb, msg);
+    sb_add_json_escaped(sb, msg);
     str_builder_add_cstr(sb, "\",\"type\":\"server_error\"}}");
     var body = str_builder_build(sb);
     var bd = to_cstr(body);
     return http_respond(cfd, status, status_text, bd, str_len(body));
+}
+
+# ── Deferred response descriptor ──────────────
+# A response that _chat_produce *returns* instead of writing to a socket,
+# so a batch worker can collect the body off the accept thread. Layout
+# (32 bytes): status cstr(+0), status_text cstr(+8), body cstr(+16),
+# body_len(+24). _resp_write replays it through http_respond.
+# 2.10.2: here from handlers.cyr, beside the bodies it mirrors, so the tests run _resp_err.
+fn _resp_new(status, status_text, body_cstr, body_len) {
+    var r = alloc(40);
+    store64(r, status);
+    store64(r + 8, status_text);
+    store64(r + 16, body_cstr);
+    store64(r + 24, body_len);
+    store64(r + 32, 0);
+    return r;
+}
+
+# Attach one extra response header — a `Name: value` cstr, no CRLF.
+#
+# 2.5.12: used for `X-Hoosh-Cache`, so a client can tell a cache hit from a
+# fresh inference. Before this the two were byte-indistinguishable, which meant
+# a caching consumer double-counted spend on every hit.
+fn _resp_set_header(r, hdr) {
+    store64(r + 32, hdr);
+    return r;
+}
+
+# Error-response descriptor mirroring http_error / http_bad_request bodies.
+fn _resp_err(status, status_text, msg, etype) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
+    sb_add_json_escaped(sb, msg);
+    str_builder_add_cstr(sb, "\",\"type\":\"");
+    str_builder_add_cstr(sb, etype);
+    str_builder_add_cstr(sb, "\"}}");
+    var b = str_builder_build(sb);
+    return _resp_new(status, status_text, to_cstr(b), str_len(b));
+}
+
+fn _resp_write(cfd, r) {
+    return http_respond_h(cfd, load64(r), load64(r + 8), load64(r + 16), load64(r + 24),
+      load64(r + 32));
 }
 
 fn http_parse_path(buf, len) {

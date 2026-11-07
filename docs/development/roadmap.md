@@ -83,21 +83,28 @@ per insert** once full, which with mostly new prompts was within about a minute.
 - **What remains:** 5.6 KB per buffered request and 3.5 KB per stream, steady with the cache full.
   [ADR 013](../decisions/013-request-memory.md) (Proposed) records the measurements and the plan below.
 
-### 2.10.1 and on — the per-request arena *(highest priority)*
+### 2.10.2 — what agnosai filed *(done)*
+
+- **Every error body is JSON,** a provider's message is stored as text, and a clip falls on a whole character.
+- **The model listings keep nothing:** the catalog holds its body, and `/v1/models` and `/api/tags` build in the thread's
+  arena. 413 KB per catalog GET at 200 entries is 176 bytes. A response head is on the stack.
+- **The catalog says `tier`, `kind` and `capabilities.tools`,** absent when nobody said
+  ([ADR 012's addendum](../decisions/012-live-model-catalog.md#addendum-2102-tier-kind-and-tools)).
+
+### 2.10.3 and on — the per-request arena *(highest priority)*
 
 From ADR 013:
 1. **A per-thread request arena,** reset when a worker starts a job, threaded explicitly through the chat path
    (`_chat_prep`, `_chat_forward`, `_chat_assemble`, `_resp_write`) with the stdlib's `_a` variants and new `_a`
    forms of hoosh's helpers. Anything not converted stays on the global heap, so a miss leaks rather than
-   corrupts. The chat path first, then embeddings, the model listings and the rest. Target: request memory under
-   1 KiB per request.
+   corrupts. The chat path first, then embeddings and the rest. Target: request memory under 1 KiB per request.
 2. **The boundary:** whatever crosses into process memory is copied. That is the cache's envelope and key, the
    semantic index, the event ring, audit entries (`audit_record` keeps the caller's pointers today), async batch
    results and OTLP spans. In the tests the arena is poisoned on reset, so a pointer that crossed reads poison.
 3. **Process memory with churn:** cache entries, values and keys, the event ring's strings, and audit and OTLP past
    their maxima are recycled on free lists instead of leaking when evicted.
 
-Measure each step with `scripts/memory-growth.py` (a fake local backend, unique prompts, `VmRSS`), and
+Measure each step with `scripts/memory-growth.py` (a fake local backend, unique prompts, `VmRSS`; `--get` for a listing), and
 `alloc_used()` per phase for a breakdown.
 
 ### Then, in any order
@@ -111,7 +118,8 @@ Measure each step with `scripts/memory-growth.py` (a fake local backend, unique 
     model a provider lists but no pattern names is never recommended.
   - **Change:** rank each route's catalog entries instead. `metadata_lookup` and `estimate_cost_micro` already read
     their live context window, vision bit and price.
-  - agnosai's B33 (choosing a model per tier from the catalog) can use it.
+  - agnosai's B33 (choosing a model per tier from the catalog) can use it. It reads `tier`, `kind` and `tools` from the catalog
+    since 2.10.2.
 - **Configurable worker pool** (`[server] workers`).
   - `WORKER_COUNT = 7` came from sigil's 8 crypto banks. Since sigil 3.13.14 (2.9.1) lanes come from a pool of 64
     per operation ([ADR 011](../decisions/011-multithreaded-accept-loop.md#update-291-the-crypto-bank-constraint-is-gone)).
@@ -129,7 +137,8 @@ Measure each step with `scripts/memory-growth.py` (a fake local backend, unique 
   (`provider.cyr`). So an OpenAI `image_url` part is never translated to Anthropic `image` or Gemini `inline_data`.
   The catalog already knows each model's vision bit. This is the gate for thoth's F10 (image input).
 - **An OpenAI Responses API path.** gpt-6-astra and gpt-6.1-sol accept no function calling on Chat Completions;
-  OpenAI serves their tools only through `/v1/responses`. So a tool-using client cannot drive them through hoosh.
+  OpenAI serves their tools only through `/v1/responses`. So a tool-using client cannot drive them through hoosh, and the
+  catalog says `tools: false` for them.
   Translate a tool-carrying request for those models into the Responses shape and back. This is the largest of the
   three.
 

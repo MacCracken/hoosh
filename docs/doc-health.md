@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-06 (**v2.10.1**: CHANGELOG, README stats, state, ADR 011's addendum, the roadmap's AGNOS item, `architecture/overview.md`'s pool row, and the AGNOS filing archived). Also 2026-11-05: (**v2.10.0**: CHANGELOG, README stats, state, the roadmap's 2.10.0 item rewritten
+> **Last refresh**: 2026-11-07 (**v2.10.2**: CHANGELOG, README stats, state, the roadmap's 2.10.2 item, ADR 012's addendum, ADR 013's "Done in 2.10.2", `hoosh.cyml`'s `[[models]]`, `architecture/overview.md`'s rows, `performance.md`, and the three agnosai filings archived). Also 2026-11-06 (**v2.10.1**: CHANGELOG, README stats, state, ADR 011's addendum, the roadmap's AGNOS item, `architecture/overview.md`'s pool row, and the AGNOS filing archived). Also 2026-11-05: (**v2.10.0**: CHANGELOG, README stats, state, the roadmap's 2.10.0 item rewritten
 > from the measurements, new `decisions/013-request-memory.md`, `development/performance.md`'s cache rows,
 > `architecture/overview.md`'s cache and http_client rows). Also 2026-11-05: **v2.9.26** (bote 3.8.12 in state,
 > `SECURITY.md`'s scope and considerations, the `wq.cyr` row), **v2.9.25** (the lookup item, `performance.md`'s live-catalog rows, the `keyindex.cyr` row),

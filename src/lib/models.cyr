@@ -1,13 +1,26 @@
 # models.cyr — the model listings (2.9.22, split from handlers.cyr).
 #
-# GET /v1/models' body (models_list_json) and the pieces GET /v1/models/catalog and /api/tags share with it:
-# one entry per id (_models_emit), a backend's own list (_models_scan, _models_live_local), and the fallback when
-# nothing asked the provider live (_models_from_catalog, _models_from_table, _cat_literal). handlers.cyr reads
+# GET /v1/models' body (models_list_json) and GET /v1/models/catalog's (models_catalog_body), and the pieces they
+# and /api/tags share: one entry per id (_models_emit), a backend's own list (_models_scan, _models_live_local), and
+# the fallback when nothing asked the provider live (_models_from_catalog, _models_from_table, _cat_literal).
+# handlers.cyr reads
 # main.cyr's _router and cannot be included in the tests, so through 2.9.21 they kept copies of _models_emit,
 # _models_scan and _cat_literal; the _models_emit copy had lost the id's JSON escaping.
 #
 # Requires: types.cyr (provider_name), route.cyr, metadata.cyr, catalog.cyr (the live snapshot), jsonlite.cyr
-# (_json_value_pos, _json_escape_into), http_client.cyr (http_req_local, for a local backend's list).
+# (_json_value_pos, _json_escape_into), http_client.cyr (http_req_local, for a local backend's list), pricing.cyr.
+
+# 2.10.2: `a` on the functions below is where a listing's memory comes from. None of it outlives the response, so
+# handlers.cyr passes this thread's scratch arena, and what a GET kept on the heap that never frees (ADR 013) is gone.
+# A builder writes through str_builder_add_cstr and friends, which grow on the global heap, so it starts with room in
+# the arena: past MODELS_SB_ROOM it grows there, which only leaks, as everything did through 2.10.1.
+var MODELS_SB_ROOM = 65536;
+
+fn _models_sb(a) {
+    var sb = str_builder_new_a(a);
+    _sb_grow_a(a, sb, MODELS_SB_ROOM);
+    return sb;
+}
 
 # ── GET /v1/models (2.7.0) ──
 # Concrete model ids, each owned_by the provider that would serve it. This used
@@ -20,7 +33,7 @@
 
 # Append one {"id","object":"model","owned_by"} entry unless `id` is already in
 # `seen`. id[0..len) need not be NUL-terminated.
-fn _models_emit(sb, seen, id, len, owner) {
+fn _models_emit(a, sb, seen, id, len, owner) {
     var n = vec_len(seen);
     var i = 0;
     while (i < n) {
@@ -28,10 +41,10 @@ fn _models_emit(sb, seen, id, len, owner) {
         if (strlen(s) == len && memeq(s, id, len) == 1) { return 0; }
         i = i + 1;
     }
-    var c = alloc(len + 1);
+    var c = alloc_via(a, len + 1);
     memcpy(c, id, len);
     store8(c + len, 0);
-    vec_push(seen, c);
+    vec_push_a(a, seen, c);
     if (n > 0) { str_builder_add_cstr(sb, ","); }
     str_builder_add_cstr(sb, "{\"id\":\"");
     _json_escape_into(sb, c, len);
@@ -43,7 +56,7 @@ fn _models_emit(sb, seen, id, len, owner) {
 
 # Every string value of `"<key>"` in a model listing that route `r` matches.
 # Returns how many ids the listing held (matched or not), so 0 means "no answer".
-fn _models_scan(sb, seen, r, body, len, key, keylen) {
+fn _models_scan(a, sb, seen, r, body, len, key, keylen) {
     var found = 0;
     var pos = 0;
     while (pos < len) {
@@ -58,11 +71,11 @@ fn _models_scan(sb, seen, r, body, len, key, keylen) {
         }
         if (e >= len) { break; }
         found = found + 1;
-        var id = alloc(e - s);
+        var id = alloc_via(a, e - s);
         memcpy(id, body + s + 1, e - s - 1);
         store8(id + e - s - 1, 0);
         if (route_matches_model(r, id) == 1) {
-            _models_emit(sb, seen, id, e - s - 1, provider_name(route_provider(r)));
+            _models_emit(a, sb, seen, id, e - s - 1, provider_name(route_provider(r)));
         }
         pos = e + 1;
     }
@@ -70,7 +83,7 @@ fn _models_scan(sb, seen, r, body, len, key, keylen) {
 }
 
 # A local backend's own model list. Returns 0 when it did not answer.
-fn _models_live_local(sb, seen, r) {
+fn _models_live_local(a, sb, seen, r) {
     if (route_healthy(r) == 0) { return 0; }
     var path = "/v1/models";
     var key = "id";
@@ -78,20 +91,20 @@ fn _models_live_local(sb, seen, r) {
     var resp = http_req_local("GET", route_base_url(r), path, 0, 0);
     if (resp == 0) { return 0; }
     if (http_status(resp) < 200 || http_status(resp) >= 300) { return 0; }
-    return _models_scan(sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
+    return _models_scan(a, sb, seen, r, http_body(resp), http_body_len(resp), key, strlen(key));
 }
 
 # The model ids route `r` can be offered for when nothing asked its provider live (2.8.0: a static route, or a
 # live one that has not answered yet): the compiled table's LISTED ids its patterns match, plus its literal
 # (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id.
-fn _models_from_table(sb, seen, r) {
+fn _models_from_table(a, sb, seen, r) {
     var owner = provider_name(route_provider(r));
     var n = metadata_count();
     var i = 0;
     while (i < n) {
         var k = metadata_key(i);
         if (metadata_listed(i) == 1) {
-            if (route_matches_model(r, k) == 1) { _models_emit(sb, seen, k, strlen(k), owner); }
+            if (route_matches_model(r, k) == 1) { _models_emit(a, sb, seen, k, strlen(k), owner); }
         }
         i = i + 1;
     }
@@ -100,7 +113,7 @@ fn _models_from_table(sb, seen, r) {
     var j = 0;
     while (j < pn) {
         var pat = load64(pats + j * 8);
-        if (_cat_literal(pat) == 1) { _models_emit(sb, seen, pat, strlen(pat), owner); }
+        if (_cat_literal(pat) == 1) { _models_emit(a, sb, seen, pat, strlen(pat), owner); }
         j = j + 1;
     }
     return 0;
@@ -115,16 +128,16 @@ fn _models_live_record(r) {
 }
 
 # What route `r` can be offered for: its provider's live list (2.8.0) when it has answered, else the table.
-fn _models_from_catalog(sb, seen, r) {
+fn _models_from_catalog(a, sb, seen, r) {
     var rec = _models_live_record(r);
-    if (rec == 0) { return _models_from_table(sb, seen, r); }
+    if (rec == 0) { return _models_from_table(a, sb, seen, r); }
     var owner = provider_name(route_provider(r));
     var es = cat_r_entries(rec);
     var n = vec_len(es);
     var i = 0;
     while (i < n) {
         var id = cat_e_id(vec_get(es, i));
-        if (route_matches_model(r, id) == 1) { _models_emit(sb, seen, id, strlen(id), owner); }
+        if (route_matches_model(r, id) == 1) { _models_emit(a, sb, seen, id, strlen(id), owner); }
         i = i + 1;
     }
     return 0;
@@ -142,11 +155,11 @@ fn _cat_literal(pat) {
 }
 
 # Every enabled route's models, in router order, as /v1/models' body: a local route's own live list when it
-# answers, else the catalog (or table) fallback. Each id once.
-fn models_list_json(rt) {
-    var sb = str_builder_new();
+# answers, else the catalog (or table) fallback. Each id once. The body is in `a`.
+fn models_list_json_a(a, rt) {
+    var sb = _models_sb(a);
     str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
-    var seen = vec_new();
+    var seen = vec_new_a(a);
     var routes = load64(rt + ROUTER_ROUTES);
     var count = load64(rt + ROUTER_COUNT);
     var i = 0;
@@ -154,11 +167,184 @@ fn models_list_json(rt) {
         var r = load64(routes + i * 8);
         if (route_enabled(r) == 1) {
             var got = 0;
-            if (route_is_remote(r) == 0) { got = _models_live_local(sb, seen, r); }
-            if (got == 0) { _models_from_catalog(sb, seen, r); }
+            if (route_is_remote(r) == 0) { got = _models_live_local(a, sb, seen, r); }
+            if (got == 0) { _models_from_catalog(a, sb, seen, r); }
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build_a(a, sb);
+}
+
+fn models_list_json(rt) { return models_list_json_a(default_alloc(), rt); }
+
+# ── GET /v1/models/catalog (2.4.9; 2.8.0: asked of the providers; 2.10.2: held) ──
+#
+# Concrete, switchable model ids — never provider names, never glob patterns — each tagged with the provider
+# that would route it as `owned_by`. 2.8.0: a route in live catalog mode is offered for what ITS provider listed
+# at the last refresh (catalog_fetch.cyr); a static route, or a live one that has not answered yet, for the
+# compiled table's listed ids its patterns match, as before. The operator's [[models]] blocks come first. Only ids
+# an enabled route matches appear. Each entry is catalog_emit_entry's shape (catalog.cyr): the 2.4.9 fields, then
+# `source`, `routes` (every enabled route matching the id, in router order — the set router_select chooses
+# among, so a client can join a model to the health of the routes that would serve it), and whatever the provider
+# or the operator said about it: display_name, context_window, max_output_tokens, capabilities, pricing, and since
+# 2.10.2 tier and kind. metadata_lend fills in what the compiled table knows.
+
+# Every enabled route of `rt` whose patterns match `model`, in router (priority) order.
+fn _cat_routes_for(rt, model) {
+    var out = vec_new();
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            if (route_matches_model(r, model) == 1) { vec_push(out, r); }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn _cat_seen(seen, id) {
+    var n = vec_len(seen);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(seen, i), id) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Emit entry `e` once, with the routes that would serve it and its price when one is known. An operator's
+# [[models]] block for the same id lends its fields to a provider's entry (the operator's word wins).
+fn _cat_emit(rt, sb, seen, e) {
+    var id = cat_e_id(e);
+    if (_cat_seen(seen, id) == 1) { return 0; }
+    var rs = _cat_routes_for(rt, id);
+    if (vec_len(rs) == 0) { return 0; }
+    if (vec_len(seen) > 0) { str_builder_add_cstr(sb, ","); }
+    vec_push(seen, id);
+    var urls = vec_new();
+    var i = 0;
+    while (i < vec_len(rs)) {
+        vec_push(urls, route_base_url(vec_get(rs, i)));
+        i = i + 1;
+    }
+    var r0 = vec_get(rs, 0);
+    var px = alloc(16);
+    var pin = 0 - 1;
+    var pout = 0 - 1;
+    if (pricing_known(id, route_provider(r0), px) == 1) {
+        pin = load64(px);
+        pout = load64(px + 8);
+    }
+    catalog_emit_entry(sb, metadata_lend(e), provider_name(route_provider(r0)), urls, pin, pout);
+    return 1;
+}
+
+# A provider's (or the table's) entry, unless the operator's [[models]] block for it says listed = false.
+fn _cat_emit_unless_hidden(rt, sb, seen, e) {
+    var ce = catalog_config_find(cat_e_id(e));
+    if (ce != 0) {
+        if (cat_e_listed(ce) == 0) { return 0; }
+    }
+    return _cat_emit(rt, sb, seen, e);
+}
+
+# The catalog of router `rt`, built from what is published now, on the global heap.
+fn models_catalog_json(rt) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
+    var seen = vec_new();
+    var cfg = catalog_config();
+    if (cfg != 0) {
+        var ci = 0;
+        while (ci < vec_len(cfg)) {
+            var ce = vec_get(cfg, ci);
+            if (cat_e_listed(ce) == 1) {
+                _cat_emit(rt, sb, seen, catalog_merge(ce, catalog_find_any(cat_e_id(ce))));
+            }
+            ci = ci + 1;
+        }
+    }
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1) {
+            var rec = _models_live_record(r);
+            if (rec != 0) {
+                var es = cat_r_entries(rec);
+                var j = 0;
+                while (j < vec_len(es)) {
+                    var e = vec_get(es, j);
+                    if (route_matches_model(r, cat_e_id(e)) == 1) { _cat_emit_unless_hidden(rt, sb, seen, e); }
+                    j = j + 1;
+                }
+            } else {
+                var n = metadata_count();
+                var k = 0;
+                while (k < n) {
+                    if (metadata_listed(k) == 1) {
+                        var key = metadata_key(k);
+                        if (route_matches_model(r, key) == 1) {
+                            _cat_emit_unless_hidden(rt, sb, seen, catalog_entry_new(key, CATSRC_BUILTIN));
+                        }
+                    }
+                    k = k + 1;
+                }
+                var pats = load64(r + ROUTE_PATTERNS);
+                var pn = load64(r + ROUTE_PATTERNS_N);
+                var p = 0;
+                while (p < pn) {
+                    var pat = load64(pats + p * 8);
+                    if (_cat_literal(pat) == 1) {
+                        _cat_emit_unless_hidden(rt, sb, seen, catalog_entry_new(pat, CATSRC_BUILTIN));
+                    }
+                    p = p + 1;
+                }
+            }
         }
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}");
     return str_builder_build(sb);
+}
+
+# The body, held (2.10.2). It takes nothing from the request, so one body serves every caller, and through 2.10.1
+# every GET built it on the heap that never frees: 413 KB per GET at 200 entries, 5 times the body.
+#
+# It depends on three things, each replaced whole by a new pointer and never changed in place: the router, the
+# published snapshot and the [[models]] list. (Pricing reads the last two and a compiled table. A route's `enabled`
+# is set before its router is published.) The snapshot alone is not enough: /v1/admin/reload replaces `_router` at
+# once, and the old snapshot serves until the refresh it kicks off publishes, so a body keyed on that would go on
+# listing a removed route. Nothing frees, so a pointer can never come back as something else.
+#
+# The three are read BEFORE the build, so what a build saw is at least as new as its key: a change that lands
+# mid-build makes the key old, the next GET rebuilds, and a body is never held under a newer key than it deserves.
+# A record is published by one aligned store, as catalog_publish does, and the fence makes its fields visible first
+# on aarch64. Workers that race build a body each and the last store wins, so a change costs at most one build per
+# worker. Readers take no lock. At one build per change this keeps about 1.7 MB a day at 200 entries.
+#
+# Layout: snapshot(0) router(8) config(16) body Str(24) — 32 bytes.
+var _cat_held = 0;
+
+fn models_catalog_body(rt) {
+    var snap = catalog_snapshot();
+    var cfg = catalog_config();
+    var h = _cat_held;
+    if (h != 0) {
+        if (load64(h) == snap && load64(h + 8) == rt && load64(h + 16) == cfg) { return load64(h + 24); }
+    }
+    var body = models_catalog_json(rt);
+    var nh = alloc(32);
+    store64(nh, snap);
+    store64(nh + 8, rt);
+    store64(nh + 16, cfg);
+    store64(nh + 24, body);
+    atomic_fence();
+    _cat_held = nh;
+    return body;
 }
