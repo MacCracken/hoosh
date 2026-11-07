@@ -573,6 +573,8 @@ fn _t_clock_real() {
     _coarse_started = 0;
     return 0;
 }
+var _t_wq_ran = 0;
+fn _t_wq_job(job) { _t_wq_ran = job; return 0; }
 fn _t_ins_at(c, key, value, ms) {
     _t_at(ms);
     return cache_insert(c, key, value);
@@ -3884,6 +3886,37 @@ fn main() {
     wq_init();
     assert_eq(wq_outstanding(), 0, "wq: wq_init clears queued and in-flight counts");
     assert_eq(wq_pop(), 0, "wq: wq_init leaves nothing to pop");
+    # 2.10.1: a serial thread backend. thread_create runs a body inline there, so a forever-loop never returned, and hoosh never
+    # reached sock_accept on AGNOS. This binary has real threads, so the backend's flag is what is flipped.
+    var sv_tc = THREADS_CONCURRENT;
+    wq_push(41);
+    assert_eq(wq_serial_turn(&_t_wq_job), 0, "serial: with real workers the accept loop runs nothing");
+    assert_eq(wq_outstanding(), 1, "serial: ...and the job stays for them");
+    THREADS_CONCURRENT = 0;
+    assert_eq(wq_serial_turn(&_t_wq_job), 1, "serial: with no workers the accept loop runs the job");
+    assert_eq(_t_wq_ran, 41, "serial: ...that job");
+    assert_eq(wq_outstanding(), 0, "serial: ...and it is finished, not left in flight");
+    assert_eq(wq_serial_turn(&_t_wq_job), 0, "serial: an empty queue runs nothing");
+    # The starters whose body never ends. Each would hang this test, inline, were it not guarded.
+    var sv_cs = _coarse_started;
+    _coarse_started = 0;
+    coarse_clock_start();
+    assert_eq(_coarse_started, 0, "serial: no coarse clock ticker");
+    assert(hoosh_now_ms() > 0, "serial: ...so hoosh_now_ms reads the real clock");
+    _coarse_started = sv_cs;
+    var sv_hw = _hw_refresh_s;
+    _hw_refresh_s = 1;
+    assert_eq(hw_refresh_start(), 0, "serial: no hardware re-detection thread");
+    _hw_refresh_s = sv_hw;
+    var sv_hi = _health_interval_s;
+    var sv_hs = _health_started;
+    _health_interval_s = 1;
+    _health_started = 0;
+    health_start();
+    assert_eq(_health_started, 1, "serial: the one health sweep runs, and no probe thread follows it");
+    _health_interval_s = sv_hi;
+    _health_started = sv_hs;
+    THREADS_CONCURRENT = sv_tc;
     # 2.9.26: /v1/queue/status's body is the queue's real depth (it was a constant).
     assert_streq(to_cstr(wq_status_json()), "{\"queued\":0,\"pending\":0,\"processing\":0}", "status: an empty queue");
     wq_push(7);

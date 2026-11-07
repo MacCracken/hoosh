@@ -15,7 +15,7 @@
 
 include "lib/ai-hwaccel.cyr"
 
-# MCP protocol core (bote 3.8.12) — self-contained JSON-RPC 2.0 registry/
+# MCP protocol core (bote 3.8.15) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
 # via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
 # cyrius resolves transitively and that collide with the agnos stdlib —
@@ -485,13 +485,18 @@ fn cmd_serve(port) {
     # handling (recv/route/respond/close) runs on the workers, concurrently.
     while (shutdown_requested() == 0) {
         var client_t, client_v = sock_accept(sfd);
-        if (is_err_result(client_t) == 1) { continue; }
+        if (is_err_result(client_t) == 1) {
+            # No workers (wq.cyr): this loop runs a queued job, or yields.
+            if (wq_serial_turn(&job_process) == 0) { pool_serial_idle(); }
+            continue;
+        }
         if (shutdown_requested() == 1) {
             # Woken by the self-connect from _sig_thread, or raced with it.
             sock_close(client_v);
             break;
         }
         wq_push(_job_conn(client_v));
+        wq_serial_turn(&job_process);
     }
 
     # Graceful shutdown (2.5.8): stop accepting, then let the workers finish

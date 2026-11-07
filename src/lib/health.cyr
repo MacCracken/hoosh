@@ -148,7 +148,8 @@ fn health_start() {
     # Probe once up front so the first requests route on measured state rather
     # than the optimistic default.
     health_sweep();
-    thread_create(&_health_thread, 0);
+    # wq.cyr: on a serial backend, the sweep above is the only one.
+    if (THREADS_CONCURRENT != 0) { thread_create(&_health_thread, 0); }
     return 0;
 }
 

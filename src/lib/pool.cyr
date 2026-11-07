@@ -205,6 +205,15 @@ fn _pool_worker(arg) {
     return 0;
 }
 
+# The accept loop's wait on a serial backend, where sock_accept does not block (AGNOS: accept#57 answers at
+# once). pause#14 yields, and sleep_ms#41 would hold the CPU from the processes this one waits for.
+fn pool_serial_idle() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (THREADS_CONCURRENT == 0) { sys_pause(); }
+    #endif
+    return 0;
+}
+
 # Spawn the worker pool. Call after crypto_tls_main_init() (main's TLS block installed).
 fn pool_start() {
     # Workers run the full request chain (was the 8 MB main stack; batch workers
@@ -216,6 +225,11 @@ fn pool_start() {
     THREAD_STACK_SIZE = 1048576;
     #endif
     wq_init();
+    # wq.cyr: _pool_worker would never return, so the accept loop serves instead.
+    if (THREADS_CONCURRENT == 0) {
+        hlog_warn("no second thread on this target: requests are served one at a time, and nothing runs on a timer");
+        return 0;
+    }
     var i = 1;
     while (i <= WORKER_COUNT) {
         thread_create(&_pool_worker, i);

@@ -249,7 +249,8 @@ fn _cat_timer_thread(arg) {
 fn catalog_start() {
     catalog_kick();
     if (_cat_timer_on == 0) {
-        if (catalog_refresh_secs() > 0) {
+        # wq.cyr: on a serial backend a timer thread would never return.
+        if ((catalog_refresh_secs() > 0) && (THREADS_CONCURRENT != 0)) {
             _cat_timer_on = 1;
             thread_create(&_cat_timer_thread, 0);
         }

@@ -75,6 +75,7 @@ fn _otlp_exporter_thread(arg) {
 
 fn otlp_init() {
     if (_otlp_endpoint == 0) { return 0; }
+    if (THREADS_CONCURRENT == 0) { return 0; }   # wq.cyr: the exporter would never return, so spans are not exported
     if (_otlp_started == 1) { return 0; }
     _otlp_spans = alloc(OTLP_RING_MAX * 8);
     var i = 0;

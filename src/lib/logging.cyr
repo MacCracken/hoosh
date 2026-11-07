@@ -34,6 +34,8 @@ fn _coarse_clock_thread(arg) {
 }
 
 fn coarse_clock_start() {
+    # wq.cyr: a ticker would never return, and hoosh_now_ms reads the real clock instead.
+    if (THREADS_CONCURRENT == 0) { return 0; }
     if (_coarse_started == 1) { return 0; }
     _coarse_now_ms = clock_now_ms();
     _coarse_started = 1;

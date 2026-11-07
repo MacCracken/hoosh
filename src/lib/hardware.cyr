@@ -195,6 +195,7 @@ fn _hw_refresh_thread(arg) {
 # which keeps the pre-2.5.7 behavior of detecting once at startup.
 fn hw_refresh_start() {
     if (_hw_refresh_s <= 0) { return 0; }
+    if (THREADS_CONCURRENT == 0) { return 0; }   # wq.cyr: a timer thread would never return
     if (_hw_lock == 0) { _hw_lock = mutex_new(); }
     thread_create(&_hw_refresh_thread, 0);
     hlog_info("hardware: periodic re-detection enabled");

@@ -160,8 +160,9 @@ Measure each step with `scripts/memory-growth.py` (a fake local backend, unique 
 
 - **cmdit adoption.** See [Adopting cmdit](#adopting-cmdit-cli-parsing) below. It changes CLI behavior on purpose
   (exit codes, last-wins flags), so it ships in a minor.
-- **AGNOS build.** There is no `hoosh_agnos` build in CI or `scripts/`; the one on disk downstream is 2.4.11. thoth's
-  v1.0 gate 1, rung 2 (a real turn against the spine on AGNOS) waits on it.
+- **AGNOS in CI.** hoosh serves on AGNOS since 2.10.1, and `agnos/scripts/smoke/spine-turn-smoke.sh` runs a real turn through it, but nothing here
+  builds `--agnos`, which is how 2.10.0 and earlier could say they were serving and read no request. A build lane is cheap. A boot needs the three
+  sibling binaries the smoke stages.
 - **Split `tests/hoosh.tcyr` / `hoosh.bcyr` into per-topic units**, only if the suite keeps growing.
 - **Threaded hardware detector** *(parked)*.
   - **Why hoosh stays serial:** the threaded path lists sysfs backends (ROCm, Intel NPU, AMD XDNA, TPU, …) before

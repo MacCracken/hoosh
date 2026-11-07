@@ -128,3 +128,11 @@ counter and shared a lane with another thread; sigil fixed that as CYRIUS-2026-0
 The pool itself is unchanged: still `WORKER_COUNT = 7`, with HTTPS work (OTLP export, the catalog refresh) still routed to
 a worker rather than done on the helper threads. Those are now choices, not requirements. A larger pool, or a TLS health
 probe on the prober thread, is bounded by 64 concurrent crypto operations rather than 8 banks.
+
+## Addendum (2.10.1): a target with no second thread
+
+This decision assumed `thread_create` starts a thread. On AGNOS it does not: `lib/thread_agnos.cyr` runs the body inline and says so with `THREADS_CONCURRENT = 0`. A body that loops forever never returned, so `coarse_clock_start` held `main`, and the accept loop never ran. hoosh logged that it was serving and read no request, and nothing had ever run it there to notice. thoth's first real turn on AGNOS found it.
+
+On such a target the accept loop is the one thread. No forever-thread starts, and the loop runs each job itself (`wq_serial_turn`), yielding with `pause`#14 while `accept`#57 has nothing, because `sleep_ms`#41 holds the CPU there. The choice is keyed on `THREADS_CONCURRENT`, the capability, and not on the target's name.
+
+What it costs: one request at a time, so a long stream holds a second client in the listen queue. A batch still drains through its own work-stealing barrier, on that one thread. Health probes after the first sweep, catalog refresh, hardware re-detection and OTLP export do not run. `pool_start` says all of that at startup. With real threads nothing changes: `wq_serial_turn` returns at its first line, and `sock_accept` blocks as it did.

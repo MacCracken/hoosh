@@ -5,6 +5,59 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.10.1] — 2026-11-06
+
+**hoosh serves on AGNOS, and bote moves to its latest.** Through 2.10.0, hoosh on AGNOS logged that it was serving and never
+read a request, because a thread body that loops forever runs inline there and never returned. thoth's first real turn on
+AGNOS found it. **1737 assertions** in 165 groups. All gates are clean: fmt, lint, vet, deny, coverage (394/716, 55%), the
+security scan, the four fuzz targets and the shutdown smoke test.
+
+⚠ **Nothing changes on Linux, macOS or Windows.** With real threads every new branch returns at its first line.
+
+### Fixed
+
+- **hoosh never read a request on AGNOS.** `lib/thread_agnos.cyr` has no second thread: `thread_create` runs the body inline
+  and returns when it ends (`THREADS_CONCURRENT = 0`). `_coarse_clock_thread` and `_pool_worker` are `while (1 == 1)`, so
+  `main` stayed in the first one and never reached `sock_accept`. The serving line is logged before all of that, and a
+  client connected, sent, and waited for its own deadline. On such a target no forever-thread starts now, and the accept
+  loop runs each job itself (`wq_serial_turn`), yielding with `pause`#14 while `accept`#57 has nothing. It is keyed on
+  `THREADS_CONCURRENT`, the capability, and not on the target's name. [ADR 011](docs/decisions/011-multithreaded-accept-loop.md)
+  has an addendum.
+- **That mode says what it costs.** `pool_start` warns at startup: one request at a time, and nothing on a timer. Health
+  probes after the first sweep, catalog refresh, hardware re-detection and OTLP export do not run there.
+
+### Changed — dependency pins
+
+| dep | was | now |
+|---|---|---|
+| bote-core | 3.8.12 | **3.8.15** |
+
+cyrius 6.7.18, ai-hwaccel 2.5.6 and majra 2.13.0 are already their latest tags, and sigil and sandhi come with cyrius.
+
+- **bote 3.8.13 to 3.8.15** adds JSON Schema keywords to the dispatcher's judgement, and refuses at registration the shapes the
+  official client's validator cannot judge. hoosh registers one tool, `bote_echo`. `GET /v1/tools/list` is byte-identical to
+  2.10.0's, and so is a `tools/call`. The warning sets are identical on x86_64, aarch64 and AGNOS.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (1727 → 1737): `wq_serial_turn` runs a job only with no workers and finishes it, on the real ring, and the
+  coarse clock, hardware and health starters return on a serial backend, where a missing guard would hang the test.
+- **`agnos/scripts/smoke/spine-turn-smoke.sh`** (new, in agnos) runs a real turn through hoosh on the real kernel: a streamed
+  reply, a tool round and `--json`, from thoth in ring 3 to a provider on the host. Stock 2.10.0 fails it. thoth runs it with
+  `./scripts/agnos-run.sh --turn`.
+
+### Sizes and performance
+
+| | 2.10.0 | 2.10.1 | |
+|---|---:|---:|---:|
+| x86_64 | 3,868,512 | 4,030,656 | +4.2% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,463,584 | 2,625,656 | +6.6% |
+
+All of it is bote's. On the benchmarks, 24 of 26 rows are within the usual spread. `metadata_lookup_live_catalog` and
+`cost_record_live_catalog` read 28% and 21% up in the one recorded run, in code this release did not touch. Four interleaved
+runs of each build put the medians 11% and 10% up, with the two builds' ranges overlapping (414 → 459 ns, 506 → 558 ns). That
+is within the spread those rows show across earlier releases.
+
 ## [2.10.0] — 2026-11-05
 
 **Request memory, measured, and its two big leaks fixed.** The roadmap's 2.10.0 item assumed about 1 KiB per

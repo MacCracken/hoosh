@@ -87,6 +87,21 @@ fn wq_done() {
     return 0;
 }
 
+# A serial thread backend (THREADS_CONCURRENT = 0, AGNOS today): thread_create runs its body inline, so a body
+# that loops forever never returns to its caller, and hoosh, which logs that it is serving before any of this,
+# never reached sock_accept. So on such a target no forever-thread starts, no worker exists, and the accept loop
+# is the one thread there is: it runs each job itself. Requests are served one at a time, a batch still drains
+# through its own work-stealing barrier, and nothing runs on a timer: pool_start says so. `process` is
+# job_process, since this file touches no handler. Returns 1 when a job ran, and is a no-op with real workers.
+fn wq_serial_turn(process) {
+    if (THREADS_CONCURRENT != 0) { return 0; }
+    var job = wq_pop();
+    if (job == 0) { return 0; }
+    fncall1(process, job);
+    wq_done();
+    return 1;
+}
+
 # GET /v1/queue/status's body (2.9.26): the queue's real depth, both counts read under one lock. `queued` is
 # rust-old's key and `pending` the port's 2.x key, for the same count: jobs waiting for a worker. `processing` is
 # the jobs workers are serving, so the request that asks is one of them. Through 2.9.25 the endpoint answered a
