@@ -1,0 +1,138 @@
+# reqmem.cyr — what a request's memory belongs to (2.10.3, ADR 013 decision 1).
+#
+# hoosh's allocator never frees: everything alloc() hands out, and everything the stdlib allocates for it, lives
+# until the process exits. Most of what a request allocates is dead once its answer is written, and through 2.10.2
+# all of it stayed: 4.5 KB per buffered chat (scripts/memory-growth.py with a -D HOOSH_ALLOC_PROBE build).
+#
+# So each thread owns one growable arena, the REQUEST ARENA, and the request path allocates from it explicitly,
+# through the stdlib's `_a` variants and hoosh's own (`_chat_completion_body_a`, `_cache_key_a`, ...).
+# - It is RESET WHEN A JOB STARTS (wq.cyr job_begin): a connection, a batch item, an OTLP export, a catalog
+#   refresh. Not when a job ends, so a stream keeps its memory until it is done.
+# - It is not provider.cyr's _remote_arena, which is reset at the start of every remote call and so cannot hold
+#   anything a request built before its forward.
+# - Anything not converted stays on the global heap: a missed conversion leaks, as before, and cannot corrupt.
+#
+# THE BOUNDARY. A pointer into the request arena must never be stored where it outlives the job. A keeper copies
+# what it keeps into process memory (mem_keep): the response cache its key and value (cache_insert), a batch item
+# its answer (_chat_produce), since the barrier and GET /v1/batch/{id} read it after this thread's next job.
+# ADR 013 lists the keepers. In the tests a reset poisons what it releases (REQ_ARENA_POISON), so a pointer that
+# crossed reads 0xA5 bytes and fails an assertion, instead of passing on stale bytes.
+#
+# A thread that never runs a job (the health prober, the main thread's CLI) never resets its arena, so there it
+# grows as the heap did; nothing on those threads allocates from it per request.
+#
+# Slot 11 is a fixed thread-local slot (0-15 are fixed; trace 1/9/10, reqbuf 2, provider_err 3, auth 4, chat id 5,
+# remote arena 6, local http 7, stream scratch 8).
+
+var REQ_ARENA_SLOT = 11;
+var REQ_ARENA_INITIAL = 65536;
+var REQ_ARENA_POISON = 0;      # the tests set 1: a reset fills what it releases with 0xA5
+
+# This thread's request arena, created on its first use. Never reset here.
+fn req_arena() {
+    var a = thread_local_get(REQ_ARENA_SLOT);
+    if (a != 0) { return a; }
+    a = arena_allocator_growable(REQ_ARENA_INITIAL);
+    if (a == 0) { return default_alloc(); }      # out of memory: the heap, as through 2.10.2
+    thread_local_set(REQ_ARENA_SLOT, a);
+    return a;
+}
+
+# Release everything the thread's request arena holds: a job is starting. Returns the arena.
+fn req_arena_begin() {
+    var a = thread_local_get(REQ_ARENA_SLOT);
+    if (a == 0) { return req_arena(); }
+    if (REQ_ARENA_POISON == 1) { _req_arena_poison(a); }
+    reset_via(a);
+    return a;
+}
+
+# Fill every byte the arena has handed out since its last reset with 0xA5: each chunk from the first to the
+# current one, whole, and the current one up to its bump pointer (lib/alloc.cyr's arena layout).
+fn _req_arena_poison(al) {
+    var ar = allocator_state(al);
+    if (ar == 0) { return 0; }
+    var cur = load64(ar + 40);
+    var ch = load64(ar + 32);
+    while (ch != 0) {
+        var data = ch + 16;
+        var n = load64(ch + 8);
+        if (ch == cur) { n = load64(ar + 8) - data; }
+        if (n > 0) { memset(data, 0xA5, n); }
+        if (ch == cur) { return 0; }
+        ch = load64(ch);
+    }
+    return 0;
+}
+
+# A string builder in `a` with `room` bytes before its first grow. str_builder_add_cstr and friends grow on the
+# global heap, so past its room a builder in an arena leaks what it grows, as everything did through 2.10.2, and
+# cannot corrupt. On the default allocator it is a plain builder.
+fn sb_room_a(a, room) {
+    var sb = str_builder_new_a(a);
+    if (sb == 0) { return str_builder_new(); }
+    if (room > 64 && a != default_alloc()) { _sb_grow_a(a, sb, room); }
+    return sb;
+}
+
+# A string builder over caller-provided storage: `hdr` its 24-byte header, `buf` `cap` bytes of room, both usually on
+# the caller's stack. For a string that is copied out before the caller returns (an event, into the ring), it takes
+# nothing from the heap; past its room it grows there, as any builder does, and only leaks that.
+fn sb_on(hdr, buf, cap) {
+    store64(hdr, buf);
+    store64(hdr + 8, 0);
+    store64(hdr + 16, cap);
+    return hdr;
+}
+
+# The builder's bytes, NUL-terminated in place: a cstr with no copy, in whatever the builder's buffer is in.
+fn sb_cstr(sb) {
+    str_builder_putc(sb, 0);
+    var n = load64(sb + 8) - 1;
+    store64(sb + 8, n);
+    return load64(sb);
+}
+
+# The builder's length (sb_cstr leaves it unchanged).
+fn sb_len(sb) { return load64(sb + 8); }
+
+# Append p[0..n) up to its first NUL, with no copy of its own.
+fn sb_add_bytes(sb, p, n) {
+    var k = 0;
+    while (k < n && load8(p + k) != 0) { k = k + 1; }
+    if (k == 0) { return 0; }
+    var s[16];
+    store64(&s, p);
+    store64(&s + 8, k);
+    str_builder_add(sb, &s);
+    return 0;
+}
+
+# Copy n bytes a word at a time, then the tail: the stdlib's memcpy is a byte loop. x86_64 and aarch64 both take
+# unaligned 8-byte loads and stores of normal memory. The ranges must not overlap.
+fn mem_copy_words(dst, src, n) {
+    var i = 0;
+    while (i + 8 <= n) {
+        store64(dst + i, load64(src + i));
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(dst + i, load8(src + i));
+        i = i + 1;
+    }
+    return dst;
+}
+
+# p[0..n) and a NUL in process memory: what a keeper stores, so that nothing it keeps points into an arena.
+fn mem_keep(p, n) {
+    var c = alloc(n + 1);
+    if (c == 0) { return 0; }
+    if (n > 0) { memcpy(c, p, n); }
+    store8(c + n, 0);
+    return c;
+}
+
+fn cstr_keep(s) {
+    if (s == 0) { return 0; }
+    return mem_keep(s, strlen(s));
+}

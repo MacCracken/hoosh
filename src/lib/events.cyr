@@ -8,6 +8,14 @@
 # /v1/events/recent — events are appended there as they publish.
 
 var EVENT_RING_MAX = 128;
+# 2.10.3 (ADR 013 decision 3): each ring slot is {buf, cap, len}, and an event is COPIED into its slot. A slot's buffer
+# is reused as the ring wraps and grows only for an event larger than any it has held, so the ring settles at
+# EVENT_RING_MAX buffers and takes nothing more. Through 2.10.2 a slot kept a pointer to each event's own string, and
+# the string a wrap overwrote stayed on the heap that never frees: 328 bytes per completion, a builder's worth.
+var EVENT_SLOT = 24;
+var EVENT_SLOT_MIN = 256;
+# An event is built in a builder over this much stack (reqmem.cyr sb_on); a larger one grows on the heap.
+var EVENT_BUILD_ROOM = 512;
 var _event_bus = 0;
 var _event_ring = 0;
 var _event_head = 0;
@@ -17,9 +25,8 @@ var _event_lock = 0;
 fn events_init() {
     if (_event_bus != 0) { return 0; }
     _event_bus = pubsub_new();
-    _event_ring = alloc(EVENT_RING_MAX * 8);
-    var i = 0;
-    while (i < EVENT_RING_MAX) { store64(_event_ring + i * 8, 0); i = i + 1; }
+    _event_ring = alloc(EVENT_RING_MAX * EVENT_SLOT);
+    memset(_event_ring, 0, EVENT_RING_MAX * EVENT_SLOT);
     _event_lock = mutex_new();
     return 0;
 }
@@ -35,62 +42,127 @@ fn events_total_published() {
     return pubsub_total_published(_event_bus);
 }
 
-# Publish a finished JSON event to the majra bus + append it to the recent ring.
+# Copy json[0..n) into a ring slot, growing its buffer only when the event does not fit. Under _event_lock. If the
+# buffer cannot grow, the slot is left empty (len 0), and the reader skips it.
+fn _ev_slot_put(slot, json, n) {
+    if (load64(slot + 8) < n + 1) {
+        var cap = EVENT_SLOT_MIN;
+        while (cap < n + 1) { cap = cap * 2; }
+        var b = alloc(cap);
+        if (b == 0) {
+            store64(slot + 16, 0);
+            return 0 - 1;
+        }
+        store64(slot, b);
+        store64(slot + 8, cap);
+    }
+    mem_copy_words(load64(slot), json, n);
+    store8(load64(slot) + n, 0);
+    store64(slot + 16, n);
+    return 0;
+}
+
+# Publish a finished JSON event to the majra bus + copy it into the recent ring. `json` is the caller's: an event
+# builder's stack, a test's string. The bus has no subscribers in hoosh; one would have to copy the payload before
+# this returns, as the ring does.
 fn event_emit(topic, json) {
+    if (_event_bus == 0) { return 0; }
+    return _event_emit_n(topic, json, strlen(json));
+}
+
+# event_emit for a builder that knows the length (sb_len).
+fn _event_emit_n(topic, json, n) {
     if (_event_bus == 0) { return 0; }
     pubsub_publish(_event_bus, topic, json);
     mutex_lock(_event_lock);
-    store64(_event_ring + (_event_head % EVENT_RING_MAX) * 8, json);
+    _ev_slot_put(_event_ring + (_event_head % EVENT_RING_MAX) * EVENT_SLOT, json, n);
     _event_head = _event_head + 1;
     _event_count = _event_count + 1;
     mutex_unlock(_event_lock);
     return 0;
 }
 
+# The request's model, as the text it stands for, JSON-escaped into sb. `model_cstr` keeps the escapes it arrived with
+# (bayan's pairs do), and through 2.10.2 an event escaped them again: a model sent as `m"x` read back as `m\"x`, though
+# the chat response said `m"x`. Decoded on this stack by the stdlib's RFC 8259 decoder, which never writes more than it
+# reads; a name with escapes too long for the stack is decoded on the heap. One with no backslash is its own text.
+fn _ev_add_model(sb, model) {
+    var n = strlen(model);
+    var i = 0;
+    var esc = 0;
+    while (i < n) {
+        if (load8(model + i) == 92) { esc = 1; break; }
+        i = i + 1;
+    }
+    if (esc == 0) { return _json_emit_escaped(sb, model); }
+    var tmp[512];
+    var t = &tmp;
+    if (n + 1 > 512) {
+        t = str_json_unescape_cstr(model, n);
+        if (t == 0) { return _json_emit_escaped(sb, model); }
+    } else {
+        store8(t + _str_json_unesc_into(t, model, n), 0);
+    }
+    return _json_emit_escaped(sb, t);
+}
+
 # ── ProviderEvent builders (escape free-form fields with bote-core's helper) ──
+# 2.10.3: each is built on its own stack (sb_on) and copied into the ring by event_emit, so a typical event takes
+# nothing from the heap. The JSON is unchanged.
 fn event_inference_completed(provider, model, latency_ms, tokens) {
     if (_event_bus == 0) { return 0; }
-    var sb = str_builder_new();
+    var hdr[24];
+    var room[512];
+    var sb = sb_on(&hdr, &room, EVENT_BUILD_ROOM);
     str_builder_add_cstr(sb, "{\"event\":\"inference_completed\",\"provider\":\"");
     str_builder_add_cstr(sb, provider);
     str_builder_add_cstr(sb, "\",\"model\":\"");
-    _json_emit_escaped(sb, model);
+    _ev_add_model(sb, model);
     str_builder_add_cstr(sb, "\",\"latency_ms\":");
     str_builder_add_int(sb, latency_ms);
     str_builder_add_cstr(sb, ",\"tokens\":");
     str_builder_add_int(sb, tokens);
     str_builder_add_cstr(sb, "}");
-    event_emit(_ev_topic_inference(), str_data(str_builder_build(sb)));
+    var js = sb_cstr(sb);
+    _event_emit_n(_ev_topic_inference(), js, sb_len(sb));
     return 0;
 }
 
 fn event_inference_failed(provider, model, err) {
     if (_event_bus == 0) { return 0; }
-    var sb = str_builder_new();
+    var hdr[24];
+    var room[512];
+    var sb = sb_on(&hdr, &room, EVENT_BUILD_ROOM);
     str_builder_add_cstr(sb, "{\"event\":\"inference_failed\",\"provider\":\"");
     str_builder_add_cstr(sb, provider);
     str_builder_add_cstr(sb, "\",\"model\":\"");
-    _json_emit_escaped(sb, model);
+    _ev_add_model(sb, model);
     str_builder_add_cstr(sb, "\",\"error\":\"");
     _json_emit_escaped(sb, err);
     str_builder_add_cstr(sb, "\"}");
-    event_emit(_ev_topic_errors(), str_data(str_builder_build(sb)));
+    var js = sb_cstr(sb);
+    _event_emit_n(_ev_topic_errors(), js, sb_len(sb));
     return 0;
 }
 
 fn event_rate_limited(provider) {
     if (_event_bus == 0) { return 0; }
-    var sb = str_builder_new();
+    var hdr[24];
+    var room[512];
+    var sb = sb_on(&hdr, &room, EVENT_BUILD_ROOM);
     str_builder_add_cstr(sb, "{\"event\":\"rate_limited\",\"provider\":\"");
     str_builder_add_cstr(sb, provider);
     str_builder_add_cstr(sb, "\"}");
-    event_emit(_ev_topic_ratelimit(), str_data(str_builder_build(sb)));
+    var js = sb_cstr(sb);
+    _event_emit_n(_ev_topic_ratelimit(), js, sb_len(sb));
     return 0;
 }
 
 fn event_health_changed(provider, base_url, healthy) {
     if (_event_bus == 0) { return 0; }
-    var sb = str_builder_new();
+    var hdr[24];
+    var room[512];
+    var sb = sb_on(&hdr, &room, EVENT_BUILD_ROOM);
     str_builder_add_cstr(sb, "{\"event\":\"health_changed\",\"provider\":\"");
     str_builder_add_cstr(sb, provider);
     str_builder_add_cstr(sb, "\",\"base_url\":\"");
@@ -98,28 +170,45 @@ fn event_health_changed(provider, base_url, healthy) {
     str_builder_add_cstr(sb, "\",\"healthy\":");
     if (healthy == 1) { str_builder_add_cstr(sb, "true"); } else { str_builder_add_cstr(sb, "false"); }
     str_builder_add_cstr(sb, "}");
-    event_emit(_ev_topic_health(), str_data(str_builder_build(sb)));
+    var js = sb_cstr(sb);
+    _event_emit_n(_ev_topic_health(), js, sb_len(sb));
     return 0;
 }
 
 # GET /v1/events/recent — the recent-events ring, oldest first.
+# 2.10.3: built in this thread's request arena (reqmem.cyr), sized under the lock to what the ring holds, and written
+# from the builder's own bytes. Through 2.10.2 each GET kept the body three times on the heap: up to ~40 KB when full.
 fn handle_events_recent(cfd) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"events\":[");
+    var sb = 0;
     if (_event_bus != 0) {
         mutex_lock(_event_lock);
         var n = _event_count;
         if (n > EVENT_RING_MAX) { n = EVENT_RING_MAX; }
+        var room = 32;
         var i = 0;
         while (i < n) {
-            if (i > 0) { str_builder_add_cstr(sb, ","); }
-            var idx = (_event_head - n + i) % EVENT_RING_MAX;
-            str_builder_add_cstr(sb, load64(_event_ring + idx * 8));
+            room = room + load64(_event_ring + ((_event_head - n + i) % EVENT_RING_MAX) * EVENT_SLOT + 16) + 1;
+            i = i + 1;
+        }
+        sb = sb_room_a(req_arena(), room);
+        str_builder_add_cstr(sb, "{\"events\":[");
+        var first = 1;
+        i = 0;
+        while (i < n) {
+            var slot = _event_ring + ((_event_head - n + i) % EVENT_RING_MAX) * EVENT_SLOT;
+            if (load64(slot + 16) > 0) {
+                if (first == 0) { str_builder_add_cstr(sb, ","); }
+                str_builder_add_cstr(sb, load64(slot));
+                first = 0;
+            }
             i = i + 1;
         }
         mutex_unlock(_event_lock);
+    } else {
+        sb = sb_room_a(req_arena(), 32);
+        str_builder_add_cstr(sb, "{\"events\":[");
     }
     str_builder_add_cstr(sb, "]}");
-    var body = str_builder_build(sb);
-    return http_ok(cfd, to_cstr(body), str_len(body));
+    var body = sb_cstr(sb);
+    return http_ok(cfd, body, sb_len(sb));
 }

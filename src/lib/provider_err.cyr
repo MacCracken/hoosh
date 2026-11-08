@@ -105,6 +105,77 @@ fn sb_add_chat_head(sb, kind) {
     return 0;
 }
 
+# 2.10.3: a stream's chunks are written from one buffer per thread, reused for every chunk, and grown only for a chunk
+# larger than any before it. Through 2.10.2 each chunk was a builder, its build and two copies on the heap that never
+# frees, so a stream kept about 1 KB per token: 100 KB for a 100-token reply (scripts/memory-growth.py --chunks 100).
+# Slot 12 is a fixed thread-local slot (reqmem.cyr lists the others).
+var SSE_BUF_SLOT = 12;
+var SSE_BUF_INITIAL = 4096;
+
+# This thread's chunk buffer, at least `need` bytes. A buffer it outgrows stays on the heap: the doubling bounds what
+# that leaves to twice the largest chunk the thread has sent.
+fn _sse_buf(need) {
+    var h = thread_local_get(SSE_BUF_SLOT);
+    if (h == 0) {
+        h = alloc(16);
+        if (h == 0) { return 0; }
+        store64(h, 0);
+        store64(h + 8, 0);
+        thread_local_set(SSE_BUF_SLOT, h);
+    }
+    if (load64(h + 8) < need) {
+        var cap = SSE_BUF_INITIAL;
+        while (cap < need) { cap = cap * 2; }
+        var b = alloc(cap);
+        if (b == 0) { return 0; }
+        store64(h, b);
+        store64(h + 8, cap);
+    }
+    return load64(h);
+}
+
+fn _sse_cat(p, s) {
+    var n = strlen(s);
+    memcpy(p, s, n);
+    return p + n;
+}
+
+# One chat.completion.chunk as an SSE event on cfd: the head sb_add_chat_head writes, the model, and a delta of
+# `open`, content[0..content_len) and `close`. Returns http_sse_event's answer (-1 once the client is gone).
+fn sse_delta_send(cfd, model, open, content, content_len, close) {
+    var id = chat_id();
+    var need = 160 + strlen(id) + strlen(model) + strlen(open) + content_len + strlen(close);
+    var buf = _sse_buf(need);
+    if (buf == 0) { return 0 - 1; }
+    var p = _sse_cat(buf, "{\"id\":\"");
+    p = _sse_cat(p, id);
+    p = _sse_cat(p, "\",\"object\":\"chat.completion.chunk\",\"created\":");
+    p = p + fmt_int_buf(chat_created(), p);
+    p = _sse_cat(p, ",\"model\":\"");
+    p = _sse_cat(p, model);
+    p = _sse_cat(p, "\",\"choices\":[{\"index\":0,\"delta\":{");
+    p = _sse_cat(p, open);
+    if (content_len > 0) { memcpy(p, content, content_len); }
+    p = p + content_len;
+    p = _sse_cat(p, close);
+    return http_sse_event(cfd, buf, p - buf);
+}
+
+# The three deltas a stream carries: text, extended thinking (2.5.0, `reasoning_content`, the de-facto OpenAI-compat
+# field, kept apart from the answer) and tool calls, which pass through as JSON. Each content is escaped already.
+fn sse_content_send(cfd, model, content, content_len) {
+    return sse_delta_send(cfd, model, "\"content\":\"", content, content_len, "\"},\"finish_reason\":null}]}");
+}
+
+fn sse_reasoning_send(cfd, model, content, content_len) {
+    return sse_delta_send(cfd, model, "\"reasoning_content\":\"", content, content_len,
+      "\"},\"finish_reason\":null}]}");
+}
+
+fn sse_tool_send(cfd, model, tool_calls) {
+    return sse_delta_send(cfd, model, "\"tool_calls\":", tool_calls, strlen(tool_calls), "},\"finish_reason\":null}]}");
+}
+
 # A cached chat.completion with a fresh head. The cache stores whole envelopes,
 # so a hit used to replay the first response's id and created time; a client
 # that dedupes by id would drop it. Returns the envelope unchanged if it does
@@ -146,8 +217,14 @@ fn chat_rehead(env) {
 # returns, so a consumer never converts and never rounds. Both fields are
 # additive inside the existing `usage` object; an OpenAI-shaped client ignores
 # unknown fields. `provider` is the real serving route, not the requested one.
-fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
-    var sb = str_builder_new();
+#
+# 2.10.3: built in `a`, the request arena on the chat path (reqmem.cyr), in a builder with room for the reply, and
+# returned over the builder's own bytes. Through 2.10.2 the builder grew on the heap and its answer was copied twice:
+# 1.7 KB kept for a short reply.
+fn _chat_completion_body_a(a, model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
+    var room = 512 + strlen(model) + strlen(resp_text);
+    if (tool_calls != 0) { room = room + strlen(tool_calls); }
+    var sb = sb_room_a(a, room);
     # 2.7.0: a fresh id and created time per completion (see provider_err.cyr).
     chat_id_new();
     sb_add_chat_head(sb, "chat.completion");
@@ -183,7 +260,12 @@ fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, p
         str_builder_add_cstr(sb, "\"");
     }
     str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
+    return str_new_a(a, sb_cstr(sb), sb_len(sb));
+}
+
+fn _chat_completion_body(model, resp_text, ptok, ctok, tool_calls, cost_micro, provider, finish) {
+    return _chat_completion_body_a(default_alloc(), model, resp_text, ptok, ctok, tool_calls, cost_micro, provider,
+      finish);
 }
 
 # PER-THREAD state (2.6.8). These four slots used to be process globals, which

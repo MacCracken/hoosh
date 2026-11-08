@@ -37,6 +37,7 @@ include "lib/ai-hwaccel.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
 include "src/lib/types.cyr"
+include "src/lib/reqmem.cyr"
 include "src/lib/logging.cyr"
 include "src/lib/dlp.cyr"
 include "src/lib/ratelimit.cyr"
@@ -592,6 +593,19 @@ fn main() {
     bench_batch_stop(b, 100000);
     bench_report(b);
 
+    # 2.10.3: a completion's event as provider_forward emits it: built on the stack, copied into its recycled slot.
+    var b_evp = _b_s("ollama");
+    var b_evm = _b_s("llama3.2:latest");
+    b = bench_new("event_completed_ring");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        event_inference_completed(b_evp, b_evm, 120, 42);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
     # 2.10.2: a provider's refusal, clipped to whole characters: 511 bytes of three-byte UTF-8, the slow branch. Last,
     # with main's thread-local block installed here as the gateway does at startup: provider_err's state is per thread.
     crypto_tls_main_init();
@@ -611,6 +625,79 @@ fn main() {
     }
     bench_batch_stop(b, 100000);
     bench_report(b);
+
+    # 2.10.3: a request with a traceparent begins hoosh's own context under it (trace.cyr), in the thread's block.
+    var tb_req = _b_s("POST /v1/chat/completions HTTP/1.1\r\nHost: h\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nContent-Type: application/json\r\n\r\n{}");
+    var tb_len = strlen(tb_req);
+    b = bench_new("trace_begin_child");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        trace_begin(tb_req, tb_len);
+        trace_current_or_new();
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+    trace_set(0);
+
+    # 2.10.3: what a buffered chat builds in the request arena (reqmem.cyr), each released by the next job's start.
+    var ra = req_arena();
+    var rb_body = _b_s("{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain how ownership and borrowing interact with lifetimes.\"}]}");
+    var rb_blen = strlen(rb_body);
+    b = bench_new("cache_key_arena");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        req_arena_begin();
+        _cache_key_a(ra, b_llama3, rb_body, rb_blen);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    var rb_text = _b_s("Ownership gives each value one owner; borrowing lends access without moving it, and lifetimes say for how long.");
+    var rb_prov = _b_s("ollama");
+    b = bench_new("chat_body_arena");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        req_arena_begin();
+        _chat_completion_body_a(ra, b_llama3, rb_text, 42, 17, 0, 0, rb_prov, FIN_STOP);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    var rb_msgs = _b_s("[{\"role\":\"system\",\"content\":\"Be brief.\"},{\"role\":\"user\",\"content\":\"Explain how ownership and borrowing interact with lifetimes.\"}]");
+    var rb_mlen = strlen(rb_msgs);
+    b = bench_new("provider_body_arena");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        req_arena_begin();
+        var rb_g = genopts_new_a(ra, 0, 256, 700, GEN_UNSET);
+        _build_chat_body_raw_x(ra, b_llama3, rb_msgs, rb_mlen, 0, 0, rb_g, 1, 0, 0);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # 2.10.3: one streamed token, from the thread's reused chunk buffer (provider_err.cyr), to /dev/null: the build
+    # and the three writes of the SSE framing.
+    var dn = sys_open(_b_s("/dev/null"), 1, 0);
+    var rb_tok = _b_s(" borrowing");
+    chat_id_new();
+    b = bench_new("sse_chunk_send");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 100000) {
+        sse_content_send(dn, b_llama3, rb_tok, 10);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+    sys_close(dn);
 
     println("");
     println("done");

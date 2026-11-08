@@ -2,74 +2,227 @@
 #
 # The traceparent arrives in the request headers, but the forward path is deep
 # (handle_chat → _chat_prep/_chat_finish → provider_forward → header builders)
-# and runs on batch worker threads. Rather than thread the header through every
-# signature, the current request's traceparent is carried in a **thread-local**
-# slot: http_route sets it (incoming or none); the outgoing header builders read
-# it (generating a fresh one if absent). Each batch worker is a fresh thread with
-# a zeroed TLS slot, so it generates its own per-item traceparent automatically.
+# and runs on pool workers. Rather than thread the header through every
+# signature, the current job's trace context is carried in **thread-local**
+# slots. Each job begins its own: http_route from the request's header
+# (trace_begin), a batch item from the context of the request that submitted it,
+# every other job and each health sweep as a fresh root (trace_begin_from(0)).
 #
-# Slot 1 — a fixed slot (0-15 are fixed; thread_local_alloc, sigil's lane slot included, hands out 16+).
-# Trace ids are unique (clock_now_ns + atomic counter), not crypto-random —
-# uniqueness is what correlation needs.
+# 2.10.3: hoosh's span is the caller's CHILD. An inbound `00-<trace>-<parent>-<flags>`
+# names the caller's span. hoosh keeps that header as the inbound context, and its
+# own context is `00-<trace>-<new span id>-<flags>`: the same trace and flags, and
+# a span id minted here. The outgoing headers carry hoosh's own, so a provider's
+# span is hoosh's child, and the OTLP span exports the caller's id as its
+# parentSpanId. Through 2.10.2 hoosh's context WAS the inbound header, so its span
+# reused the caller's id and the provider was told the caller was its parent.
+#
+# Both contexts live in one 128-byte block per thread, written in place: hoosh's at
+# +0 and the inbound at +64, each 55 characters and a NUL. Through 2.10.2 they were
+# heap allocations, 56 bytes per request with a header and 64 per request without.
+# A context lives until the same thread's next trace_begin; every reader (the header
+# builders, the provider header set, the span builder) copies it first.
+#
+# Slots 1, 9 and 10 are fixed slots (0-15 are fixed; thread_local_alloc, sigil's
+# lane slot included, hands out 16+).
+#
+# IDS. Each 64-bit id hoosh mints is a process-wide counter's next value through a keyed permutation, splitmix64's
+# finalizer twice with a key xored in before each (_trace_id64). The counter makes every id distinct; the keys,
+# drawn once from the OS, make them unpredictable from outside. Through 2.10.2 a root's trace id was the monotonic
+# clock and the counter in plain hex (`0000bd5b7bba5ad1` `0000000000000003`), so every provider was told the
+# gateway's uptime and how many requests it had served, and each id cost a clock syscall. Not crypto-random:
+# uniqueness is what correlation needs, and W3C asks only that ids not be guessable or leak.
 
-var TRACE_SLOT = 1;
+var TRACE_SLOT = 1;          # hoosh's own traceparent (cstr), or 0 until one is needed
+var TRACE_IN_SLOT = 9;       # 2.10.3: the inbound traceparent (cstr), or 0 when hoosh's is a root
+var TRACE_BLOCK_SLOT = 10;   # 2.10.3: this thread's 128-byte block both are written into
+var TRACE_LEN = 55;          # "00-" + 32 hex + "-" + 16 hex + "-" + 2 hex
 var _trace_counter = 0;
+var _trace_keys[2];          # 2.10.3: the permutation's two keys, drawn once (_trace_keys_ready)
+var _trace_key_state = 0;    # 0 not drawn, 1 being drawn, 2 ready
 
 # NB: thread_local_init() is NOT idempotent — it installs a fresh zeroed TLS
 # block, wiping all slots (including sigil's lane slot). It must be
 # called exactly once per thread: the main thread via crypto_tls_main_init() at
 # startup, worker threads via CLONE_SETTLS in thread_create. So trace_* only
 # get/set, never init.
+
+# Set hoosh's own context to `tp`, a root as far as hoosh knows (no inbound context).
 fn trace_set(tp) {
     thread_local_set(TRACE_SLOT, tp);
+    thread_local_set(TRACE_IN_SLOT, 0);
     return 0;
 }
 
-# Write the 16 lowercase-hex digits of a 64-bit value to out[0..16).
+# The inbound traceparent this job continues, or 0 when hoosh's context is a root.
+# Its span id, at +36 for 16 characters, is the parent of hoosh's span.
+fn trace_inbound() {
+    return thread_local_get(TRACE_IN_SLOT);
+}
+
+# This thread's trace block, allocated on its first use (process memory: one per thread).
+fn _trace_block() {
+    var b = thread_local_get(TRACE_BLOCK_SLOT);
+    if (b == 0) {
+        b = alloc(128);
+        if (b == 0) { return 0; }
+        memset(b, 0, 128);
+        thread_local_set(TRACE_BLOCK_SLOT, b);
+    }
+    return b;
+}
+
+# Write the 16 lowercase-hex digits of a 64-bit value to out[0..16). Any value: `>>` is a logical shift, and
+# through 2.10.2 this divided by powers of 16, which read a value with its top bit set as negative.
 fn _trace_hex64(val, out) {
+    var digits = "0123456789abcdef";
     var i = 0;
     while (i < 16) {
-        var nib = (val / _trace_pow16(15 - i)) % 16;
-        var c = 48 + nib;
-        if (nib > 9) { c = 87 + nib; }
-        store8(out + i, c);
+        store8(out + i, load8(digits + ((val >> ((15 - i) * 4)) & 15)));
         i = i + 1;
     }
     return 0;
 }
 
-fn _trace_pow16(n) {
-    var r = 1;
-    var i = 0;
-    while (i < n) { r = r * 16; i = i + 1; }
-    return r;
-}
-
-# Build a fresh "00-<32hex traceid>-<16hex spanid>-01" (56 bytes incl. NUL).
-fn trace_generate() {
+# The next value of the process-wide counter (never 0).
+fn _trace_next() {
     var old = load64(&_trace_counter);
     while (atomic_cas(&_trace_counter, old, old + 1) == 0) { old = load64(&_trace_counter); }
-    var c = old + 1;
-    var t = clock_now_ns();
-    var buf = alloc(64);
+    return old + 1;
+}
+
+# splitmix64's finalizer (Steele, Lea and Flood, "Fast splittable pseudorandom number generators", OOPSLA 2014;
+# Stafford's Mix13 constants, as Vigna's splitmix64.c has them): a bijection of 64-bit values. docs/sources.md.
+fn _trace_mix(z) {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
+
+# Draw the permutation's keys once, from the OS as the stdlib draws its hash seed (lib/hashmap.cyr _hm_seed_get),
+# and never that seed: an observer who inverted ids made from it could flood hoosh's maps. One thread draws; a
+# thread that finds the draw under way waits for it. Without the OS's randomness, a mix of the clocks.
+fn _trace_keys_ready() {
+    if (load64(&_trace_key_state) == 2) { return 1; }
+    if (atomic_cas(&_trace_key_state, 0, 1) == 1) {
+        #ifdef CYRIUS_TARGET_LINUX
+        var nr = sys_getrandom(&_trace_keys, 16, 4);                # GRND_INSECURE: never blocks
+        if (nr == 0 - 22) { nr = sys_getrandom(&_trace_keys, 16, 1); }   # before 5.6: GRND_NONBLOCK
+        #else
+        var nr = sys_getrandom(&_trace_keys, 16, 0);
+        #endif
+        if (nr != 16) {
+            var here = 0;
+            store64(&_trace_keys, _trace_mix(clock_epoch_ns() ^ &here));
+            store64(&_trace_keys + 8, _trace_mix(clock_now_ns() ^ load64(&_trace_keys)));
+        }
+        atomic_cas(&_trace_key_state, 1, 2);     # publish with release ordering (ldaxr/stlxr on aarch64)
+        return 1;
+    }
+    while (load64(&_trace_key_state) != 2) { }
+    return 1;
+}
+
+# A fresh 64-bit id: the counter's next value through the keyed permutation. W3C: an all-zero id is invalid.
+fn _trace_id64() {
+    _trace_keys_ready();
+    var v = _trace_mix(_trace_mix(_trace_next() ^ load64(&_trace_keys)) ^ load64(&_trace_keys + 8));
+    if (v == 0) { v = 1; }
+    return v;
+}
+
+# Write a fresh root "00-<32hex traceid>-<16hex spanid>-01" and its NUL to buf[0..56).
+fn _trace_generate_into(buf) {
     memcpy(buf, "00-", 3);
-    _trace_hex64(t, buf + 3);
-    _trace_hex64(c, buf + 19);
+    _trace_hex64(_trace_id64(), buf + 3);
+    _trace_hex64(_trace_id64(), buf + 19);
     store8(buf + 35, 45);
-    _trace_hex64(t + c * 2654435761, buf + 36);
+    _trace_hex64(_trace_id64(), buf + 36);
     memcpy(buf + 52, "-01", 3);
     store8(buf + 55, 0);
     return buf;
 }
 
-# The current thread's traceparent, generating + storing one if none is set.
+# A fresh root traceparent in its own allocation (56 bytes incl. NUL), for a caller that keeps it.
+fn trace_generate() {
+    var buf = alloc(64);
+    if (buf == 0) { return 0; }
+    return _trace_generate_into(buf);
+}
+
+# Write the child of the validated, lowercased traceparent `tin` to out[0..56): version 00, its trace id
+# and flags, and a span id minted here (W3C Trace Context §3.2: `parent-id` is the caller's span).
+fn _trace_child_into(tin, out) {
+    memcpy(out, "00-", 3);
+    memcpy(out + 3, tin + 3, 32);
+    store8(out + 35, 45);
+    _trace_hex64(_trace_id64(), out + 36);
+    # A span id equal to the caller's would make hoosh's span its own parent.
+    if (memeq(out + 36, tin + 36, 16) == 1) { _trace_hex64(_trace_id64(), out + 36); }
+    store8(out + 52, 45);
+    store8(out + 53, load8(tin + 53));
+    store8(out + 54, load8(tin + 54));
+    store8(out + 55, 0);
+    return out;
+}
+
+# Begin this job's trace context from the validated traceparent `tin` (55 characters, any case), or as a root
+# when `tin` is 0. A root's id is minted on first use, by trace_current_or_new. `tin` is copied into the block
+# before the child is written, so it may be a slice of the request buffer or the block's own +0 or +64.
+fn trace_begin_from(tin) {
+    if (tin == 0) {
+        thread_local_set(TRACE_SLOT, 0);
+        thread_local_set(TRACE_IN_SLOT, 0);
+        return 0;
+    }
+    var b = _trace_block();
+    if (b == 0) { trace_set(0); return 0; }
+    var inb = b + 64;
+    if (tin != inb) {
+        # Copied in lowercase, which W3C writes: `tin` is validated hex digits and '-', and OR-ing 0x20 lowercases
+        # A-F and leaves the digits, a-f and '-' as they are, so a word at a time: 6 words, then the last 7 bytes.
+        var i = 0;
+        while (i < 48) {
+            store64(inb + i, load64(tin + i) | 0x2020202020202020);
+            i = i + 8;
+        }
+        while (i < TRACE_LEN) {
+            store8(inb + i, load8(tin + i) | 32);
+            i = i + 1;
+        }
+        store8(inb + TRACE_LEN, 0);
+    }
+    _trace_child_into(inb, b);
+    thread_local_set(TRACE_SLOT, b);
+    thread_local_set(TRACE_IN_SLOT, inb);
+    return 0;
+}
+
+# Begin the job's trace context from a raw request's `traceparent` header (or as a root without a valid one).
+fn trace_begin(buf, buf_len) {
+    return trace_begin_from(_trace_find(buf, buf_len));
+}
+
+# hoosh's own traceparent for this job, minting a root into the thread's block if the job has none yet.
 fn trace_current_or_new() {
     var tp = thread_local_get(TRACE_SLOT);
     if (tp == 0) {
-        tp = trace_generate();
+        var b = _trace_block();
+        if (b == 0) { tp = trace_generate(); }
+        else { tp = _trace_generate_into(b); }
         thread_local_set(TRACE_SLOT, tp);
     }
     return tp;
+}
+
+# A copy of the inbound context in its own allocation, or 0 when there is none: for a job that runs after this
+# thread's block has moved on (a batch item).
+fn trace_inbound_copy() {
+    var tin = trace_inbound();
+    if (tin == 0) { return 0; }
+    var c = alloc(TRACE_LEN + 1);
+    if (c == 0) { return 0; }
+    memcpy(c, tin, TRACE_LEN + 1);
+    return c;
 }
 
 # Case-insensitive compare of `a[0..n)` against the lowercase pattern `pat`.
@@ -84,9 +237,6 @@ fn _trace_ci_eq(a, pat, n) {
     return 1;
 }
 
-# Extract the incoming `traceparent` header value from a raw HTTP request.
-# Returns a NUL-terminated copy, or 0 if absent. Header name is matched
-# case-insensitively at a line start.
 # A single lowercase-or-uppercase hex digit.
 fn _trace_is_hex(c) {
     var b = c & 255;
@@ -96,7 +246,20 @@ fn _trace_is_hex(c) {
     return 0;
 }
 
-fn trace_extract(buf, buf_len) {
+# 1 when p[0..n) is all '0'. W3C: an all-zero trace id or parent id is invalid.
+fn _trace_all_zero(p, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != 48) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Find the incoming `traceparent` header in a raw HTTP request and validate its value. Returns a pointer to the
+# value's 55 characters inside buf, or 0 if absent or invalid. The header name is matched case-insensitively at a
+# line start.
+fn _trace_find(buf, buf_len) {
     var i = 0;
     while (i < buf_len - 12) {
         if (i == 0 || load8(buf + i - 1) == 10) {
@@ -112,30 +275,43 @@ fn trace_extract(buf, buf_len) {
                 # from which ~50 bytes were read and emitted unescaped; a
                 # length-legal 55-byte value needed no over-read at all to
                 # inject forged span fields, and an embedded NUL truncated the
-                # fragment and corrupted the whole batch. The same buffer is
-                # also forwarded verbatim into every outbound request header.
+                # fragment and corrupted the whole batch. Its trace id and flags
+                # are also forwarded in every outbound request header.
                 # Rejecting here means a fresh, well-formed id is generated.
                 #
                 #   00-<32 hex>-<16 hex>-<2 hex>   == 55 bytes exactly
-                if (n != 55) { return 0; }
+                if (n != TRACE_LEN) { return 0; }
                 if (load8(buf + s + 2) != 45) { return 0; }
                 if (load8(buf + s + 35) != 45) { return 0; }
                 if (load8(buf + s + 52) != 45) { return 0; }
                 var k = 0;
-                while (k < 55) {
+                while (k < TRACE_LEN) {
                     if (k != 2 && k != 35 && k != 52) {
                         if (_trace_is_hex(load8(buf + s + k)) == 0) { return 0; }
                     }
                     k = k + 1;
                 }
-                var out = alloc(n + 1);
-                if (out == 0) { return 0; }
-                memcpy(out, buf + s, n);
-                store8(out + n, 0);
-                return out;
+                # 2.10.3, W3C Trace Context §3.2: version ff, an all-zero trace id and an all-zero parent id are
+                # invalid. The parent id is exported as hoosh's span's parentSpanId now, where zeros mean nothing.
+                if (_trace_ci_eq(buf + s, "ff", 2) == 1) { return 0; }
+                if (_trace_all_zero(buf + s + 3, 32) == 1) { return 0; }
+                if (_trace_all_zero(buf + s + 36, 16) == 1) { return 0; }
+                return buf + s;
             }
         }
         i = i + 1;
     }
     return 0;
+}
+
+# Extract the incoming `traceparent` header value from a raw HTTP request, as validated by _trace_find.
+# Returns a NUL-terminated copy in its own allocation, or 0 if absent or invalid.
+fn trace_extract(buf, buf_len) {
+    var p = _trace_find(buf, buf_len);
+    if (p == 0) { return 0; }
+    var out = alloc(TRACE_LEN + 1);
+    if (out == 0) { return 0; }
+    memcpy(out, p, TRACE_LEN);
+    store8(out + TRACE_LEN, 0);
+    return out;
 }

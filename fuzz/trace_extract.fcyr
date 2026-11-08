@@ -1,95 +1,147 @@
-# Fuzz: trace_extract — the incoming-`traceparent` header scanner
-# (src/lib/trace.cyr). It walks the raw HTTP request doing bounded pointer
-# arithmetic (line-start detection, case-insensitive name match, value copy with
-# a length cap), so truncated headers, missing CRLFs, oversized values, and
-# binary garbage must not crash or OOB-read. Self-contained mirror.
+# Fuzz: the incoming-`traceparent` header, through src/lib/trace.cyr itself.
+#
+# 2.10.3: this was a mirror of trace_extract from before 2.6.8's validation, so it fuzzed code the gateway no longer
+# ran. It includes the real module now and drives what a request does: trace_begin over the raw bytes (the header
+# scan, the W3C validation, the lowercase copy into the thread's block, the child id), trace_current_or_new, and
+# trace_extract. Truncated headers, missing CRLFs, oversized values and binary garbage must not crash or read out of
+# bounds, and every context it leaves must hold:
+#   - hoosh's own is a 55-byte W3C traceparent of lowercase hex, version 00;
+#   - an inbound one is too (any version but ff), and hoosh's is its child: the same trace id and flags, its own
+#     span id;
+#   - no inbound one means a root.
+# A broken invariant exits 1, as a crash would.
 
 include "lib/string.cyr"
 include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
 include "lib/fmt.cyr"
+include "lib/chrono.cyr"
+include "lib/sigil.cyr"
+include "src/lib/trace.cyr"
 
-# Mirror of src/lib/trace.cyr _trace_ci_eq + trace_extract.
-fn _trace_ci_eq(a, pat, n) {
-    var i = 0;
-    while (i < n) {
-        var ca = load8(a + i);
-        if (ca >= 65 && ca <= 90) { ca = ca + 32; }
-        if (ca != load8(pat + i)) { return 0; }
-        i = i + 1;
+fn _fz_fail(what) {
+    sys_write(2, "trace fuzz: ", 12);
+    sys_write(2, what, strlen(what));
+    sys_write(2, "\n", 1);
+    syscall(60, 1);
+    return 0;
+}
+
+# 1 when p[0..55) is 2 hex, '-', 32 hex, '-', 16 hex, '-', 2 hex, all lowercase, and p[55] is a NUL.
+fn _fz_shape(p) {
+    var k = 0;
+    while (k < 55) {
+        var c = load8(p + k);
+        if (k == 2 || k == 35 || k == 52) {
+            if (c != 45) { return 0; }
+        } else {
+            var hex = 0;
+            if (c >= 48 && c <= 57) { hex = 1; }
+            if (c >= 97 && c <= 102) { hex = 1; }
+            if (hex == 0) { return 0; }
+        }
+        k = k + 1;
     }
+    if (load8(p + 55) != 0) { return 0; }
     return 1;
 }
-fn trace_extract(buf, buf_len) {
-    var i = 0;
-    while (i < buf_len - 12) {
-        if (i == 0 || load8(buf + i - 1) == 10) {
-            if (_trace_ci_eq(buf + i, "traceparent:", 12) == 1) {
-                var j = i + 12;
-                while (j < buf_len && (load8(buf + j) == 32 || load8(buf + j) == 9)) { j = j + 1; }
-                var s = j;
-                while (j < buf_len && load8(buf + j) != 13 && load8(buf + j) != 10) { j = j + 1; }
-                var n = j - s;
-                if (n <= 0 || n > 200) { return 0; }
-                var out = alloc(n + 1);
-                memcpy(out, buf + s, n);
-                store8(out + n, 0);
-                return out;
-            }
-        }
-        i = i + 1;
+
+fn _fz_check() {
+    var own = trace_current_or_new();
+    if (own == 0) { _fz_fail("no context"); }
+    if (_fz_shape(own) == 0) { _fz_fail("hoosh's context is not a lowercase W3C traceparent"); }
+    if (memeq(own, "00-", 3) == 0) { _fz_fail("hoosh's context is not version 00"); }
+    var tin = trace_inbound();
+    if (tin == 0) { return 0; }
+    if (_fz_shape(tin) == 0) { _fz_fail("the inbound context is not a lowercase W3C traceparent"); }
+    if (memeq(tin, "ff", 2) == 1) { _fz_fail("version ff was continued"); }
+    if (memeq(own + 3, tin + 3, 32) == 0) { _fz_fail("hoosh's span left the caller's trace"); }
+    if (memeq(own + 36, tin + 36, 16) == 1) { _fz_fail("hoosh's span took the caller's span id"); }
+    if (memeq(own + 53, tin + 53, 2) == 0) { _fz_fail("the caller's flags were not kept"); }
+    return 0;
+}
+
+# One request's worth: begin from its bytes, check the context, and extract as the fuzz always did.
+fn _fz_run(buf, n) {
+    trace_begin(buf, n);
+    _fz_check();
+    var x = trace_extract(buf, n);
+    if (x != 0) {
+        if (strlen(x) != 55) { _fz_fail("an extracted value is not 55 bytes"); }
     }
     return 0;
 }
 
 fn _fuzz_cstr(s) {
     var n = strlen(s);
-    if (n == 0) { trace_extract(s, 0); return 0; }
-    var buf = alloc(n);
+    var buf = alloc(n + 1);
     memcpy(buf, s, n);
-    trace_extract(buf, n);
+    store8(buf + n, 0);
+    _fz_run(buf, n);
     return 0;
 }
 
 alloc_init();
+crypto_tls_main_init();
 
 # ── Crafted adversarial requests ──
-_fuzz_cstr("POST / HTTP/1.1\r\ntraceparent: 00-abc-def-01\r\n\r\n");  # valid
-_fuzz_cstr("traceparent: at-buffer-start-no-prior-newline");          # i==0 branch
+_fuzz_cstr("POST / HTTP/1.1\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n");
+_fuzz_cstr("traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");   # at the start, no CRLF
+_fuzz_cstr("\nTRACEPARENT: 00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-00\r\n");   # upper case
+_fuzz_cstr("\ntraceparent: ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n");   # version ff
+_fuzz_cstr("\ntraceparent: 00-00000000000000000000000000000000-00f067aa0ba902b7-01\r\n");   # zero trace id
+_fuzz_cstr("\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01\r\n");   # zero parent id
+_fuzz_cstr("\ntraceparent: 01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-09\r\n");   # later version
+_fuzz_cstr("POST / HTTP/1.1\r\ntraceparent: 00-abc-def-01\r\n\r\n");
 _fuzz_cstr("X\ntraceparent:");                                          # name then EOF (empty value)
 _fuzz_cstr("\ntraceparent:    \t  ");                                   # only whitespace value
 _fuzz_cstr("GET / HTTP/1.1\r\nHost: x\r\n\r\n");                        # absent
 _fuzz_cstr("traceparent");                                              # shorter than 12, no colon
-_fuzz_cstr("\nTRACEPARENT: UPPER-01\r\n");                              # case-insensitive
 _fuzz_cstr("\ntraceparent: no-crlf-ever-just-runs-to-the-end");         # no terminator
 _fuzz_cstr("");                                                          # empty
 _fuzz_cstr("\n");                                                        # single newline
 _fuzz_cstr("\ntraceparent:\r");                                         # value empty, CR immediately
 
-# Oversized value (>200 → must return 0, not copy).
+# An oversized value is refused, never copied.
 var big = alloc(512);
 memcpy(big, "\ntraceparent: ", 14);
 var p = 14;
 while (p < 500) { store8(big + p, 65); p = p + 1; }
 store8(big + 500, 13);
-trace_extract(big, 501);
+_fz_run(big, 501);
 
-# ── Generated stress over header-relevant bytes ──
-var ALPHA = "traceparent: \r\n\t01-";
+# ── Generated: header-relevant bytes, and values one byte from valid ──
+var ALPHA = "traceparent: \r\n\t01-aAfF9";
 var alen = strlen(ALPHA);
 var seed = 88172645;
 var trial = 0;
 while (trial < 4000) {
     var len = 1 + (trial % 199);
-    var buf = alloc(len);
+    var buf = alloc(len + 1);
     var k = 0;
     while (k < len) {
         seed = (seed * 1103515245 + 12345) % 2147483648;
         store8(buf + k, load8(ALPHA + (seed % alen)));
         k = k + 1;
     }
-    trace_extract(buf, len);
+    store8(buf + len, 0);
+    _fz_run(buf, len);
+    trial = trial + 1;
+}
+var VALID = "\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n";
+var vlen = strlen(VALID);
+var MUT = "0123456789abcdefABCDEF-xg \t\r\n";
+var mlen = strlen(MUT);
+trial = 0;
+while (trial < 4000) {
+    var vb = alloc(vlen + 1);
+    memcpy(vb, VALID, vlen + 1);
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    var at = 14 + (seed % 55);
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    store8(vb + at, load8(MUT + (seed % mlen)));
+    _fz_run(vb, vlen);
     trial = trial + 1;
 }
 

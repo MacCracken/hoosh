@@ -13,6 +13,15 @@ on the raw bytes, which also refuses a body that is not UTF-8.
   held      the catalog answers from a held body, and a change to the router, the snapshot or [[models]] replaces it.
             docs/development/issues/archived/2026-11-06-agnosai-every-catalog-get-keeps-what-it-built.md
   race      reads across all the listings while reloads and refreshes replace what they read.
+  stream    (2.10.3) a many-token reply, with quotes, backslashes and non-ASCII text, through an Ollama and an
+            OpenAI-compatible route: every chunk parses, all carry one id, and the deltas join into the reply. The
+            chunks are written from one reused buffer since 2.10.3.
+  events    (2.10.3) GET /v1/events/recent read while chats fill the ring from several threads: every read parses,
+            holds at most 128 events of the shapes hoosh writes, and the last read the newest. Events are copied into
+            recycled slots since 2.10.3.
+  trace     (2.10.3) hoosh's span is the caller's child: the provider is sent hoosh's span id, and the exported span
+            names the caller's as its parentSpanId. A batch item is a span of its own under the request's caller.
+            docs/development/issues/archived/2026-11-07-agnosai-inference-span-takes-the-callers-span-id.md
 
 Exits non-zero on the first run with a failed check. No network beyond 127.0.0.1.
 
@@ -21,6 +30,7 @@ Usage: scripts/wire-smoke.py [build/hoosh]
 import http.server
 import json
 import os
+import re
 import socketserver
 import subprocess
 import sys
@@ -494,6 +504,305 @@ def run_race(binary):
         a.shutdown()
 
 
+# The reply StreamStub streams, one token per line or event: escapes and characters a chunk builder could mangle.
+STREAM_TOKENS = ["Hello", ", ", "\"quoted\"", " back\\slash", " café", " 中文", " tab\there", " " + "z" * 9000, "."]
+
+
+class StreamStub(http.server.BaseHTTPRequestHandler):
+    """A local backend that streams STREAM_TOKENS: Ollama NDJSON on /api/chat, OpenAI SSE on /v1/chat/completions."""
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = json.dumps({"models": [{"name": "stub:latest"}], "data": [{"id": "stub"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path.startswith("/api/chat"):
+            lines = [json.dumps({"message": {"role": "assistant", "content": t}, "done": False}, ensure_ascii=False)
+                     for t in STREAM_TOKENS]
+            lines.append(json.dumps({"message": {"role": "assistant", "content": ""}, "done": True,
+                                     "done_reason": "stop", "prompt_eval_count": 3, "eval_count": len(STREAM_TOKENS)}))
+            body = ("\n".join(lines) + "\n").encode()
+            ctype = "application/x-ndjson"
+        else:
+            ev = [json.dumps({"choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}]},
+                             ensure_ascii=False) for t in STREAM_TOKENS]
+            ev.append(json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+            body = ("".join(f"data: {e}\n\n" for e in ev) + "data: [DONE]\n\n").encode()
+            ctype = "text/event-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def sse_events(raw):
+    """The data payloads of an SSE body, in order."""
+    out = []
+    for block in raw.split(b"\n\n"):
+        for line in block.split(b"\n"):
+            if line.startswith(b"data: "):
+                out.append(line[6:])
+    return out
+
+
+def run_stream(binary):
+    print("stream")
+    stub = serve(StreamStub)
+    port = stub.server_address[1]
+    for kind in ("ollama", "openai"):
+        gw = Gateway(binary, f'[[providers]]\ntype = "{kind}"\nbase_url = "http://127.0.0.1:{port}"\n'
+                             'priority = 1\nmodels = ["*"]\n')
+        try:
+            for rnd in range(3):
+                st, raw = gw.req("/v1/chat/completions", chat(f"stream {kind} {rnd}", stream=True))
+                evs = sse_events(raw)
+                docs = [strict(e) for e in evs if e != b"[DONE]"]
+                deltas = [d["choices"][0]["delta"].get("content", "") for d in docs
+                          if d and d.get("choices") and d["choices"][0].get("delta")]
+                ids = {d.get("id") for d in docs if d}
+                check(st == 200 and evs and evs[-1] == b"[DONE]" and all(d is not None for d in docs),
+                      f"{kind} stream {rnd}: every chunk parses as a strict client reads it")
+                check("".join(deltas) == "".join(STREAM_TOKENS),
+                      f"{kind} stream {rnd}: the deltas join into the reply, escapes and all")
+                check(len(ids) == 1 and docs[0].get("object") == "chat.completion.chunk",
+                      f"{kind} stream {rnd}: one id for every chunk")
+                check(docs and docs[-1]["choices"][0].get("finish_reason") == "stop",
+                      f"{kind} stream {rnd}: it ends with the provider's finish reason")
+        finally:
+            gw.stop()
+    stub.shutdown()
+
+
+def run_events(binary):
+    print("events")
+    stub = serve(ErrorStub)
+    gw = Gateway(binary, f'[[providers]]\ntype = "ollama"\nbase_url = "http://127.0.0.1:{stub.server_address[1]}"\n'
+                         'priority = 1\nmodels = ["*"]\n\n[cache]\nenabled = false\n')
+    stop = threading.Event()
+    bad = []
+    reads = [0]
+    sent = [0]
+
+    def chatter(t):
+        i = 0
+        while not stop.is_set() and i < 60:
+            body = chat(f"event {t} {i}")
+            body["model"] = f'm"{t}\\{i}'          # a model the event must escape
+            gw.req("/v1/chat/completions", body)
+            sent[0] += 1
+            i += 1
+
+    def reader():
+        while not stop.is_set():
+            st, raw = gw.req("/v1/events/recent")
+            doc = strict(raw)
+            reads[0] += 1
+            if st != 200 or doc is None or len(doc.get("events", [])) > 128:
+                bad.append((st, raw[:120]))
+                continue
+            for e in doc["events"]:
+                if e.get("event") not in ("inference_completed", "inference_failed", "rate_limited", "health_changed"):
+                    bad.append(("shape", e))
+                    break
+
+    try:
+        writers = [threading.Thread(target=chatter, args=(t,)) for t in range(6)]
+        readers = [threading.Thread(target=reader) for _ in range(2)]
+        for t in writers + readers:
+            t.start()
+        for t in writers:
+            t.join()
+        stop.set()
+        for t in readers:
+            t.join()
+        print(f"       {reads[0]} reads while {sent[0]} chats filled the ring")
+        check(not bad, f"every read parsed and held only hoosh's event shapes {bad[:2]}")
+        st, raw = gw.req("/v1/events/recent")
+        evs = (strict(raw) or {}).get("events", [])
+        models = [e.get("model", "") for e in evs]
+        exact = re.compile(r'm"[0-5]\\[0-9]+')
+        check(len(evs) == 128 and all(exact.fullmatch(m) for m in models),
+              f"the ring holds 128, each model read back exactly as sent, escaped once ({len(evs)}, {models[-1:]})")
+        check(gw.proc.poll() is None, "the gateway stayed up")
+    finally:
+        stop.set()
+        gw.stop()
+        stub.shutdown()
+
+
+CALLER = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+class TraceStub(http.server.BaseHTTPRequestHandler):
+    """An Ollama-shaped provider that records each request's traceparent, and an OTLP collector that keeps each span."""
+    protocol_version = "HTTP/1.0"
+    sent = []      # the traceparent of each chat request hoosh made, by prompt: (prompt, header or None)
+    spans = []     # every span the collector was sent
+
+    def log_message(self, *args):
+        pass
+
+    def _send(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self._send({"models": [{"name": "stub:latest"}]})
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path.startswith("/v1/traces"):
+            for rs in json.loads(raw)["resourceSpans"]:
+                for ss in rs["scopeSpans"]:
+                    TraceStub.spans.extend(ss["spans"])
+            self._send({})
+            return
+        if self.path.startswith("/api/show"):
+            self._send({})
+            return
+        try:
+            prompt = json.loads(raw)["messages"][-1]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            prompt = None
+        TraceStub.sent.append((prompt, self.headers.get("traceparent")))
+        if self.path.startswith("/api/chat") and b'"stream":true' in raw.replace(b" ", b""):
+            body = (json.dumps({"message": {"role": "assistant", "content": "ok"}, "done": False}) + "\n"
+                    + json.dumps({"message": {"role": "assistant", "content": ""}, "done": True,
+                                  "done_reason": "stop", "prompt_eval_count": 1, "eval_count": 1}) + "\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._send({"model": "stub", "message": {"role": "assistant", "content": "ok"}, "done": True,
+                    "done_reason": "stop", "prompt_eval_count": 1, "eval_count": 1})
+
+
+def tp_parts(tp):
+    """(trace id, span id, flags) of a traceparent, or None."""
+    if not tp or len(tp) != 55:
+        return None
+    return tp[3:35], tp[36:52], tp[53:55]
+
+
+def sent_for(prompt):
+    return [tp for p, tp in TraceStub.sent if p == prompt]
+
+
+def spans_for(trace_id, n, wait=4.0):
+    """The spans of a trace, once the exporter has sent n of them (it batches every second)."""
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        got = [sp for sp in TraceStub.spans if sp.get("traceId") == trace_id]
+        if len(got) >= n:
+            return got
+        time.sleep(0.1)
+    return [sp for sp in TraceStub.spans if sp.get("traceId") == trace_id]
+
+
+def traced(gw, path, body, tp):
+    data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    if tp:
+        headers["traceparent"] = tp
+    r = urllib.request.Request(gw.url + path, data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(r, timeout=15) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def run_trace(binary):
+    print("trace")
+    stub = serve(TraceStub)
+    port = stub.server_address[1]
+    gw = Gateway(binary, f'[[providers]]\ntype = "ollama"\nbase_url = "http://127.0.0.1:{port}"\n'
+                         'priority = 1\nmodels = ["*"]\n\n'
+                         f'[telemetry]\notlp_endpoint = "http://127.0.0.1:{port}/v1/traces"\n')
+    ctrace, cspan, _ = tp_parts(CALLER)
+    try:
+        # The issue's repro: a request that names the caller's span.
+        traced(gw, "/v1/chat/completions", chat("child-1"), CALLER)
+        up = tp_parts((sent_for("child-1") or [None])[0])
+        check(up is not None and up[0] == ctrace and up[1] != cspan and up[2] == "01",
+              f"the provider is sent the caller's trace under hoosh's own span id ({up})")
+        sp = spans_for(ctrace, 1)
+        check(len(sp) == 1 and up is not None and sp[0]["spanId"] == up[1] and sp[0].get("parentSpanId") == cspan,
+              f"the span is hoosh's, and its parent is the caller's ({sp[:1]})")
+
+        # No header: a root, and the provider's parent is still hoosh's span.
+        traced(gw, "/v1/chat/completions", chat("root-1"), None)
+        up = tp_parts((sent_for("root-1") or [None])[0])
+        sp = spans_for(up[0], 1) if up else []
+        check(up is not None and up[0] != ctrace and len(sp) == 1 and sp[0]["spanId"] == up[1]
+              and "parentSpanId" not in sp[0], f"without a header the span is a root ({sp[:1]})")
+
+        # A stream forwards hoosh's own too.
+        traced(gw, "/v1/chat/completions", chat("stream-1", stream=True), CALLER)
+        up = tp_parts((sent_for("stream-1") or [None])[0])
+        check(up is not None and up[0] == ctrace and up[1] != cspan, f"a stream is sent hoosh's own span id ({up})")
+
+        # A sync batch: each item a span of its own under the caller's.
+        btrace = "0af7651916cd43dd8448eb211c80319c"
+        bcaller = f"00-{btrace}-b7ad6b7169203331-01"
+        traced(gw, "/v1/batch", {"requests": [chat("item-a"), chat("item-b"), chat("item-c")]}, bcaller)
+        ups = [tp_parts(t) for t in sent_for("item-a") + sent_for("item-b") + sent_for("item-c")]
+        sp = spans_for(btrace, 3)
+        check(len(ups) == 3 and all(u and u[0] == btrace and u[1] != "b7ad6b7169203331" for u in ups)
+              and len({u[1] for u in ups}) == 3, f"batch: each item is sent its own span id in the caller's trace")
+        check(len(sp) == 3 and all(s.get("parentSpanId") == "b7ad6b7169203331" for s in sp)
+              and {s["spanId"] for s in sp} == {u[1] for u in ups if u},
+              f"batch: three spans, each the caller's child ({len(sp)})")
+
+        # An async batch runs after its request has ended, on any worker.
+        atrace = "11111111111111111111111111111111"
+        acaller = f"00-{atrace}-2222222222222222-01"
+        st, raw = traced(gw, "/v1/batch", {"requests": [chat("async-a"), chat("async-b")], "async": True}, acaller)
+        bid = (strict(raw) or {}).get("id")
+        for _ in range(100):
+            if len(sent_for("async-a") + sent_for("async-b")) == 2:
+                break
+            time.sleep(0.05)
+        ups = [tp_parts(t) for t in sent_for("async-a") + sent_for("async-b")]
+        sp = spans_for(atrace, 2)
+        check(bid is not None and len(ups) == 2 and all(u and u[0] == atrace for u in ups)
+              and len(sp) == 2 and all(s.get("parentSpanId") == "2222222222222222" for s in sp),
+              f"async batch: the items continue the request that submitted them ({len(sp)})")
+
+        # A worker keeps its last connection's slots: fill every worker's with the caller's, then send items with none.
+        for i in range(14):
+            traced(gw, "/v1/chat/completions", chat(f"fill-{i}"), CALLER)
+        traced(gw, "/v1/batch", {"requests": [chat(f"bare-{i}") for i in range(7)]}, None)
+        ups = [tp_parts(t) for i in range(7) for t in sent_for(f"bare-{i}")]
+        check(len(ups) == 7 and all(u and u[0] != ctrace for u in ups),
+              "batch: an item of a request without a header is not sent under another request's trace")
+
+        # Values the spec calls invalid: a root, with no zeros for a parent.
+        ztrace = "33333333333333333333333333333333"
+        traced(gw, "/v1/chat/completions", chat("zero-1"), f"00-{ztrace}-0000000000000000-01")
+        up = tp_parts((sent_for("zero-1") or [None])[0])
+        check(up is not None and up[0] != ztrace, "an all-zero parent id is not continued")
+        check(gw.proc.poll() is None, "the gateway stayed up")
+    finally:
+        gw.stop()
+        stub.shutdown()
+
+
 if __name__ == "__main__":
     bin_path = sys.argv[1] if len(sys.argv) > 1 else "build/hoosh"
     run_errors(bin_path)
@@ -501,6 +810,9 @@ if __name__ == "__main__":
     run_catalog(bin_path)
     run_held(bin_path)
     run_race(bin_path)
+    run_stream(bin_path)
+    run_events(bin_path)
+    run_trace(bin_path)
     if FAILS:
         print(f"\n{len(FAILS)} failed:")
         for f in FAILS:

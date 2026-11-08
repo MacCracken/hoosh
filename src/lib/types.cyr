@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.10.2";
+var HOOSH_VERSION = "2.10.3";
 
 # ================================================================
 # Error types
@@ -197,7 +197,13 @@ enum Strategy {
 var GEN_UNSET = 0 - 1;
 
 fn genopts_new(effort, max_tokens, temp_milli, top_p_milli) {
-    var g = alloc(48);
+    return genopts_new_a(default_alloc(), effort, max_tokens, temp_milli, top_p_milli);
+}
+
+# 2.10.3: in `a`, the request arena on the chat path (reqmem.cyr). A request's options live as long as its job.
+fn genopts_new_a(a, effort, max_tokens, temp_milli, top_p_milli) {
+    var g = alloc_via(a, 48);
+    if (g == 0) { return 0; }
     store64(g, effort);
     store64(g + 8, max_tokens);
     store64(g + 16, temp_milli);

@@ -6,7 +6,7 @@
 # and runs the real ring: through 2.9.19 it tested a copy of the ring arithmetic, without the lock or wq_done.
 #
 # Requires: alloc, store64/load64, mutex_new/mutex_lock/mutex_unlock (lib/sync.cyr), sleep_ms (lib/chrono.cyr),
-# str_builder (wq_status_json).
+# str_builder (wq_status_json), trace.cyr and reqmem.cyr (job_begin, 2.10.3).
 
 var JOB_CONN = 0;
 var JOB_BATCH_ITEM = 1;
@@ -134,18 +134,39 @@ fn _job_conn(cfd) {
     return j;
 }
 
-# A batch item: [type, req_ptr, req_len, result_slot, completed_ctr, failed_ctr].
+# A batch item: [type, req_ptr, req_len, result_slot, completed_ctr, failed_ctr, trace_in].
 # completed_ctr / failed_ctr are absolute addresses of atomic counters (the batch
 # barrier reads completed_ctr; failed_ctr may be 0 to skip failure accounting).
-fn job_batch_item(req_ptr, req_len, slot, completed_ctr, failed_ctr) {
-    var j = alloc(48);
+# trace_in (2.10.3) is the submitting request's inbound traceparent, a copy the batch owns
+# (trace_inbound_copy), or 0: the item's span is a child of the caller's span, or a root.
+fn job_batch_item(req_ptr, req_len, slot, completed_ctr, failed_ctr, trace_in) {
+    var j = alloc(56);
     store64(j, JOB_BATCH_ITEM);
     store64(j + 8, req_ptr);
     store64(j + 16, req_len);
     store64(j + 24, slot);
     store64(j + 32, completed_ctr);
     store64(j + 40, failed_ctr);
+    store64(j + 48, trace_in);
     return j;
+}
+
+# 2.10.3: begin a job's own trace context, before job_process runs it. A worker's slots held its last connection's,
+# so through 2.10.2 a batch item, a catalog refresh and an OTLP export went out under some unrelated request's trace.
+# A batch item continues the request that submitted it, as a span of its own; every other job begins as a root, and
+# a connection's is then begun again by http_route, from its header.
+fn job_trace_begin(job) {
+    if (load64(job) == JOB_BATCH_ITEM) { return trace_begin_from(load64(job + 48)); }
+    return trace_begin_from(0);
+}
+
+# 2.10.3: what every job does before job_process runs it: its own trace context, and the thread's request arena
+# released (reqmem.cyr). Whatever the thread's last job built there is dead: what it handed a keeper was copied.
+# A sync batch's barrier runs jobs on the submitting thread, so the batch handler holds nothing in the arena.
+fn job_begin(job) {
+    job_trace_begin(job);
+    req_arena_begin();
+    return 0;
 }
 
 # An OTLP/JSON export POST: [type, doc_ptr, doc_len]. The exporter thread

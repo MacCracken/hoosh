@@ -5,6 +5,177 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.10.3] — 2026-11-07
+
+**hoosh's span is the caller's child, and a request keeps a fifth of what it did.** agnosai's trace issue is fixed, with
+two more trace bugs it led to. The chat path builds in a per-thread request arena (ADR 013's first step), the event ring
+recycles its slots, and a stream no longer keeps memory per token: through 2.10.2 a 1,000-token reply kept **1 MB** on the
+heap that never frees, and a buffered chat 4.6 KB, now 974 bytes. **2035 assertions** in 179 groups. All gates are clean:
+fmt, lint, vet, deny, coverage (454/778, 58%), the security scan, the four fuzz targets, the shutdown smoke test and the
+wire smoke test (40 → 77 checks).
+
+⚠ **What changes on the wire.**
+- A request with a `traceparent` is answered and forwarded under hoosh's own span id, in the caller's trace: the provider
+  is told hoosh is its parent, and the exported span names the caller's span as its `parentSpanId`.
+- A batch item is a span of its own under the request that submitted it.
+- A trace id or span id hoosh mints no longer reads as its uptime and a counter.
+- A `traceparent` with version `ff`, or an all-zero trace id or parent id, starts a root, as a malformed one always has.
+- An event's `model` in `GET /v1/events/recent` reads as the client sent it. A model with an escape in it was escaped
+  twice, so `m"x` read back as `m\"x`.
+- Every chat response body is byte-identical to 2.10.2's.
+
+### Fixed — trace context
+
+- **An inference span took the caller's span id** ([agnosai's issue](docs/development/issues/archived/2026-11-07-agnosai-inference-span-takes-the-callers-span-id.md)).
+  An inbound `00-<trace>-<parent>-<flags>` is the caller's span, and hoosh's context *was* that header. So the exported
+  span had the caller's id and no parent, the trace held two spans with one id, and a provider that traces was told the
+  caller was its parent. hoosh keeps the header as the inbound context now and writes its own:
+  `00-<trace>-<a span id minted here>-<flags>`, the same trace and flags. The outgoing headers carry hoosh's own (local and
+  remote, buffered and streamed), and the span exports `parentSpanId`. With no header the span is a root, as before.
+  agnosai sent no `traceparent` because of this, so its spans and hoosh's sat in unrelated traces.
+- **A batch item took an unrelated request's trace.** Since 2.4.0's pool a worker's slots kept its last connection's
+  context, and only `http_route` replaced it. So a batch item, a catalog refresh and an OTLP export went out under some
+  earlier request's trace. Every job begins its own now (`job_begin`, wq.cyr): a batch item continues the request that
+  submitted it, sync or async, from a copy it owns, and the rest begin as roots. Each health sweep is a trace of its own,
+  where the prober's one context had covered every probe it ever sent.
+- **A minted id told the provider the gateway's uptime and request count.** A root's trace id was `clock_now_ns()` and a
+  counter in plain hex (`0000bd5b7bba5ad1` `0000000000000003`), and each id cost a clock syscall. An id is the counter's
+  next value through a keyed permutation now, splitmix64's finalizer twice with a key xored in before each, the keys
+  drawn once from the OS. The counter makes ids distinct and the keys make them opaque. The keys are trace.cyr's own: an
+  id made from the stdlib's hash seed would let an observer invert it and flood hoosh's maps.
+- **`_trace_hex64` wrote garbage for a value with its top bit set.** It divided by powers of 16, as signed numbers. It
+  shifts now; no id before reached the top bit.
+- **W3C's invalid values** (version `ff`, an all-zero trace id or parent id) start a root. A zero parent id would
+  have reached the collector as `parentSpanId`, where it means nothing.
+
+### Fixed — request memory
+
+- **A stream kept about 1 KB per token.** Each chunk was a builder, its build and two copies on the heap, and each token's
+  text a copy of its own. ADR 013's 3.5 KB per stream was measured with a fake backend that sends one line, so the real
+  figure scaled with the reply: **102 KB for 100 tokens, 1.0 MB for 1,000**. Chunks are written from one buffer per thread
+  now, reused for every chunk (`sse_delta_send`, provider_err.cyr), and a token is read where it is in the line
+  (`_json_str_span`, jsonlite.cyr), local and remote. The stream's head is written on the stack, and its stop and usage
+  chunks are built in the request arena. **A stream keeps 352 bytes, whatever its length.**
+- **Every Ollama request kept a copy of its messages.** `_ollama_messages_convert` built the translated array before it
+  knew whether any message needed translating, and threw it away when none did: 208 bytes for a short chat.
+- **`_sb_add_span` copied every span to the heap** to read it as a cstr: the messages and tools of every forwarded
+  request. It appends straight from the span now.
+- **The recent-events ring kept every event it ever held** (ADR 013 decision 3). A slot held a pointer to each event's
+  own string, and the string a wrap overwrote stayed: 328 bytes per completion, a builder, its growth and its build.
+  Each slot is a buffer now, copied into and reused as the ring wraps, grown only for an event larger than any it has
+  held. An event is built on the stack (`sb_on`, reqmem.cyr) and copied in, a word at a time (`mem_copy_words`).
+- **`GET /v1/events/recent` kept its body three times**: 57.5 KB per GET with a full ring. It is built in the request
+  arena, sized under the lock to what the ring holds, and written from the builder's own bytes: 176 bytes per GET.
+
+### Fixed — events
+
+- **An event escaped the request's model twice.** `model_cstr` keeps the escapes the request's JSON had, as bayan's pairs
+  do, and the chat response writes it as it is, but the event builders escaped it again. 2.10.2 fixed the same thing in
+  the error messages. The model is decoded first now (`_ev_add_model`), on the stack with the stdlib's RFC 8259 decoder,
+  only when it has a backslash, so a plain name costs nothing more.
+
+### Added
+
+- **`src/lib/reqmem.cyr`: the request arena** ([ADR 013](docs/decisions/013-request-memory.md), decision 1). Each thread
+  owns a growable arena, released when it starts a job. It is not `_remote_arena`, which resets at every remote call.
+  The chat path builds there explicitly: the prep record, the parsed request (`bayan_json_parse_a`), the cache key, the
+  generation options, the provider body, a remote answer's copy, the forward's record, the completion body and its
+  descriptor. A builder gets room in the arena (`sb_room_a`), because `str_builder_add_cstr` and friends grow on the heap.
+- **The boundary** (ADR 013 decision 2). A keeper copies what it keeps out of the arena (`mem_keep`). The cache copies its
+  key and value (`cache_insert_kept`), only when it is on, and hands its key to the semantic index. A batch item's answer
+  is copied out (`_resp_keep`), since the barrier and `GET /v1/batch/{id}` read it after the thread's next job.
+  `model_cstr` and the other strings a keeper may store stay on the heap. In the tests a reset fills what it releases
+  with `0xA5` (`REQ_ARENA_POISON`), so a pointer that crossed reads poison.
+- **`-D HOOSH_ALLOC_PROBE`** builds a gateway that serves `GET /v1/debug/alloc-used`, `alloc_used()` in decimal.
+  `scripts/memory-growth.py` reports it per request, buffered and streamed. The release build has no such route.
+- **`scripts/memory-growth.py --chunks N`** streams an N-token reply, one NDJSON line each; `--stream-only` skips the
+  buffered run; `--prefill N` sends N chats before a `--get` run, so `--get /v1/events/recent --prefill 200` reads a full
+  ring.
+- **`scripts/wire-smoke.py`** has three new runs. `events` reads `GET /v1/events/recent` from two threads while six
+  send chats with quoted, backslashed model names: every read parses, and the full ring holds 128, each model exactly as
+  sent (it fails on 2.10.2, on the double escape). `stream` sends a many-token reply with quotes, backslashes, non-ASCII text
+  and a 9,000-byte token through an Ollama and an OpenAI-compatible route, and checks that every chunk parses, all carry
+  one id, and the deltas join into the reply. `trace` is agnosai's repro against a stub provider and a stub collector:
+  the provider's `traceparent`, the span's id and parent, batch items sync and async, items with no header after the
+  workers have served others, and an all-zero parent. 8 of its 10 checks fail on 2.10.2.
+
+### Changed — request memory
+
+| kept per request, `alloc_used()` | 2.10.2 | 2.10.3 |
+|---|---:|---:|
+| buffered chat, local Ollama route | 4,563 | **974** |
+| of which the response cache keeps (key, body, entry) | ~500 | ~500 |
+| streamed chat, 1 token | 4,357 | **352** |
+| streamed chat, 100 tokens | 102,992 | **352** |
+| streamed chat, 1,000 tokens | 1,010,192 | **353** |
+| `GET /v1/events/recent`, a full ring | 57,528 | **176** |
+
+From `scripts/memory-growth.py` against a `-D HOOSH_ALLOC_PROBE` build of each, unique prompts, 2,000 requests (500 and
+200 for the long streams, 500 GETs after 200 chats). 2.10.2 is that tag with only the probe route added. Request memory,
+all but what the cache keeps by design, is about 480 bytes for a buffered chat: ADR 013's target was under 1 KiB. What
+is left is listed in the ADR.
+
+A request with a `traceparent` takes nothing for its context either. Both contexts are written into one 128-byte block
+per thread; through 2.10.2 they were heap allocations, 56 bytes with a header and 64 without.
+
+### Changed — dependency pins
+
+None. cyrius 6.7.18, ai-hwaccel 2.5.6, bote 3.8.15 and majra 2.13.0 are their latest tags, and sigil 3.13.15 and sandhi 1.13.7
+come with cyrius. The vendored bundles and `data/` are unchanged.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (1890 → 2035). New groups:
+  - `trace_child`: the child context, a later version, upper case read in lowercase, the invalid values, a context begun
+    again from itself, 512 ids distinct and opaque, and no heap over 2,000 requests.
+  - `trace_wire`: the header builders and `_provider_headers` send hoosh's own, and the span's id and `parentSpanId`.
+  - `trace_jobs`: what each job type begins from.
+  - `request_arena`: room, spans with no copy, the poisoned reset across chunks, `job_begin`, and reuse.
+  - `arena_boundary`: the cache key, completion and provider bodies, the same bytes from the arena with nothing on the
+    heap. A kept descriptor and the cache's copies survive a poisoned reset, and the arena's read poison. So does the
+    forward's record, after the next job's start.
+  - `stream_chunks`: each chunk's bytes against 2.10.2's builder, a 10,000-byte chunk, 1,000 chunks with nothing on the
+    heap, the stream head, the stop and usage chunks, and `_json_str_span`.
+  - `event_ring`: `sb_on` and `mem_copy_words` at every length and offset, 4,000 events with nothing on the heap once the
+    slots exist, a copy that outlives the caller's buffer, a 3,000-byte model, an empty slot skipped, a full ring's GET
+    with nothing on the heap, and an escaped model, `\u` escapes and a surrogate pair decoded once.
+- **The loopback server stops counting a waker as a request.** When a run's server saw the stop flag before it accepted
+  its waker, the next run counted the waker: "a 429 is retried too (got 4, expected 3)", seen once.
+- **`fuzz/trace_extract.fcyr` fuzzes the real module.** It was a copy of `trace_extract` from before 2.6.8's validation.
+  It includes `src/lib/trace.cyr` now and drives `trace_begin`, checking on every input that hoosh's context is a W3C
+  traceparent in lowercase, and that with an inbound one it is its child. Reverting the fix fails it.
+- **`tests/hoosh.bcyr`** (30 → 36): `trace_begin_child`, `cache_key_arena`, `chat_body_arena`, `provider_body_arena`,
+  `sse_chunk_send`, `event_completed_ring`.
+- Every new test was mutation-checked: reverting each fix fails a test.
+
+### Sizes and performance
+
+| | 2.10.2 | 2.10.3 | |
+|---|---:|---:|---:|
+| x86_64 | 4,039,000 | 4,051,528 | +0.3% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,634,072 | 2,646,600 | +0.5% |
+| aarch64 | 4,718,600 | 4,718,840 | +0.0% |
+| AGNOS, `CYRIUS_DCE=1` | 2,602,472 | 2,610,912 | +0.3% |
+
+The warning sets are identical on all three targets.
+
+A request's trace context, alternated over three rounds of seven (only `trace.cyr` included): **2.06 → 0.20 µs** with no
+`traceparent`, the common case, where the clock syscall is gone, and 0.80 → 0.92 µs with one, for the span id 2.10.2 did
+not mint.
+
+An event, alternated over three rounds of seven: one built and emitted as a completion's is (`event_completed_ring`),
+**1,132 → 797 ns**, with nothing on the heap. `event_publish_ring`, `event_emit` of a caller's string, is 174 → 230 ns:
+the ring copies the event now, where it kept a pointer to it.
+
+The 30 rows both releases have, alternated over five rounds before the event ring changed: every row's range overlaps
+but one. `batch_split_4` reads
++5.1% (741 → 779 ns). `_batch_split` is unchanged: its 1,246 bytes differ only in three `call` displacements, and it moved
+from byte 41 to byte 56 of its cache line. That is placement.
+
+The recorded run (36 rows, taken once no other compile was running) reads every unchanged row 3–20% faster than
+2.10.2's, which was taken on a busier machine, so read those as the machine and the alternated figures above as the
+change. `event_publish_ring` reads +35% there, the copy.
+
 ## [2.10.2] — 2026-11-07
 
 **The three issues agnosai filed, all fixed.** An error with a quote in it was not JSON, every `GET /v1/models/catalog`

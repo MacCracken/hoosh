@@ -1,6 +1,7 @@
 # ADR-013: What a request's memory belongs to
 
-**Status:** Proposed (2.10.0). 2.10.0 and 2.10.2 ship the fixes in their "Done" sections; the chat path's arena is planned for 2.10.x.
+**Status:** Accepted (2.10.3). 2.10.0 and 2.10.2 ship the fixes in their "Done" sections, and 2.10.3 decision 1 for
+the chat path, with decision 2's boundary for the keepers it reaches. The rest is on the roadmap.
 **Date:** 2026-11-05
 
 ## Context
@@ -68,6 +69,47 @@ worth, for no provider tokens.
 **After all three:** 176 bytes per catalog GET, 304 per `/v1/models` and 160 per `/api/tags`, all under the 1 KiB target at 200
 entries. `scripts/memory-growth.py --get` repeats it, and reports `alloc_used()` from a scratch build that serves
 `GET /v1/debug/alloc-used`, since VmRSS moves in whole chunks at these sizes.
+
+## Done in 2.10.3
+
+- **The request arena** is `src/lib/reqmem.cyr`: `req_arena()` per thread, released by `req_arena_begin()` when a job
+  starts (`job_begin`, wq.cyr), as decision 1 has it. Slot 11. A thread that runs no jobs never releases its arena, and
+  nothing on such a thread allocates from it per request.
+- **The chat path builds there:** the prep record, the parsed request (`bayan_json_parse_a`), the cache key
+  (`_cache_key_a`, with no copy of the body), the generation options, the provider body (`_build_chat_body_raw_x`, its
+  Ollama translation included), a remote answer's copy, the forward's record, the completion body and its descriptor,
+  and a stream's stop and usage chunks. A builder gets room in the arena (`sb_room_a`) and is read in place (`sb_cstr`).
+- **The boundary**, for the keepers this path reaches: the cache copies its key and value (`cache_insert_kept`) and gives
+  its key to the semantic index, and a batch item's answer is copied out (`_resp_keep`). The strings `audit_record` and
+  the cost records may keep (`model_cstr`, `prompt_cstr`, the pool name) stay on the heap. The tests poison a reset.
+- **A stream's chunks** are written from one buffer per thread, reused for every chunk, and its tokens read in place.
+  This was not in the table above, which was measured with a one-line stream: a stream kept about 1 KB per token.
+- **A request's trace context** is written into one block per thread, not two heap allocations.
+- **Decision 3 for the event ring:** each slot is a buffer, copied into and reused as the ring wraps (`_ev_slot_put`),
+  grown only for an event larger than any it has held. An event is built on the stack (`sb_on`), so building one takes
+  nothing either. `GET /v1/events/recent` is built in the request arena, sized under the lock.
+
+**After 2.10.3** (`scripts/memory-growth.py` against a `-D HOOSH_ALLOC_PROBE` build, which serves
+`GET /v1/debug/alloc-used`):
+
+| | 2.10.2 | 2.10.3 |
+|---|---:|---:|
+| buffered chat | 4,563 | 974, of which the cache keeps ~500 |
+| stream, 1 token | 4,357 | 352 |
+| stream, 1,000 tokens | 1,010,192 | 353 |
+| `GET /v1/events/recent`, a full ring | 57,528 | 176 |
+
+So request memory is about 480 bytes for a buffered chat, under the 1 KiB target. What remains, per phase (`alloc_used()`
+marks in a scratch build, median of 300 unique chats; the rest of the 974 is the cache's map growing now and then):
+
+| phase | bytes | what |
+|---|---:|---|
+| connection handling | 184 | the path's copy, the log line, auth |
+| prep | 64 | `model_cstr` and the other heap strings, the message spans |
+| forward | 144 | the local client's record (80), the reply text (56) and finish reason (8) copied out |
+| events | 0 | the ring copies into recycled slots |
+| the cache's copies | 496 | its key, value and entry: process memory, kept until evicted (decision 3) |
+| assemble and write | 0 | |
 
 ## Decision
 
@@ -137,5 +179,6 @@ made. It stays an option for later, behind an audit of every lazy initialization
 
 ## References
 
-- CHANGELOG 2.10.0 (the measurements), 2.9.3 (`_remote_arena`), 2.5.11 (the per-thread request buffer).
+- CHANGELOG 2.10.0 (the measurements), 2.10.3 (the arena, the stream, the boundary), 2.9.3 (`_remote_arena`), 2.5.11
+  (the per-thread request buffer).
 - ADR 011 (the worker pool and its jobs).

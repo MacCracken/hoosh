@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.7.18)
-- **Version**: SemVer 2.10.2 stable
+- **Version**: SemVer 2.10.3 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -66,6 +66,11 @@ wrapper (guarded by the `hardware_data_files` test).
 - **Syscalls via `sys_*` wrappers** (`sys_write`/`sys_read`/`sys_close`/`sys_socket`/`sys_connect`/`sys_exit`) — never raw `syscall(N, …)` numbers or bare `SYS_*` enum members.
 - **Single-pass include order** — modules must be `include`d before first use (`include "lib/ai-hwaccel.cyr"` before any module that calls into it).
 - **Build strings with `str_builder`**, allocate with `alloc` only when you must — avoid temporary allocations.
+- **On the request path, allocate from the request arena** (`req_arena()`, `src/lib/reqmem.cyr`, ADR 013): it is released
+  when the thread's next job starts. Anything a keeper stores (the cache, the semantic index, audit, batch results,
+  the event ring) must be copied out with `mem_keep`, or stay on the heap. A string copied out before its function
+  returns can be built on the stack (`sb_on`), as the events are. Measure with a `-D HOOSH_ALLOC_PROBE` build
+  and `scripts/memory-growth.py` (`--chunks N` for streams).
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
 - **Do not panic in library code** — return error codes / `Result`; reserve fatal exits for `main`.
 

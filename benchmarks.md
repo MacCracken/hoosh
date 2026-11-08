@@ -1,41 +1,47 @@
 # Benchmarks
 
-Latest: **2026-11-07T08:36:35Z** — commit `6f634f4`
+Latest: **2026-11-08T07:27:55Z** — commit `6df894d`
 
 ## hoosh
 
-| Benchmark | Baseline (`8c46669`) | Previous (`9749dd9`) | Current (`6f634f4`) |
+| Benchmark | Baseline (`9749dd9`) | Previous (`6f634f4`) | Current (`6df894d`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 843 ns | 837 ns | 900 ns +7% |
-| `route_round_robin_10` | 127 ns | 125 ns | 154 ns +21% |
-| `pool_reserve_commit` | 37 ns | 37 ns | 41 ns +11% |
-| `pool_available` | 5 ns | 4 ns **-20%** | 5 ns |
-| `cache_get_hit` | 127 ns | 127 ns | 141 ns +11% |
-| `cache_get_miss` | 57 ns | 56 ns | 64 ns +12% |
-| `cache_insert` | 201 ns | 200 ns | 222 ns +10% |
-| `cache_insert_full` | 1.89 us | 1.92 us | 2.08 us +10% |
-| `route_matches_model` | 32 ns | 31 ns **-3%** | 36 ns +12% |
-| `estimate_tokens_per_provider` | 9 ns | 9 ns | 10 ns +11% |
-| `dlp_scan_clean_prompt` | 4.36 us | 4.17 us **-4%** | 4.82 us +11% |
-| `mcp_tools_list` | 3.62 us | 3.49 us **-4%** | 3.99 us +10% |
-| `mcp_tools_call` | 5.26 us | 5.12 us | 5.87 us +12% |
-| `batch_split_4` | 781 ns | 767 ns | 861 ns +10% |
-| `latency_bucket_find` | 57 ns | 55 ns **-4%** | 64 ns +12% |
-| `work_queue_push_pop` | 158 ns | 151 ns **-4%** | 171 ns +8% |
-| `auth_verify_token` | 82 ns | 78 ns **-5%** | 89 ns +9% |
-| `auth_verify_wrong_late` | 81 ns | 79 ns | 89 ns +10% |
-| `auth_verify_wrong_early` | 82 ns | 78 ns **-5%** | 89 ns +9% |
-| `rate_limit_check` | 9 ns | 9 ns | 10 ns +11% |
-| `cost_record_known_model` | 218 ns | 210 ns **-4%** | 296 ns +36% |
-| `cost_record_local_free` | 113 ns | 111 ns | 125 ns +11% |
-| `cost_record_live_catalog` | 542 ns | 657 ns +21% | 745 ns +37% |
-| `metadata_lookup_live_catalog` | 449 ns | 575 ns +28% | 581 ns +29% |
-| `audit_record_sign` | 7.06 us | 7.00 us | 7.13 us |
-| `event_publish_ring` | 183 ns | 182 ns | 185 ns |
-| `catalog_body_build_200` | — | — | 3.29 ms |
-| `catalog_body_held_200` | — | — | 9 ns |
-| `models_list_200_arena` | — | — | 1.41 ms |
-| `provider_err_set_utf8_511b` | — | — | 4.44 us |
+| `route_select_20_providers` | 837 ns | 900 ns +8% | 814 ns |
+| `route_round_robin_10` | 125 ns | 154 ns +23% | 124 ns |
+| `pool_reserve_commit` | 37 ns | 41 ns +11% | 36 ns |
+| `pool_available` | 4 ns | 5 ns +25% | 5 ns +25% |
+| `cache_get_hit` | 127 ns | 141 ns +11% | 124 ns |
+| `cache_get_miss` | 56 ns | 64 ns +14% | 57 ns |
+| `cache_insert` | 200 ns | 222 ns +11% | 195 ns |
+| `cache_insert_full` | 1.92 us | 2.08 us +8% | 1.87 us |
+| `route_matches_model` | 31 ns | 36 ns +16% | 32 ns +3% |
+| `estimate_tokens_per_provider` | 9 ns | 10 ns +11% | 9 ns |
+| `dlp_scan_clean_prompt` | 4.17 us | 4.82 us +16% | 4.22 us |
+| `mcp_tools_list` | 3.49 us | 3.99 us +14% | 3.60 us |
+| `mcp_tools_call` | 5.12 us | 5.87 us +15% | 5.17 us |
+| `batch_split_4` | 767 ns | 861 ns +12% | 763 ns |
+| `latency_bucket_find` | 55 ns | 64 ns +16% | 59 ns +7% |
+| `work_queue_push_pop` | 151 ns | 171 ns +13% | 154 ns |
+| `auth_verify_token` | 78 ns | 89 ns +14% | 81 ns +4% |
+| `auth_verify_wrong_late` | 79 ns | 89 ns +13% | 81 ns |
+| `auth_verify_wrong_early` | 78 ns | 89 ns +14% | 80 ns |
+| `rate_limit_check` | 9 ns | 10 ns +11% | 9 ns |
+| `cost_record_known_model` | 210 ns | 296 ns +41% | 268 ns +28% |
+| `cost_record_local_free` | 111 ns | 125 ns +13% | 112 ns |
+| `cost_record_live_catalog` | 657 ns | 745 ns +13% | 639 ns |
+| `metadata_lookup_live_catalog` | 575 ns | 581 ns | 536 ns **-7%** |
+| `audit_record_sign` | 7.00 us | 7.13 us | 6.84 us |
+| `event_publish_ring` | 182 ns | 185 ns | 250 ns +37% |
+| `catalog_body_build_200` | — | 3.29 ms | 3.00 ms |
+| `catalog_body_held_200` | — | 9 ns | 9 ns |
+| `models_list_200_arena` | — | 1.41 ms | 1.36 ms |
+| `provider_err_set_utf8_511b` | — | 4.44 us | 4.44 us |
+| `event_completed_ring` | — | — | 974 ns |
+| `trace_begin_child` | — | — | 932 ns |
+| `cache_key_arena` | — | — | 1.59 us |
+| `chat_body_arena` | — | — | 3.97 us |
+| `provider_body_arena` | — | — | 2.16 us |
+| `sse_chunk_send` | — | — | 1.76 us |
 
 ---
 

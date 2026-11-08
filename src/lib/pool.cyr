@@ -159,6 +159,7 @@ fn _handle_conn(cfd) {
 # Process one job (a connection, or a batch item). Used by the worker loop and by
 # the sync-batch work-stealing barrier.
 fn job_process(job) {
+    job_begin(job);   # 2.10.3 (wq.cyr): each job's own trace context, and the thread's request arena released
     if (load64(job) == JOB_CONN) {
         _handle_conn(load64(job + 8));
         return 0;

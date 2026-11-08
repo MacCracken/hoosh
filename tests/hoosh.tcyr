@@ -36,6 +36,7 @@ include "src/vendor/majra.cyr"
 # Provider / Strategy enums, error and provider helpers, generation options, _sb_add_milli / _sb_add_sampling,
 # status_retryable. They replaced the test file's own copies of all of it.
 include "src/lib/types.cyr"
+include "src/lib/reqmem.cyr"
 include "src/lib/logging.cyr"
 # 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
 # needs only sys_write), so the response-header path is tested against the REAL
@@ -2225,9 +2226,13 @@ fn _t_serve_many(arg) {
             sys_close(cfd);
             return 0;
         }
-        _t_read_http_req(cfd, buf, 16384);
-        _t_ms_count = _t_ms_count + 1;
-        sys_write(cfd, _t_ms_reply, strlen(_t_ms_reply));
+        # 2.10.3: a connection that sends nothing is the last run's waker. When that run's server saw the stop flag
+        # before it accepted the waker, the waker waited in the backlog and this run counted it as a request (seen
+        # once as "a 429 is retried too (got 4, expected 3)").
+        if (_t_read_http_req(cfd, buf, 16384) > 0) {
+            _t_ms_count = _t_ms_count + 1;
+            sys_write(cfd, _t_ms_reply, strlen(_t_ms_reply));
+        }
         sys_close(cfd);
     }
     return 0;
@@ -2376,6 +2381,612 @@ fn _t_count(s, pat) {
         if (memeq(s + i, pat, pl) == 1) { n = n + 1; i = i + pl; } else { i = i + 1; }
     }
     return n;
+}
+
+# ── 2.10.3: hoosh's span is the caller's child (agnosai's issue) ──
+var _T2103_CALLER = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+# A request with `tp` as its traceparent header, or with none when tp is 0.
+fn _t2103_req(tp) {
+    if (tp == 0) { return "POST /v1/chat/completions HTTP/1.1\r\nHost: h\r\n\r\n{}"; }
+    return _t_cat(_t_cat("POST /v1/chat/completions HTTP/1.1\r\nHost: h\r\ntraceparent: ", tp), "\r\n\r\n{}");
+}
+
+fn _t2103_copy(cs) { return _t_cat(cs, ""); }
+
+fn _t2103_trace_child() {
+    test_group("trace_child");
+    var req = _t2103_req(_T2103_CALLER);
+    trace_begin(req, strlen(req));
+    var own = trace_current_or_new();
+    assert_eq(strlen(own), 55, "child: hoosh's context is a whole traceparent");
+    assert_eq(memeq(own, "00-4bf92f3577b34da6a3ce929d0e0e4736-", 36), 1, "child: version 00, the caller's trace id");
+    assert_eq(memeq(own + 36, "00f067aa0ba902b7", 16), 0,
+      "child: a span id of hoosh's own (2.10.2 took the caller's)");
+    assert_eq(memeq(own + 52, "-01", 3), 1, "child: the caller's flags");
+    assert_streq(trace_inbound(), _T2103_CALLER, "child: the caller's traceparent is the inbound context");
+    var oreq = _t2103_req(own);
+    assert_streq(trace_extract(oreq, strlen(oreq)), own, "child: what a provider is sent is a valid traceparent");
+    assert_streq(trace_current_or_new(), own, "child: one context for the whole job");
+    var own1 = _t2103_copy(own);
+    trace_begin(req, strlen(req));
+    assert_eq(streq(trace_current_or_new(), own1), 0, "child: each request mints its own span id");
+    assert_eq(memeq(trace_current_or_new(), own1, 36), 1, "child: in the same trace");
+    # No header: a root, minted on first use, of a trace of its own.
+    var bare = _t2103_req(0);
+    trace_begin(bare, strlen(bare));
+    assert_eq(trace_inbound(), 0, "root: no inbound context");
+    var root = trace_current_or_new();
+    assert_eq(strlen(root), 55, "root: minted on first use");
+    assert_eq(memeq(root + 3, _T2103_CALLER + 3, 32), 0, "root: not the last request's trace");
+    # Read leniently, continued as the spec writes it.
+    var up = _t2103_req("00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-00");
+    trace_begin(up, strlen(up));
+    assert_streq(trace_inbound(), "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+      "child: an uppercase header is kept in lowercase");
+    assert_eq(memeq(trace_current_or_new() + 3, "4bf92f3577b34da6a3ce929d0e0e4736", 32), 1,
+      "child: and continued in lowercase");
+    assert_eq(memeq(trace_current_or_new() + 52, "-00", 3), 1, "child: an unsampled caller stays unsampled");
+    var v1 = _t2103_req("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    trace_begin(v1, strlen(v1));
+    assert_eq(memeq(trace_current_or_new(), "00-4bf92f3577b34da6a3ce929d0e0e4736-", 36), 1,
+      "child: a later version is continued as version 00");
+    # W3C §3.2.2: values the spec calls invalid start a root, as a malformed one does.
+    var bad = vec_new();
+    vec_push(bad, "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    vec_push(bad, "FF-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    vec_push(bad, "00-00000000000000000000000000000000-00f067aa0ba902b7-01");
+    vec_push(bad, "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01");
+    var bi = 0;
+    while (bi < vec_len(bad)) {
+        var br = _t2103_req(vec_get(bad, bi));
+        assert_eq(trace_extract(br, strlen(br)), 0, "invalid: refused by the extractor");
+        trace_begin(br, strlen(br));
+        assert_eq(trace_inbound(), 0, "invalid: no inbound context, so no parentSpanId");
+        bi = bi + 1;
+    }
+    # An explicit context is a root.
+    trace_begin(req, strlen(req));
+    trace_set(_T2103_CALLER);
+    assert_eq(trace_inbound(), 0, "set: an explicit context has no inbound");
+    assert_streq(trace_current_or_new(), _T2103_CALLER, "set: and is the current one");
+    # Begun again from the block's own contexts: read before it is written.
+    trace_begin(req, strlen(req));
+    var before = _t2103_copy(trace_current_or_new());
+    trace_begin_from(trace_inbound());
+    assert_streq(trace_inbound(), _T2103_CALLER, "again: from its own inbound, the inbound is kept");
+    assert_eq(streq(trace_current_or_new(), before), 0, "again: under a new span id");
+    before = _t2103_copy(trace_current_or_new());
+    trace_begin_from(trace_current_or_new());
+    assert_streq(trace_inbound(), before, "nested: from hoosh's own, hoosh's span is the parent");
+    assert_eq(memeq(trace_current_or_new(), before, 36), 1, "nested: in the same trace");
+    assert_eq(memeq(trace_current_or_new() + 36, before + 36, 16), 0, "nested: under a span id of its own");
+    # A copy outlives the thread's next request (a batch's items run after it).
+    trace_begin(req, strlen(req));
+    var cp = trace_inbound_copy();
+    trace_begin(bare, strlen(bare));
+    assert_streq(cp, _T2103_CALLER, "copy: still the submitter's after the next request");
+    assert_eq(trace_inbound_copy(), 0, "copy: none for a root");
+    # Ids: distinct, never zero, and not the counter (2.10.2 wrote the clock and the counter in plain hex).
+    var ids = alloc(8 * 512);
+    var ii = 0;
+    var dup = 0;
+    var zero = 0;
+    while (ii < 512) {
+        var v = _trace_id64();
+        if (v == 0) { zero = 1; }
+        var jj = 0;
+        while (jj < ii) {
+            if (load64(ids + jj * 8) == v) { dup = 1; }
+            jj = jj + 1;
+        }
+        store64(ids + ii * 8, v);
+        ii = ii + 1;
+    }
+    assert_eq(dup + zero, 0, "ids: 512 in a row, distinct and never zero");
+    assert_eq(load64(ids + 8) - load64(ids) != 1, 1, "ids: consecutive ids are not consecutive numbers");
+    var r1 = trace_generate();
+    var r2 = trace_generate();
+    assert_eq(memeq(r1 + 3, r2 + 3, 16) + memeq(r1 + 19, r2 + 19, 16), 0,
+      "ids: two roots share neither half of a trace id (2.10.2's first half was the clock)");
+    var hx = alloc(17);
+    _trace_hex64(0x00f067aa0ba902b7, hx);
+    store8(hx + 16, 0);
+    assert_streq(hx, "00f067aa0ba902b7", "hex: 16 lowercase digits");
+    _trace_hex64(0xBF58476D1CE4E5B9, hx);
+    store8(hx + 16, 0);
+    assert_streq(hx, "bf58476d1ce4e5b9", "hex: a value with its top bit set (2.10.2 divided, and wrote garbage)");
+    _trace_hex64(1, hx);
+    assert_streq(hx, "0000000000000001", "hex: leading zeros kept");
+    # ADR 013: a request's trace context lives in the thread's block, not on the heap that never frees.
+    trace_begin(req, strlen(req));
+    trace_current_or_new();
+    var u0 = alloc_used();
+    var k = 0;
+    while (k < 1000) {
+        trace_begin(req, strlen(req));
+        trace_current_or_new();
+        trace_begin(bare, strlen(bare));
+        trace_current_or_new();
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "memory: 2000 requests' contexts take nothing (2.10.2 kept 56 or 64 bytes each)");
+    trace_set(0);
+    return 0;
+}
+
+# What leaves hoosh: the upstream header and the exported span.
+fn _t2103_trace_wire() {
+    test_group("trace_wire");
+    var req = _t2103_req(_T2103_CALLER);
+    trace_begin(req, strlen(req));
+    var own = _t2103_copy(trace_current_or_new());
+    var hb = alloc(2048);
+    var hl = _build_post_header(hb, "/api/chat", "127.0.0.1", 2, 2048);
+    assert_eq(_t_has(hb, hl, _t_cat("\r\ntraceparent: ", own)), 1, "wire: a local backend is sent hoosh's own");
+    assert_eq(_t_has(hb, hl, "00f067aa0ba902b7"), 0, "wire: and not the caller's span id (2.10.2 forwarded it)");
+    hl = _build_req_header(hb, "GET", "/api/tags", "127.0.0.1", 0, 2048);
+    assert_eq(_t_has(hb, hl, _t_cat("\r\ntraceparent: ", own)), 1, "wire: on every method");
+    var rt = route_new(PROV_OPENAI, 1, "https://api.example");
+    var h = _provider_headers(rt);
+    assert_streq(sandhi_headers_get(h, "traceparent"), own, "wire: a remote provider is sent hoosh's own");
+    # The span: hoosh's id, the caller's as its parent.
+    _otlp_endpoint = "http://localhost:4318/v1/traces";
+    _otlp_spans = alloc(OTLP_RING_MAX * 8);
+    memset(_otlp_spans, 0, OTLP_RING_MAX * 8);
+    _otlp_lock = mutex_new();
+    _otlp_head = 0;
+    _otlp_count = 0;
+    otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
+    var sp = load64(_otlp_spans);
+    var want = _t_cat("{\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\",\"spanId\":\"", own + 36);
+    store8(want + strlen(want) - 3, 0);   # own + 36 runs to "-01": keep its 16 digits
+    want = _t_cat(want, "\",\"parentSpanId\":\"00f067aa0ba902b7\",\"name\":\"inference\",");
+    assert_eq(memeq(sp, want, strlen(want)), 1, "span: hoosh's span id, the caller's as its parentSpanId");
+    # No header: a root span has no parentSpanId at all.
+    var bare = _t2103_req(0);
+    trace_begin(bare, strlen(bare));
+    otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
+    var sr = load64(_otlp_spans + 8);
+    assert_eq(_t_has(sr, strlen(sr), "parentSpanId"), 0, "span: a root names no parent");
+    assert_eq(memeq(sr + 56, trace_current_or_new() + 36, 16), 1, "span: and its id is the one sent upstream");
+    # An invalid header is a root, so no zeros reach the collector as a parent.
+    var zr = _t2103_req("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01");
+    trace_begin(zr, strlen(zr));
+    otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
+    var sz = load64(_otlp_spans + 16);
+    assert_eq(_t_has(sz, strlen(sz), "parentSpanId"), 0, "span: an all-zero parent is no parent");
+    _otlp_endpoint = 0;
+    _otlp_spans = 0;
+    _otlp_count = 0;
+    _otlp_head = 0;
+    trace_set(0);
+    return 0;
+}
+
+# Each job begins its own context (wq.cyr job_trace_begin): a worker's slots hold its last connection's.
+fn _t2103_trace_jobs() {
+    test_group("trace_jobs");
+    var req = _t2103_req(_T2103_CALLER);
+    var bare = _t2103_req(0);
+    trace_begin(req, strlen(req));
+    job_trace_begin(_job_conn(42));
+    assert_eq(trace_inbound(), 0, "job: a connection starts clean, and http_route begins it from its header");
+    trace_begin(req, strlen(req));
+    job_trace_begin(job_otlp_export(0, 0));
+    assert_eq(trace_inbound(), 0, "job: an OTLP export is a root");
+    assert_eq(memeq(trace_current_or_new() + 3, _T2103_CALLER + 3, 32), 0,
+      "job: not under the last connection's trace (2.10.2 sent it there)");
+    var jr = alloc(8);
+    store64(jr, 3);    # catalog_fetch.cyr's JOB_CATALOG_REFRESH
+    trace_begin(req, strlen(req));
+    job_trace_begin(jr);
+    assert_eq(trace_inbound(), 0, "job: a catalog refresh is a root");
+    # A batch item continues the request that submitted it, which has ended by then.
+    trace_begin(req, strlen(req));
+    var tin = trace_inbound_copy();
+    trace_begin(bare, strlen(bare));
+    job_trace_begin(job_batch_item(0, 0, 0, 0, 0, tin));
+    assert_streq(trace_inbound(), _T2103_CALLER, "job: a batch item's parent is the submitter's caller");
+    var s1 = _t2103_copy(trace_current_or_new());
+    job_trace_begin(job_batch_item(0, 0, 0, 0, 0, tin));
+    assert_eq(streq(trace_current_or_new(), s1), 0, "job: each item is a span of its own");
+    assert_eq(memeq(trace_current_or_new(), s1, 36), 1, "job: in the caller's trace");
+    trace_begin(req, strlen(req));
+    job_trace_begin(job_batch_item(0, 0, 0, 0, 0, 0));
+    assert_eq(trace_inbound(), 0, "job: an item of a request without a traceparent is a root");
+    trace_set(0);
+    return 0;
+}
+
+# ── 2.10.3: the request arena (reqmem.cyr, ADR 013 decision 1) ──
+fn _t2103_request_arena() {
+    test_group("request_arena");
+    var a = req_arena();
+    assert_eq(req_arena() == a, 1, "arena: one per thread");
+    assert_eq(req_arena_begin() == a, 1, "arena: a job's begin releases the same arena");
+    # A builder with room takes nothing from the heap until its room is used.
+    var u0 = alloc_used();
+    var sb = sb_room_a(a, 4096);
+    var k = 0;
+    while (k < 100) { str_builder_add_cstr(sb, "0123456789"); k = k + 1; }
+    var cs = sb_cstr(sb);
+    assert_eq(alloc_used() - u0, 0, "builder: 1000 bytes in its room take nothing from the heap");
+    assert_eq(strlen(cs), 1000, "builder: sb_cstr is its bytes, NUL-terminated");
+    assert_eq(sb_len(sb), 1000, "builder: and leaves its length");
+    var u1 = alloc_used();
+    sb_room_a(default_alloc(), 65536);
+    assert_eq(alloc_used() - u1 < 1024, 1, "builder: on the heap it reserves no room");
+    # A span is appended with no copy, up to a NUL, as its cstr copy was read.
+    var sp = alloc(8);
+    memcpy(sp, "xy", 2);
+    store8(sp + 2, 0);
+    memcpy(sp + 3, "zz", 2);
+    var sb2 = sb_room_a(a, 256);
+    u0 = alloc_used();
+    sb_add_bytes(sb2, "abcdef", 4);
+    sb_add_bytes(sb2, sp, 5);
+    sb_add_bytes(sb2, "q", 0);
+    assert_eq(alloc_used() - u0, 0, "span: appended with no copy");
+    assert_streq(sb_cstr(sb2), "abcdxy", "span: its bytes up to a NUL");
+    sb2 = sb_room_a(a, 256);
+    _sb_add_span(sb2, sp, 5);
+    assert_streq(sb_cstr(sb2), "xy", "span: provider.cyr's _sb_add_span is the same");
+    # The poisoned reset: what a reset releases reads 0xA5, and a kept copy does not.
+    REQ_ARENA_POISON = 1;
+    var p = alloc_via(a, 32);
+    memcpy(p, "request bytes", 14);
+    var kept = cstr_keep(p);
+    var kept2 = mem_keep(p, 7);
+    req_arena_begin();
+    assert_eq(load8(p), 0xA5, "poison: a reset fills what it released");
+    assert_eq(load8(p + 13), 0xA5, "poison: to its end");
+    assert_streq(kept, "request bytes", "keep: a copy outlives the reset");
+    assert_streq(kept2, "request", "keep: n bytes and a NUL");
+    assert_eq(cstr_keep(0), 0, "keep: nothing of nothing");
+    # Every chunk, past the first: an allocation larger than a chunk gets one of its own.
+    var big = alloc_via(a, REQ_ARENA_INITIAL + 100);
+    store8(big, 1);
+    store8(big + REQ_ARENA_INITIAL + 99, 1);
+    req_arena_begin();
+    assert_eq(load8(big) == 0xA5 && load8(big + REQ_ARENA_INITIAL + 99) == 0xA5, 1, "poison: every chunk it used");
+    # A job's start releases it (wq.cyr job_begin), whatever the job.
+    var q = alloc_via(a, 8);
+    store64(q, 7);
+    job_begin(_job_conn(1));
+    assert_eq(load8(q), 0xA5, "job: a connection's start releases the thread's request arena");
+    q = alloc_via(a, 8);
+    store64(q, 7);
+    job_begin(job_batch_item(0, 0, 0, 0, 0, 0));
+    assert_eq(load8(q), 0xA5, "job: and a batch item's");
+    REQ_ARENA_POISON = 0;
+    # It is reused: a loop of jobs settles at its high-water mark and takes nothing more.
+    req_arena_begin();
+    alloc_via(a, 2000);
+    var u2 = alloc_used();
+    k = 0;
+    while (k < 500) {
+        req_arena_begin();
+        var x = alloc_via(a, 2000);
+        store8(x, 1);
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - u2, 0, "arena: 500 jobs of 2000 bytes take nothing from the heap");
+    trace_set(0);
+    return 0;
+}
+
+# What the chat path builds there, and what crosses into process memory.
+fn _t2103_arena_boundary() {
+    test_group("arena_boundary");
+    REQ_ARENA_POISON = 1;
+    var a = req_arena_begin();
+    # The cache key: the same key as 2.10.2's, the sha256 of identity, model and body.
+    var body = "{\"model\":\"llama3\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+    var kc = str_builder_new();
+    str_builder_add_int(kc, auth_identity());
+    str_builder_add_cstr(kc, "\nllama3\n");
+    str_builder_add_cstr(kc, body);
+    var kcs = str_builder_build(kc);
+    var want = sha256_hex(str_data(kcs), str_len(kcs));
+    var hk = _cache_key("llama3", body, strlen(body));
+    assert_streq(hk, want, "key: the same key as ever");
+    var u0 = alloc_used();
+    var ak = _cache_key_a(a, "llama3", body, strlen(body));
+    assert_eq(alloc_used() - u0, 0, "key: in the arena, nothing on the heap (2.10.2 kept 632 bytes)");
+    assert_streq(ak, hk, "key: the same key from the arena");
+    # The completion body: the same bytes after its fresh head, and nothing on the heap.
+    var hb = to_cstr(_chat_completion_body("llama3", "hello there", 3, 4, 0, 12, "ollama", FIN_STOP));
+    u0 = alloc_used();
+    var ab = _chat_completion_body_a(a, "llama3", "hello there", 3, 4, 0, 12, "ollama", FIN_STOP);
+    assert_eq(alloc_used() - u0, 0, "completion: in the arena, nothing on the heap (2.10.2 kept 1.7 KB)");
+    var hm = _t_find(hb, "\"model\":");
+    var am = _t_find(str_data(ab), "\"model\":");
+    assert_eq(hm > 0 && am > 0, 1, "completion: both have the model after the head");
+    assert_streq(str_data(ab) + am, hb + hm, "completion: the same bytes from the arena");
+    assert_eq(str_len(ab), strlen(str_data(ab)), "completion: its length is its cstr's");
+    # The provider body, with its generation options, buffered and streamed.
+    var msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    var tools = "[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]";
+    var g = genopts_new(0, 100, 700, GEN_UNSET);
+    var pb = _build_chat_body_raw("llama3", msgs, strlen(msgs), tools, strlen(tools), g, 1, 0);
+    var ps = _build_chat_body_raw_stream("llama3", msgs, strlen(msgs), tools, strlen(tools), g, 1, 0);
+    u0 = alloc_used();
+    var ga = genopts_new_a(a, 0, 100, 700, GEN_UNSET);
+    var apb = _build_chat_body_raw_x(a, "llama3", msgs, strlen(msgs), tools, strlen(tools), ga, 1, 0, 0);
+    var aps = _build_chat_body_raw_x(a, "llama3", msgs, strlen(msgs), tools, strlen(tools), ga, 1, 0, 1);
+    assert_eq(alloc_used() - u0, 0, "provider body: in the arena with its options, nothing on the heap (2.10.2: 632)");
+    assert_streq(apb, pb, "provider body: the same bytes");
+    assert_streq(aps, ps, "provider body: the same stream bytes");
+    assert_eq(_t_has(pb, strlen(pb), "\"stream\":false,") + _t_has(ps, strlen(ps), "\"stream\":true,"), 2,
+      "provider body: one builder, both shapes");
+    assert_eq(_t_has(pb, strlen(pb), "\"options\":{\"temperature\":0.7,\"num_predict\":100}"), 1,
+      "provider body: the options read from the arena");
+    # The descriptor: a kept copy survives the reset, and the arena's reads poison.
+    var d = _resp_set_header(_resp_new_a(a, "200", "OK", str_data(ab), str_len(ab)), "X-Hoosh-Cache: MISS");
+    var kd = _resp_keep(d);
+    var dbody = load64(d + 16);
+    var abody = to_cstr(str_from(str_data(ab)));
+    # The cache keeps copies of the key and the body, and gives the key to the semantic index.
+    var c = cache_new(4, 1, 0);
+    var ck = cache_insert_kept(c, ak, str_data(ab), str_len(ab));
+    assert_eq(ck != 0 && ck != ak, 1, "cache: it keeps a copy of the key");
+    var cd = cache_new(4, 0, 0);
+    assert_eq(cache_insert_kept(cd, ak, str_data(ab), str_len(ab)), 0, "cache: off, it keeps nothing");
+    assert_eq(cache_len(cd), 0, "cache: off, nothing inserted");
+    req_arena_begin();
+    assert_eq(load8(d), 0xA5, "boundary: the arena's descriptor reads poison after the job");
+    assert_eq(load8(dbody), 0xA5, "boundary: and its body");
+    assert_eq(load8(ak), 0xA5, "boundary: and so does the arena's key");
+    assert_streq(load64(kd + 16), abody, "boundary: a kept descriptor's body survives it");
+    assert_eq(load64(kd + 24), strlen(abody), "boundary: with its length");
+    assert_streq(load64(kd), "200", "boundary: and its status");
+    assert_streq(load64(kd + 32), "X-Hoosh-Cache: MISS", "boundary: and its header");
+    assert_streq(ck, hk, "cache: its key survives the job");
+    assert_streq(cache_get(c, hk), abody, "cache: and a later request is served the body");
+    assert_eq(_resp_keep(0), 0, "boundary: nothing kept of nothing");
+    # provider_forward's record is in the arena, so its caller reads it before the job ends.
+    var pf_port = alloc(8);
+    var pf_lfd = _t_listen(pf_port);
+    var pf_saved_router = _router;
+    var pf_routes = alloc(8);
+    store64(pf_routes, route_new(PROV_OLLAMA, 1, _t_base_url(load64(pf_port))));
+    _router = router_new(pf_routes, 1, STRAT_PRIORITY);
+    var pf_ok = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"message\":{\"role\":\"assistant\",\"content\":\"hi there\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":3,\"eval_count\":4}";
+    req_arena_begin();
+    var rf = _t_retry_run(pf_lfd, load64(pf_port), pf_ok, 0);
+    _router = pf_saved_router;
+    assert_eq(rf != 0, 1, "forward: a record");
+    if (rf == 0) { sys_close(pf_lfd); REQ_ARENA_POISON = 0; return 0; }
+    assert_streq(load64(rf), "hi there", "forward: the record's text, within the job");
+    assert_eq(load64(rf + 16) + load64(rf + 24), 7, "forward: and its token counts");
+    job_begin(_job_conn(1));
+    assert_eq(load8(rf), 0xA5, "forward: the record is the job's, released at the next");
+    sys_close(pf_lfd);
+    REQ_ARENA_POISON = 0;
+    trace_set(0);
+    return 0;
+}
+
+# ── 2.10.3: a stream's chunks are written from one reused buffer, and its tokens read with no copy ──
+fn _t2103_pipe_read(rfd) {
+    var buf = alloc(65536);
+    var total = 0;
+    var n = sys_read(rfd, buf, 65535);
+    if (n > 0) { total = n; }
+    store8(buf + total, 0);
+    return buf;
+}
+
+# The event 2.10.2's builder wrote: the head sb_add_chat_head writes, the model, and the delta.
+fn _t2103_want_chunk(model, open, content, close) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "data: ");
+    sb_add_chat_head(sb, "chat.completion.chunk");
+    str_builder_add_cstr(sb, "\"model\":\"");
+    str_builder_add_cstr(sb, model);
+    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"delta\":{");
+    str_builder_add_cstr(sb, open);
+    str_builder_add_cstr(sb, content);
+    str_builder_add_cstr(sb, close);
+    str_builder_add_cstr(sb, "\n\n");
+    return to_cstr(str_builder_build(sb));
+}
+
+fn _t2103_stream_chunks() {
+    test_group("stream_chunks");
+    chat_id_new();
+    var fds = alloc(8);
+    sys_pipe(fds);
+    var rfd = load32(fds);
+    var wfd = load32(fds + 4);
+    var content = "he said \\\"hi\\\" \\\\ caf\\u00e9";
+    var cclose = "\"},\"finish_reason\":null}]}";
+    assert_eq(sse_content_send(wfd, "llama3", content, strlen(content)), 0, "chunk: sent");
+    assert_streq(_t2103_pipe_read(rfd), _t2103_want_chunk("llama3", "\"content\":\"", content, cclose),
+      "chunk: the bytes 2.10.2's builder wrote");
+    sse_reasoning_send(wfd, "claude-x", "think", 5);
+    assert_streq(_t2103_pipe_read(rfd), _t2103_want_chunk("claude-x", "\"reasoning_content\":\"", "think", cclose),
+      "chunk: a thinking delta, the same");
+    var tc = "[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]";
+    sse_tool_send(wfd, "llama3", tc);
+    assert_streq(_t2103_pipe_read(rfd), _t2103_want_chunk("llama3", "\"tool_calls\":", tc, "},\"finish_reason\":null}]}"),
+      "chunk: a tool-call delta, the same");
+    sse_content_send(wfd, "llama3", "abcdef", 3);
+    var part = _t2103_pipe_read(rfd);
+    assert_eq(_t_has(part, strlen(part), "\"content\":\"abc\"}"), 1, "chunk: content[0..len), not to its NUL");
+    # A chunk larger than the buffer grows it, and arrives whole.
+    var big = alloc(10001);
+    memset(big, 122, 10000);
+    store8(big + 10000, 0);
+    sse_content_send(wfd, "llama3", big, 10000);
+    var bigr = _t2103_pipe_read(rfd);
+    assert_streq(bigr, _t2103_want_chunk("llama3", "\"content\":\"", big, cclose), "chunk: 10000 bytes, whole");
+    # Every later chunk reuses the buffer: a stream's tokens take nothing from the heap (2.10.2: ~1 KB each).
+    var u0 = alloc_used();
+    var r = 0;
+    while (r < 10) {
+        var k = 0;
+        while (k < 100) { sse_content_send(wfd, "llama3", "tok ", 4); k = k + 1; }
+        sys_read(rfd, big, 10000);
+        sys_read(rfd, big, 10000);
+        r = r + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "chunk: 1000 chunks take nothing from the heap");
+    # The head: the same bytes as ever, written from the stack.
+    u0 = alloc_used();
+    http_sse_begin(wfd);
+    assert_eq(alloc_used() - u0, 0, "head: a stream's head takes nothing from the heap (2.10.2 kept 760 bytes)");
+    var want_head = _t_cat("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n",
+      "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n");
+    want_head = _t_cat(want_head, "Connection: keep-alive\r\n\r\n");
+    assert_streq(_t2103_pipe_read(rfd), want_head, "head: the same bytes as ever");
+    # The stop and usage chunks: in the arena, the same bytes, and NUL-terminated so the writer copies nothing.
+    var a = req_arena_begin();
+    var hs = to_cstr(outcome_stop_chunk("llama3", FIN_LENGTH));
+    var hu = to_cstr(outcome_usage_chunk("llama3", 12, 34, 56, "ollama"));
+    u0 = alloc_used();
+    var as = outcome_stop_chunk_a(a, "llama3", FIN_LENGTH);
+    var au = outcome_usage_chunk_a(a, "llama3", 12, 34, 56, "ollama");
+    assert_eq(alloc_used() - u0, 0, "stop: the stop and usage chunks take nothing from the heap (2.10.2: 840 bytes)");
+    var hsm = _t_find(hs, "\"model\":");
+    var a_sm = _t_find(str_data(as), "\"model\":");
+    assert_eq(hsm > 0 && a_sm > 0, 1, "stop: both have the model after the head");
+    assert_streq(str_data(as) + a_sm, hs + hsm, "stop: the same bytes from the arena");
+    assert_eq(str_len(as), strlen(str_data(as)), "stop: NUL-terminated at its length");
+    var hum = _t_find(hu, "\"model\":");
+    var aum = _t_find(str_data(au), "\"model\":");
+    assert_streq(str_data(au) + aum, hu + hum, "usage: the same bytes from the arena");
+    assert_eq(str_len(au), strlen(str_data(au)), "usage: NUL-terminated at its length");
+    sys_close(rfd);
+    sys_close(wfd);
+
+    # A token is read where it is: _json_str_span, which _json_extract_str copies from.
+    var j1 = _t_cat("{\"a\":1,\"content\":\"he said \\\"x\\\" \\\\\",\"b\":\"y\",\"n\":null}", "");
+    var sp = alloc(16);
+    assert_eq(_json_str_span(j1, strlen(j1), "content", 7, sp), 1, "span: found");
+    assert_eq(load64(sp + 8), 16, "span: the value's length, escapes kept");
+    assert_eq(memeq(load64(sp), "he said \\\"x\\\" \\\\", 16), 1, "span: where the value is");
+    assert_streq(_json_extract_str(j1, strlen(j1), "content", 7), "he said \\\"x\\\" \\\\",
+      "span: _json_extract_str copies the same bytes");
+    assert_eq(_json_str_span(j1, strlen(j1), "missing", 7, sp), 0, "span: absent");
+    assert_eq(load64(sp) + load64(sp + 8), 0, "span: and zeroed");
+    assert_eq(_json_str_span(j1, strlen(j1), "a", 1, sp), 0, "span: a number is not a string");
+    assert_eq(_json_str_span(j1, strlen(j1), "n", 1, sp), 0, "span: nor is null (OpenAI's finish_reason mid-stream)");
+    assert_streq(_json_extract_str(j1, strlen(j1), "n", 1), "", "span: and copies to \"\"");
+    var j2 = _t_cat("{\"content\":\"ab\\", "");
+    assert_eq(_json_str_span(j2, strlen(j2), "content", 7, sp), 1, "span: an unterminated value");
+    assert_eq(load64(sp) + load64(sp + 8) <= j2 + strlen(j2), 1, "span: ends inside the body");
+    assert_eq(_json_str_span(0, 5, "content", 7, sp) + _json_str_span(j1, 0, "content", 7, sp), 0,
+      "span: no body, no value");
+    u0 = alloc_used();
+    var q = 0;
+    while (q < 1000) { _json_str_span(j1, strlen(j1), "content", 7, sp); q = q + 1; }
+    assert_eq(alloc_used() - u0, 0, "span: 1000 reads take nothing (each token was a copy through 2.10.2)");
+    return 0;
+}
+
+# ── 2.10.3: the event ring copies into recycled slots, and an event is built on the stack (ADR 013 decision 3) ──
+fn _t2103_event_ring() {
+    test_group("event_ring");
+    # A builder over the caller's storage: nothing from the heap within its room, and right past it.
+    var hdr = alloc(24);
+    var room = alloc(64);
+    var u0 = alloc_used();
+    var sb = sb_on(hdr, room, 64);
+    str_builder_add_cstr(sb, "0123456789012345678901234567890123456789");
+    assert_eq(alloc_used() - u0, 0, "sb_on: 40 bytes in 64 of room take nothing from the heap");
+    assert_eq(load64(sb) == room, 1, "sb_on: written where the caller said");
+    str_builder_add_cstr(sb, "0123456789012345678901234567890123456789");
+    assert_streq(sb_cstr(sb), "01234567890123456789012345678901234567890123456789012345678901234567890123456789",
+      "sb_on: past its room it grows, and keeps every byte");
+    # The slot copy goes a word at a time: every length and source offset, and not a byte past n.
+    var src = alloc(64);
+    var dst = alloc(64);
+    var q = 0;
+    while (q < 64) { store8(src + q, 33 + q); q = q + 1; }
+    var bad = 0;
+    var off = 0;
+    while (off < 8) {
+        var len = 0;
+        while (len <= 40) {
+            memset(dst, 0, 64);
+            mem_copy_words(dst + 1, src + off, len);
+            if (load8(dst) != 0 || load8(dst + 1 + len) != 0) { bad = 1; }
+            if (len > 0 && memeq(dst + 1, src + off, len) == 0) { bad = 1; }
+            len = len + 1;
+        }
+        off = off + 1;
+    }
+    assert_eq(bad, 0, "copy: every length 0..40 at every offset 0..7, exact");
+    events_init();
+    # Fill every slot once, so each has a buffer; from then on the ring takes nothing.
+    var k = 0;
+    while (k < EVENT_RING_MAX) { event_inference_completed("ollama", "llama3", 1, 2); k = k + 1; }
+    u0 = alloc_used();
+    k = 0;
+    while (k < 1000) {
+        event_inference_completed("ollama", "llama3.2:latest", 120, 42);
+        event_inference_failed("openai", "gpt-4o", "backend unreachable");
+        event_rate_limited("groq");
+        event_health_changed("vllm", "http://v:2", 0);
+        k = k + 1;
+    }
+    assert_eq(alloc_used() - u0, 0, "ring: 4000 events take nothing once the slots exist (2.10.2: 328 bytes each)");
+    # A request's model keeps its JSON escapes (bayan's pairs do): the event says the text once, as the chat does.
+    event_inference_completed("ollama", "m\\\"x\\\\y", 1, 2);
+    var eb = _t_events_recent();
+    assert_eq(_t_has(eb, strlen(eb), "\"model\":\"m\\\"x\\\\y\","), 1,
+      "model: an escaped model is escaped once (2.10.2 wrote m\\\\\\\"x)");
+    event_inference_failed("ollama", "caf\\u00e9 \\ud83d\\ude00", "bad");
+    eb = _t_events_recent();
+    assert_eq(_t_has(eb, strlen(eb), "\"model\":\"caf\xc3\xa9 \xf0\x9f\x98\x80\","), 1,
+      "model: \\u escapes decode to UTF-8, a surrogate pair joined");
+    var lm = alloc(1300);
+    memset(lm, 120, 1290);
+    memcpy(lm + 1290, "\\\"", 2);
+    store8(lm + 1292, 0);
+    event_inference_completed("ollama", lm, 1, 2);
+    eb = _t_events_recent();
+    assert_eq(_t_has(eb, strlen(eb), "xx\\\"\",\"latency_ms\":1,"), 1, "model: a long escaped name, decoded on the heap");
+    # The ring keeps a copy: the caller's buffer is free to change.
+    var mine = _t_cat("{\"n\":\"before\"}", "");
+    event_emit("providers/inference", mine);
+    memcpy(mine + 6, "AFTER!", 6);
+    var body = _t_events_recent();
+    assert_eq(_t_has(body, strlen(body), "{\"n\":\"before\"}]}"), 1, "ring: an event is copied in, not pointed at");
+    # An event larger than its slot (and its stack room) grows them, and reads back whole.
+    var longm = alloc(3001);
+    memset(longm, 109, 3000);
+    store8(longm + 3000, 0);
+    event_inference_completed("ollama", longm, 7, 8);
+    body = _t_events_recent();
+    var want = _t_cat(_t_cat("{\"event\":\"inference_completed\",\"provider\":\"ollama\",\"model\":\"", longm),
+      "\",\"latency_ms\":7,\"tokens\":8}]}");
+    assert_eq(_t_has(body, strlen(body), want), 1, "ring: a 3000-byte model, whole and last");
+    # A slot that could not grow is left empty, and the reader skips it without an empty element.
+    var idx = (_event_head - 2) % EVENT_RING_MAX;
+    store64(_event_ring + idx * EVENT_SLOT + 16, 0);
+    body = _t_events_recent();
+    assert_eq(_t_has(body, strlen(body), ",,") + _t_has(body, strlen(body), "[,"), 0,
+      "ring: an empty slot is skipped cleanly");
+    assert_eq(_t_count(body, "{\"event\":") + _t_count(body, "{\"n\":"), EVENT_RING_MAX - 1,
+      "ring: and only it");
+    # GET /v1/events/recent builds in the request arena: once it has room, a full ring's GET takes nothing.
+    req_arena_begin();
+    _t_events_recent();
+    var dn = sys_open("/dev/null", 1, 0);
+    var r = 0;
+    u0 = alloc_used();
+    while (r < 10) {
+        req_arena_begin();
+        handle_events_recent(dn);
+        r = r + 1;
+    }
+    var used = alloc_used() - u0;
+    sys_close(dn);
+    assert_eq(used, 0, "recent: a full ring's GET takes nothing from the heap (2.10.2 kept 57.5 KB)");
+    return 0;
 }
 
 fn main() {
@@ -4415,13 +5026,14 @@ fn main() {
     var jc = _job_conn(42);
     assert_eq(load64(jc), JOB_CONN, "job: conn type");
     assert_eq(load64(jc + 8), 42, "job: conn fd at +8");
-    var jb = job_batch_item(1000, 17, 2000, 3000, 4000);
+    var jb = job_batch_item(1000, 17, 2000, 3000, 4000, 6000);
     assert_eq(load64(jb), JOB_BATCH_ITEM, "job: batch item type");
     assert_eq(load64(jb + 8), 1000, "job: batch request pointer at +8");
     assert_eq(load64(jb + 16), 17, "job: batch request length at +16");
     assert_eq(load64(jb + 24), 2000, "job: batch result slot at +24");
     assert_eq(load64(jb + 32), 3000, "job: batch completed counter at +32");
     assert_eq(load64(jb + 40), 4000, "job: batch failed counter at +40");
+    assert_eq(load64(jb + 48), 6000, "job: batch inbound trace context at +48");
     var jo = job_otlp_export(5000, 9);
     assert_eq(load64(jo), JOB_OTLP_EXPORT, "job: otlp export type");
     assert_eq(load64(jo + 8), 5000, "job: otlp document at +8");
@@ -6969,6 +7581,13 @@ fn main() {
     _t2102_catalog_lend();
     _t2102_catalog_held();
     _t2102_listing_arena();
+    _t2103_trace_child();
+    _t2103_trace_wire();
+    _t2103_trace_jobs();
+    _t2103_request_arena();
+    _t2103_arena_boundary();
+    _t2103_stream_chunks();
+    _t2103_event_ring();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

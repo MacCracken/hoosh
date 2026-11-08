@@ -29,7 +29,8 @@ Clients (curl, daimon, AGNOS consumer apps)
 Accept loop (accept + enqueue) → unified 7-worker pool ── main.cyr / pool.cyr
     │
     ├─ Auth (bearer, constant-time) ── auth.cyr
-    ├─ Trace context (traceparent, thread-local) ── trace.cyr
+    ├─ Trace context (2.10.3: hoosh's span is the caller's child) ── trace.cyr
+    ├─ Request arena (per thread, released at each job's start) ── reqmem.cyr
     ▼
 Router (priority │ round-robin │ lowest-latency │ direct) ── router.cyr / route.cyr
     │  health-filtered: unhealthy routes withdrawn ── health.cyr
@@ -81,14 +82,15 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
 | `models.cyr` | The model listings (2.9.22 split from `handlers.cyr`): `/v1/models`' body (`models_list_json_a`), one entry per id, a local backend's own list, the catalog and table fallbacks, `_cat_literal`; since 2.10.2 `/v1/models/catalog`'s body too, built once per change and held (`models_catalog_body`, [ADR 013](../decisions/013-request-memory.md)) |
 | `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`), `add_devices`' sizes (2.9.22) |
-| `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, the job constructors, and `/v1/queue/status`'s body (2.9.26) |
+| `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, the job constructors, `/v1/queue/status`'s body (2.9.26), and `job_begin` (2.10.3: each job's trace context and a released request arena) |
 | `pool.cyr` | Unified worker pool (v2.4.0; on a target with no second thread the accept loop serves instead, [ADR 011](../decisions/011-multithreaded-accept-loop.md)'s 2.10.1 addendum) — 7 workers draining `wq.cyr`'s queue (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
-| `events.cyr` | Provider event bus (majra pubsub) + recent-events ring |
+| `events.cyr` | Provider event bus (majra pubsub) + recent-events ring: 128 slots each event is copied into and reused as the ring wraps, events built on the stack (2.10.3) |
 | `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring, span and batch JSON |
 | `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
-| `trace.cyr` | W3C `traceparent` propagation (thread-local carrier) |
+| `trace.cyr` | W3C `traceparent` propagation: per job, the caller's context and hoosh's own under it, in one block per thread; ids from a keyed permutation of a counter (2.10.3, [ADR 010](../decisions/010-observability.md)'s update) |
+| `reqmem.cyr` | The request arena (2.10.3, [ADR 013](../decisions/013-request-memory.md)): one growable arena per thread, released when a job starts; builders with room in it; `mem_keep`, the copy a keeper stores |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms; the `/metrics` body (`metrics_render`, 2.9.21) |
 | `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry, evicting in O(1) through two lists in each entry (2.10.0) + semantic (embedding cosine) cache |
 | `budget.cyr` | Named token pools (reserve → commit/release) |
@@ -98,7 +100,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
 | `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers (each saying `kind`, tools and vision where its provider does, 2.10.2), the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling, and since 2.9.25 an index over each published list (exact id and dated alias) so lookups do not scan (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
 | `urlparse.cyr` | Scheme-aware host / port of a base url (2.8.0 — the remote health probe had been reading `https://` urls as `localhost:80`) |
-| `provider_err.cyr` | The provider's own error kept and relayed (2.6.5), and the OpenAI envelope: completion id and head, `chat_rehead`, the `chat.completion` body (`_chat_completion_body`, 2.9.21 from `handlers.cyr`) |
+| `provider_err.cyr` | The provider's own error kept and relayed (2.6.5), and the OpenAI envelope: completion id and head, `chat_rehead`, the `chat.completion` body (`_chat_completion_body`, 2.9.21 from `handlers.cyr`), and a stream's chunks from one reused buffer per thread (`sse_delta_send`, 2.10.3) |
 | `outcome.cyr` | Finish reasons mapped from each provider's words, stream usage (Anthropic `message_*`, OpenAI `usage`, Gemini `usageMetadata`, Ollama's final line), the Anthropic tool-fragment guard |
 | `keyindex.cyr` | An index over a compiled table of key-first rows (2.9.25): the exact key through a map, then the longest prefix by precomputed key lengths; pricing and metadata look up through it |
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09, and what `metadata_lend` fills into what an entry does not say (2.10.2) |

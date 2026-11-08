@@ -141,8 +141,12 @@ fn _json_array_count(ptr, len) {
 
 # The exact-key response cache's key. Identical requests (same caller, same model, byte-identical body) collide
 # to one entry; this is the exact-key LRU cache (the semantic cache handles similarity).
-fn _cache_key(model, body_ptr, body_len) {
-    var sb = str_builder_new();
+#
+# 2.10.3: in `a`, the request arena on the chat path (reqmem.cyr): 64 hex digits and a NUL, hashed from a builder
+# with room for the body, so nothing is copied. The cache keeps a copy of its own (_chat_assemble). Through 2.10.2
+# this kept a copy of the body, two of the key's text and the digest on the heap: 632 bytes for a short chat.
+fn _cache_key_a(a, model, body_ptr, body_len) {
+    var sb = sb_room_a(a, body_len + strlen(model) + 32);
     # Caller identity first: without it the cache was shared across every
     # consumer of the gateway, so one tenant's response could be replayed to
     # another for an identical prompt. 0 when auth is not configured, which
@@ -153,12 +157,26 @@ fn _cache_key(model, body_ptr, body_len) {
     str_builder_add_cstr(sb, "\n");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\n");
-    var bb = alloc(body_len + 1);
-    memcpy(bb, body_ptr, body_len);
-    store8(bb + body_len, 0);
-    str_builder_add_cstr(sb, bb);
-    var s = str_builder_build(sb);
-    return sha256_hex(to_cstr(s), str_len(s));
+    sb_add_bytes(sb, body_ptr, body_len);    # up to a NUL, as the cstr copy it replaced did
+    var digest[32];
+    sha256(load64(sb), sb_len(sb), &digest);
+    var out = alloc_via(a, 65);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < 32) {
+        var b = load8(&digest + i) & 255;
+        var hi = b / 16;
+        var lo = b % 16;
+        if (hi < 10) { store8(out + i * 2, 48 + hi); } else { store8(out + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out + i * 2 + 1, 48 + lo); } else { store8(out + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out + 64, 0);
+    return out;
+}
+
+fn _cache_key(model, body_ptr, body_len) {
+    return _cache_key_a(default_alloc(), model, body_ptr, body_len);
 }
 
 # Canonical compact body a client must POST to hit a warmed entry:

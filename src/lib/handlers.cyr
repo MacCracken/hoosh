@@ -1421,68 +1421,20 @@ fn _extract_messages(body_ptr, body_len) {
     return result;
 }
 
-# Stream one SSE chunk wrapping a content token
+# Stream one SSE chunk wrapping a content token (already escaped from the provider), one carrying an
+# extended-thinking delta (2.5.0) and one carrying tool_calls (passed through verbatim). 2.10.3: built in this
+# thread's chunk buffer (provider_err.cyr sse_delta_send), where each kept about 600 bytes on the heap per chunk.
+# Each propagates a dead peer, so the caller can stop pulling from the provider.
 fn _sse_chunk(cfd, model, content, content_len) {
-    var sb = str_builder_new();
-    sb_add_chat_head(sb, "chat.completion.chunk");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"delta\":{\"content\":\"");
-    # Add content (already escaped from provider)
-    var cs = str_builder_build(sb);
-    var prefix = to_cstr(cs);
-    var plen = strlen(prefix);
-    var suffix = "\"},\"finish_reason\":null}]}";
-    var slen = strlen(suffix);
-    var total = plen + content_len + slen;
-    var buf = alloc(total + 1);
-    memcpy(buf, prefix, plen);
-    memcpy(buf + plen, content, content_len);
-    memcpy(buf + plen + content_len, suffix, slen);
-    store8(buf + total, 0);
-    # Propagate a dead peer so the caller can stop pulling from the provider.
-    return http_sse_event(cfd, buf, total);
+    return sse_content_send(cfd, model, content, content_len);
 }
 
-# Stream one SSE chunk carrying an extended-thinking delta (2.5.0) as `delta.reasoning_content` — the de-facto
-# OpenAI-compat field for a model's reasoning stream (DeepSeek/others use it), kept SEPARATE from `delta.content`
-# so a client can fold the reasoning apart from the answer. Byte-for-byte `_sse_chunk` but for the delta key.
 fn _sse_reasoning_chunk(cfd, model, content, content_len) {
-    var sb = str_builder_new();
-    sb_add_chat_head(sb, "chat.completion.chunk");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"delta\":{\"reasoning_content\":\"");
-    var cs = str_builder_build(sb);
-    var prefix = to_cstr(cs);
-    var plen = strlen(prefix);
-    var suffix = "\"},\"finish_reason\":null}]}";
-    var slen = strlen(suffix);
-    var total = plen + content_len + slen;
-    var buf = alloc(total + 1);
-    memcpy(buf, prefix, plen);
-    memcpy(buf + plen, content, content_len);
-    memcpy(buf + plen + content_len, suffix, slen);
-    store8(buf + total, 0);
-    # Propagate a dead peer so the caller can stop pulling from the provider.
-    return http_sse_event(cfd, buf, total);
+    return sse_reasoning_send(cfd, model, content, content_len);
 }
 
-# Stream one SSE chunk wrapping a tool_calls delta (passed through verbatim).
 fn _sse_tool_chunk(cfd, model, tool_calls) {
-    var sb = str_builder_new();
-    sb_add_chat_head(sb, "chat.completion.chunk");
-    str_builder_add_cstr(sb, "\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,");
-    str_builder_add_cstr(sb, "\"delta\":{\"tool_calls\":");
-    str_builder_add_cstr(sb, tool_calls);
-    str_builder_add_cstr(sb, "},\"finish_reason\":null}]}");
-    var s = str_builder_build(sb);
-    var d = to_cstr(s);
-    return http_sse_event(cfd, d, str_len(s));
+    return sse_tool_send(cfd, model, tool_calls);
 }
 
 # _sse_error_chunk: send the upstream-error frame built by provider_err.cyr. The BODY lives there (and
@@ -1497,9 +1449,9 @@ fn _sse_error_chunk(cfd, model, status, message) {
 # finish — and, before [DONE], the usage chunk when the client asked for one (stream_options.include_usage).
 # `usage` is 0 for none, else the chunk's Str (outcome_usage_chunk).
 fn _sse_stop(cfd, model, finish, usage) {
-    var s = outcome_stop_chunk(model, finish);
-    http_sse_event(cfd, to_cstr(s), str_len(s));
-    if (usage != 0) { http_sse_event(cfd, to_cstr(usage), str_len(usage)); }
+    var s = outcome_stop_chunk_a(req_arena(), model, finish);    # 2.10.3: the request arena, and no copy
+    http_sse_event(cfd, str_data(s), str_len(s));
+    if (usage != 0) { http_sse_event(cfd, str_data(usage), str_len(usage)); }
     http_sse_done(cfd);
     return 0;
 }
@@ -1584,30 +1536,33 @@ fn _remote_stream_cb(ctx, ev) {
     if (prov == PROV_ANTHROPIC) { outcome_feed_anthropic(st, data, dlen); }
     elif (prov == PROV_GOOGLE) { outcome_feed_gemini(st, data, dlen); }
     else { outcome_feed_openai(st, data, dlen); }
-    var txt = 0;
+    # 2.10.3: each delta is read where it is in the event (jsonlite.cyr _json_str_span), as anthropic_extract_text,
+    # anthropic_extract_thinking and ollama_extract_text read it, without their copy per event.
+    var tsp[16];
     if (prov == PROV_ANTHROPIC) {
         # content_block_delta carries delta.text; other event types have no
         # "text":"..." and extract to empty (skipped below).
-        txt = anthropic_extract_text(data, dlen);
+        _json_str_span(data, dlen, "text", 4, &tsp);
         # 2.5.0 extended thinking: a thinking_delta -> emit a `reasoning_content` chunk (separate from the answer
         # content so the client can fold it). Empty on text/signature/message events. Only sent when the request
         # enabled thinking (budget_tokens), so this is inert for a normal turn.
-        var think = anthropic_extract_thinking(data, dlen);
-        if (strlen(think) > 0) {
-            _sse_reasoning_chunk(load64(ctx), load64(ctx + 8), think, strlen(think));
+        var ksp[16];
+        _json_str_span(data, dlen, "thinking", 8, &ksp);
+        if (load64(&ksp + 8) > 0) {
+            _sse_reasoning_chunk(load64(ctx), load64(ctx + 8), load64(&ksp), load64(&ksp + 8));
             store64(ctx + 24, load64(ctx + 24) + 1);
         }
     } else {
         if (prov == PROV_GOOGLE) {
             # candidates[].content.parts[].text
-            txt = anthropic_extract_text(data, dlen);
+            _json_str_span(data, dlen, "text", 4, &tsp);
         } else {
             # OpenAI-compat delta: choices[].delta.content
-            txt = ollama_extract_text(data, dlen);
+            _json_str_span(data, dlen, "content", 7, &tsp);
         }
     }
-    if (strlen(txt) > 0) {
-        _sse_chunk(load64(ctx), load64(ctx + 8), txt, strlen(txt));
+    if (load64(&tsp + 8) > 0) {
+        _sse_chunk(load64(ctx), load64(ctx + 8), load64(&tsp), load64(&tsp + 8));
         store64(ctx + 24, load64(ctx + 24) + 1);
     }
     # Tool-call deltas, converted per provider to OpenAI tool_call delta chunks.
@@ -1650,8 +1605,9 @@ fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen
     if (prov == PROV_GOOGLE) {
         return _build_gemini_body(msg_raw, msg_len, tools_raw, tools_len);
     }
-    return _build_chat_body_raw_stream(model, msg_raw, msg_len, tools_raw, tools_len, gen,
-      (prov == PROV_OLLAMA), route);
+    # 2.10.3: in the request arena (reqmem.cyr); sandhi has sent it before the stream's first read.
+    return _build_chat_body_raw_x(req_arena(), model, msg_raw, msg_len, tools_raw, tools_len, gen,
+      (prov == PROV_OLLAMA), route, 1);
 }
 
 # Build the streaming request URL for a remote provider.
@@ -1691,7 +1647,7 @@ fn _stream_meter(route, model, bpool, est_tokens, st, gen, served) {
         hlog_warn("chat stream: dropped tool-argument fragments whose call never started (no id/name reached hoosh)");
     }
     if (real == 1 && gen_usage(gen) == 1) {
-        return outcome_usage_chunk(model, ptok, ctok, cost, provider_name(route_provider(route)));
+        return outcome_usage_chunk_a(req_arena(), model, ptok, ctok, cost, provider_name(route_provider(route)));
     }
     return 0;
 }
@@ -1823,6 +1779,7 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
 
     var rbuf = sscr + SS_READ;
     var done = 0;
+    var tsp[16];       # 2.10.3: a token's span in the line (jsonlite.cyr _json_str_span), read with no copy
     # 2.7.0: SSE keep-alive. rust-old sent a comment every 15 s of silence, which
     # keeps a proxy's idle timeout (nginx and most load balancers: 60 s) from
     # cutting a stream while a model loads or thinks before its first token. The
@@ -1853,10 +1810,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                     if (is_ollama == 1) {
                         outcome_feed_ollama(oc, lbuf, lpos);       # 2.8.0: the final line's counts + done_reason
                         # Ollama NDJSON: extract "content"
-                        var txt = ollama_extract_text(lbuf, lpos);
-                        if (strlen(txt) > 0) {
+                        _json_str_span(lbuf, lpos, "content", 7, &tsp);
+                        if (load64(&tsp + 8) > 0) {
                             if (_sse_chunk(cfd, model,
-                                txt, strlen(txt)) < 0) { done = 1; }
+                                load64(&tsp), load64(&tsp + 8)) < 0) { done = 1; }
                             token_count = token_count + 1;
                         }
                         # 2.6.1: …and its tool calls. Reading only "content" meant a locally
@@ -1879,11 +1836,10 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
                                     done = 1;
                                 } else {
                                     outcome_feed_openai(oc, dptr, dlen);   # 2.8.0
-                                    var txt = ollama_extract_text(
-                                      dptr, dlen);
-                                    if (strlen(txt) > 0) {
+                                    _json_str_span(dptr, dlen, "content", 7, &tsp);
+                                    if (load64(&tsp + 8) > 0) {
                                         if (_sse_chunk(cfd, model,
-                                            txt, strlen(txt)) < 0) { done = 1; }
+                                            load64(&tsp), load64(&tsp + 8)) < 0) { done = 1; }
                                         token_count = token_count + 1;
                                     }
                                     # 2.6.1: a LOCAL OpenAI-compatible backend streams
@@ -2023,16 +1979,22 @@ fn _embed_query_body(body_ptr, body_len) {
 #   +104 thinking_budget (2.5.0)
 # Cache lookups are skipped when is_stream != 0 (matches the prior behavior:
 # streaming responses are never cache-served).
+#
+# 2.10.3: the record, the parsed request, the cache key and the generation options are in this thread's request
+# arena (reqmem.cyr), released when its next job starts. What the record hands on is either there, process memory
+# (the route, the pool) or heap strings a keeper may store (model_cstr: audit, the cost records); a terminal
+# descriptor is on the heap.
 fn _chat_prep(body_ptr, body_len, is_stream) {
-    var out = alloc(112);   # 2.5.0: +104 holds the extended-thinking budget (was alloc(104), fully used through +96)
+    var a = req_arena();
+    var out = alloc_via(a, 112);   # 2.5.0: +104 holds the extended-thinking budget (104 bytes were all used)
     store64(out, 0);
     store64(out + 104, 0);   # default: thinking off (set below from reasoning_effort)
     if (body_len == 0) {
         store64(out + 8, _resp_err("400", "Bad Request", "empty request body", "invalid_request_error"));
         return out;
     }
-    var body_str = str_new(body_ptr, body_len);
-    var pairs = json_parse(body_str);
+    var body_str = str_new_a(a, body_ptr, body_len);
+    var pairs = bayan_json_parse_a(a, body_str);
     if (pairs == 0) {
         store64(out + 8, _resp_err("400", "Bad Request", "invalid JSON", "invalid_request_error"));
         return out;
@@ -2139,7 +2101,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     var sem_vec = 0;
     var sem_n = 0;
     if (is_stream == 0) {
-        ckey = _cache_key(model_cstr, body_ptr, body_len);
+        ckey = _cache_key_a(a, model_cstr, body_ptr, body_len);
         var cached = cache_get(_cache, ckey);
         if (cached != 0) {
             hlog_info("chat: response cache hit");
@@ -2231,8 +2193,8 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # 2.5.0 extended thinking + 2.5.2 sampling, carried on the per-request prep
     # struct (out + 104) — hoosh is multi-threaded, so a global would race.
     # Absent/unknown values leave the request byte-identical to before.
-    var eff_word = alloc(8);
-    var gopts = genopts_new(catalog_req_effort(body_ptr, body_len, eff_word), g_maxt, g_temp, g_topp);
+    var eff_word = alloc_via(a, 8);
+    var gopts = genopts_new_a(a, catalog_req_effort(body_ptr, body_len, eff_word), g_maxt, g_temp, g_topp);
     gen_set_effort_name(gopts, load64(eff_word));        # 2.8.0: verbatim to OpenAI-compatible reasoning models
     gen_set_usage(gopts, catalog_req_include_usage(body_ptr, body_len));   # 2.8.0: the final usage chunk on a stream
     store64(out + 104, gopts);
@@ -2275,7 +2237,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
             # output size — unrelated to how much input the model can accept, so
             # a large-context model was compacted as aggressively as a small one.
             # Unknown models keep the old heuristic rather than an invented limit.
-            var mmeta = alloc(40);
+            var mmeta = alloc_via(a, 40);
             var token_limit = est_tokens * 2;
             if (metadata_lookup(model_cstr, mmeta) == 1) {
                 var derived = context_token_limit(load64(mmeta));
@@ -2401,16 +2363,21 @@ fn _chat_assemble(prep, result) {
           provider_name(route_provider(route)), model_cstr);
     }
 
-    var body = _chat_completion_body(model_cstr, resp_text, resp_ptok,
+    # 2.10.3: the body and its descriptor are in the request arena (reqmem.cyr); handle_chat writes them before the
+    # thread's next job, and _chat_produce copies a batch item's out.
+    var a = req_arena();
+    var body = _chat_completion_body_a(a, model_cstr, resp_text, resp_ptok,
       resp_ctok, resp_tool_calls, resp_cost_micro, provider_name(route_prov), load64(result + 40));
-    var body_cstr = to_cstr(body);
+    var body_cstr = str_data(body);
     var body_clen = str_len(body);
-    if (ckey != 0) { cache_insert(_cache, ckey, body_cstr); }
-    if (ckey != 0 && sem_vec != 0) { semantic_insert_model(ckey, sem_vec, sem_n, _sem_scope(model_cstr)); }
+    # ADR 013's boundary: the cache keeps its key and its value, and the semantic index the key, so they are copied
+    # out of the arena (cache.cyr), and only when the cache will keep them.
+    var kept_key = cache_insert_kept(_cache, ckey, body_cstr, body_clen);
+    if (kept_key != 0 && sem_vec != 0) { semantic_insert_model(kept_key, sem_vec, sem_n, _sem_scope(model_cstr)); }
     # MISS: this response was produced by a real forward, not replayed. A later
     # hit on it replays the body verbatim — including this cost — which is why
     # the header, not the body, is what a consumer must bill on.
-    return _resp_set_header(_resp_new("200", "OK", body_cstr, body_clen),
+    return _resp_set_header(_resp_new_a(a, "200", "OK", body_cstr, body_clen),
       "X-Hoosh-Cache: MISS");
 }
 
@@ -2423,19 +2390,22 @@ fn _chat_finish(prep) {
 # _chat_lock around the shared-state phases (prep, assemble) and releasing it
 # for the network forward. Batch workers call this from their own threads; the
 # concurrency lives entirely in the unlocked forward.
+#
+# 2.10.3: the answer is read after this thread's next job has reset its request arena (the sync barrier steals jobs,
+# GET /v1/batch/{id} reads an async one later), so it is copied out: ADR 013's boundary for batch results.
 fn _chat_produce(body_ptr, body_len) {
     mutex_lock(_chat_lock);
     var prep = _chat_prep(body_ptr, body_len, 0);
     var kind = load64(prep);
     mutex_unlock(_chat_lock);
-    if (kind == 0) { return load64(prep + 8); }
+    if (kind == 0) { return _resp_keep(load64(prep + 8)); }
 
     var result = _chat_forward(prep);
 
     mutex_lock(_chat_lock);
     var desc = _chat_assemble(prep, result);
     mutex_unlock(_chat_lock);
-    return desc;
+    return _resp_keep(desc);
 }
 
 # Accept-thread chat handler. Holds _chat_lock around the shared-state phases

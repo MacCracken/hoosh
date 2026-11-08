@@ -8,9 +8,10 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.9.10 (cyrius 6.7.18). 2.9.3 stopped remote requests leaking megabytes each; 2.9.3–2.9.10 put
-sixteen modules under test for real (fifteen replaced mirrors; `events.cyr` had no tests). See the CHANGELOG.
-**Next**: the 2.9.x patches and 2.10.0 below.
+**Current**: v2.10.3 (cyrius 6.7.18). 2.10.3 made hoosh's span the caller's child and gave the chat path a request
+arena: a buffered chat keeps 974 bytes, about 500 of them the cache's, and a stream 352 bytes whatever its length
+(2.10.2: 4.6 KB, and 1 MB for a 1,000-token stream). See the CHANGELOG.
+**Next**: the rest of ADR 013 below, then *Then, in any order*.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
@@ -91,21 +92,33 @@ per insert** once full, which with mostly new prompts was within about a minute.
 - **The catalog says `tier`, `kind` and `capabilities.tools`,** absent when nobody said
   ([ADR 012's addendum](../decisions/012-live-model-catalog.md#addendum-2102-tier-kind-and-tools)).
 
-### 2.10.3 and on — the per-request arena *(highest priority)*
+### 2.10.3 — the request arena, and a span of its own *(done)*
 
-From ADR 013:
-1. **A per-thread request arena,** reset when a worker starts a job, threaded explicitly through the chat path
-   (`_chat_prep`, `_chat_forward`, `_chat_assemble`, `_resp_write`) with the stdlib's `_a` variants and new `_a`
-   forms of hoosh's helpers. Anything not converted stays on the global heap, so a miss leaks rather than
-   corrupts. The chat path first, then embeddings and the rest. Target: request memory under 1 KiB per request.
-2. **The boundary:** whatever crosses into process memory is copied. That is the cache's envelope and key, the
-   semantic index, the event ring, audit entries (`audit_record` keeps the caller's pointers today), async batch
-   results and OTLP spans. In the tests the arena is poisoned on reset, so a pointer that crossed reads poison.
-3. **Process memory with churn:** cache entries, values and keys, the event ring's strings, and audit and OTLP past
-   their maxima are recycled on free lists instead of leaking when evicted.
+- **hoosh's span is the caller's child** under an inbound `traceparent`, and the provider is told so. A batch item is a
+  span of its own, every job begins its own context, and a minted id no longer reads as uptime and a counter.
+- **ADR 013 decision 1 for the chat path** (`src/lib/reqmem.cyr`): the request arena, released when a job starts, and
+  the boundary the cache and the batch results copy across. In the tests a reset poisons what it releases.
+- **A stream no longer keeps memory per token:** 1 MB for a 1,000-token reply through 2.10.2, 352 bytes now.
+- **The event ring recycles its slots** (decision 3), and an event is built on the stack: 328 bytes per completion, and
+  57.5 KB per `GET /v1/events/recent`, are gone.
 
-Measure each step with `scripts/memory-growth.py` (a fake local backend, unique prompts, `VmRSS`; `--get` for a listing), and
-`alloc_used()` per phase for a breakdown.
+### 2.10.x — the rest of ADR 013 *(highest priority)*
+
+What a buffered chat still keeps, about 480 bytes besides the cache's copy (`alloc_used()` per phase, ADR 013's table):
+1. **Connection handling before the handler** (184 bytes): `http_parse_path`'s copy, the log line, auth.
+2. **The forward's extractions** (144 bytes): the local client's record, and each `_json_extract_str` copy of the reply
+   text and finish reason. `_json_str_span`
+   (2.10.3) reads them with no copy; give the extractors an `_a` form, or read spans where the text goes straight into
+   the completion body.
+3. **The other paths:** embeddings, the Anthropic and Gemini body builders (`_build_anthropic_body_x` has three
+   builders and a `str_new` per part), the remote stream callback's tool-call deltas, and error descriptors.
+4. **Decision 2's remaining keepers:** `audit_record` keeps its caller's pointers, so anything that reaches it must stay
+   on the heap (today `model_cstr` does). Copy in `audit_record` before moving such strings into the arena.
+5. **Decision 3, recycling:** cache entries, values and keys, and audit and OTLP past their maxima, on free lists. The
+   event ring's recycled slots (2.10.3) are the pattern: a keeper with a bound reuses its own storage.
+
+Measure each step with `scripts/memory-growth.py` against a `-D HOOSH_ALLOC_PROBE` build: it reports `alloc_used()` per
+request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `--get` measures a listing.
 
 ### Then, in any order
 
@@ -159,6 +172,9 @@ Measure each step with `scripts/memory-growth.py` (a fake local backend, unique 
     3. **The wiring.** Vendor the bundle at `src/vendor/szal-mcp.cyr` and call `szal_register_into` in `mcp_init`.
        The transport does not change ([ADR 005](../decisions/005-mcp-via-bote.md)).
 - **Nested OTLP spans.** Provider-forward, cache and retry child spans under the inference span, extending 2.3.5.
+  Since 2.10.3 the inference span has an id of its own and names the caller's as its parent, and `trace_begin_from`
+  starts a context under any given one, so a child span is `trace_begin_from(trace_current_or_new())` around the
+  forward, with the old context restored after. A stream exports no span yet, and an embeddings request neither.
 - **OTLP/protobuf**, the standard wire format. It is no longer upstream-gated: cyrius ships `lib/protobuf.cyr`
   (`pb_tag`, `pb_write_varint`, …). Encode the existing OTLP/JSON document's fields as
   `ExportTraceServiceRequest`.

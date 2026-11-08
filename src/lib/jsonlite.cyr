@@ -62,17 +62,20 @@ fn _json_value_pos(body, len, key, keylen) {
     return 0 - 1;
 }
 
-# Extract the string value of the first `"<key>"` field (escaped `\"`
-# preserved), whitespace-tolerant via _json_value_pos. "" if absent or the
-# value is not a JSON string.
-fn _json_extract_str(body, len, key, keylen) {
-    if (body == 0) { return ""; }
-    if (len == 0) { return ""; }
+# Where the string value of the first `"<key>"` field is (escaped `\"` preserved), whitespace-tolerant via
+# _json_value_pos: out[0] its first byte in body, out[8] its length. Returns 1, or 0 with out zeroed when the key is
+# absent or its value is not a JSON string. 2.10.3: split from _json_extract_str, so a stream's tokens are read where
+# they are, with no copy each (handlers.cyr). Like it, writes a NUL at body[len].
+fn _json_str_span(body, len, key, keylen, out) {
+    store64(out, 0);
+    store64(out + 8, 0);
+    if (body == 0) { return 0; }
+    if (len == 0) { return 0; }
     store8(body + len, 0);
     var p = _json_value_pos(body, len, key, keylen);
-    if (p < 0) { return ""; }
-    if (p >= len) { return ""; }
-    if (load8(body + p) != 34) { return ""; }
+    if (p < 0) { return 0; }
+    if (p >= len) { return 0; }
+    if (load8(body + p) != 34) { return 0; }
     var start = p + 1;
     var j = start;
     # Forward scan: on a backslash, skip the next byte unconditionally. The
@@ -86,9 +89,21 @@ fn _json_extract_str(body, len, key, keylen) {
         if (load8(body + j) == 92) { j = j + 1; }
         j = j + 1;
     }
-    var tlen = j - start;
+    # A trailing backslash can step j past len; the value ends at the body's end.
+    if (j > len) { j = len; }
+    store64(out, body + start);
+    store64(out + 8, j - start);
+    return 1;
+}
+
+# The string value of the first `"<key>"` field (escaped `\"` preserved), a fresh cstr. "" if absent or the value is
+# not a JSON string.
+fn _json_extract_str(body, len, key, keylen) {
+    var sp[16];
+    if (_json_str_span(body, len, key, keylen, &sp) == 0) { return ""; }
+    var tlen = load64(&sp + 8);
     var text = alloc(tlen + 1);
-    memcpy(text, body + start, tlen);
+    memcpy(text, load64(&sp), tlen);
     store8(text + tlen, 0);
     return text;
 }

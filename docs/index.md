@@ -32,9 +32,11 @@
 - [ADR-010: Observability](decisions/010-observability.md) — latency histograms, event bus, traceparent, OTLP export
 - [ADR-011: Multi-threaded accept loop](decisions/011-multithreaded-accept-loop.md) — unified 7-worker pool, crypto-bank budget, synchronization pass
 - [ADR-012: The model catalog is asked of the providers](decisions/012-live-model-catalog.md) — live per-route lists, the snapshot, `[[models]]`, capability-shaped requests
+- [ADR-013: What a request's memory belongs to](decisions/013-request-memory.md) — the request arena, the boundary keepers copy across, recycling process memory
 
 ## Reference
 
+- [Sources](sources.md) — citations for the specifications and algorithms the code implements
 - [benchmarks.md](../benchmarks.md) — raw benchmark results with hardware specs
 - [CHANGELOG.md](../CHANGELOG.md) — version history
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — development workflow

@@ -85,22 +85,15 @@ fn http_respond(cfd, status, status_text, body, body_len) {
 }
 
 # Send SSE stream header (no Content-Length, chunked)
+# 2.10.3: written on this stack, as http_respond_h's head is. It is a constant, and through 2.10.2 it was built and
+# copied twice per stream on the heap that never frees: 760 bytes kept.
 fn http_sse_begin(cfd) {
-    var cr = make_crlf();
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 200 OK");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Type: text/event-stream");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Cache-Control: no-cache");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Access-Control-Allow-Origin: *");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Connection: keep-alive");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, cr);
-    var hdr = str_builder_build(sb);
-    sys_write(cfd, to_cstr(hdr), str_len(hdr));
+    var head[256];
+    var end = &head + 256;
+    var p = _head_add(&head, end, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n");
+    p = _head_add(p, end, "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n");
+    p = _head_add(p, end, "Connection: keep-alive\r\n\r\n");
+    sys_write(cfd, &head, p - &head);
     return 0;
 }
 
@@ -209,13 +202,33 @@ fn http_error(cfd, status, status_text, msg) {
 # body_len(+24). _resp_write replays it through http_respond.
 # 2.10.2: here from handlers.cyr, beside the bodies it mirrors, so the tests run _resp_err.
 fn _resp_new(status, status_text, body_cstr, body_len) {
-    var r = alloc(40);
+    return _resp_new_a(default_alloc(), status, status_text, body_cstr, body_len);
+}
+
+# 2.10.3: in `a`, the request arena on the chat path (reqmem.cyr). A descriptor that outlives the job (a batch
+# item's) goes through _resp_keep.
+fn _resp_new_a(a, status, status_text, body_cstr, body_len) {
+    var r = alloc_via(a, 40);
     store64(r, status);
     store64(r + 8, status_text);
     store64(r + 16, body_cstr);
     store64(r + 24, body_len);
     store64(r + 32, 0);
     return r;
+}
+
+# 2.10.3: a descriptor and its body in process memory, for a keeper (ADR 013's boundary): a batch item's answer is
+# read after the thread's next job has reset the request arena. Status, status text and the header are constants.
+fn _resp_keep(r) {
+    if (r == 0) { return 0; }
+    var k = alloc(40);
+    if (k == 0) { return 0; }
+    store64(k, load64(r));
+    store64(k + 8, load64(r + 8));
+    store64(k + 16, mem_keep(load64(r + 16), load64(r + 24)));
+    store64(k + 24, load64(r + 24));
+    store64(k + 32, load64(r + 32));
+    return k;
 }
 
 # Attach one extra response header — a `Name: value` cstr, no CRLF.

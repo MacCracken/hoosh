@@ -38,7 +38,7 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-26 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
+36 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
 function (no live backend — inference latency is backend-bound and not meaningful to
 micro-measure here). The clock-reading rows run on the production coarse clock, which
 the bench sets as the gateway's ticker would:
@@ -64,6 +64,11 @@ the bench sets as the gateway's ticker would:
   every other GET; `models_list_200_arena`, `GET /v1/models`' body in the thread's arena
 - **A provider's refusal** (2.10.2) — `provider_err_set_utf8_511b`, the clip over three-byte UTF-8,
   the slow branch of the error path
+- **The request path in the request arena** (2.10.3) — `trace_begin_child`, a request's trace context under an
+  inbound `traceparent`; `cache_key_arena`, `chat_body_arena` and `provider_body_arena`, what a buffered chat builds,
+  each released by the next job's start; `sse_chunk_send`, one streamed token from the reused chunk buffer to
+  `/dev/null`; `event_completed_ring`, a completion's event built on the stack and copied into its recycled ring slot.
+  Since 2.10.3 `event_publish_ring` includes that copy (it stored a pointer before), so it reads ~55 ns higher
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a

@@ -16,11 +16,11 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.7.18) |
-| **Source** | ~15,600 lines / 38 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~2.3 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
+| **Source** | ~17,300 lines / 46 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.6 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 1890 assertions, 172 groups, 0 failures |
-| **Benchmarks** | 25 operations |
+| **Tests** | 2035 assertions, 179 groups, 0 failures |
+| **Benchmarks** | 36 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 17 (9 local, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
@@ -268,19 +268,21 @@ neither. `hoosh serve` logs a warning when either file is missing.
 ## Testing
 
 ```bash
-# Run tests (1890 assertions across 172 groups)
+# Run tests (2035 assertions across 179 groups)
 cyrius test tests/hoosh.tcyr
 
-# Run benchmarks (25 operations)
+# Run benchmarks (36 operations)
 cyrius bench tests/hoosh.bcyr
 ```
 
-`tests/hoosh.tcyr` is self-contained (stdlib + the vendored bote-core, mirroring
-src logic) and covers: error/HTTP mapping, routing (4 strategies), token budgets,
+`tests/hoosh.tcyr` includes 39 of the 45 `src/lib` modules for real, and copies no `src/` code (since 2.9.22;
+`scripts/coverage.sh` lists them). `scripts/wire-smoke.py` runs a real gateway at stub providers and reads it as a
+strict client does. The suite covers: error/HTTP mapping, routing (4 strategies), token budgets,
 cache + cost, queue priority, health FSM, rate limiting, metrics, audit chain
 (HMAC-SHA256), config (TOML), JSON, token counting, DLP, cosine similarity, auth,
 tool-call conversion + pruning, MCP dispatch, batch parsing + lane pool, and
-observability (latency buckets, traceparent extraction, OTLP path/attribute JSON).
+observability (latency buckets, the trace context and its child span, OTLP spans), and the request arena and
+what crosses out of it.
 
 ---
 

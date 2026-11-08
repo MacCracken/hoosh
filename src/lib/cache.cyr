@@ -180,6 +180,19 @@ fn cache_evict_expired(c) {
     return removed;
 }
 
+# 2.10.3: insert copies of a request's key and body (ADR 013's boundary: on the chat path both are in the request
+# arena, reqmem.cyr, released when the thread's next job starts). Returns the cache's copy of the key, which the
+# semantic index may keep too, or 0 when the cache is off and keeps nothing.
+fn cache_insert_kept(c, key, value, vlen) {
+    if (c == 0 || key == 0 || value == 0) { return 0; }
+    if (load64(c + CACHE_ENABLED) == 0) { return 0; }
+    var k = cstr_keep(key);
+    var v = mem_keep(value, vlen);
+    if (k == 0 || v == 0) { return 0; }
+    cache_insert(c, k, v);
+    return k;
+}
+
 fn cache_insert(c, key, value) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
     var m = load64(c + CACHE_ENTRIES);

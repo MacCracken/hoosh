@@ -9,16 +9,16 @@
 
 | | |
 |---|---|
-| **Version** | **2.10.2** (agnosai's three filings: every error body is JSON, the model listings keep nothing per GET, and the catalog says `tier`, `kind` and `capabilities.tools`) |
+| **Version** | **2.10.3** (hoosh's span is the caller's child; the chat path's request arena, ADR 013 decision 1, and the event ring's recycled slots: a buffered chat keeps 974 bytes and a stream 352 whatever its length, where 2.10.2 kept 4.6 KB and 1 MB for a 1,000-token stream) |
 | **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0** |
 | **Binary** (x86_64 static ELF) | ~2.6 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~4.0 MB without |
-| **Source** | ~16,700 lines / 45 files (`src/main.cyr` + 44 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 1890 assertions, 172 groups (`tests/hoosh.tcyr`); 38 of 44 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does |
-| **Benchmarks** | 30 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2); CSV history + `benchmarks.md` (release gate) |
-| **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract, inference request, message content |
-| **Coverage** | symbol coverage 56% (417/732; `scripts/coverage.sh`, CI floor 30%) |
+| **Source** | ~17,300 lines / 46 files (`src/main.cyr` + 45 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 2035 assertions, 179 groups (`tests/hoosh.tcyr`); 39 of 45 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does |
+| **Benchmarks** | 36 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3); CSV history + `benchmarks.md` (release gate) |
+| **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract (on the real `trace.cyr` since 2.10.3), inference request, message content |
+| **Coverage** | symbol coverage 58% (454/778; `scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 17 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 8 remote) |
-| **ADRs** | 12 (`docs/decisions/`) |
+| **ADRs** | 13 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
 | **Concurrency** | unified 7-worker pool (sigil crypto lanes from a pool of 64 since 2.9.1; no per-thread banks); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md); on a target with no second thread (AGNOS) the accept loop runs each job itself ([ADR 011](../decisions/011-multithreaded-accept-loop.md)'s 2.10.1 addendum) |
 

@@ -17,13 +17,11 @@ fn _build_chat_body(model, prompt) {
 }
 
 # Build chat request JSON with raw messages array passthrough
-# Append ptr[0..len) as a NUL-terminated cstr into a str_builder.
+# Append ptr[0..len) into a str_builder, up to its first NUL.
+# 2.10.3: straight from the span (reqmem.cyr sb_add_bytes). Through 2.10.2 each span was first copied to the heap
+# that never frees, to be read as a cstr: the messages and tools of every forwarded request, kept for good.
 fn _sb_add_span(sb, ptr, len) {
-    var b = alloc(len + 1);
-    memcpy(b, ptr, len);
-    store8(b + len, 0);
-    str_builder_add_cstr(sb, b);
-    return 0;
+    return sb_add_bytes(sb, ptr, len);
 }
 
 # Ollama's /api/embed answer, {"embeddings":[[...],...],"prompt_eval_count":N},
@@ -85,8 +83,8 @@ fn _ollama_embed_to_openai(model, rb, rl) {
 # through, as does everything else — copied span-verbatim, so nothing outside a tool_calls array
 # is reinterpreted. This is the same translation _build_anthropic_body_x has always done for
 # Anthropic; Ollama was the provider it was never done for.
-fn _ollama_messages_convert(messages_raw, messages_len) {
-    var sb = str_builder_new();
+fn _ollama_messages_convert_a(a, messages_raw, messages_len) {
+    var sb = sb_room_a(a, messages_len + 256);
     str_builder_putc(sb, '[');
     var any = 0;
     var first = 1;
@@ -110,12 +108,12 @@ fn _ollama_messages_convert(messages_raw, messages_len) {
         var tcspan = _json_arr_span(mp, obj_len, "tool_calls", 10);
         if (first == 0) { str_builder_putc(sb, ','); }
         if (tcspan == 0) {
-            str_builder_add(sb, str_new(mp, obj_len));       # verbatim — nothing to translate
+            str_builder_add(sb, str_new_a(a, mp, obj_len));       # verbatim — nothing to translate
         } else {
             any = 1;
             str_builder_add_cstr(sb, "{\"role\":\"assistant\",\"content\":\"");
             var cf = _json_obj_str_field(mp, obj_len, "content", 7);
-            if (cf != 0) { str_builder_add(sb, str_new(load64(cf), load64(cf + 8))); }
+            if (cf != 0) { str_builder_add(sb, str_new_a(a, load64(cf), load64(cf + 8))); }
             str_builder_add_cstr(sb, "\",\"tool_calls\":[");
             var tcp = load64(tcspan);
             var tcl = load64(tcspan + 8);
@@ -134,9 +132,9 @@ fn _ollama_messages_convert(messages_raw, messages_len) {
                             if (bf == 0) { str_builder_putc(sb, ','); }
                             var idf = _json_obj_str_field(tcp + k, tol, "id", 2);
                             str_builder_add_cstr(sb, "{\"id\":\"");
-                            if (idf != 0) { str_builder_add(sb, str_new(load64(idf), load64(idf + 8))); }
+                            if (idf != 0) { str_builder_add(sb, str_new_a(a, load64(idf), load64(idf + 8))); }
                             str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
-                            str_builder_add(sb, str_new(load64(nmf), load64(nmf + 8)));
+                            str_builder_add(sb, str_new_a(a, load64(nmf), load64(nmf + 8)));
                             str_builder_add_cstr(sb, "\",\"arguments\":");
                             # arguments: STRING -> unescape to the OBJECT Ollama requires. Already
                             # an object (a client that never round-tripped through us) -> verbatim.
@@ -150,7 +148,7 @@ fn _ollama_messages_convert(messages_raw, messages_len) {
                             } else {
                                 var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
                                 if (argo != 0) {
-                                    str_builder_add(sb, str_new(load64(argo), load64(argo + 8)));
+                                    str_builder_add(sb, str_new_a(a, load64(argo), load64(argo + 8)));
                                 } else {
                                     str_builder_add_cstr(sb, "{}");
                                 }
@@ -171,14 +169,21 @@ fn _ollama_messages_convert(messages_raw, messages_len) {
     }
     str_builder_putc(sb, ']');
     if (any == 0) { return 0; }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
+}
+
+fn _ollama_messages_convert(messages_raw, messages_len) {
+    return _ollama_messages_convert_a(default_alloc(), messages_raw, messages_len);
 }
 
 # Append the messages array, translating OpenAI tool-continuation shapes for Ollama (2.6.1).
 # Non-Ollama providers and Ollama requests with no tool_calls both forward the raw span.
-fn _sb_add_messages(sb, messages_raw, messages_len, ollama) {
+#
+# 2.10.3: the translation is built in `a`, the request arena on the chat path (reqmem.cyr). It is built before the
+# converter knows whether any message needs it, so through 2.10.2 every Ollama request kept a copy of its messages.
+fn _sb_add_messages(a, sb, messages_raw, messages_len, ollama) {
     if (ollama == 1) {
-        var conv = _ollama_messages_convert(messages_raw, messages_len);
+        var conv = _ollama_messages_convert_a(a, messages_raw, messages_len);
         if (conv != 0) {
             str_builder_add_cstr(sb, conv);
             return 0;
@@ -202,37 +207,38 @@ fn _sb_add_openai_extras(sb, route, model, gen, stream) {
     return 0;
 }
 
-fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route) {
-    var sb = str_builder_new();
+# 2.10.3: one builder for both shapes, in `a`, the request arena on the chat path (reqmem.cyr), with room for the
+# messages and tools, and returned over its own bytes. The body is sent and dead before the job ends. Through 2.10.2
+# it grew on the heap and was copied twice: 632 bytes kept for a short chat, and more with every message.
+fn _build_chat_body_raw_x(a, model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route, stream) {
+    var sb = sb_room_a(a, 256 + strlen(model) + messages_len + tools_len);
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
-    _sb_add_messages(sb, messages_raw, messages_len, ollama);
+    if (stream == 1) {
+        str_builder_add_cstr(sb, "\",\"stream\":true,\"messages\":");
+    } else {
+        str_builder_add_cstr(sb, "\",\"stream\":false,\"messages\":");
+    }
+    _sb_add_messages(a, sb, messages_raw, messages_len, ollama);
     if (tools_raw != 0 && tools_len > 0) {
         str_builder_add_cstr(sb, ",\"tools\":");
         _sb_add_span(sb, tools_raw, tools_len);
     }
     _sb_add_sampling(sb, gen, ollama);
-    if (route != 0) { _sb_add_openai_extras(sb, route, model, gen, 0); }
+    if (route != 0) { _sb_add_openai_extras(sb, route, model, gen, stream); }
     str_builder_add_cstr(sb, "}");
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
+}
+
+fn _build_chat_body_raw(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route) {
+    return _build_chat_body_raw_x(default_alloc(), model, messages_raw, messages_len, tools_raw, tools_len, gen,
+      ollama, route, 0);
 }
 
 # Build streaming chat body from model + raw messages (+ optional tools).
 fn _build_chat_body_raw_stream(model, messages_raw, messages_len, tools_raw, tools_len, gen, ollama, route) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"model\":\"");
-    str_builder_add_cstr(sb, model);
-    str_builder_add_cstr(sb, "\",\"stream\":true,\"messages\":");
-    _sb_add_messages(sb, messages_raw, messages_len, ollama);
-    if (tools_raw != 0 && tools_len > 0) {
-        str_builder_add_cstr(sb, ",\"tools\":");
-        _sb_add_span(sb, tools_raw, tools_len);
-    }
-    _sb_add_sampling(sb, gen, ollama);
-    if (route != 0) { _sb_add_openai_extras(sb, route, model, gen, 1); }
-    str_builder_add_cstr(sb, "}");
-    return to_cstr(str_builder_build(sb));
+    return _build_chat_body_raw_x(default_alloc(), model, messages_raw, messages_len, tools_raw, tools_len, gen,
+      ollama, route, 1);
 }
 
 # Forward to Ollama native API
@@ -1235,6 +1241,9 @@ fn _provider_err_capture(status, body, blen) {
 
 fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw, tools_len, gen) {
     var _fwd_t0 = clock_now_ns();
+    # 2.10.3: the body, the remote answer's copy and the result record are in this thread's request arena
+    # (reqmem.cyr); every caller is done with them before its job ends.
+    var a = req_arena();
     var base = route_base_url(route);
     var is_anthropic = (route_provider(route) == PROV_ANTHROPIC);
     var is_google = (route_provider(route) == PROV_GOOGLE);
@@ -1258,8 +1267,8 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         } else {
             if (messages_raw != 0) {
                 # Ollama's native /api/chat nests sampling under `options`.
-                body = _build_chat_body_raw(model, messages_raw, messages_len,
-                  tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA), route);
+                body = _build_chat_body_raw_x(a, model, messages_raw, messages_len,
+                  tools_raw, tools_len, gen, (route_provider(route) == PROV_OLLAMA), route, 0);
             } else {
                 body = _build_chat_body(model, prompt);
             }
@@ -1306,7 +1315,8 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         # buffer has no guaranteed trailing slack — writing past it corrupts
         # the heap (intermittent crashes).
         rbl = sandhi_http_body_len(sresp);
-        rb = alloc(rbl + 1);
+        rb = alloc_via(a, rbl + 1);   # 2.10.3: the whole answer was kept on the heap through 2.10.2
+        if (rb == 0) { return 0; }
         memcpy(rb, sandhi_http_body(sresp), rbl);
         store8(rb + rbl, 0);
     } else {
@@ -1390,7 +1400,8 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
             } } }
 
     # Result: text(0) 0(8) ptok(16) ctok(24) tool_calls(32) finish(40) — 2.8.0 grew it by the finish slot.
-    var result = alloc(48);
+    var result = alloc_via(a, 48);
+    if (result == 0) { return 0; }
     store64(result, text);
     store64(result + 8, 0);
     store64(result + 16, ptok);
@@ -1418,9 +1429,10 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     # (handle_chat_stream's remote branch) and never reach here.
     if (route_is_remote(route) == 1) { return 0 - 1; }
     var base = route_base_url(route);
-    var body = _build_chat_body_raw_stream(
+    # 2.10.3: in the request arena (reqmem.cyr), and sent before this returns.
+    var body = _build_chat_body_raw_x(req_arena(),
       model, messages_raw, messages_len, tools_raw, tools_len, gen,
-      (route_provider(route) == PROV_OLLAMA), route);
+      (route_provider(route) == PROV_OLLAMA), route, 1);
     var blen = strlen(body);
     var path = _provider_path(route);
     var fd = http_post_stream(base, path, body, blen);

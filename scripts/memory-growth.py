@@ -11,10 +11,21 @@ uses two sockets per request; a long run right after another can run out of ephe
 
 2.10.2: --get PATH sends that GET instead of chats, for the model listings, with the fake's list at --tags N models.
 --shape claude lists them from a `type = "anthropic"` route, whose entries carry the capability tree; the default is
-bare Ollama tags. In this mode the output also says what a GET kept if the gateway serves GET /v1/debug/alloc-used,
-which only a scratch build does (see ADR 013).
+bare Ollama tags.
+
+2.10.3: the output also says what each request kept by `alloc_used()` when the gateway serves GET /v1/debug/alloc-used,
+which only a build with `-D HOOSH_ALLOC_PROBE` does (ADR 013). VmRSS moves in whole chunks; this counts bytes:
+
+  cyrius build -D HOOSH_ALLOC_PROBE src/main.cyr build/hoosh-probe
+  scripts/memory-growth.py build/hoosh-probe 2000
+
+2.10.3: --chunks N makes a streamed reply N tokens, one NDJSON line each, as a real model's is; through 2.10.2 every
+token kept about 500 bytes.
+
+--prefill N sends N chats before a --get run, so `--get /v1/events/recent --prefill 200` reads a full event ring.
 
 Usage: scripts/memory-growth.py [build/hoosh] [requests]   (defaults: build/hoosh, 3000)
+       scripts/memory-growth.py build/hoosh-probe 500 --stream-only --chunks 100
        scripts/memory-growth.py build/hoosh 3000 --get /v1/models/catalog --tags 200 --shape claude
 """
 import argparse
@@ -45,6 +56,7 @@ def claude_model(i):
 class FakeOllama(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     tags = 1
+    chunks = 1      # 2.10.3: NDJSON lines in a streamed reply, one token each (--chunks)
 
     def log_message(self, *args):
         pass
@@ -75,6 +87,19 @@ class FakeOllama(http.server.BaseHTTPRequestHandler):
         if not self.path.startswith("/api/chat"):
             self._send({}, 404)
             return
+        if req.get("stream") and self.chunks > 1:
+            lines = [json.dumps({"model": req.get("model", "llama3"), "message": {"role": "assistant",
+                                 "content": f"tok{i} "}, "done": False}) for i in range(self.chunks - 1)]
+            lines.append(json.dumps({"model": req.get("model", "llama3"), "message": {"role": "assistant",
+                                     "content": ""}, "done": True, "done_reason": "stop",
+                                     "prompt_eval_count": 42, "eval_count": self.chunks}))
+            body = ("\n".join(lines) + "\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # One NDJSON line for a stream (with its newline, as Ollama sends it), one object otherwise.
         self._send({"model": req.get("model", "llama3"), "created_at": "2026-11-05T00:00:00Z",
                     "message": {"role": "assistant", "content": "A reply of moderate length to exercise the path."},
@@ -94,7 +119,7 @@ def rss_kib(pid):
     return 0
 
 
-def run(binary, n, stream, get=None, shape="ollama"):
+def run(binary, n, stream, get=None, shape="ollama", prefill=0):
     backend = Server(("127.0.0.1", 0), FakeOllama)
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     probe = Server(("127.0.0.1", 0), FakeOllama)
@@ -138,6 +163,8 @@ def run(binary, n, stream, get=None, shape="ollama"):
                     return None
 
             once = fetch if get else chat
+            for i in range(prefill):         # 2.10.3: chats first, so a --get reads a full ring or cache
+                chat(1000000 + i)
             if get:
                 # The first refresh runs on a worker; wait until the catalog has what the fake lists.
                 want = {"ollama": b"llama3-pad", "claude": b"claude-opus-5-5-2026"}[shape]
@@ -149,7 +176,7 @@ def run(binary, n, stream, get=None, shape="ollama"):
                 once(i)
             time.sleep(0.5)
             before = rss_kib(gw.pid)
-            used0 = alloc_used() if get else None
+            used0 = alloc_used()
             ok = 0
             t0 = time.time()
             for i in range(200, 200 + n):
@@ -158,7 +185,7 @@ def run(binary, n, stream, get=None, shape="ollama"):
                     ok += 1
                 except OSError:
                     pass
-            used1 = alloc_used() if get else None
+            used1 = alloc_used()
             time.sleep(0.5)
             after = rss_kib(gw.pid)
             what = get or ("streamed" if stream else "buffered")
@@ -180,10 +207,16 @@ if __name__ == "__main__":
     ap.add_argument("--get", help="send this GET instead of chats")
     ap.add_argument("--tags", type=int, default=1, help="models the fake backend lists")
     ap.add_argument("--shape", choices=("ollama", "claude"), default="ollama")
+    ap.add_argument("--chunks", type=int, default=1, help="tokens in a streamed reply (2.10.3)")
+    ap.add_argument("--stream-only", action="store_true", help="measure only streamed chats")
+    ap.add_argument("--prefill", type=int, default=0, help="chats to send before a --get run (2.10.3)")
     args = ap.parse_args()
     FakeOllama.tags = args.tags
+    FakeOllama.chunks = args.chunks
     if args.get:
-        run(args.binary, args.requests, False, args.get, args.shape)
+        run(args.binary, args.requests, False, args.get, args.shape, args.prefill)
+    elif args.stream_only:
+        run(args.binary, args.requests, True)
     else:
         run(args.binary, args.requests, False)
         time.sleep(2)

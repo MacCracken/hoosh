@@ -229,22 +229,30 @@ fn outcome_note_orphan(st) {
 # ── the chunks a stream ends with ──
 
 # The final content chunk: an empty delta and the finish reason.
-fn outcome_stop_chunk(model, finish) {
-    var sb = str_builder_new();
+fn outcome_stop_chunk(model, finish) { return outcome_stop_chunk_a(default_alloc(), model, finish); }
+
+# 2.10.3: in `a`, the request arena at the end of a stream (reqmem.cyr): written at once, and NUL-terminated, so the
+# writer needs no copy. The stop and usage chunks kept 840 bytes of every stream through 2.10.2.
+fn outcome_stop_chunk_a(a, model, finish) {
+    var sb = sb_room_a(a, 256 + strlen(model));
     sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"");
     str_builder_add_cstr(sb, outcome_finish_name(finish));
     str_builder_add_cstr(sb, "\"}]}");
-    return str_builder_build(sb);
+    return str_new_a(a, sb_cstr(sb), sb_len(sb));
 }
 
 # The usage chunk OpenAI sends last when stream_options.include_usage is set: no choices, the usage object. The
 # cost and the serving provider ride inside usage exactly as on the buffered response (2.5.12), so a client
 # summing either reconciles with /v1/costs.
 fn outcome_usage_chunk(model, ptok, ctok, cost_micro, provider) {
-    var sb = str_builder_new();
+    return outcome_usage_chunk_a(default_alloc(), model, ptok, ctok, cost_micro, provider);
+}
+
+fn outcome_usage_chunk_a(a, model, ptok, ctok, cost_micro, provider) {
+    var sb = sb_room_a(a, 320 + strlen(model));
     sb_add_chat_head(sb, "chat.completion.chunk");
     str_builder_add_cstr(sb, "\"model\":\"");
     str_builder_add_cstr(sb, model);
@@ -262,5 +270,5 @@ fn outcome_usage_chunk(model, ptok, ctok, cost_micro, provider) {
         str_builder_add_cstr(sb, "\"");
     }
     str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
+    return str_new_a(a, sb_cstr(sb), sb_len(sb));
 }

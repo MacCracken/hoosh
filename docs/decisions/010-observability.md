@@ -111,3 +111,41 @@ monotonic-measured duration (one realtime read per span).
 **Scope / deferred:** localhost `http://` collector only (the common sidecar) —
 remote + `https://` (via sandhi) and OTLP/protobuf are follow-ups; spans are
 inference-only (no nested provider/cache spans yet).
+
+## Update (2.10.3): hoosh's span is the caller's child
+
+Three statements above stopped being true, two of them long before 2.10.3.
+
+**The forwarded `traceparent` was the inbound one.** Decision 3 forwards the incoming header, and 2.3.5's span took its
+ids from it. But an inbound `00-<trace>-<parent>-<flags>` names the *caller's* span. So hoosh's span reused the
+caller's id with no parent, and a provider was told the caller was its parent. agnosai found it wiring its `chat` span
+to hoosh's (`docs/development/issues/archived/2026-11-07-agnosai-inference-span-takes-the-callers-span-id.md`).
+hoosh now keeps two contexts per job (`src/lib/trace.cyr`):
+- **inbound:** the caller's header as it came, validated and lowercased, or none (`trace_inbound`);
+- **own:** `00-<the same trace id>-<a span id minted here>-<the same flags>`, or a root minted on first use
+  (`trace_current_or_new`).
+Every outgoing header carries hoosh's own, and the span exports the inbound span id as its `parentSpanId` (W3C Trace
+Context §3.2, whose `parent-id` is the caller's span; OTLP's `Span.parent_span_id`). [Sources](../sources.md). Both are written into one 128-byte block per thread, so a request's
+context takes nothing from the heap that never frees.
+
+**"Each batch worker is a fresh thread."** Not since 2.4.0's pool ([ADR 011](011-multithreaded-accept-loop.md)): a
+worker's slot kept its last connection's context, and only `http_route` replaced it, so batch items, catalog refreshes
+and OTLP exports went out under some other request's trace. Every job begins its own now (`job_begin`, wq.cyr). A batch
+item carries a copy of its submitter's inbound context, so each item is a span of its own under the caller's; any other
+job is a root, and each health sweep too.
+
+**"Unique (clock + counter)."** A root's trace id was the monotonic clock and a counter in plain hex, which told every
+provider the gateway's uptime and request count. Since 2.10.3 an id is the counter's next value through a keyed
+permutation: splitmix64's finalizer twice, a key xored in before each, the keys drawn once from the OS with
+`getrandom`. Distinct because the counter is, opaque because the keys are secret, and with no clock read. They are not
+the stdlib's hash seed, which an inverted id would expose to a flooding attack on hoosh's maps. Still not a CSPRNG:
+W3C asks that ids be unique and not leak, which this is.
+
+W3C's invalid values (version `ff`, an all-zero trace id or parent id) are refused as a malformed header is, and a
+request with one is a root.
+
+**The recent-events ring (decision 2) copies.** Each of its 128 slots is a buffer an event is copied into, reused as the
+ring wraps; through 2.10.2 a slot pointed at each event's own string, which stayed on the heap when overwritten
+([ADR 013](013-request-memory.md), decision 3). An event is built on the stack. The bus still gets the caller's bytes,
+and hoosh subscribes nothing to it: a subscriber would have to copy the payload before `event_emit` returns. An event's
+`model` is the request's, decoded once: through 2.10.2 a model with an escape in it was escaped twice.

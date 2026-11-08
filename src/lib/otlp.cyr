@@ -8,7 +8,8 @@
 # Off unless [[telemetry]] otlp_endpoint is set. Non-blocking: inference enqueues
 # a span fragment into a bounded ring; a background thread batches the ring and
 # POSTs every OTLP_BATCH_MS. Spans correlate via the 2.3.4 traceparent's trace-id
-# + span-id. Only a localhost http:// collector is supported in this release
+# + span-id, and since 2.10.3 a span names the caller's span as its parentSpanId.
+# Only a localhost http:// collector is supported in this release
 # (the common sidecar); remote/https is a follow-up. #skip-lint
 #
 # 2.9.14: this file is the pure half, as catalog.cyr is for catalog_fetch.cyr: the
@@ -81,6 +82,13 @@ fn otlp_enqueue_inference_span(provider, model, latency_ms, tokens, ok) {
     str_builder_add_cstr(sb, "\",\"spanId\":\"");
     i = 0;
     while (i < 16) { str_builder_add_byte(sb, load8(tp + 36 + i)); i = i + 1; }
+    # 2.10.3: the caller's span, when the request carried one (trace.cyr). A root has no parentSpanId at all.
+    var tin = trace_inbound();
+    if (tin != 0) {
+        str_builder_add_cstr(sb, "\",\"parentSpanId\":\"");
+        i = 0;
+        while (i < 16) { str_builder_add_byte(sb, load8(tin + 36 + i)); i = i + 1; }
+    }
     str_builder_add_cstr(sb, "\",\"name\":\"inference\",\"kind\":3,\"startTimeUnixNano\":\"");
     str_builder_add_int(sb, start_ns);
     str_builder_add_cstr(sb, "\",\"endTimeUnixNano\":\"");

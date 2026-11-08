@@ -40,7 +40,7 @@ fn _batch_atomic_add(ptr, delta) {
 # Status values (stored atomically at BS_STATUS): BATCH_QUEUED .. BATCH_FAILED live in reqparse.cyr since
 # 2.9.17, beside _batch_status_name, which names them.
 
-# BatchState layout (64 bytes). completed/failed/status/cancel are written by
+# BatchState layout (72 bytes). completed/failed/status/cancel are written by
 # the background runner + read by the accept thread serving GET — accessed
 # atomically. results slots are write-once per item (runner writes, GET reads).
 var BS_ID        = 0;    # cstr — batch id
@@ -51,6 +51,7 @@ var BS_STATUS    = 32;   # atomic i64 (BATCH_*)
 var BS_CANCEL    = 40;   # atomic i64 (0/1)
 var BS_RESULTS   = 48;   # alloc(total*8) — per-item response descriptor or 0
 var BS_REQS      = 56;   # alloc(total*16) — per-item [owned_body_ptr, len]
+var BS_TRACE     = 64;   # 2.10.3: the submitter's inbound traceparent (owned copy), or 0
 
 # id → BatchState. Now touched by multiple pool workers (POST insert on one,
 # GET/cancel on another), so registry mutation + lookup are guarded by
@@ -101,7 +102,7 @@ fn _batch_next_id() {
 
 # Build a BatchState for `total` items (results/reqs arrays zeroed).
 fn batch_state_new(id, total) {
-    var bs = alloc(64);
+    var bs = alloc(72);
     store64(bs + BS_ID, id);
     store64(bs + BS_TOTAL, total);
     store64(bs + BS_COMPLETED, 0);
@@ -119,6 +120,7 @@ fn batch_state_new(id, total) {
     }
     store64(bs + BS_RESULTS, results);
     store64(bs + BS_REQS, reqs);
+    store64(bs + BS_TRACE, 0);
     return bs;
 }
 
@@ -136,7 +138,7 @@ fn _async_batch_run(bs) {
     while (idx < total) {
         if (load64(bs + BS_CANCEL) == 1) { idx = total; } else {
             wq_push(job_batch_item(load64(reqs + idx * 16), load64(reqs + idx * 16 + 8),
-                results + idx * 8, bs + BS_COMPLETED, bs + BS_FAILED));
+                results + idx * 8, bs + BS_COMPLETED, bs + BS_FAILED, load64(bs + BS_TRACE)));
             launched = launched + 1;
             idx = idx + 1;
         }
@@ -164,6 +166,8 @@ fn batch_submit(items) {
     var id = _batch_next_id();
     mutex_unlock(_batch_reg_lock);
     var bs = batch_state_new(id, total);
+    # 2.10.3: the items run after this request has ended, so they take a copy of its inbound context.
+    store64(bs + BS_TRACE, trace_inbound_copy());
     var reqs = load64(bs + BS_REQS);
     var i = 0;
     while (i < total) {
@@ -323,6 +327,9 @@ fn handle_batch(cfd, body_ptr, body_len) {
     var completed = alloc(8); store64(completed, 0);
     var failed = alloc(8); store64(failed, 0);
     var slots = alloc(n * 8);
+    # 2.10.3: each item is a span of its own under the caller's. A copy, as for the bodies: the barrier below
+    # runs other jobs on this thread, and each begins its own context in the thread's block.
+    var tin = trace_inbound_copy();
     var k = 0;
     while (k < n) {
         var it = vec_get(items, k);
@@ -338,7 +345,7 @@ fn handle_batch(cfd, body_ptr, body_len) {
         var icopy = alloc(ilen + 1);
         memcpy(icopy, load64(it), ilen);
         store8(icopy + ilen, 0);
-        wq_push(job_batch_item(icopy, ilen, slot, completed, failed));
+        wq_push(job_batch_item(icopy, ilen, slot, completed, failed, tin));
         k = k + 1;
     }
     # Barrier with work-stealing — process queued jobs until this batch is done.

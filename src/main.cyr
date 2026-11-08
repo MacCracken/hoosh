@@ -32,6 +32,7 @@ include "src/vendor/majra.cyr"
 # ================================================================
 
 include "src/lib/types.cyr"
+include "src/lib/reqmem.cyr"        # 2.10.3: the per-thread request arena and its boundary (ADR 013)
 # 2.8.0: the live model catalog's pure half (parsers, snapshot, request shaping). Early, because pricing.cyr,
 # metadata.cyr and provider.cyr consult it; it reaches no hoosh module, so tests include it for real.
 include "src/lib/catalog.cyr"
@@ -111,12 +112,23 @@ var _warming = 0;
 
 # _requires_post (the POST-only, body-taking paths) is reqparse.cyr's since 2.9.21, so the tests check its list.
 
+#ifdef HOOSH_ALLOC_PROBE
+# alloc_used() in decimal, read before anything of this answer is built; the answer itself takes nothing.
+fn _alloc_probe(cfd) {
+    var used = alloc_used();
+    var t[24];
+    var n = fmt_int_buf(used, &t);
+    return http_respond_h(cfd, "200", "OK", &t, n, 0);
+}
+#endif
+
 fn http_route(cfd, method, path, buf, buf_len) {
     hlog_request(method, path);
-    # W3C Trace Context: carry the incoming traceparent (or none) for this
-    # request so outgoing backend forwards join the trace. Reset per request
-    # (the accept thread is reused); the forward generates one if none arrived.
-    trace_set(trace_extract(buf, buf_len));
+    # W3C Trace Context: this request's span is the child of an incoming
+    # traceparent's (2.10.3: under its own span id), or a root when none came.
+    # Reset per request (the worker is reused); a root's id is minted when the
+    # first outgoing header or span needs it.
+    trace_begin(buf, buf_len);
     # CORS preflight
     if (streq(method, "OPTIONS") == 1) {
         var cr = make_crlf();
@@ -162,6 +174,11 @@ fn http_route(cfd, method, path, buf, buf_len) {
     }
 
     # GET routes
+    #ifdef HOOSH_ALLOC_PROBE
+    # 2.10.3 (ADR 013): what the heap that never frees has handed out, for scripts/memory-growth.py. Only a build
+    # with `-D HOOSH_ALLOC_PROBE` serves it; the release build has no such route.
+    if (streq(path, "/v1/debug/alloc-used") == 1) { return _alloc_probe(cfd); }
+    #endif
     if (streq(path, "/v1/health") == 1) { return handle_health(cfd); }
     if (streq(path, "/v1/health/providers") == 1) { return handle_health_providers(cfd); }
     if (streq(path, "/v1/health/heartbeat") == 1) { return handle_heartbeat(cfd); }

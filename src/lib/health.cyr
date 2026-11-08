@@ -111,6 +111,9 @@ fn health_record(route, ok) {
 # One full sweep over the current router's enabled routes.
 fn health_sweep() {
     if (_router == 0) { return 0; }
+    # 2.10.3: each sweep is a trace of its own. The prober thread's context was minted once and never reset, so
+    # every probe it ever sent named the same trace.
+    trace_begin_from(0);
     var routes = load64(_router + ROUTER_ROUTES);
     var count = load64(_router + ROUTER_COUNT);
     var i = 0;
