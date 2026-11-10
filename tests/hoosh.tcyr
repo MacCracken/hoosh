@@ -3000,7 +3000,9 @@ fn _t2103_event_ring() {
 # written before the first tnt_load.
 
 # Train a byte-vocabulary (V = 256) ternary model on `text` and write it to `path`; returns file_write_all's count.
-fn _t211_write_model(path, text, C, F, steps, seed) {
+# With declare = 1 the file declares the byte vocabulary (tentib >= 1.4.0, flags bit 0); _t211_write_model is
+# declare = 0.
+fn _t2111_write(path, text, C, F, steps, seed, declare) {
     var T = strlen(text) - 1;
     var tok = t_alloc(T); var tgt = t_alloc(T);
     var t = 0;
@@ -3008,11 +3010,15 @@ fn _t211_write_model(path, text, C, F, steps, seed) {
     var st = t_alloc(2);
     tx_train(tok, tgt, 256, T, C, F, steps, seed, st);
     tx_int_init(256, T, C, F); tx_pack_init(256, T, C, F); tx_pack(256, T, C, F);
+    if (declare == 1) { tx_pack_set_vocab(pk_vocab_bytes()); }
     var n = tx_pack_serial_bytes();
     var buf = alloc(n);
     tx_pack_serialize(buf, n);
     return file_write_all(path, buf, n);
 }
+
+# The 2.11.0 writer: no vocabulary declared.
+fn _t211_write_model(path, text, C, F, steps, seed) { return _t2111_write(path, text, C, F, steps, seed, 0); }
 
 # A packed model with vocabulary V = 8 (not the byte one), written to `path`.
 fn _t211_write_v8(path) {
@@ -3042,6 +3048,180 @@ fn _t211_reply(route, msgs, maxt, resp) {
     store64(resp, r);
     if (r == 0 || r == FWD_PERMANENT) { return ""; }
     return load64(r);
+}
+
+# 2.11.0's decode, as the oracle: the prompt's last T bytes (a "\n" for an empty one), then for each of nsteps tokens
+# one tx_fwd_packed over the window and the argmax of its last row, sliding the window once it holds T. The bytes go
+# to out[0..nsteps), i64 each. Call it outside any generation's steps (a test is single-threaded).
+fn _t2111_oracle(prompt, plen, nsteps, out) {
+    var T = tnt_context();
+    var win = alloc(T * 8);
+    var w = 0;
+    if (plen <= 0) {
+        store64(win, 10);
+        w = 1;
+    } else {
+        var from = 0;
+        if (plen > T) { from = plen - T; }
+        while (from < plen) { store64(win + w * 8, load8(prompt + from)); w = w + 1; from = from + 1; }
+    }
+    var s = 0;
+    while (s < nsteps) {
+        tx_fwd_packed(win, 256, w, _tnt_C, _tnt_F);
+        var nx = logits_argmax(ki_logits + (w - 1) * 256 * 8, 256);
+        store64(out + s * 8, nx);
+        if (w == T) {
+            var i = 0;
+            while (i < T - 1) { store64(win + i * 8, load64(win + (i + 1) * 8)); i = i + 1; }
+            store64(win + (T - 1) * 8, nx);
+        } else {
+            store64(win + w * 8, nx);
+            w = w + 1;
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+
+# 1 when a lone generation over prompt[0..plen) decodes the oracle's nsteps bytes.
+fn _t2111_lone(prompt, plen, nsteps) {
+    var want = alloc(nsteps * 8);
+    _t2111_oracle(prompt, plen, nsteps, want);
+    var g = tnt_gen_begin(req_arena(), prompt, plen);
+    var ok = 1;
+    var s = 0;
+    while (s < nsteps) {
+        if (tnt_gen_step(g) != load64(want + s * 8)) { ok = 0; }
+        s = s + 1;
+    }
+    return ok;
+}
+
+# 2.11.1: tentib 1.4.0's incremental decode, header peek and same-shape reload, through the provider.
+fn _t2111_tentib_decode() {
+    test_group("tentib_local: incremental decode, the header peek, same-shape reloads (2.11.1)");
+    # every model is written before the first load: training replaces tentib's model
+    var dir = _t_line("/tmp/hoosh-tcyr-", sys_getpid(), "-d-");
+    var ma = _t_cat(dir, "a.tpk"); var mb = _t_cat(dir, "b.tpk"); var mc = _t_cat(dir, "c.tpk");
+    var mf = _t_cat(dir, "flag2.tpk"); var md = _t_cat(dir, "d.tpk"); var me = _t_cat(dir, "e.tpk");
+    assert_eq(_t2111_write(md, "the gateway serves ternary", 24, 32, 100, 5, 0) > 0, 1,
+      "decode: wrote model D (T = 25, C = 24: a larger decode cache than any before)");
+    assert_eq(_t2111_write(me, "the gateway serves ternary", 16, 48, 100, 6, 0) > 0, 1,
+      "decode: wrote model E (A's V, T, C; F = 48)");
+    assert_eq(_t2111_write(ma, "the gateway serves ternary", 16, 32, 300, 1, 0) > 0, 1,
+      "decode: wrote model A (T = 25)");
+    assert_eq(_t2111_write(mb, "a ternary model, declared!", 16, 32, 300, 3, 1) > 0, 1,
+      "decode: wrote model B (T = 25, the byte vocabulary declared)");
+    assert_eq(_t2111_write(mc, "short model text", 16, 32, 200, 4, 0) > 0, 1, "decode: wrote model C (T = 15)");
+    var fl[8];
+    var fbuf = file_read_whole_max(ma, 1 << 24, &fl);
+    store64(fbuf + 56, 2);                       # flags bit 1: no tentib defines it
+    file_write_all(mf, fbuf, load64(&fl));
+
+    assert_eq(tnt_load(ma), 0, "decode: model A loads");
+    assert_eq(tnt_vocab_declared(), 0, "decode: A declares no vocabulary (bytes are assumed)");
+    assert_eq(tnt_load_reused(), 0, "decode: A replaces a model of another shape (new memory)");
+    var the = "the";
+    # a lone reply: one decode step per token until the window slides, then full forwards; the oracle's bytes
+    var c0 = alloc(24); var c1 = alloc(24);
+    tnt_decode_counts(c0);
+    assert_eq(_t2111_lone(the, 3, 40), 1, "decode: 40 tokens from \"the\" are 2.11.0's bytes (cached, then slid)");
+    tnt_decode_counts(c1);
+    var lone = (load64(c1) - load64(c0) == 22) & (load64(c1 + 8) - load64(c0 + 8) == 1);
+    lone = lone & (load64(c1 + 16) - load64(c0 + 16) == 17);
+    assert_eq(lone, 1, "decode: ... one takeover, 22 cached steps to T = 25, then 17 full forwards");
+    assert_eq(_t2111_lone(the, 0, 30), 1, "decode: ... from an empty prompt");
+    var longp = "a prompt that is longer than the context";
+    assert_eq(_t2111_lone(longp, strlen(longp), 12), 1, "decode: ... from a prompt longer than T");
+    assert_eq(_t2111_lone(the, 3, 1), 1, "decode: ... one token");
+    # two replies that interleave step by step take the one cache from each other, and both stay right
+    var srv = "serves";
+    var wa = alloc(30 * 8); var wb = alloc(30 * 8);
+    _t2111_oracle(the, 3, 30, wa); _t2111_oracle(srv, 6, 30, wb);
+    var ga = tnt_gen_begin(req_arena(), the, 3); var gb = tnt_gen_begin(req_arena(), srv, 6);
+    tnt_decode_counts(c1);
+    var iok = 1; var s = 0;
+    while (s < 30) {
+        if (tnt_gen_step(ga) != load64(wa + s * 8)) { iok = 0; }
+        if (tnt_gen_step(gb) != load64(wb + s * 8)) { iok = 0; }
+        s = s + 1;
+    }
+    assert_eq(iok, 1, "decode: two interleaved replies each decode their own 2.11.0 bytes");
+    # Alternating, each takes the cache from the other: A's first 21 steps and B's 20 (B, from a 6-byte prompt,
+    # slides first: windows 6..25). With B on full forwards, A owns the cache for its last 2 windows (24, 25); then
+    # both have slid: A's 7 and B's 10 remaining tokens are full forwards.
+    tnt_decode_counts(c0);
+    assert_eq(load64(c0 + 8) - load64(c1 + 8), 41,
+      "decode: ... interleaved, every step a takeover until one slides (41)");
+    assert_eq(load64(c0) - load64(c1), 2, "decode: ... then the other's cached steps to its own slide (2)");
+    assert_eq(load64(c0 + 16) - load64(c1 + 16), 17, "decode: ... then full forwards for both (17)");
+    # an unchanged reload in the middle of a reply leaves its cache in place
+    var w35 = alloc(35 * 8);
+    _t2111_oracle(the, 3, 35, w35);
+    var gu = tnt_gen_begin(req_arena(), the, 3);
+    var uok = 1; s = 0;
+    while (s < 5) { if (tnt_gen_step(gu) != load64(w35 + s * 8)) { uok = 0; } s = s + 1; }
+    assert_eq(tnt_load(ma), TNT_UNCHANGED(), "decode: a reload of A mid-reply -> TNT_UNCHANGED");
+    while (s < 35) { if (tnt_gen_step(gu) != load64(w35 + s * 8)) { uok = 0; } s = s + 1; }
+    assert_eq(uok, 1, "decode: ... and the reply goes on with the same bytes");
+    # the header peek refuses what tentib's load would, before tentib is touched
+    assert_eq(tnt_load(mf), pk_err_header(), "decode: a flag no tentib defines -> pk_err_header (from the peek)");
+    assert_eq(_t2111_lone(the, 3, 30), 1, "decode: ... and A still serves");
+    # a same-shape reload: tentib overwrites A's buffers, so nothing is allocated, and the reply on A stops
+    var gr = tnt_gen_begin(req_arena(), the, 3);
+    assert_eq(tnt_gen_step(gr), 32, "decode: a reply on A begins");
+    var u0 = alloc_used();
+    assert_eq(tnt_load(mb), 0, "decode: model B (A's shape) loads");
+    assert_eq(alloc_used() - u0, 0, "decode: ... allocating nothing (tentib reused A's memory)");
+    assert_eq(tnt_load_reused(), 1, "decode: ... which tnt_load_reused reports");
+    assert_eq(tnt_vocab_declared(), 1, "decode: B declares the byte vocabulary");
+    assert_eq(tnt_gen_step(gr), 0 - 1, "decode: the reply begun on A stops");
+    var ta = "a ternary";
+    assert_eq(_t2111_lone(ta, 9, 40), 1, "decode: B decodes its own 2.11.0 bytes");
+    u0 = alloc_used();
+    assert_eq(tnt_load(ma), 0, "decode: A loads back over B");
+    assert_eq(alloc_used() - u0, 0, "decode: ... allocating nothing");
+    assert_eq(tnt_vocab_declared(), 0, "decode: ... declaring nothing again");
+    assert_eq(_t2111_lone(the, 3, 40), 1, "decode: ... and A decodes its bytes again (none of B left)");
+    # a model of another shape allocates, and decodes right
+    u0 = alloc_used();
+    assert_eq(tnt_load(mc), 0, "decode: model C (T = 15) loads");
+    assert_eq(tnt_load_reused(), 0, "decode: ... as new memory");
+    assert_eq(alloc_used() - u0 >= tnt_model_bytes(), 1, "decode: ... at least tentib's figure for its dims");
+    var sh = "short";
+    assert_eq(_t2111_lone(sh, 5, 30), 1, "decode: C decodes its own 2.11.0 bytes (sliding at T = 15)");
+    # serving keeps nothing on the heap on the cached path
+    var route = route_new(PROV_TENTIB, 1, mc);
+    var resp = alloc(8);
+    var msgs = "[{\"role\":\"user\",\"content\":\"short\"}]";
+    req_arena_begin();
+    _t211_reply(route, msgs, 9, resp);
+    var m0 = alloc_used(); var mi = 0;
+    while (mi < 200) { req_arena_begin(); _t211_reply(route, msgs, 9, resp); mi = mi + 1; }
+    assert_eq(alloc_used() - m0, 0, "decode: 200 cached replies keep nothing on the heap");
+    # a model wider than any before needs a larger decode cache: the load allocates it, not the first reply
+    assert_eq(tnt_load(md), 0, "decode: model D (C = 24, a larger cache) loads");
+    req_arena_begin();
+    m0 = alloc_used();
+    _t211_reply(route, msgs, 9, resp);
+    assert_eq(alloc_used() - m0, 0, "decode: ... and its first reply allocates nothing (the load sized the cache)");
+    assert_eq(_t2111_lone(sh, 5, 20), 1, "decode: D decodes its own 2.11.0 bytes");
+    # a shape differs in F alone: still a new shape
+    assert_eq(tnt_load(ma), 0, "decode: A loads again");
+    assert_eq(tnt_load(me), 0, "decode: model E (F = 48) loads over A");
+    assert_eq(tnt_load_reused(), 0, "decode: ... as new memory (F differs)");
+    assert_eq(_t2111_lone(the, 3, 30), 1, "decode: E decodes its own 2.11.0 bytes");
+    # the model's path is kept in one buffer: a path as long as the longest before it allocates nothing
+    var lp1 = alloc(301); var lp2 = alloc(301); var li = 0;
+    while (li < 300) { store8(lp1 + li, 97); store8(lp2 + li, 98); li = li + 1; }
+    store8(lp1 + 300, 0); store8(lp2 + 300, 0);
+    _tnt_keep_path(lp1);
+    m0 = alloc_used();
+    _tnt_keep_path(lp2);
+    assert_eq(alloc_used() - m0, 0, "decode: keeping a path as long as the buffer allocates nothing");
+    assert_streq(tnt_path(), lp2, "decode: ... and keeps it");
+    sys_unlink(ma); sys_unlink(mb); sys_unlink(mc); sys_unlink(mf); sys_unlink(md); sys_unlink(me);
+    return 0;
 }
 
 fn _t211_tentib_local() {
@@ -7792,6 +7972,7 @@ fn main() {
     _t2103_stream_chunks();
     _t2103_event_ring();
     _t211_tentib_local();
+    _t2111_tentib_decode();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

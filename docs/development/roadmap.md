@@ -8,9 +8,9 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.11.0 (cyrius 6.7.18). 2.11.0 serves a packed ternary model in hoosh's own process, through tentib's
+**Current**: v2.11.1 (cyrius 6.7.18). 2.11.0 serves a packed ternary model in hoosh's own process, through tentib's
 library bundle: a `type = "tentib"` provider, buffered and streamed ([ADR 014](../decisions/014-in-process-ternary-inference.md)).
-See the CHANGELOG.
+2.11.1 pins tentib 1.4.0: a token is one cached decode step, and a same-shape reload keeps no memory. See the CHANGELOG.
 **Next**: the rest of ADR 013 below, then *Then, in any order*.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
@@ -150,16 +150,21 @@ request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `
   bytes are the model serving) and answers through tentib's integer kernel, buffered and streamed. One per process;
   bytes are tokens; greedy decoding. [ADR 014](../decisions/014-in-process-ternary-inference.md).
 
+### 2.11.1 — tentib 1.4.0 *(done)*
+
+- Incremental decode with one cache shared by turns, the header peek and the declared byte vocabulary, and same-shape
+  reloads that keep no memory ([ADR 014](../decisions/014-in-process-ternary-inference.md)'s 2.11.1 update).
+
 ### 2.11.x — what tentib's next releases make possible
 
 Each waits on tentib (`docs/development/roadmap.md` there), then is a pin bump and a change here.
-- **Incremental decode.** Each token is a full forward over the window today, about 50 µs per token on the bench's
-  C = 16 model and growing with the window. A KV cache in tentib makes it one position per token.
-- **A model's own vocabulary.** tentib's format v1 carries none, so hoosh requires V = 256 and reads bytes as tokens.
-  When the artifact can carry a tokenizer (tentib format v2 or a flag), read it and lift the byte rule.
-- **Memory per model loaded.** A load of another model keeps the one it replaces: 802,376 bytes at T = 30, C = 16, and
-  `tx_model_alloc_bytes` in general. tentib's 1.4.x serving-only allocation shrinks it; its 2.0.0 model handles end it,
-  and would also allow more than one tentib route per process.
+- **A model's own vocabulary.** A file can declare the byte vocabulary (tentib 1.4.0), but not another one, so hoosh
+  still requires V = 256 and reads bytes as tokens. When the artifact can carry a tokenizer (tentib's 1.4.x token
+  table), read it and lift the byte rule.
+- **Memory per change of shape.** A load of a model of another shape keeps the one it replaces: 802,376 bytes at
+  T = 30, C = 16, and `tx_model_alloc_bytes` in general (a same-shape reload keeps nothing since 2.11.1). tentib's 1.5.x
+  serving-only allocation shrinks it. Its 2.0.0 model handles end it, and would also allow more than one tentib route per
+  process and a decode cache per reply.
 
 ### 2.11.x — hoosh's own follow-ups
 

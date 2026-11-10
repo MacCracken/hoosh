@@ -5,6 +5,125 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.11.1] — 2026-11-09
+
+**A tentib reply is one decode step per token.** hoosh pins tentib 1.4.0 and uses what it added for its first consumer:
+
+- incremental decode, so a new token is one cached step instead of a forward over the whole window;
+- `tx_pack_peek`, to read a model file's header before a load;
+- the byte-vocabulary flag;
+- same-shape reloads that allocate nothing.
+
+**2134 assertions** in 181 groups. All gates are clean: fmt, lint, vet, deny, coverage (479/816, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test.
+
+⚠ **What changes on the wire.** Nothing. A tentib reply is the same bytes as 2.11.0's: a test checks it byte for byte
+against a 2.11.0-style oracle. It comes faster: an 8-token reply takes 99 µs instead of 448, and a 22-token reply
+263 µs instead of 2.74 ms (interleaved A/B, medians). A model file that declares the byte vocabulary, which tentib
+1.4.0 can write and 1.3.0 refused, now loads.
+
+### Changed — the tentib provider (`src/lib/tentib_local.cyr`, ADR 014's 2.11.1 update)
+
+- **Decoding.** Until the window slides, each token is one `tx_dec_step` against tentib's cache of the window's earlier
+  positions. The step's logits are the same bits as the full forward's last row (tentib's architecture note 002). Once
+  the window slides, every position moves, and each token is a full forward over the window again, as in 2.11.0.
+- **One cache, shared by turns.** tentib keeps one decode cache per process, and replies interleave step by step under
+  the lock.
+  - The cache belongs to the reply that last reset it.
+  - Another reply's step takes it over: a reset, then that reply's window fed back in, at the cost of the full forward
+    it replaces.
+  - So a lone reply gets the speedup, and interleaved replies cost what they did in 2.11.0, never more.
+  - A load clears the owner, so a step never runs on a cache older than its model, which tentib's `guard()` would exit
+    the process for.
+- **The header first.** A model file's header is read with `tx_pack_peek`, the load's own header checks, before anything
+  else, instead of reading offset 24 by hand.
+  - A header tentib refuses (`pk_err_*`), or a V other than 256, is refused before tentib is called.
+  - A flag no tentib defines is refused as "a malformed header, or a flag this hoosh's tentib does not read".
+- **The vocabulary.** A file may declare the byte vocabulary (tentib 1.4.0, flags bit 0). One that declares nothing is
+  still served as bytes, as in 2.11.0. `tnt_vocab_declared()` says which, and so does the load's log.
+- **The load's log** is two lines: the path, then the context, the vocabulary (declared or assumed) and the model's
+  memory, "(new)" or "(the replaced model's, reused)". The logger (sakshi) cuts a line at 256 bytes and drops its
+  newline, and a long `model_file` path pushed the 2.11.0 line past that.
+- **Counters.** `tnt_decode_counts` reports the tokens decoded by a cached step, by a takeover and by a full forward.
+
+### Memory
+
+- **A same-shape reload keeps nothing.** A load over the loaded model of the same V, T, C, F overwrites its buffers
+  (tentib's ADR 0003) and allocates nothing (tested). Through 2.11.0 every reload to another model kept a whole model,
+  802,376 bytes at T = 30, C = 16. A model of another shape still keeps its predecessor's (`tnt_load_reused()` and the
+  log say which).
+- **The model's path** is kept in one buffer, grown only for a longer path than any before. Through 2.11.0 a changed
+  `model_file` kept a copy of the path per change.
+- **The decode cache** is 16·T·C bytes (6,400 at T = 25, C = 16). It is sized by the load of a model larger than any
+  before, never by a reply (tested): 200 cached replies keep nothing on the heap.
+
+### Changed — dependency pins
+
+- **tentib 1.3.0 → 1.4.0**, with `cyrius.lock` regenerated from empty: tentib `b29ae7c`. rosnet 1.4.1 and tyche 1.2.2
+  come with it, unchanged.
+- tentib 1.4.0's new names collide with nothing in hoosh. Only a function-local `dec_len` in
+  `lib/unicode/normalize.cyr` shares one, and a local shadows the global (checked with a probe program). The build
+  prints no duplicate or undefined warning.
+- Unchanged: cyrius 6.7.18 and ai-hwaccel 2.5.6, both the latest releases, and the vendored bundles.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2088 → 2134), a new group `tentib_local: incremental decode, the header peek, same-shape
+  reloads`. Models are trained and written through tentib's API, as in 2.11.0, and every check goes through tentib_local.
+  The oracle is 2.11.0's decode, a full `tx_fwd_packed` per token, and the cached path matches it byte for byte:
+  - a lone reply past the slide, from an empty prompt, from one longer than T, and one token;
+  - two replies interleaved step by step;
+  - an unchanged reload mid-reply, which keeps the cache.
+
+  The group also covers:
+  - the decode-path counts: a lone 40-token reply is 1 takeover, 22 cached steps and 17 full forwards; the interleaved
+    pair is 41 takeovers, 2 cached and 17 full;
+  - a file with an undefined flag, refused with the model still serving;
+  - same-shape reloads that allocate nothing and stop a reply begun on the old model, and back again;
+  - a model of another shape (T), and one that differs in F alone, as new memory;
+  - a wider model whose load, not its first reply, sizes the cache;
+  - the path buffer.
+- **`tests/hoosh.bcyr`** (39 → 41): `tentib_reply_22tok` (windows 3..24, the longest reply that does not slide) and
+  `tentib_load_same_shape` (two files of one shape, alternated).
+- **Mutation-checked:** 12 mutants of the change, and the suite kills 11. The twelfth (not clearing the owner at a load)
+  is equivalent, because generation ids are never reused.
+- **Live:** a gateway with a tentib route was driven over HTTP and `SIGHUP`:
+  - buffered and streamed replies;
+  - an unchanged reload;
+  - a same-shape swap to a model declaring the byte vocabulary, and back, both logged as reused;
+  - a file with an undefined flag, which disabled the route with the reason logged.
+
+### Sizes and performance
+
+| | 2.11.0 | 2.11.1 | |
+|---|---:|---:|---:|
+| x86_64 | 4,183,080 | 4,188,072 | +0.1% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,696,232 | 2,701,224 | +0.2% |
+| aarch64 | 4,854,456 | 4,920,904 | +1.4% |
+| AGNOS, `CYRIUS_DCE=1` | 2,664,648 | 2,669,648 | +0.2% |
+
+On aarch64 the code segment grows by 8,952 bytes, like the other targets. That pushes it past a 64 KB boundary, so the
+data segment's file offset moves up one 64 KB page: the rest is padding in the file, not memory. The warning sets are
+unchanged on all three targets. The one warning, large static data, grows by tentib's and hoosh's new globals: 142,224
+→ 142,336 bytes on x86_64.
+
+The bench's model is T = 25, C = 16, F = 32, a 40,064-byte file. The 2.11.0 and 2.11.1 bench binaries were run
+alternately, five times each on one idle core, with the 22-token row added to 2.11.0's source for the comparison:
+
+| | 2.11.0 | 2.11.1 | |
+|---|---:|---:|---:|
+| `tentib_reply_8tok` (windows 3..10) | 447.6 µs | 99.2 µs | 4.5× |
+| `tentib_reply_22tok` (windows 3..24) | 2.74 ms | 263 µs | 10.4× |
+| `tentib_load` (another shape: allocates) | 506 µs | 527 µs | +4%, noise |
+| `tentib_reload_same` (unchanged file: SHA-256 only) | 149 µs | 152 µs | +2%, noise |
+| `tentib_load_same_shape` (allocates nothing) | — | 314 µs | new |
+
+The gain grows with the reply: 2.11.0's cost per token grew with the window, and a cached step's barely does. The run of
+record (`bench-history.csv`) agrees: 98, 259, 495, 147 and 306 µs. Against 2.11.0's recorded run, the rows whose code did
+not change are a median 9.5% slower, and the A/B moves them a median −0.8%. Several of those rows are bimodal from run
+to run in both binaries (`provider_err_set_utf8_511b` reads 5 µs or 10 µs), so read that as today's machine, which was
+running other sessions' jobs.
+
 ## [2.11.0] — 2026-11-09
 
 **hoosh serves a ternary model in its own process.** A `type = "tentib"` provider loads a packed ternary (1.58-bit)

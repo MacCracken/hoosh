@@ -35,8 +35,11 @@ Citations for the specifications and algorithms hoosh implements, by the module 
   arXiv:2402.17764. The model shape tentib implements: ternary {−1, 0, +1} weights with a per-layer scale, int8
   activations. hoosh serves it; tentib trains and packs it. [ADR 014](decisions/014-in-process-ternary-inference.md).
 - **tentib's packed-model format, version 1**: tentib's `docs/architecture/001-packed-model-format.md` (the bytes, the
-  decoder's checks and its status codes). hoosh reads the vocabulary size from its header word at offset 24 before tentib
-  loads anything, and passes the rest to `tx_pack_deserialize`.
+  decoder's checks and its status codes, and since tentib 1.4.0 flags bit 0, the byte vocabulary). hoosh reads the header
+  with `tx_pack_peek` before tentib loads anything (V must be 256), and passes the rest to `tx_pack_deserialize`.
+- **Incremental decode**: tentib's `docs/architecture/002-incremental-decode.md`, why a cached step is the same bits as
+  the full forward's last row and why the cache stops at T. hoosh shares the one cache between interleaved replies
+  ([ADR 014](decisions/014-in-process-ternary-inference.md)'s 2.11.1 update).
 - **UTF-8**: The Unicode Standard, Version 15.0, §3.9, Table 3-7 ("Well-Formed UTF-8 Byte Sequences"), for the byte
   ranges a character's second byte may take (E0 A0–BF, ED 80–9F, F0 90–BF, F4 80–8F, else 80–BF); and §3.9's "U+FFFD
   Substitution of Maximal Subparts", the practice hoosh follows: each maximal subpart of an ill-formed sequence becomes

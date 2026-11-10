@@ -347,16 +347,29 @@ fn load_config(path) {
                     var trc = tnt_load(mf);
                     if (trc == 0) {
                         tentib_loaded = 1;
-                        # Each model loaded keeps its memory for the life of the process (ADR 014), so say how much.
+                        # A model of a new shape keeps its memory for the life of the process; one of the shape
+                        # serving reuses that model's (ADR 014). Say which, how much, and whether the file declares
+                        # the byte vocabulary or it is assumed. Two lines: the logger cuts a line at 256 bytes, and
+                        # the path's length is the operator's.
                         var lsb = str_builder_new();
                         str_builder_add_cstr(lsb, "config: tentib model loaded: ");
                         str_builder_add_cstr(lsb, mf);
-                        str_builder_add_cstr(lsb, ", context ");
-                        str_builder_add_int(lsb, tnt_context());
-                        str_builder_add_cstr(lsb, " tokens, ");
-                        str_builder_add_int(lsb, tnt_model_bytes());
-                        str_builder_add_cstr(lsb, " bytes of model memory");
                         hlog_info(to_cstr(str_builder_build(lsb)));
+                        var msb = str_builder_new();
+                        str_builder_add_cstr(msb, "config: tentib model: context ");
+                        str_builder_add_int(msb, tnt_context());
+                        if (tnt_vocab_declared() == 1) {
+                            str_builder_add_cstr(msb, " tokens, byte vocabulary declared, ");
+                        } else {
+                            str_builder_add_cstr(msb, " tokens, byte vocabulary assumed, ");
+                        }
+                        str_builder_add_int(msb, tnt_model_bytes());
+                        if (tnt_load_reused() == 1) {
+                            str_builder_add_cstr(msb, " bytes of model memory (the replaced model's, reused)");
+                        } else {
+                            str_builder_add_cstr(msb, " bytes of model memory (new)");
+                        }
+                        hlog_info(to_cstr(str_builder_build(msb)));
                     } elif (trc == TNT_UNCHANGED()) {
                         tentib_loaded = 1;
                         hlog_info("config: tentib model unchanged, not reloaded");

@@ -33,15 +33,17 @@ git = "https://github.com/MacCracken/ai-hwaccel"
 tag = "2.5.6"
 modules = ["dist/ai-hwaccel.cyr"]
 
-# In-process ternary (1.58-bit) inference (2.11.0, ADR 014): tentib's library bundle.
+# In-process ternary (1.58-bit) inference (2.11.0, ADR 014): tentib's library bundle (1.4.0 since 2.11.1:
+# incremental decode, tx_pack_peek, the byte-vocabulary flag, same-shape reloads).
 # tentib's manifest declares rosnet and tyche (its f64 substrate), so `cyrius deps` vendors
 # lib/rosnet.cyr and lib/tyche.cyr with lib/tentib.cyr; akshara is tentib's test-scope dep
 # and does not come. The bundle's requires block names one stdlib leaf (math). None of the
 # three shares a function or global name with hoosh, its vendored bundles or its stdlib
-# set (checked 2026-11-09). Powers src/lib/tentib_local.cyr.
+# set (checked 2026-11-09, and again for 1.4.0's names: only a function-local `dec_len` in
+# lib/unicode/normalize.cyr shares one, and a local shadows the global). Powers src/lib/tentib_local.cyr.
 [deps.tentib]
 git = "https://github.com/MacCracken/tentib"
-tag = "1.3.0"
+tag = "1.4.0"
 modules = ["dist/tentib.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers

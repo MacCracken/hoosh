@@ -704,9 +704,12 @@ fn main() {
     sys_close(dn);
 
     # 2.11.0: in-process ternary inference (tentib_local.cyr). The models are trained here through tentib (outside the
-    # timing): byte models of the sentences below, C = 16, F = 32, T = 25. A reply decodes greedily, one tentib forward
-    # over the window per token. A load alternates the two files, so each reads, checks and deserializes a 40 KB file
-    # and allocates a model (it runs 20 times); a reload of the file serving reads it and compares its SHA-256.
+    # timing): byte models of the sentences below, C = 16, F = 32, T = 25 and 26. A reply decodes greedily; since
+    # 2.11.1 (tentib 1.4.0) each token is one cached decode step until the window slides (reply_8tok: windows 3..10;
+    # reply_22tok: 3..24, the longest that does not slide). tentib_load alternates the two files of different T, so
+    # each reads, checks and deserializes a 40 KB file and allocates a model (it runs 20 times); a reload of the file
+    # serving reads it and compares its SHA-256; load_same_shape alternates two files of one shape, which tentib
+    # loads into the same buffers, allocating nothing.
     var tb_alt = _b_s("a second model to alternate");
     var tb_aT = strlen(tb_alt) - 1;
     var tb_atok = t_alloc(tb_aT); var tb_atgt = t_alloc(tb_aT);
@@ -739,6 +742,18 @@ fn main() {
     tx_pack_serialize(tb_buf, tb_n);
     var tb_path = _b_s("/tmp/hoosh-bcyr-tentib.tpk");
     file_write_all(tb_path, tb_buf, tb_n);
+    var tb_same = _b_s("a ternary model, declared!");          # T = 25, the main model's shape (2.11.1)
+    var tb_stok = t_alloc(tb_T); var tb_stgt = t_alloc(tb_T);
+    tbi = 0;
+    while (tbi < tb_T) {
+        store64(tb_stok + tbi * 8, load8(tb_same + tbi)); store64(tb_stgt + tbi * 8, load8(tb_same + tbi + 1));
+        tbi = tbi + 1;
+    }
+    tx_train(tb_stok, tb_stgt, 256, tb_T, 16, 32, 20, 3, tb_st);
+    tx_int_init(256, tb_T, 16, 32); tx_pack_init(256, tb_T, 16, 32); tx_pack(256, tb_T, 16, 32);
+    tx_pack_serialize(tb_buf, tb_n);
+    var tb_spath = _b_s("/tmp/hoosh-bcyr-tentib-same.tpk");
+    file_write_all(tb_spath, tb_buf, tb_n);
     tnt_load(tb_path);
     var tb_route = route_new(PROV_TENTIB, 1, tb_path);
     var tb_msgs = _b_s("[{\"role\":\"user\",\"content\":\"the\"}]");
@@ -750,6 +765,17 @@ fn main() {
         req_arena_begin();
         var tb_g = genopts_new_a(ra, 0, 8, GEN_UNSET, GEN_UNSET);
         tnt_forward(tb_route, b_llama3, 0, tb_msgs, tb_mlen, tb_g);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 2000);
+    bench_report(b);
+    b = bench_new("tentib_reply_22tok");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 2000) {
+        req_arena_begin();
+        var tb_g22 = genopts_new_a(ra, 0, 22, GEN_UNSET, GEN_UNSET);
+        tnt_forward(tb_route, b_llama3, 0, tb_msgs, tb_mlen, tb_g22);
         i = i + 1;
     }
     bench_batch_stop(b, 2000);
@@ -772,7 +798,16 @@ fn main() {
     }
     bench_batch_stop(b, 2000);
     bench_report(b);
-    sys_unlink(tb_path); sys_unlink(tb_apath);
+    b = bench_new("tentib_load_same_shape");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 200) {
+        if (i % 2 == 0) { tnt_load(tb_spath); } else { tnt_load(tb_path); }
+        i = i + 1;
+    }
+    bench_batch_stop(b, 200);
+    bench_report(b);
+    sys_unlink(tb_path); sys_unlink(tb_apath); sys_unlink(tb_spath);
 
     println("");
     println("done");

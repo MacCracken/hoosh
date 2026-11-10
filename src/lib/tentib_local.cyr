@@ -7,7 +7,7 @@
 # reload (config.cyr).
 #
 # Requires: lib/tentib.cyr (with lib/rosnet.cyr and lib/tyche.cyr) included first; types.cyr (PROV_TENTIB, GEN_UNSET,
-# gen_max_tokens); reqmem.cyr (req_arena, sb_room_a, sb_on, sb_cstr, sb_len, cstr_keep); jsonlite.cyr
+# gen_max_tokens); reqmem.cyr (req_arena, sb_room_a, sb_on, sb_cstr, sb_len); jsonlite.cyr
 # (_json_escape_into, _json_obj_end, _json_str_span); outcome.cyr (FIN_*, OC_*); provider_err.cyr (sse_content_send,
 # upstream_error_sse_body, provider_err_*); http_server.cyr (http_sse_event); logging.cyr; lib/io.cyr
 # (file_read_whole_max); lib/str.cyr (_str_json_unesc_into); lib/sync (mutex_*).
@@ -20,19 +20,31 @@
 # - tentib's guard() exits the PROCESS on a precondition it refuses (a token id outside [0, V), a T past the model's,
 #   a call before a load). Every value this module passes is in range by construction: tokens are bytes and V is 256,
 #   the window never exceeds the model's T, and nothing calls tentib before a load succeeded.
-# - Bytes are tokens. tentib's artifact carries no vocabulary, so a model hoosh serves uses the byte-identity
-#   vocabulary: V = 256, token id = byte value. A model with another V is refused at load (TNT_ERR_VOCAB).
+# - Bytes are tokens: a model hoosh serves uses the byte-identity vocabulary, V = 256, token id = byte value. A file
+#   may declare it (tentib >= 1.4.0, flags bit 0); one that declares nothing is assumed to use it, as 2.11.0 did. The
+#   header is read with tx_pack_peek before tentib is touched, so a model with another V is refused (TNT_ERR_VOCAB)
+#   without replacing the one serving, and so is a header tentib refuses (its status).
 # - Decoding is greedy (the argmax token); temperature and top_p are not applied, and tools are not offered. The
-#   window slides over the model's last T positions, and each new token runs tx_fwd_packed over the whole window
-#   (tentib has no incremental decode yet): one forward of up to T positions per token.
+#   window slides over the model's last T positions. Until it slides, a token is one tentib decode step (2.11.1):
+#   tentib's cache holds the keys and values of the window's earlier positions, and the step's logits are the same
+#   bits as the full forward's last row (tentib's architecture note 002). Once the window slides, every position
+#   moves, so each token is a tx_fwd_packed over the window again, as in 2.11.0.
+# - tentib has ONE decode cache per process, and replies interleave step by step. The cache belongs to the
+#   generation that last reset it (_tnt_dec_owner). A step by any other generation takes it over: a reset and its
+#   window fed back in, which costs what the full forward it replaces does. So a lone reply decodes one position per
+#   token, and replies that interleave cost what they did in 2.11.0, never more. A load that replaces the model
+#   clears the owner (tentib refuses a step on a cache built before the load).
 # - Byte 0 ends a reply (finish "stop"); max_tokens ends it otherwise (finish "length"). The bytes become valid UTF-8,
 #   an invalid or unfinished sequence each turning into U+FFFD, and are JSON-escaped; the escaper drops control bytes
 #   other than tab, LF and CR.
 # - Memory. Every load reads into one buffer (file_read_whole_into), grown only for a file larger than any before it,
-#   and a reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing. A load of another
-#   model allocates a whole tentib model, and the one it replaces is never freed (tentib's buffers come from the
-#   allocator that does not free; model handles are tentib's 2.0.0 backlog item): tx_model_alloc_bytes(V, T, C, F)
-#   per model loaded, which the config log states.
+#   and a reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing. Since tentib 1.4.0
+#   a load of another model of the same V, T, C, F overwrites the loaded model's buffers and allocates nothing (its
+#   ADR 0003). A model of another shape allocates a whole tentib model, and the one it replaces is never freed
+#   (tentib's buffers come from the allocator that does not free; model handles are tentib's 2.0.0 backlog item):
+#   tx_model_alloc_bytes(V, T, C, F) per change of shape, which the config log states. The decode cache,
+#   tx_dec_alloc_bytes(T, C) = 16 * T * C bytes, is allocated by the load (tx_dec_reset) of a model larger than any
+#   before it, never by a reply.
 
 # ---- policy ----------------------------------------------------------------------------------------------------
 
@@ -56,6 +68,15 @@ fn TNT_ERR_READ() { return 0 - 100; }
 # The model's vocabulary is not the byte-identity one (V != 256).
 fn TNT_ERR_VOCAB() { return 0 - 101; }
 
+# The fields of a generation record (tnt_gen_begin), in bytes.
+fn TNT_G_WIN() { return 0; }     # the window: up to T token ids (bytes), i64 each
+fn TNT_G_W() { return 8; }       # tokens in the window
+fn TNT_G_T() { return 16; }      # the model's T when the generation began
+fn TNT_G_EPOCH() { return 24; }  # the model's epoch when the generation began
+fn TNT_G_ID() { return 32; }     # the generation's id (> 0), for the decode cache's owner
+fn TNT_G_SLID() { return 40; }   # 1 once the window has slid (every position moved: the cache cannot serve it)
+fn TNT_G_SIZE() { return 48; }
+
 # ---- state -----------------------------------------------------------------------------------------------------
 
 var _tnt_lock = 0;       # serializes every call into tentib (created by the first load)
@@ -63,19 +84,55 @@ var _tnt_load_lock = 0;  # serializes loads, which share _tnt_rb (load_config's 
 var _tnt_ready = 0;      # 1 while a model is loaded
 var _tnt_epoch = 0;      # bumped by every load that replaces the model
 var _tnt_V = 0; var _tnt_T = 0; var _tnt_C = 0; var _tnt_F = 0;
-var _tnt_path = 0;       # the loaded model's file (process memory)
+var _tnt_path = 0;       # the loaded model's file, in a buffer reused by every load (_tnt_keep_path)
+var _tnt_path_cap = 0;   # the bytes that buffer holds
 var _tnt_size = 0;       # its size in bytes
 var _tnt_rb[2];          # the file buffer, { ptr, cap }, reused by every load (file_read_whole_into)
 var _tnt_digest[4];      # the SHA-256 of the loaded model's file
+var _tnt_declared = 0;   # 1 when the loaded model's file declares the byte vocabulary (tentib >= 1.4.0)
+var _tnt_reused = 0;     # 1 when the last load replaced a model of the same shape (tentib reused its memory)
+var _tnt_gen_seq = 0;    # the last generation id handed out (under _tnt_lock)
+var _tnt_dec_owner = 0;  # the generation whose sequence tentib's decode cache holds; 0 = none (under _tnt_lock)
+var _tnt_n_cached = 0;   # tokens decoded by one cached step (under _tnt_lock)
+var _tnt_n_takeover = 0; # tokens decoded by taking the cache over: a reset and the window stepped in
+var _tnt_n_full = 0;     # tokens decoded by a full forward (the window had slid)
 
 # 1 while a model is loaded.
 fn tnt_ready() { return _tnt_ready; }
 # The loaded model's context length in tokens (0 before a load).
 fn tnt_context() { return _tnt_T; }
-# The loaded model's file, or 0.
+# The loaded model's file, or 0. Its buffer is rewritten by the next load of another path.
 fn tnt_path() { return _tnt_path; }
+# 1 when the loaded model's file declares the byte vocabulary; 0 when it declares none (bytes are assumed).
+fn tnt_vocab_declared() { return _tnt_declared; }
+# 1 when the last load replaced a model of the same V, T, C, F, so tentib overwrote its buffers instead of allocating.
+fn tnt_load_reused() { return _tnt_reused; }
+# The tokens decoded each way since the process started: out[0] by one cached step, out[1] by taking the cache over
+# (a reply whose sequence it did not hold), out[2] by a full forward (a window that slid).
+fn tnt_decode_counts(out) {
+    mutex_lock(_tnt_lock);
+    store64(out, _tnt_n_cached); store64(out + 8, _tnt_n_takeover); store64(out + 16, _tnt_n_full);
+    mutex_unlock(_tnt_lock);
+    return 0;
+}
 
 # ---- load ------------------------------------------------------------------------------------------------------
+
+# Keep `path` as the loaded model's file (under _tnt_load_lock), in one buffer that grows only for a path longer than
+# any before it, so a reload to another file of the same length allocates nothing. -1 if the buffer cannot grow (the
+# old path stays, and the next load compares against it).
+fn _tnt_keep_path(path) {
+    var n = strlen(path);
+    if (n + 1 > _tnt_path_cap) {
+        var p = alloc(n + 1);
+        if (p == 0) { return 0 - 1; }
+        _tnt_path = p;
+        _tnt_path_cap = n + 1;
+    }
+    memcpy(_tnt_path, path, n);
+    store8(_tnt_path + n, 0);
+    return 0;
+}
 
 # Load the packed model at `path`. Returns 0 (loaded), TNT_UNCHANGED (the file holds the model serving: nothing is
 # loaded, and replies in progress go on), TNT_ERR_READ / TNT_ERR_VOCAB, or tentib's tx_pack_deserialize status
@@ -95,35 +152,46 @@ fn _tnt_load_held(path) {
     var n = file_read_whole_into(&_tnt_rb, path, TNT_MAX_FILE());
     if (n < 0) { return TNT_ERR_READ(); }
     var buf = load64(&_tnt_rb);
-    # The vocabulary is a header word (format version 1, offset 24): refuse another V before tentib replaces the
-    # current model with one this module cannot serve.
-    if (n >= 72) {
-        if (load64(buf) == load64("TENTIBPK")) {
-            if (load64(buf + 24) != TNT_VOCAB()) { return TNT_ERR_VOCAB(); }
-        }
-    }
+    # The header first (tentib's tx_pack_peek: the load's own header checks, and no state touched): a header tentib
+    # refuses, or a model this module cannot serve, never replaces the model serving.
+    var info[40];
+    var pr = tx_pack_peek(buf, n, &info);
+    if (pr != 0) { return pr; }
+    if (load64(&info) != TNT_VOCAB()) { return TNT_ERR_VOCAB(); }
     # A reload re-reads every file: when this one holds the model serving, loading it again would only allocate a
     # second copy of the model and stop every reply in progress.
     var dg[32];
     sha256(buf, n, &dg);
     if (_tnt_ready == 1 && n == _tnt_size) {
         if (memeq(&dg, &_tnt_digest, 32) == 1) {
-            if (streq(_tnt_path, path) == 0) { _tnt_path = cstr_keep(path); }
+            if (streq(_tnt_path, path) == 0) { _tnt_keep_path(path); }
             return TNT_UNCHANGED();
         }
     }
     mutex_lock(_tnt_lock);
+    # tentib reuses the loaded model's buffers for a model of the same shape (its _pk_reusable: the live model was
+    # loaded, which every model in this process is, and the dims match).
+    var same = 0;
+    if (_tnt_ready == 1) {
+        same = (load64(&info) == _tnt_V) & (load64(&info + 8) == _tnt_T);
+        same = same & (load64(&info + 16) == _tnt_C) & (load64(&info + 24) == _tnt_F);
+    }
     var rc = tx_pack_deserialize(buf, n, TNT_MAX_LOAD());
     if (rc != 0) { mutex_unlock(_tnt_lock); return rc; }
     var dims[32];
     tx_pack_dims(&dims);
     _tnt_V = load64(&dims); _tnt_T = load64(&dims + 8); _tnt_C = load64(&dims + 16); _tnt_F = load64(&dims + 24);
     _tnt_size = n;
+    _tnt_declared = 0;
+    if (tx_pack_vocab() == pk_vocab_bytes()) { _tnt_declared = 1; }
+    _tnt_reused = same;
     _tnt_epoch = _tnt_epoch + 1;
+    tx_dec_reset();              # here, not on a reply: sizes the cache for this model if none so large exists yet
+    _tnt_dec_owner = 0;          # no generation's sequence is in it
     _tnt_ready = 1;
     mutex_unlock(_tnt_lock);
     memcpy(&_tnt_digest, &dg, 32);
-    if (_tnt_path == 0 || streq(_tnt_path, path) == 0) { _tnt_path = cstr_keep(path); }
+    if (_tnt_path == 0 || streq(_tnt_path, path) == 0) { _tnt_keep_path(path); }
     return 0;
 }
 
@@ -142,7 +210,7 @@ fn tnt_status_text(rc) {
     if (rc == pk_err_length()) { return "not a whole tentib model (wrong length)"; }
     if (rc == pk_err_magic()) { return "not a tentib packed model"; }
     if (rc == pk_err_version()) { return "a tentib format version this hoosh does not read"; }
-    if (rc == pk_err_header()) { return "a malformed header"; }
+    if (rc == pk_err_header()) { return "a malformed header, or a flag this hoosh's tentib does not read"; }
     if (rc == pk_err_checksum()) { return "the checksum does not match (the file is corrupt)"; }
     if (rc == pk_err_too_big()) { return "loading it would need more than 4 GiB"; }
     if (rc == pk_err_weights()) { return "malformed ternary weights"; }
@@ -195,25 +263,52 @@ fn tnt_prompt_a(a, messages_raw, messages_len, prompt, lenp) {
 
 # ---- decode ----------------------------------------------------------------------------------------------------
 
-# The next token after window[0..w) on the model of `epoch`, or -1 when that model is gone (a reload or none).
-fn _tnt_next(window, w, epoch) {
+# The next token after generation g's window[0..w), or -1 when the model g began on is gone (a reload or none).
+# Under _tnt_lock. Three ways to the same bits:
+# - g owns tentib's decode cache, which holds window[0..w-1): one decode step of window[w-1];
+# - the window has not slid, but the cache is another generation's (or none's): reset it and step the window in,
+#   which leaves g the owner (the work of one full forward);
+# - the window has slid: one tx_fwd_packed over it (every position moved, so no cache can serve it).
+# Every token id is a byte and V is 256, and w never exceeds the model's T, so no tentib guard can fire: a step
+# never runs on a cache older than the model (a load clears the owner), nor on a full one (w - 1 < T).
+fn _tnt_next(g, w, epoch) {
+    var window = load64(g + TNT_G_WIN());
     mutex_lock(_tnt_lock);
     if (_tnt_ready == 0 || _tnt_epoch != epoch) { mutex_unlock(_tnt_lock); return 0 - 1; }
-    tx_fwd_packed(window, _tnt_V, w, _tnt_C, _tnt_F);
-    var nx = logits_argmax(ki_logits + (w - 1) * _tnt_V * 8, _tnt_V);
+    var nx = 0;
+    if (load64(g + TNT_G_SLID()) == 1) {
+        tx_fwd_packed(window, _tnt_V, w, _tnt_C, _tnt_F);
+        nx = logits_argmax(ki_logits + (w - 1) * _tnt_V * 8, _tnt_V);
+        _tnt_n_full = _tnt_n_full + 1;
+    } else {
+        var id = load64(g + TNT_G_ID());
+        if (_tnt_dec_owner == id && tx_dec_len() == w - 1) {
+            tx_dec_step(load64(window + (w - 1) * 8));
+            _tnt_n_cached = _tnt_n_cached + 1;
+        } else {
+            tx_dec_reset();
+            var i = 0;
+            while (i < w) { tx_dec_step(load64(window + i * 8)); i = i + 1; }
+            _tnt_dec_owner = id;
+            _tnt_n_takeover = _tnt_n_takeover + 1;
+        }
+        nx = logits_argmax(ki_logits, _tnt_V);
+    }
     mutex_unlock(_tnt_lock);
     return nx;
 }
 
-# A generation over prompt[0..plen): window(0) w(8) T(16) epoch(24), in `a`; the window holds the prompt's last T
+# A generation over prompt[0..plen), a TNT_G_SIZE record in `a` (see TNT_G_*); the window holds the prompt's last T
 # bytes (a single "\n" for an empty prompt). 0 when no model is loaded.
 fn tnt_gen_begin(a, prompt, plen) {
     if (_tnt_lock == 0) { return 0; }
     mutex_lock(_tnt_lock);
     var ready = _tnt_ready; var T = _tnt_T; var epoch = _tnt_epoch;
+    _tnt_gen_seq = _tnt_gen_seq + 1;
+    var id = _tnt_gen_seq;
     mutex_unlock(_tnt_lock);
     if (ready == 0 || T <= 0) { return 0; }
-    var g = alloc_via(a, 32);
+    var g = alloc_via(a, TNT_G_SIZE());
     var win = alloc_via(a, T * 8);
     if (g == 0 || win == 0) { return 0; }
     var w = 0;
@@ -225,23 +320,25 @@ fn tnt_gen_begin(a, prompt, plen) {
         if (plen > T) { from = plen - T; }
         while (from < plen) { store64(win + w * 8, load8(prompt + from)); w = w + 1; from = from + 1; }
     }
-    store64(g, win); store64(g + 8, w); store64(g + 16, T); store64(g + 24, epoch);
+    store64(g + TNT_G_WIN(), win); store64(g + TNT_G_W(), w); store64(g + TNT_G_T(), T);
+    store64(g + TNT_G_EPOCH(), epoch); store64(g + TNT_G_ID(), id); store64(g + TNT_G_SLID(), 0);
     return g;
 }
 
 # One greedy step: the next byte (0..255), appended to the window (sliding when it is full), or -1 when the model the
 # generation began on is gone.
 fn tnt_gen_step(g) {
-    var win = load64(g); var w = load64(g + 8); var T = load64(g + 16);
-    var nx = _tnt_next(win, w, load64(g + 24));
+    var win = load64(g + TNT_G_WIN()); var w = load64(g + TNT_G_W()); var T = load64(g + TNT_G_T());
+    var nx = _tnt_next(g, w, load64(g + TNT_G_EPOCH()));
     if (nx < 0) { return 0 - 1; }
     if (w == T) {
         var i = 0;
         while (i < T - 1) { store64(win + i * 8, load64(win + (i + 1) * 8)); i = i + 1; }
         store64(win + (T - 1) * 8, nx);
+        store64(g + TNT_G_SLID(), 1);
     } else {
         store64(win + w * 8, nx);
-        store64(g + 8, w + 1);
+        store64(g + TNT_G_W(), w + 1);
     }
     return nx;
 }

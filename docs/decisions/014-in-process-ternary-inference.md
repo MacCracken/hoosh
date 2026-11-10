@@ -82,3 +82,46 @@ models = ["tentib-hello"]
   whether ternary models move behind it is a new decision. This ADR does not block it.
 - **One model per route.** That would need tentib's state per instance, a breaking tentib change (its 2.0.0 backlog
   item, model handles).
+
+## Update (2.11.1): tentib 1.4.0 — incremental decode, the header peek, same-shape reloads
+
+tentib 1.4.0 shipped three of the things its first consumer asked for, and hoosh pins it. The decisions above stand
+except where this says otherwise.
+
+- **Decoding (7).** Until the window slides, a token is one tentib decode step against a cache of the window's earlier
+  positions (`tx_dec_step`), not a full forward over the window. tentib's own gate is that the step's logits are the
+  same bits as the full forward's last row. hoosh's suite checks it against a 2.11.0-style oracle, byte for byte: past
+  the slide, from an empty prompt, from one longer than T, and with replies interleaved. Once the window slides, every
+  position moves, so each token is a full forward again.
+- **One cache, shared by turns.** tentib has one decode cache per process, and hoosh interleaves replies step by step
+  (decision 2). The cache belongs to the reply that last reset it. Another reply's step takes it over: a reset, then that
+  reply's window fed back in. That costs what the full forward it stands in for costs. So a lone reply decodes one
+  position per token, and interleaved replies cost what they did in 2.11.0, never more. A per-reply cache is tentib's
+  2.0.0 model-handle item. The suite pins the counts, a lone reply's (1 takeover, 22 cached steps, 17 full forwards) and
+  an interleaved pair's.
+- **No guard can fire.** A step never runs on a cache older than the model: a load clears the owner, and tentib would
+  refuse otherwise. It never runs on a full cache either, since w − 1 < T. Decision 6 holds.
+- **The vocabulary (5).** The header is read with `tx_pack_peek`, the load's own header checks with no state touched,
+  instead of reading offset 24 by hand. A header tentib refuses is refused before tentib is called, and so is a V other
+  than 256. A file may now declare the byte vocabulary (flags bit 0), and hoosh logs whether it is declared or assumed.
+  A file that declares nothing is still served as bytes, as in 2.11.0. Lifting the byte rule needs a tokenizer in the
+  file, which is tentib's 1.4.x token-table item.
+- **Memory (3, and the consequences).** A load over the loaded model of the same V, T, C, F now allocates nothing:
+  tentib overwrites its buffers (tentib's ADR 0003). The log says "(the replaced model's, reused)" or "(new)". A model
+  of another shape still keeps its predecessor's memory, which tentib's serving-only allocation (its 1.5.x, renumbered
+  from 1.4.x) shrinks and model handles end.
+  - The decode cache, 16·T·C bytes (6,400 at T = 25, C = 16), is sized by the load of a model larger than any before,
+    never by a reply.
+  - The kept model path moved to a buffer reused by every load, like the file buffer. A reload to another file of the
+    same shape therefore allocates nothing at all. Through 2.11.0, a changed `model_file` kept a copy of its path.
+
+**Consequences.**
+- **Positive:**
+  - a 22-token reply on the bench's model takes about a tenth of 2.11.0's time (2.74 ms → 263 µs; see the
+    CHANGELOG);
+  - a same-shape reload keeps no memory;
+  - the vocabulary check uses tentib's API instead of its byte layout.
+- **Negative:**
+  - hoosh now depends on tentib's decode cache being per process, and keeps an owner variable beside it;
+  - a model whose dims match the live one's but which was built in-process (tests only) would make hoosh's "reused"
+    log line wrong. Only the suite builds models in-process, and it writes every model before the first load.
