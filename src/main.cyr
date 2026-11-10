@@ -15,6 +15,14 @@
 
 include "lib/ai-hwaccel.cyr"
 
+# tentib (2.11.0, ADR 014) — ternary (1.58-bit) inference in-process, from a packed model
+# file. Its bundle sits on rosnet (f64 tensors) and tyche (PRNG), vendored with it by
+# `cyrius deps`; the three are included here, before any hoosh module, so
+# src/lib/tentib_local.cyr can call into them.
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/tentib.cyr"
+
 # MCP protocol core (bote 3.8.15) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
 # via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
@@ -61,6 +69,7 @@ include "src/lib/jsonlite.cyr"
 include "src/lib/provider_err.cyr"
 # 2.8.0: finish reasons + stream usage, mapped from each provider's own words. After jsonlite/provider_err.
 include "src/lib/outcome.cyr"
+include "src/lib/tentib_local.cyr"  # 2.11.0: in-process ternary inference (ADR 014); provider.cyr dispatches to it
 include "src/lib/provider.cyr"
 # 2.8.0: the live catalog's I/O half — asks each route for its models on a pool worker.
 include "src/lib/catalog_fetch.cyr"
@@ -601,12 +610,16 @@ fn cmd_health() {
         if (route_enabled(r) == 1) {
             var base = route_base_url(r);
             var up = 0;
-            var _sr_t, _sr_v = tcp_socket();
-            if (is_ok(_sr_t) == 1) {
-                var fd = _sr_v;
-                var _cr_t, _cr_v = sock_connect(fd, host_addr(url_host(base)), url_port(base));
-                if (is_ok(_cr_t) == 1) { up = 1; }
-                sys_close(fd);
+            if (route_provider(r) == PROV_TENTIB) {
+                up = tnt_ready();          # 2.11.0: in-process; there is nothing to connect to
+            } else {
+                var _sr_t, _sr_v = tcp_socket();
+                if (is_ok(_sr_t) == 1) {
+                    var fd = _sr_v;
+                    var _cr_t, _cr_v = sock_connect(fd, host_addr(url_host(base)), url_port(base));
+                    if (is_ok(_cr_t) == 1) { up = 1; }
+                    sys_close(fd);
+                }
             }
             sys_write(1, "  ", 2);
             var name = provider_name(route_provider(r));

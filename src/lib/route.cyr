@@ -73,6 +73,7 @@ fn route_new(prov, priority, base_url) {
 # [[providers]] catalog = "live" | "static" overrides either way.
 fn route_catalog_default(prov) {
     if (prov == PROV_OPENROUTER) { return 0; }
+    if (prov == PROV_TENTIB) { return 0; }     # 2.11.0: in-process, no provider to ask; its patterns are its list
     if (prov == PROV_WHISPER) { return 0; }
     return 1;
 }

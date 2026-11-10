@@ -34,6 +34,9 @@ include "lib/sakshi.cyr"
 # src/lib, in tests/hoosh.tcyr's order (which follows src/main.cyr's), minus the two leaf modules nothing here
 # calls (cli.cyr, models.cyr).
 include "lib/ai-hwaccel.cyr"
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/tentib.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
 include "src/lib/types.cyr"
@@ -48,6 +51,7 @@ include "src/lib/compact.cyr"
 include "src/lib/provider_err.cyr"
 include "src/lib/catalog.cyr"
 include "src/lib/outcome.cyr"
+include "src/lib/tentib_local.cyr"
 include "src/lib/urlparse.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/compression.cyr"
@@ -698,6 +702,77 @@ fn main() {
     bench_batch_stop(b, 100000);
     bench_report(b);
     sys_close(dn);
+
+    # 2.11.0: in-process ternary inference (tentib_local.cyr). The models are trained here through tentib (outside the
+    # timing): byte models of the sentences below, C = 16, F = 32, T = 25. A reply decodes greedily, one tentib forward
+    # over the window per token. A load alternates the two files, so each reads, checks and deserializes a 40 KB file
+    # and allocates a model (it runs 20 times); a reload of the file serving reads it and compares its SHA-256.
+    var tb_alt = _b_s("a second model to alternate");
+    var tb_aT = strlen(tb_alt) - 1;
+    var tb_atok = t_alloc(tb_aT); var tb_atgt = t_alloc(tb_aT);
+    var tba = 0;
+    while (tba < tb_aT) {
+        store64(tb_atok + tba * 8, load8(tb_alt + tba)); store64(tb_atgt + tba * 8, load8(tb_alt + tba + 1));
+        tba = tba + 1;
+    }
+    var tb_ast = t_alloc(2);
+    tx_train(tb_atok, tb_atgt, 256, tb_aT, 16, 32, 20, 2, tb_ast);
+    tx_int_init(256, tb_aT, 16, 32); tx_pack_init(256, tb_aT, 16, 32); tx_pack(256, tb_aT, 16, 32);
+    var tb_an = tx_pack_serial_bytes();
+    var tb_abuf = alloc(tb_an);
+    tx_pack_serialize(tb_abuf, tb_an);
+    var tb_apath = _b_s("/tmp/hoosh-bcyr-tentib-alt.tpk");
+    file_write_all(tb_apath, tb_abuf, tb_an);
+    var tb_text = _b_s("the gateway serves ternary");
+    var tb_T = strlen(tb_text) - 1;
+    var tb_tok = t_alloc(tb_T); var tb_tgt = t_alloc(tb_T);
+    var tbi = 0;
+    while (tbi < tb_T) {
+        store64(tb_tok + tbi * 8, load8(tb_text + tbi)); store64(tb_tgt + tbi * 8, load8(tb_text + tbi + 1));
+        tbi = tbi + 1;
+    }
+    var tb_st = t_alloc(2);
+    tx_train(tb_tok, tb_tgt, 256, tb_T, 16, 32, 300, 1, tb_st);
+    tx_int_init(256, tb_T, 16, 32); tx_pack_init(256, tb_T, 16, 32); tx_pack(256, tb_T, 16, 32);
+    var tb_n = tx_pack_serial_bytes();
+    var tb_buf = alloc(tb_n);
+    tx_pack_serialize(tb_buf, tb_n);
+    var tb_path = _b_s("/tmp/hoosh-bcyr-tentib.tpk");
+    file_write_all(tb_path, tb_buf, tb_n);
+    tnt_load(tb_path);
+    var tb_route = route_new(PROV_TENTIB, 1, tb_path);
+    var tb_msgs = _b_s("[{\"role\":\"user\",\"content\":\"the\"}]");
+    var tb_mlen = strlen(tb_msgs);
+    b = bench_new("tentib_reply_8tok");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 2000) {
+        req_arena_begin();
+        var tb_g = genopts_new_a(ra, 0, 8, GEN_UNSET, GEN_UNSET);
+        tnt_forward(tb_route, b_llama3, 0, tb_msgs, tb_mlen, tb_g);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 2000);
+    bench_report(b);
+    b = bench_new("tentib_load");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 20) {
+        if (i % 2 == 0) { tnt_load(tb_apath); } else { tnt_load(tb_path); }
+        i = i + 1;
+    }
+    bench_batch_stop(b, 20);
+    bench_report(b);
+    b = bench_new("tentib_reload_same");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 2000) {
+        tnt_load(tb_path);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 2000);
+    bench_report(b);
+    sys_unlink(tb_path); sys_unlink(tb_apath);
 
     println("");
     println("done");

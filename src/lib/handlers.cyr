@@ -67,7 +67,7 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
         }
     }
     var prov = route_provider(route);
-    if (prov == PROV_ANTHROPIC || prov == PROV_GOOGLE) {
+    if (prov == PROV_ANTHROPIC || prov == PROV_GOOGLE || prov == PROV_TENTIB) {
         var usb = str_builder_new();
         str_builder_add_cstr(usb, "provider '");
         str_builder_add_cstr(usb, provider_name(prov));
@@ -1656,6 +1656,24 @@ fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len,
     # 2.7.0: one id and created time for every chunk of this stream.
     chat_id_new();
     var oc = outcome_new();                   # 2.8.0: finish reason, usage, the tool guard (outcome.cyr)
+    # 2.11.0: a tentib route decodes in this process (tentib_local.cyr): each character goes out as it is decoded.
+    if (route_provider(route) == PROV_TENTIB) {
+        if (tnt_ready() == 0) {
+            _stream_meter(route, model, bpool, est_tokens, oc, gen, 0);
+            return http_error(cfd, "503", "Service Unavailable", "tentib: no model is loaded");
+        }
+        http_sse_begin(cfd);
+        var tserved = tnt_stream(cfd, model, msg_raw, msg_len, gen, oc);
+        if (_audit_chain != 0) {
+            mutex_lock(_chat_lock);
+            audit_record(_audit_chain, "inference.stream", "info", "streaming inference (in-process)",
+              provider_name(PROV_TENTIB), model);
+            mutex_unlock(_chat_lock);
+        }
+        var tuchunk = _stream_meter(route, model, bpool, est_tokens, oc, gen, tserved);
+        _sse_stop(cfd, model, outcome_finish_final(outcome_finish(oc), outcome_tools(oc)), tuchunk);
+        return 0;
+    }
     # Remote (TLS) providers: incremental SSE via sandhi_http_stream, decoding
     # each provider's delta events and re-emitting them as OpenAI SSE chunks.
     # If the stream errors before emitting anything, fall back to the buffered
@@ -1904,6 +1922,7 @@ fn _embed_query_body(body_ptr, body_len) {
     if (model == 0) { return 0; }
     var route = router_select(_router, model);
     if (route == 0) { return 0; }
+    if (route_provider(route) == PROV_TENTIB) { return 0; }     # 2.11.0: a tentib model embeds nothing
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);

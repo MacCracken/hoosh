@@ -266,6 +266,7 @@ fn load_config(path) {
     # Parse [[providers]] sections
     var prov_secs = bayan_toml_get_sections_by_cstr(sections, "providers");
     var route_count = vec_len(prov_secs);
+    var tentib_loaded = 0;      # 2.11.0: tentib holds one model per process: the first route whose model loads serves
     if (route_count > 0) {
         var routes = alloc(route_count * 8);
         var ri = 0;
@@ -325,6 +326,51 @@ fn load_config(path) {
                 if (str_eq_cstr(pcat_str, "static") == 1) { route_set_catalog_live(route, 0); }
                 elif (str_eq_cstr(pcat_str, "live") == 1) { route_set_catalog_live(route, 1); }
                 else { hlog_warn("config: [[providers]] catalog must be \"live\" or \"static\" (default kept)"); }
+            }
+
+            # 2.11.0: a tentib route serves a packed ternary model in this process (tentib_local.cyr, ADR 014).
+            # `model_file` names it; it is read here, at startup and on every reload, and loaded when it is not the
+            # model already serving. A route whose model does not load is disabled, and so is every tentib route
+            # after the first that loaded, with the reason in the log.
+            if (ptype == PROV_TENTIB) {
+                route_set_catalog_live(route, 0);        # no provider to ask: its patterns are its list
+                var mf_str = bayan_toml_get_by_cstr(pp, "model_file");
+                if (mf_str == 0) {
+                    hlog_error("config: a tentib provider needs model_file; route disabled");
+                    route_set_enabled(route, 0);
+                } elif (tentib_loaded == 1) {
+                    hlog_error("config: only one tentib provider can be served per process; route disabled");
+                    route_set_enabled(route, 0);
+                } else {
+                    var mf = to_cstr(mf_str);
+                    store64(route + ROUTE_BASE_URL, mf);
+                    var trc = tnt_load(mf);
+                    if (trc == 0) {
+                        tentib_loaded = 1;
+                        # Each model loaded keeps its memory for the life of the process (ADR 014), so say how much.
+                        var lsb = str_builder_new();
+                        str_builder_add_cstr(lsb, "config: tentib model loaded: ");
+                        str_builder_add_cstr(lsb, mf);
+                        str_builder_add_cstr(lsb, ", context ");
+                        str_builder_add_int(lsb, tnt_context());
+                        str_builder_add_cstr(lsb, " tokens, ");
+                        str_builder_add_int(lsb, tnt_model_bytes());
+                        str_builder_add_cstr(lsb, " bytes of model memory");
+                        hlog_info(to_cstr(str_builder_build(lsb)));
+                    } elif (trc == TNT_UNCHANGED()) {
+                        tentib_loaded = 1;
+                        hlog_info("config: tentib model unchanged, not reloaded");
+                    } else {
+                        var esb = str_builder_new();
+                        str_builder_add_cstr(esb, "config: tentib model_file ");
+                        str_builder_add_cstr(esb, mf);
+                        str_builder_add_cstr(esb, ": ");
+                        str_builder_add_cstr(esb, tnt_status_text(trc));
+                        str_builder_add_cstr(esb, "; route disabled");
+                        hlog_error(to_cstr(str_builder_build(esb)));
+                        route_set_enabled(route, 0);
+                    }
+                }
             }
 
             # Parse model patterns — TOML array: ["llama*", "mistral*"]

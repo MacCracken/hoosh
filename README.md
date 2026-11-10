@@ -16,13 +16,13 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.7.18) |
-| **Source** | ~17,300 lines / 46 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~2.6 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
-| **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, bote, majra) + cyrius stdlib |
-| **Tests** | 2035 assertions, 179 groups, 0 failures |
-| **Benchmarks** | 36 operations |
+| **Source** | ~17,800 lines / 47 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.7 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
+| **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, tentib with rosnet + tyche, bote, majra) + cyrius stdlib |
+| **Tests** | 2088 assertions, 180 groups, 0 failures |
+| **Benchmarks** | 39 operations |
 | **Fuzz targets** | 4 |
-| **Providers** | 17 (9 local, 8 remote) |
+| **Providers** | 18 (9 local, 1 in-process, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
 
 ### Port comparison (Rust v1.3.0 → Cyrius)
@@ -45,7 +45,7 @@ hoosh is the **inference backend** — it routes, caches, rate-limits, and budge
 
 | Capability | Details |
 |------------|---------|
-| **17 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper |
+| **18 LLM providers** | Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX, OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter, Whisper, and tentib: a ternary (1.58-bit) model served in hoosh's own process (2.11.0) |
 | **OpenAI-compatible API** | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
 | **Batch inference** | `POST /v1/batch` — concurrent (in-process worker pool) sync, or `"async":true` → job id with `GET /v1/batch/{id}` progress + cancel |
 | **MCP tool server** | `/v1/tools/list` + `/v1/tools/call` (JSON-RPC 2.0 via bote) |
@@ -245,6 +245,13 @@ capacity = 100000
 [[auth]]
 tokens = "your-secret-token"
 
+# In-process ternary inference (2.11.0): a packed model tentib wrote, served with no socket.
+# One per process; tokens are bytes (V = 256); a reload of the same file loads nothing.
+# [[providers]]
+# type = "tentib"
+# model_file = "/var/lib/hoosh/model.tpk"
+# models = ["tentib-small"]                  # literal ids: its patterns are its model list
+
 # Opt-in: OpenTelemetry OTLP/JSON span export to a collector
 # [[telemetry]]
 # otlp_endpoint = "http://localhost:4318/v1/traces"
@@ -268,21 +275,21 @@ neither. `hoosh serve` logs a warning when either file is missing.
 ## Testing
 
 ```bash
-# Run tests (2035 assertions across 179 groups)
+# Run tests (2088 assertions across 180 groups)
 cyrius test tests/hoosh.tcyr
 
-# Run benchmarks (36 operations)
+# Run benchmarks (39 operations)
 cyrius bench tests/hoosh.bcyr
 ```
 
-`tests/hoosh.tcyr` includes 39 of the 45 `src/lib` modules for real, and copies no `src/` code (since 2.9.22;
+`tests/hoosh.tcyr` includes 40 of the 46 `src/lib` modules for real, and copies no `src/` code (since 2.9.22;
 `scripts/coverage.sh` lists them). `scripts/wire-smoke.py` runs a real gateway at stub providers and reads it as a
 strict client does. The suite covers: error/HTTP mapping, routing (4 strategies), token budgets,
 cache + cost, queue priority, health FSM, rate limiting, metrics, audit chain
 (HMAC-SHA256), config (TOML), JSON, token counting, DLP, cosine similarity, auth,
 tool-call conversion + pruning, MCP dispatch, batch parsing + lane pool, and
-observability (latency buckets, the trace context and its child span, OTLP spans), and the request arena and
-what crosses out of it.
+observability (latency buckets, the trace context and its child span, OTLP spans), the request arena and
+what crosses out of it, and in-process ternary inference (models trained and served through tentib).
 
 ---
 

@@ -50,6 +50,8 @@ fn _health_probe_path(route) {
 
 # Probe one route. Returns 1 when it answered, 0 otherwise.
 fn health_probe(route) {
+    # 2.11.0: an in-process tentib route is up exactly when its model is loaded; there is nothing to connect to.
+    if (route_provider(route) == PROV_TENTIB) { return tnt_ready(); }
     var base = route_base_url(route);
     if (base == 0) { return 0; }
     if (route_is_remote(route) == 1) {

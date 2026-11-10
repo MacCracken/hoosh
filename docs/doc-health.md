@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — hoosh
 
-> **Last refresh**: 2026-11-07 (**v2.10.3**: CHANGELOG, README stats and testing text, state, the roadmap's 2.10.3 item and the rest of ADR 013, ADR 010's update (the trace context and the event ring), ADR 013's "Done in 2.10.3", `architecture/overview.md`'s rows, `performance.md`, the index, a new `sources.md`, and agnosai's trace filing archived). Also 2026-11-07 (**v2.10.2**: CHANGELOG, README stats, state, the roadmap's 2.10.2 item, ADR 012's addendum, ADR 013's "Done in 2.10.2", `hoosh.cyml`'s `[[models]]`, `architecture/overview.md`'s rows, `performance.md`, and the three agnosai filings archived). Also 2026-11-06 (**v2.10.1**: CHANGELOG, README stats, state, ADR 011's addendum, the roadmap's AGNOS item, `architecture/overview.md`'s pool row, and the AGNOS filing archived). Also 2026-11-05: (**v2.10.0**: CHANGELOG, README stats, state, the roadmap's 2.10.0 item rewritten
+> **Last refresh**: 2026-11-09 (**v2.11.0**: CHANGELOG, README stats, capabilities, config and testing text, state, the roadmap's 2.11.x band (the later bands moved up one minor), new `decisions/014-in-process-ternary-inference.md`, `architecture/overview.md`'s diagram, tentib_local row and dependency row, `sources.md`'s tentib section, the index, and `hoosh.cyml`'s commented tentib provider). Also 2026-11-07 (**v2.10.3**: CHANGELOG, README stats and testing text, state, the roadmap's 2.10.3 item and the rest of ADR 013, ADR 010's update (the trace context and the event ring), ADR 013's "Done in 2.10.3", `architecture/overview.md`'s rows, `performance.md`, the index, a new `sources.md`, and agnosai's trace filing archived). Also 2026-11-07 (**v2.10.2**: CHANGELOG, README stats, state, the roadmap's 2.10.2 item, ADR 012's addendum, ADR 013's "Done in 2.10.2", `hoosh.cyml`'s `[[models]]`, `architecture/overview.md`'s rows, `performance.md`, and the three agnosai filings archived). Also 2026-11-06 (**v2.10.1**: CHANGELOG, README stats, state, ADR 011's addendum, the roadmap's AGNOS item, `architecture/overview.md`'s pool row, and the AGNOS filing archived). Also 2026-11-05: (**v2.10.0**: CHANGELOG, README stats, state, the roadmap's 2.10.0 item rewritten
 > from the measurements, new `decisions/013-request-memory.md`, `development/performance.md`'s cache rows,
 > `architecture/overview.md`'s cache and http_client rows). Also 2026-11-05: **v2.9.26** (bote 3.8.12 in state,
 > `SECURITY.md`'s scope and considerations, the `wq.cyr` row), **v2.9.25** (the lookup item, `performance.md`'s live-catalog rows, the `keyindex.cyr` row),
@@ -69,7 +69,7 @@ type: state
 | `benchmarks.md` | 🟢 Auto-generated — 25 benches | `bench-history.sh` |
 | `docs/index.md` | 🟢 Fresh — all 11 ADRs + doc-health linked | 2026-07-23 re-read |
 | `docs/architecture/overview.md` | 🟢 Fresh — module map, data flow, endpoints | 2026-07-23 sweep |
-| `docs/development/roadmap.md` | 🟢 Fresh — **forward-only**, banded by release (2.9.x, 2.10.x–2.12.x, unscheduled, upstream-gated); every item re-checked against code and upstream; 2.9.2's quick wins shipped and left it | 2026-11-04 re-band |
+| `docs/development/roadmap.md` | 🟢 Fresh — **forward-only**, banded by release (2.9.x, 2.10.x–2.13.x, unscheduled, upstream-gated); every item re-checked against code and upstream; 2.9.2's quick wins shipped and left it | 2026-11-04 re-band |
 | `docs/development/state.md` | 🟢 Fresh — v2.5.11 + arc retrospective | 2026-07-23 sweep |
 | `docs/development/rust-old-parity-review.md` | 🟢 Point-in-time — the 2026-07-22 parity diff that drove the arc; not rewritten as items shipped | 2026-07-22 |
 | `docs/development/rust-old-retirement.md` | 🟢 Fresh — the 2.7.0 parity check, known non-ports, deletion checklist (carried out in 2.9.2) | 2026-11-04 |
@@ -95,6 +95,8 @@ slow cadence; supersede with a new ADR or an `## Update` section rather than edi
 | 010 Observability | Accepted | Current (2.3.4–2.3.5, with Update section) |
 | 011 Multi-threaded accept loop | Accepted | Current (2.4.0, §2.4.5). The 7-worker/crypto-bank ceiling still stands |
 | 012 Live model catalog | Accepted | New (2.8.0). The catalog asked of each route's provider; capability-shaped requests |
+| 013 Request memory | Accepted | Current (2.10.0–2.10.3, with Done sections); the rest is on the roadmap |
+| 014 In-process ternary inference | Accepted | New (2.11.0). tentib served in hoosh's process; revisit when murti is ported or tentib has model handles |
 
 ## Policy / legal
 

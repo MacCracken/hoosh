@@ -85,6 +85,7 @@ fn _models_scan(a, sb, seen, r, body, len, key, keylen) {
 # A local backend's own model list. Returns 0 when it did not answer.
 fn _models_live_local(a, sb, seen, r) {
     if (route_healthy(r) == 0) { return 0; }
+    if (route_provider(r) == PROV_TENTIB) { return 0; }     # 2.11.0: in-process; its patterns are its list
     var path = "/v1/models";
     var key = "id";
     if (route_provider(r) == PROV_OLLAMA) { path = "/api/tags"; key = "name"; }

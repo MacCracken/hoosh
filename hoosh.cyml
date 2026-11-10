@@ -204,6 +204,16 @@ models = ["ornith*", "llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*
 # priority = 2
 # models = ["gguf-*"]
 
+# In-process ternary (1.58-bit) inference (2.11.0, ADR 014): a packed model tentib's tx_pack_serialize wrote,
+# served in this process with no socket. One tentib route per process. Tokens are bytes (the model's V must be
+# 256), decoding is greedy, and a reload whose file is unchanged loads nothing. List literal ids: the route
+# has no provider to ask, so its patterns are its model list.
+#[[providers]]
+# type = "tentib"
+# model_file = "/var/lib/hoosh/model.tpk"
+# priority = 1
+# models = ["tentib-small"]
+
 # --- Remote providers ---
 # Set API keys via environment variables for security.
 

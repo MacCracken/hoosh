@@ -28,3 +28,18 @@ Citations for the specifications and algorithms hoosh implements, by the module 
 ## Audit chain — `src/lib/audit.cyr`
 
 - **HMAC**: RFC 2104, with SHA-256 (FIPS 180-4), from sigil. [ADR 002](decisions/002-cryptographic-audit-chain.md).
+
+## In-process ternary inference — `src/lib/tentib_local.cyr`
+
+- **BitNet b1.58**: Shuming Ma et al., "The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits", 2024,
+  arXiv:2402.17764. The model shape tentib implements: ternary {−1, 0, +1} weights with a per-layer scale, int8
+  activations. hoosh serves it; tentib trains and packs it. [ADR 014](decisions/014-in-process-ternary-inference.md).
+- **tentib's packed-model format, version 1**: tentib's `docs/architecture/001-packed-model-format.md` (the bytes, the
+  decoder's checks and its status codes). hoosh reads the vocabulary size from its header word at offset 24 before tentib
+  loads anything, and passes the rest to `tx_pack_deserialize`.
+- **UTF-8**: The Unicode Standard, Version 15.0, §3.9, Table 3-7 ("Well-Formed UTF-8 Byte Sequences"), for the byte
+  ranges a character's second byte may take (E0 A0–BF, ED 80–9F, F0 90–BF, F4 80–8F, else 80–BF); and §3.9's "U+FFFD
+  Substitution of Maximal Subparts", the practice hoosh follows: each maximal subpart of an ill-formed sequence becomes
+  one U+FFFD. <https://www.unicode.org/versions/Unicode15.0.0/>
+- **JSON strings**: RFC 8259 §7, for the escapes a reply's text is written with and a message's content is decoded from.
+- **SHA-256** (FIPS 180-4), from sigil: whether a reload's file holds the model already serving.

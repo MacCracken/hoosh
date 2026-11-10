@@ -5,6 +5,116 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.11.0] — 2026-11-09
+
+**hoosh serves a ternary model in its own process.** A `type = "tentib"` provider loads a packed ternary (1.58-bit)
+model that tentib wrote and answers chat completions with it, buffered and streamed, with no socket and no second server
+([ADR 014](docs/decisions/014-in-process-ternary-inference.md)). hoosh is tentib's first consumer, through tentib 1.3.0's
+library bundle. murti, the other planned consumer, is still a Rust tree, so its adoption waits for its port. **2088
+assertions** in 180 groups. All gates are clean: fmt, lint, vet, deny, coverage (474/805, 58%), the security scan, the
+four fuzz targets, the shutdown smoke test and the wire smoke test (77 checks).
+
+⚠ **What changes on the wire.** Nothing, for a config with no tentib provider: every response body is byte-identical to
+2.10.3's. A tentib route answers as any local route does, except:
+- Its tokens are bytes, so `usage` counts the prompt's and the reply's bytes.
+- Decoding is greedy: `temperature` and `top_p` are ignored, and a request's tools are not offered.
+- A reply ends at `max_tokens` (`"length"`; 128 when unset, never more than 4096) or at a 0 byte (`"stop"`).
+- `/v1/embeddings` refuses it by name, as it refuses Anthropic and Gemini.
+- Its cost is 0.
+
+### Added — the tentib provider (`src/lib/tentib_local.cyr`, ADR 014)
+
+```toml
+[[providers]]
+type = "tentib"
+model_file = "/var/lib/hoosh/model.tpk"   # what tentib's tx_pack_serialize wrote
+models = ["tentib-hello"]
+```
+
+- **Loading.** The file is read at startup and on every reload, `SIGHUP` and `POST /v1/admin/reload` alike. It is
+  untrusted: the read is capped at 256 MiB and the load's memory at 4 GiB (tentib computes the need and refuses before it
+  allocates, because a failed allocation would end the process), and tentib checks every field. A refused file disables
+  its route with the reason in words (`config: tentib model_file <path>: the checksum does not match (the file is
+  corrupt); route disabled`), and the model already serving, if any, goes on serving. A loaded model is logged with its
+  context and its memory.
+- **Reloads.** A reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing:
+  `config: tentib model unchanged, not reloaded`, and replies in progress go on. A reload to another model swaps it under
+  the lock, and a reply begun on the old one stops instead of mixing two models: a buffered reply fails and the retry
+  serves the new model, and a stream ends with a 503 error frame.
+- **Bytes are tokens.** tentib's format carries no vocabulary, so a served model uses the byte-identity one: V = 256,
+  token id = byte value. A model with another V is refused before tentib replaces the model serving.
+- **Decoding.** The prompt is every message's content, JSON-decoded, joined by `"\n"`, of which the window holds the last
+  T bytes (T is the model's context). Each new token is the argmax of one tentib forward over the window. The reply's
+  bytes become valid UTF-8, each invalid or unfinished sequence turning into one U+FFFD (the maximal-subpart rule of
+  Unicode's table 3-7), and are JSON-escaped.
+- **Streaming** sends each character as one SSE content chunk once its last byte is decoded, then the stop and usage
+  chunks every stream ends with.
+- **One model per process.** tentib keeps its model in module globals, so the first tentib route whose model loads
+  serves and a later one is disabled with the reason logged. Every call into tentib holds one lock **for one decode step**,
+  so streams interleave and no lock is held across a socket write.
+- **Out of range is impossible by construction.** tentib's `guard()` exits the process on a precondition it refuses.
+  Every token hoosh passes is a byte and V is 256, the window never passes the model's T, and nothing reaches tentib
+  before a load succeeds.
+- **The route to the rest of hoosh:** local (DLP-confidential content may use it), healthy exactly when its model is
+  loaded (`hoosh health` as well, which asks no socket for it), a static catalog (its patterns are its list), no
+  embeddings, no tools, cost 0. It records what any provider does: a buffered reply its latency, a completion event
+  and an OTLP span, and a stream its usage, through the handler's meter.
+
+### Memory
+
+A reply builds in the request arena and a stream's chunks on the stack: **200 buffered replies and 200 streams keep
+nothing on the heap** (tested). Every load reads into one buffer, grown only for a file larger than any before, so an
+unchanged reload and a refused one keep nothing either (tested).
+
+A load of a *different* model keeps the previous one's memory for the life of the process: tentib's buffers come from
+the allocator that never frees, and freeable model handles are tentib's 2.0.0 backlog item. That is tentib's own figure
+for the model's dims (`tx_model_alloc_bytes`), and the load's log line states it: 802,376 bytes for a T = 30, C = 16
+model. A load also allocates tentib's training buffers along with what serving reads, which tentib's 1.4.x serving-only
+allocation removes. A reload that leaves the file alone costs nothing.
+
+### Changed — dependency pins
+
+- **New: tentib 1.3.0** (`[deps.tentib]`, `modules = ["dist/tentib.cyr"]`). `cyrius deps` brings its dependencies, rosnet
+  1.4.1 and tyche 1.2.2, and rosnet's requires block adds the stdlib's `simd`. akshara is tentib's test-scope dependency
+  and does not come. No function or global name collides: 181 names on tentib's side, 3,007 on hoosh's.
+- Unchanged: cyrius 6.7.18, ai-hwaccel 2.5.6, bote 3.8.15, majra 2.13.0, and sigil 3.13.15 and sandhi 1.13.7 with cyrius.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2035 → 2088), the `tentib_local` group. The models are trained and written through tentib's own
+  API, as an operator makes one, and every check goes through tentib_local's real functions: the provider type, a reply
+  with no model (permanent, not retried) and the health it reports, a known-answer reply (a model trained on "the gateway
+  serves ternary" answers "the" with " gateway serves ternar"), its usage and finish, refused loads (missing, V = 8,
+  corrupt) that keep the model serving, a stream over a pipe, an unchanged reload that lets a reply go on, a reload to
+  another model that stops it, what each load keeps on the heap, the prompt's decoding, the token budget, seven UTF-8
+  cases, and the model listing. The test removes its model files.
+- **`tests/hoosh.bcyr`** (36 → 39): `tentib_reply_8tok`, `tentib_load` (two files alternated, so every load is real) and
+  `tentib_reload_same`.
+- Every new test was mutation-checked: reverting each of the eight behaviors fails a test (the vocabulary check's revert
+  ends the test binary through tentib's `guard()`, the failure it exists to prevent).
+
+### Sizes and performance
+
+| | 2.10.3 | 2.11.0 | |
+|---|---:|---:|---:|
+| x86_64 | 4,051,528 | 4,183,080 | +3.2% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,646,600 | 2,696,232 | +1.9% |
+| aarch64 | 4,718,840 | 4,854,456 | +2.9% |
+| AGNOS, `CYRIUS_DCE=1` | 2,610,912 | 2,664,648 | +2.1% |
+
+The warning sets are unchanged on all three targets. The one warning, large static data, grows by tentib's, rosnet's and
+tyche's globals: 140,032 → 142,224 bytes on x86_64.
+
+On the bench's model (T = 25, C = 16, F = 32, a 40,064-byte file): an 8-token reply **395 µs**, about 50 µs per token,
+each a full forward over the window because tentib has no incremental decode yet. A load of a different model is 455 µs,
+and a reload of the file serving 132 µs (its read and SHA-256). Across runs that day the reply read 388–438 µs.
+
+The run of record was taken once the machine's other jobs had eased; one taken under load read most rows 5–15% slower.
+Against 2.10.3's run, the rows both releases have range from −15% (`cost_record_known_model`, 268 → 229 ns) to +10%
+(`batch_split_4`, 763 → 842 ns), most of them 4–8% slower. None of the code under them changed, so read the spread as the
+machine and placement, as 2.10.3 read the same row's. `cache_get_miss` read 104 ns in one run and 59 ns in the run of
+record. It is bimodal run to run on 2.10.3 too (58–66 ns, and 120 ns once in six runs), so it is not this change.
+
 ## [2.10.3] — 2026-11-07
 
 **hoosh's span is the caller's child, and a request keeps a fifth of what it did.** agnosai's trace issue is fixed, with

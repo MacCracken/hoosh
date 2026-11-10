@@ -28,6 +28,10 @@ include "lib/sakshi.cyr"
 # 2.9.9: ai-hwaccel's single-file bundle, vendored into lib/ by `cyrius deps`, first among the non-stdlib
 # includes as in src/main.cyr. src/lib/hardware.cyr is built on it.
 include "lib/ai-hwaccel.cyr"
+# 2.11.0: tentib (with rosnet + tyche), at the same point src/main.cyr includes them.
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "lib/tentib.cyr"
 include "src/vendor/bote-core.cyr"
 # 2.9.8: majra's pub/sub, which src/lib/events.cyr publishes to, at the same point src/main.cyr includes it.
 # It shares one name with types.cyr, the enum member ERR_NONE, which is 0 in both (see cyrius.cyml).
@@ -53,6 +57,7 @@ include "src/lib/provider_err.cyr"
 # 2.8.0: the live catalog's pure half and the finish/usage mapping — included for real, not mirrored.
 include "src/lib/catalog.cyr"
 include "src/lib/outcome.cyr"
+include "src/lib/tentib_local.cyr"   # 2.11.0: in-process ternary inference, for real
 include "src/lib/urlparse.cyr"
 # 2.9.2: the MCP wiring (tool registration, the echo handler) is tested against the REAL module; its
 # needs (bote-core, http_server, logging) are all included above. It replaced the _mcp_echo mirror.
@@ -2989,6 +2994,202 @@ fn _t2103_event_ring() {
     return 0;
 }
 
+# ── 2.11.0: in-process ternary inference through tentib (src/lib/tentib_local.cyr, ADR 014) ──
+# The models are trained and written here through tentib's own API, as an operator would make one; then every
+# check goes through tentib_local's real functions. Training (tx_train) replaces tentib's model, so every file is
+# written before the first tnt_load.
+
+# Train a byte-vocabulary (V = 256) ternary model on `text` and write it to `path`; returns file_write_all's count.
+fn _t211_write_model(path, text, C, F, steps, seed) {
+    var T = strlen(text) - 1;
+    var tok = t_alloc(T); var tgt = t_alloc(T);
+    var t = 0;
+    while (t < T) { store64(tok + t * 8, load8(text + t)); store64(tgt + t * 8, load8(text + t + 1)); t = t + 1; }
+    var st = t_alloc(2);
+    tx_train(tok, tgt, 256, T, C, F, steps, seed, st);
+    tx_int_init(256, T, C, F); tx_pack_init(256, T, C, F); tx_pack(256, T, C, F);
+    var n = tx_pack_serial_bytes();
+    var buf = alloc(n);
+    tx_pack_serialize(buf, n);
+    return file_write_all(path, buf, n);
+}
+
+# A packed model with vocabulary V = 8 (not the byte one), written to `path`.
+fn _t211_write_v8(path) {
+    tx_init(8, 4, 4, 8); tx_param_init(8, 4, 4, 8, 7);
+    tx_int_init(8, 4, 4, 8); tx_pack_init(8, 4, 4, 8); tx_pack(8, 4, 4, 8);
+    var n = tx_pack_serial_bytes();
+    var buf = alloc(n);
+    tx_pack_serialize(buf, n);
+    return file_write_all(path, buf, n);
+}
+
+# The bytes of a JSON-escaped UTF-8 assembly of b[0..n), finished, as a cstr.
+fn _t211_utf8(b, n) {
+    var a = req_arena();
+    var sb = sb_room_a(a, n * 3 + 16);
+    var u = tnt_utf8_new(a);
+    var i = 0;
+    while (i < n) { tnt_utf8_feed(u, load8(b + i), sb); i = i + 1; }
+    tnt_utf8_finish(u, sb);
+    return sb_cstr(sb);
+}
+
+# The text of a buffered tentib reply to messages `msgs`, at most `maxt` tokens; its result record goes to *resp.
+fn _t211_reply(route, msgs, maxt, resp) {
+    var g = genopts_new_a(req_arena(), 0, maxt, GEN_UNSET, GEN_UNSET);   # in the arena, as the chat path's are
+    var r = tnt_forward(route, "tentib-test", 0, msgs, strlen(msgs), g);
+    store64(resp, r);
+    if (r == 0 || r == FWD_PERMANENT) { return ""; }
+    return load64(r);
+}
+
+fn _t211_tentib_local() {
+    test_group("tentib_local (2.11.0)");
+    # the provider type
+    assert_eq(provider_parse("tentib"), PROV_TENTIB, "tentib: [[providers]] type = \"tentib\" parses");
+    assert_streq(provider_name(PROV_TENTIB), "tentib", "tentib: its name");
+    assert_eq(provider_is_local(PROV_TENTIB), 1, "tentib: local (in-process: nothing leaves the host)");
+    assert_eq(route_catalog_default(PROV_TENTIB), 0, "tentib: static catalog (no provider to ask)");
+    var route = route_new(PROV_TENTIB, 1, "/nonexistent");
+    var resp = alloc(8);
+
+    # before any load: no model, and a reply says so instead of reaching tentib
+    assert_eq(tnt_ready(), 0, "tentib: no model before a load");
+    _t211_reply(route, "[{\"role\":\"user\",\"content\":\"hi\"}]", 4, resp);
+    assert_eq(load64(resp), FWD_PERMANENT, "tentib: a reply with no model is a permanent failure (no retry loop)");
+    assert_eq(health_probe(route), 0, "tentib: unhealthy with no model");
+
+    # the model files, all written before the first load (training replaces tentib's model)
+    var dir = _t_line("/tmp/hoosh-tcyr-", sys_getpid(), "-");
+    var good = _t_cat(dir, "good.tpk"); var v8 = _t_cat(dir, "v8.tpk"); var bad = _t_cat(dir, "bad.tpk");
+    var good2 = _t_cat(dir, "good2.tpk");
+    var text = "the gateway serves ternary";
+    assert_eq(_t211_write_model(good2, "a second byte model", 16, 32, 50, 2) > 0, 1, "tentib: wrote a second model");
+    assert_eq(_t211_write_model(good, text, 16, 32, 300, 1) > 0, 1, "tentib: wrote the byte model");
+    assert_eq(_t211_write_v8(v8) > 0, 1, "tentib: wrote a V = 8 model");
+    var gl[8];
+    var gbuf = file_read_whole_max(good, 1 << 24, &gl);
+    store8(gbuf + 200, load8(gbuf + 200) ^ 1);
+    file_write_all(bad, gbuf, load64(&gl));
+
+    # loading
+    assert_eq(tnt_load(_t_cat(dir, "missing.tpk")), TNT_ERR_READ(), "tentib: a missing file -> TNT_ERR_READ");
+    assert_eq(tnt_load(good), 0, "tentib: the byte model loads");
+    assert_eq(tnt_ready(), 1, "tentib: ready after the load");
+    assert_eq(tnt_context(), strlen(text) - 1, "tentib: the model's context is its trained T");
+    assert_eq(health_probe(route), 1, "tentib: healthy once a model is loaded");
+
+    # a reply: the trained model continues its sentence, greedily, to max_tokens
+    var msgs = "[{\"role\":\"user\",\"content\":\"the\"}]";
+    assert_streq(_t211_reply(route, msgs, 22, resp), " gateway serves ternar",
+      "tentib: the reply continues the trained text");
+    var r1 = load64(resp);
+    assert_eq(load64(r1 + 16), 3, "tentib: prompt_tokens = the prompt's bytes");
+    assert_eq(load64(r1 + 24), 22, "tentib: completion_tokens = max_tokens");
+    assert_eq(load64(r1 + 40), FIN_LENGTH, "tentib: finish \"length\" at max_tokens");
+    assert_eq(load64(r1 + 32), 0, "tentib: no tool calls");
+    assert_streq(_t211_reply(route, msgs, 22, resp), " gateway serves ternar", "tentib: the same reply again (greedy)");
+
+    # refused loads keep the model serving
+    assert_eq(tnt_load(v8), TNT_ERR_VOCAB(), "tentib: a V = 8 model -> TNT_ERR_VOCAB");
+    assert_eq(tnt_load(bad), pk_err_checksum(), "tentib: a corrupt file -> tentib's pk_err_checksum");
+    assert_eq(tnt_ready(), 1, "tentib: still ready after two refused loads");
+    assert_streq(_t211_reply(route, msgs, 22, resp), " gateway serves ternar",
+      "tentib: and still serving the same model");
+
+    # a reload re-reads the file: the same bytes load nothing, so a reply in progress goes on, and neither that nor a
+    # refused load allocates once the file buffer has room
+    var ug = tnt_gen_begin(req_arena(), "the", 3);
+    assert_eq(tnt_load(good), TNT_UNCHANGED(), "tentib: a reload of the model serving -> TNT_UNCHANGED");
+    assert_eq(tnt_gen_step(ug), 32, "tentib: ... and a reply in progress goes on");
+    var missing = _t_cat(dir, "missing.tpk");
+    var lu0 = alloc_used();
+    tnt_load(good); tnt_load(bad); tnt_load(v8); tnt_load(missing);
+    assert_eq(alloc_used() - lu0, 0, "tentib: unchanged and refused reloads keep nothing on the heap");
+
+    # a stream: each character as an SSE content chunk, the same text as the buffered reply
+    chat_id_new();
+    var fds = alloc(8);
+    sys_pipe(fds);
+    var rfd = load32(fds); var wfd = load32(fds + 4);
+    var oc = outcome_new();
+    var sg = genopts_new(0, 8, GEN_UNSET, GEN_UNSET);
+    assert_eq(tnt_stream(wfd, "tentib-test", msgs, strlen(msgs), sg, oc), 1, "tentib: a stream is served");
+    sys_close(wfd);
+    var sout = _t2103_pipe_read(rfd);
+    assert_eq(_t_has(sout, strlen(sout), "\"content\":\" \""), 1, "tentib: the stream's first chunk is the space");
+    assert_eq(_t_has(sout, strlen(sout), "\"content\":\"g\""), 1, "tentib: ... then 'g'");
+    assert_eq(outcome_ptok(oc), 3, "tentib: the stream's prompt_tokens");
+    assert_eq(outcome_ctok(oc), 8, "tentib: the stream's completion_tokens");
+    assert_eq(outcome_finish(oc), FIN_LENGTH, "tentib: the stream's finish");
+
+    # memory: a reply builds in the request arena and a stream's chunks on the stack, so serving keeps nothing on the
+    # heap that never frees (ADR 013), buffered or streamed, once the arena has room
+    req_arena_begin();
+    _t211_reply(route, msgs, 22, resp);
+    var mu0 = alloc_used();
+    var mi = 0;
+    while (mi < 200) { req_arena_begin(); _t211_reply(route, msgs, 22, resp); mi = mi + 1; }
+    assert_eq(alloc_used() - mu0, 0, "tentib: 200 buffered replies keep nothing on the heap");
+    var mdn = sys_open("/dev/null", 1, 0);
+    req_arena_begin();
+    tnt_stream(mdn, "tentib-test", msgs, strlen(msgs), sg, outcome_new());
+    var mo = outcome_new();
+    mu0 = alloc_used();
+    mi = 0;
+    while (mi < 200) { req_arena_begin(); tnt_stream(mdn, "tentib-test", msgs, strlen(msgs), sg, mo); mi = mi + 1; }
+    assert_eq(alloc_used() - mu0, 0, "tentib: 200 streams keep nothing on the heap");
+    sys_close(mdn);
+
+    # a reload while a reply is in progress: the reply stops instead of mixing models
+    var pl[8];
+    var pb = tnt_prompt_a(req_arena(), msgs, strlen(msgs), 0, &pl);
+    var gen = tnt_gen_begin(req_arena(), pb, load64(&pl));
+    assert_eq(tnt_gen_step(gen), 32, "tentib: a step decodes the next byte (' ')");
+    var lu1 = alloc_used();
+    assert_eq(tnt_load(good2), 0, "tentib: a reload to another model");
+    var lkept = alloc_used() - lu1;
+    assert_eq(tnt_gen_step(gen), 0 - 1, "tentib: a step after the reload refuses (the model changed)");
+    # tentib's allocator does not free, so a model loaded keeps its memory: tentib's own figure for its dims
+    assert_eq(lkept >= tnt_model_bytes() && lkept < tnt_model_bytes() + 4096, 1,
+      "tentib: a load of another model keeps one model's memory (tx_model_alloc_bytes)");
+
+    # the prompt: every message's content, decoded, joined by "\n"
+    var pm = "[{\"role\":\"system\",\"content\":\"a\\\"b\"}, {\"role\":\"user\",\"content\":\"c\\nd\\u00e9\"}]";
+    var pml[8];
+    var pmb = tnt_prompt_a(req_arena(), pm, strlen(pm), 0, &pml);
+    assert_streq(pmb, "a\"b\nc\nd\xc3\xa9", "tentib: the prompt decodes each content and joins them");
+    assert_eq(load64(&pml), 9, "tentib: ... and its length is in bytes");
+    var pr[8];
+    assert_streq(tnt_prompt_a(req_arena(), 0, 0, "plain", &pr), "plain", "tentib: no messages: the prompt as given");
+
+    # the token budget
+    assert_eq(tnt_max_new(genopts_new(0, GEN_UNSET, GEN_UNSET, GEN_UNSET)), TNT_DEFAULT_MAX_NEW(),
+      "tentib: no max_tokens -> the default budget");
+    assert_eq(tnt_max_new(genopts_new(0, 1000000, GEN_UNSET, GEN_UNSET)), TNT_MAX_NEW(),
+      "tentib: a huge max_tokens is capped");
+
+    # UTF-8: whole characters pass, everything else is U+FFFD, and the result is JSON-escaped
+    assert_streq(_t211_utf8("a\"\\\n", 4), "a\\\"\\\\\\n", "utf8: ASCII, JSON-escaped");
+    assert_streq(_t211_utf8("\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 9), "\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80",
+      "utf8: 2-, 3- and 4-byte characters pass whole");
+    assert_streq(_t211_utf8("\xff", 1), "\xef\xbf\xbd", "utf8: a byte that cannot lead -> U+FFFD");
+    assert_streq(_t211_utf8("\xe2\x82a", 3), "\xef\xbf\xbda",
+      "utf8: a sequence an ASCII byte breaks -> U+FFFD, then the byte");
+    assert_streq(_t211_utf8("\xc0\x80", 2), "\xef\xbf\xbd\xef\xbf\xbd",
+      "utf8: an overlong lead and its stray -> two U+FFFD");
+    assert_streq(_t211_utf8("\xed\xa0\x80", 3), "\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd",
+      "utf8: a surrogate is refused byte by byte");
+    assert_streq(_t211_utf8("ok\xe2\x82", 4), "ok\xef\xbf\xbd", "utf8: an unfinished character at the end -> U+FFFD");
+
+    # the model listing offers the route's literal patterns, without asking anything over HTTP
+    assert_eq(_models_live_local(req_arena(), str_builder_new(), vec_new(), route), 0,
+      "tentib: no live listing (in-process: its patterns are its list)");
+    sys_unlink(good); sys_unlink(good2); sys_unlink(v8); sys_unlink(bad);
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -3042,15 +3243,17 @@ fn main() {
         if (provider_parse(provider_name(tpi)) != tpi) { tp_rt = 0; }
         var tpu = provider_default_url(tpi);
         var tp_https = memeq(tpu, "https://", 8);
-        if (provider_is_local(tpi) == 1) {
+        if (tpi == PROV_TENTIB) {
+            if (strlen(tpu) != 0) { tp_url = 0; }      # 2.11.0: in-process, no URL (its base is the model file)
+        } elif (provider_is_local(tpi) == 1) {
             if (memeq(tpu, "http://localhost:", 17) == 0) { tp_url = 0; }
         } else {
             if (tp_https == 0) { tp_url = 0; }
         }
         tpi = tpi + 1;
     }
-    assert_eq(tp_rt, 1, "types: provider_parse(provider_name(p)) == p for all 17");
-    assert_eq(tp_url, 1, "types: default URL is https for remote, http://localhost for local, for all 17");
+    assert_eq(tp_rt, 1, "types: provider_parse(provider_name(p)) == p for all 18");
+    assert_eq(tp_url, 1, "types: default URL is https for remote, http://localhost for local, none for tentib");
     assert_eq(provider_parse("OpenAi"), PROV_OPENAI, "types: provider names are case-insensitive");
     assert_eq(provider_parse("TensorRT-LLM"), PROV_TENSORRT, "types: tensorrt-llm alias");
     assert_eq(provider_parse("trtllm"), PROV_TENSORRT, "types: trtllm alias");
@@ -3075,7 +3278,7 @@ fn main() {
     # ── Provider types ───────────────────────────────────────────
     test_group("provider_types");
 
-    assert_eq(PROV_COUNT, 17, "17 provider types");
+    assert_eq(PROV_COUNT, 18, "18 provider types");
     assert(provider_is_local(PROV_OLLAMA) == 1, "ollama is local");
     assert(provider_is_local(PROV_LLAMACPP) == 1, "llamacpp is local");
     assert(provider_is_local(PROV_SYNAPSE) == 1, "synapse is local");
@@ -7588,6 +7791,7 @@ fn main() {
     _t2103_arena_boundary();
     _t2103_stream_chunks();
     _t2103_event_ring();
+    _t211_tentib_local();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

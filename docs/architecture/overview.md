@@ -11,8 +11,8 @@
 
 ## Design Principles
 
-1. **Provider-agnostic** — uniform OpenAI-compatible API across 17 backends
-   (local + remote); model-pattern routing picks the backend.
+1. **Provider-agnostic** — uniform OpenAI-compatible API across 18 backends
+   (local, in-process + remote); model-pattern routing picks the backend.
 2. **Local-first** — prefer on-device inference; remote APIs as fallback.
 3. **Token-aware** — every request tracked against per-agent budgets.
 4. **No magic** — every operation measurable, auditable, traceable.
@@ -45,6 +45,7 @@ Router (priority │ round-robin │ lowest-latency │ direct) ── router.cy
     ▼
 Provider forward ── provider.cyr
     ├─ Local: raw socket → host:port, bounded connect/IO timeouts (Ollama, llama.cpp, Synapse, LM Studio, LocalAI, vLLM, TensorRT-LLM, ONNX)
+    ├─ In-process (2.11.0): a packed ternary model, decoded through tentib ── tentib_local.cyr (ADR 014)
     └─ Remote: sandhi HTTPS → (OpenAI, Anthropic, DeepSeek, Mistral, Google, Groq, Grok, OpenRouter)
     │
     ▼
@@ -106,6 +107,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09, and what `metadata_lend` fills into what an entry does not say (2.10.2) |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
+| `tentib_local.cyr` | In-process ternary inference (2.11.0, [ADR 014](../decisions/014-in-process-ternary-inference.md)): a `tentib` route's packed model loaded through tentib's library bundle (bounded, validated, skipped when unchanged), byte-token greedy decoding one locked step at a time, buffered replies and per-character streams, UTF-8 assembly with U+FFFD |
 | `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string lists (read with bayan's array parser since 2.9.23), a provider's TLS policy and rate limit |
 | `cli.cyr` | The command line's flag parser (2.9.19 split from `main.cyr`): `--name value`, `-s value`, `--name=value`, positionals, `infer`'s model and prompt, over an argument vec |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
@@ -129,6 +131,7 @@ distlibs:
 | Dependency | Role | Consumed as |
 |-----------|------|-------------|
 | **ai-hwaccel** | Hardware detection for model placement / cost | `[deps.ai-hwaccel]` → `lib/ai-hwaccel.cyr` |
+| **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
 | **majra** | Provider event bus (pub/sub) | vendored `src/vendor/majra.cyr` |
 | cyrius **sandhi** | HTTPS client (URL parse + DNS + TLS) for remote providers | stdlib |

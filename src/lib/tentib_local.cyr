@@ -1,0 +1,421 @@
+# tentib_local.cyr — in-process ternary (1.58-bit) inference through tentib (2.11.0, ADR 014).
+#
+# A `type = "tentib"` provider serves a packed ternary model in the gateway's own process: no socket and no second
+# server, so a reply never leaves the host (DLP-confidential content may use it, as any local route). The model is a
+# tentib packed-model file, the bytes tentib's tx_pack_serialize writes (format: tentib's
+# docs/architecture/001-packed-model-format.md), named by the route's `model_file` and loaded at startup and on a
+# reload (config.cyr).
+#
+# Requires: lib/tentib.cyr (with lib/rosnet.cyr and lib/tyche.cyr) included first; types.cyr (PROV_TENTIB, GEN_UNSET,
+# gen_max_tokens); reqmem.cyr (req_arena, sb_room_a, sb_on, sb_cstr, sb_len, cstr_keep); jsonlite.cyr
+# (_json_escape_into, _json_obj_end, _json_str_span); outcome.cyr (FIN_*, OC_*); provider_err.cyr (sse_content_send,
+# upstream_error_sse_body, provider_err_*); http_server.cyr (http_sse_event); logging.cyr; lib/io.cyr
+# (file_read_whole_max); lib/str.cyr (_str_json_unesc_into); lib/sync (mutex_*).
+#
+# THE CONTRACT WITH TENTIB
+# - One model per process. tentib keeps its model in module globals, so every call into it holds _tnt_lock, and a
+#   gateway serves at most one tentib model (config.cyr disables a second tentib route). The lock is held for one
+#   decode step, not across a reply, so streams interleave; a reload bumps _tnt_epoch under the lock, and a reply
+#   that sees the epoch change stops instead of mixing two models.
+# - tentib's guard() exits the PROCESS on a precondition it refuses (a token id outside [0, V), a T past the model's,
+#   a call before a load). Every value this module passes is in range by construction: tokens are bytes and V is 256,
+#   the window never exceeds the model's T, and nothing calls tentib before a load succeeded.
+# - Bytes are tokens. tentib's artifact carries no vocabulary, so a model hoosh serves uses the byte-identity
+#   vocabulary: V = 256, token id = byte value. A model with another V is refused at load (TNT_ERR_VOCAB).
+# - Decoding is greedy (the argmax token); temperature and top_p are not applied, and tools are not offered. The
+#   window slides over the model's last T positions, and each new token runs tx_fwd_packed over the whole window
+#   (tentib has no incremental decode yet): one forward of up to T positions per token.
+# - Byte 0 ends a reply (finish "stop"); max_tokens ends it otherwise (finish "length"). The bytes become valid UTF-8,
+#   an invalid or unfinished sequence each turning into U+FFFD, and are JSON-escaped; the escaper drops control bytes
+#   other than tab, LF and CR.
+# - Memory. Every load reads into one buffer (file_read_whole_into), grown only for a file larger than any before it,
+#   and a reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing. A load of another
+#   model allocates a whole tentib model, and the one it replaces is never freed (tentib's buffers come from the
+#   allocator that does not free; model handles are tentib's 2.0.0 backlog item): tx_model_alloc_bytes(V, T, C, F)
+#   per model loaded, which the config log states.
+
+# ---- policy ----------------------------------------------------------------------------------------------------
+
+# The vocabulary a served model must have: the byte-identity one.
+fn TNT_VOCAB() { return 256; }
+# The largest model file a load reads (256 MiB).
+fn TNT_MAX_FILE() { return 268435456; }
+# What one load may allocate (4 GiB): tentib refuses a model that needs more before it allocates anything
+# (tx_model_alloc_bytes), because a failed allocation would end the process.
+fn TNT_MAX_LOAD() { return 4294967296; }
+# Tokens a reply may have when the request sets no max_tokens.
+fn TNT_DEFAULT_MAX_NEW() { return 128; }
+# The most tokens one reply may have, whatever the request asks.
+fn TNT_MAX_NEW() { return 4096; }
+
+# tnt_load's own status codes (tentib's tx_pack_deserialize codes, -1 to -9, pass through).
+# Success with nothing loaded: the file holds the bytes of the model serving.
+fn TNT_UNCHANGED() { return 1; }
+# The file could not be read (missing, unreadable, or past TNT_MAX_FILE).
+fn TNT_ERR_READ() { return 0 - 100; }
+# The model's vocabulary is not the byte-identity one (V != 256).
+fn TNT_ERR_VOCAB() { return 0 - 101; }
+
+# ---- state -----------------------------------------------------------------------------------------------------
+
+var _tnt_lock = 0;       # serializes every call into tentib (created by the first load)
+var _tnt_load_lock = 0;  # serializes loads, which share _tnt_rb (load_config's callers hold _chat_lock as well)
+var _tnt_ready = 0;      # 1 while a model is loaded
+var _tnt_epoch = 0;      # bumped by every load that replaces the model
+var _tnt_V = 0; var _tnt_T = 0; var _tnt_C = 0; var _tnt_F = 0;
+var _tnt_path = 0;       # the loaded model's file (process memory)
+var _tnt_size = 0;       # its size in bytes
+var _tnt_rb[2];          # the file buffer, { ptr, cap }, reused by every load (file_read_whole_into)
+var _tnt_digest[4];      # the SHA-256 of the loaded model's file
+
+# 1 while a model is loaded.
+fn tnt_ready() { return _tnt_ready; }
+# The loaded model's context length in tokens (0 before a load).
+fn tnt_context() { return _tnt_T; }
+# The loaded model's file, or 0.
+fn tnt_path() { return _tnt_path; }
+
+# ---- load ------------------------------------------------------------------------------------------------------
+
+# Load the packed model at `path`. Returns 0 (loaded), TNT_UNCHANGED (the file holds the model serving: nothing is
+# loaded, and replies in progress go on), TNT_ERR_READ / TNT_ERR_VOCAB, or tentib's tx_pack_deserialize status
+# (-1 .. -9). A refused load leaves the current model, if any, serving: the file is read and its header checked before
+# tentib is touched, and tentib itself validates everything before it replaces anything.
+fn tnt_load(path) {
+    if (_tnt_lock == 0) { _tnt_lock = mutex_new(); _tnt_load_lock = mutex_new(); }
+    mutex_lock(_tnt_load_lock);
+    var rc = _tnt_load_held(path);
+    mutex_unlock(_tnt_load_lock);
+    return rc;
+}
+
+# tnt_load's body, under _tnt_load_lock. Allocates nothing unless the file is larger than any read before (the buffer
+# grows) or it replaces the model (tentib allocates one).
+fn _tnt_load_held(path) {
+    var n = file_read_whole_into(&_tnt_rb, path, TNT_MAX_FILE());
+    if (n < 0) { return TNT_ERR_READ(); }
+    var buf = load64(&_tnt_rb);
+    # The vocabulary is a header word (format version 1, offset 24): refuse another V before tentib replaces the
+    # current model with one this module cannot serve.
+    if (n >= 72) {
+        if (load64(buf) == load64("TENTIBPK")) {
+            if (load64(buf + 24) != TNT_VOCAB()) { return TNT_ERR_VOCAB(); }
+        }
+    }
+    # A reload re-reads every file: when this one holds the model serving, loading it again would only allocate a
+    # second copy of the model and stop every reply in progress.
+    var dg[32];
+    sha256(buf, n, &dg);
+    if (_tnt_ready == 1 && n == _tnt_size) {
+        if (memeq(&dg, &_tnt_digest, 32) == 1) {
+            if (streq(_tnt_path, path) == 0) { _tnt_path = cstr_keep(path); }
+            return TNT_UNCHANGED();
+        }
+    }
+    mutex_lock(_tnt_lock);
+    var rc = tx_pack_deserialize(buf, n, TNT_MAX_LOAD());
+    if (rc != 0) { mutex_unlock(_tnt_lock); return rc; }
+    var dims[32];
+    tx_pack_dims(&dims);
+    _tnt_V = load64(&dims); _tnt_T = load64(&dims + 8); _tnt_C = load64(&dims + 16); _tnt_F = load64(&dims + 24);
+    _tnt_size = n;
+    _tnt_epoch = _tnt_epoch + 1;
+    _tnt_ready = 1;
+    mutex_unlock(_tnt_lock);
+    memcpy(&_tnt_digest, &dg, 32);
+    if (_tnt_path == 0 || streq(_tnt_path, path) == 0) { _tnt_path = cstr_keep(path); }
+    return 0;
+}
+
+# What the loaded model holds in memory, in bytes (tentib's figure for its dims); 0 before a load.
+fn tnt_model_bytes() {
+    if (_tnt_ready == 0) { return 0; }
+    return tx_model_alloc_bytes(_tnt_V, _tnt_T, _tnt_C, _tnt_F);
+}
+
+# A sentence for tnt_load's status, for the log.
+fn tnt_status_text(rc) {
+    if (rc == 0) { return "loaded"; }
+    if (rc == TNT_UNCHANGED()) { return "unchanged (the file holds the model serving)"; }
+    if (rc == TNT_ERR_READ()) { return "the file could not be read (missing, unreadable, or larger than 256 MiB)"; }
+    if (rc == TNT_ERR_VOCAB()) { return "the model's vocabulary is not the byte one (V must be 256)"; }
+    if (rc == pk_err_length()) { return "not a whole tentib model (wrong length)"; }
+    if (rc == pk_err_magic()) { return "not a tentib packed model"; }
+    if (rc == pk_err_version()) { return "a tentib format version this hoosh does not read"; }
+    if (rc == pk_err_header()) { return "a malformed header"; }
+    if (rc == pk_err_checksum()) { return "the checksum does not match (the file is corrupt)"; }
+    if (rc == pk_err_too_big()) { return "loading it would need more than 4 GiB"; }
+    if (rc == pk_err_weights()) { return "malformed ternary weights"; }
+    if (rc == pk_err_gamma()) { return "a malformed layer scale"; }
+    if (rc == pk_err_param()) { return "a non-finite parameter"; }
+    return "refused";
+}
+
+# ---- prompt ----------------------------------------------------------------------------------------------------
+
+# The prompt a request gives a byte model: every message's content, decoded, joined by "\n"; or `prompt` (a cstr) when
+# there are no messages. In `a`; its length goes to *lenp.
+fn tnt_prompt_a(a, messages_raw, messages_len, prompt, lenp) {
+    if (messages_raw == 0 || messages_len <= 0) {
+        var pl = 0;
+        if (prompt != 0) { pl = strlen(prompt); }
+        store64(lenp, pl);
+        return prompt;
+    }
+    var out = alloc_via(a, messages_len + 1);   # a decoded string is never longer than its escaped form
+    if (out == 0) { store64(lenp, 0); return 0; }
+    var o = 0;
+    var i = 0;
+    while (i < messages_len) {
+        if (load8(messages_raw + i) == 91) { break; }
+        i = i + 1;
+    }
+    i = i + 1;
+    var sp[16];
+    while (i < messages_len) {
+        var ch = load8(messages_raw + i);
+        if (ch == 32 || ch == 44 || ch == 10 || ch == 13 || ch == 9) { i = i + 1; continue; }
+        if (ch != 123) { break; }
+        var e = _json_obj_end(messages_raw, messages_len, i);
+        if (e <= i) { break; }
+        # _json_str_span writes a NUL at body[len] (the object's closing brace's position + 1 is a comma, a space or
+        # the array's `]`); restore it after reading.
+        var keep = load8(messages_raw + e);
+        if (_json_str_span(messages_raw + i, e - i, "content", 7, &sp) == 1) {
+            if (o > 0) { store8(out + o, 10); o = o + 1; }
+            o = o + _str_json_unesc_into(out + o, load64(&sp), load64(&sp + 8));
+        }
+        store8(messages_raw + e, keep);
+        i = e;
+    }
+    store8(out + o, 0);
+    store64(lenp, o);
+    return out;
+}
+
+# ---- decode ----------------------------------------------------------------------------------------------------
+
+# The next token after window[0..w) on the model of `epoch`, or -1 when that model is gone (a reload or none).
+fn _tnt_next(window, w, epoch) {
+    mutex_lock(_tnt_lock);
+    if (_tnt_ready == 0 || _tnt_epoch != epoch) { mutex_unlock(_tnt_lock); return 0 - 1; }
+    tx_fwd_packed(window, _tnt_V, w, _tnt_C, _tnt_F);
+    var nx = logits_argmax(ki_logits + (w - 1) * _tnt_V * 8, _tnt_V);
+    mutex_unlock(_tnt_lock);
+    return nx;
+}
+
+# A generation over prompt[0..plen): window(0) w(8) T(16) epoch(24), in `a`; the window holds the prompt's last T
+# bytes (a single "\n" for an empty prompt). 0 when no model is loaded.
+fn tnt_gen_begin(a, prompt, plen) {
+    if (_tnt_lock == 0) { return 0; }
+    mutex_lock(_tnt_lock);
+    var ready = _tnt_ready; var T = _tnt_T; var epoch = _tnt_epoch;
+    mutex_unlock(_tnt_lock);
+    if (ready == 0 || T <= 0) { return 0; }
+    var g = alloc_via(a, 32);
+    var win = alloc_via(a, T * 8);
+    if (g == 0 || win == 0) { return 0; }
+    var w = 0;
+    if (plen <= 0) {
+        store64(win, 10);
+        w = 1;
+    } else {
+        var from = 0;
+        if (plen > T) { from = plen - T; }
+        while (from < plen) { store64(win + w * 8, load8(prompt + from)); w = w + 1; from = from + 1; }
+    }
+    store64(g, win); store64(g + 8, w); store64(g + 16, T); store64(g + 24, epoch);
+    return g;
+}
+
+# One greedy step: the next byte (0..255), appended to the window (sliding when it is full), or -1 when the model the
+# generation began on is gone.
+fn tnt_gen_step(g) {
+    var win = load64(g); var w = load64(g + 8); var T = load64(g + 16);
+    var nx = _tnt_next(win, w, load64(g + 24));
+    if (nx < 0) { return 0 - 1; }
+    if (w == T) {
+        var i = 0;
+        while (i < T - 1) { store64(win + i * 8, load64(win + (i + 1) * 8)); i = i + 1; }
+        store64(win + (T - 1) * 8, nx);
+    } else {
+        store64(win + w * 8, nx);
+        store64(g + 8, w + 1);
+    }
+    return nx;
+}
+
+# The reply's token budget: the request's max_tokens, else TNT_DEFAULT_MAX_NEW, never past TNT_MAX_NEW.
+fn tnt_max_new(gen) {
+    var m = gen_max_tokens(gen);
+    if (m <= 0) { m = TNT_DEFAULT_MAX_NEW(); }
+    if (m > TNT_MAX_NEW()) { m = TNT_MAX_NEW(); }
+    return m;
+}
+
+# ---- UTF-8 ------------------------------------------------------------------------------------------------------
+# The assembler u: pend[0..4)(0) pn(8) need(16) lo(24) hi(32) — the bytes of the character in progress, how many it
+# has and needs, and the range its next byte must fall in (Unicode 15, table 3-7: E0 A0-BF, ED 80-9F, F0 90-BF,
+# F4 80-8F, else 80-BF). A finished character is appended to sb JSON-escaped; an invalid lead byte, or a sequence a
+# byte breaks, becomes one U+FFFD (the broken sequence's maximal subpart), and the breaking byte starts over.
+
+# A fresh assembler in `a`.
+fn tnt_utf8_new(a) {
+    var u = alloc_via(a, 40);
+    if (u != 0) { store64(u, 0); store64(u + 8, 0); store64(u + 16, 0); }
+    return u;
+}
+
+# Append U+FFFD to sb.
+fn _tnt_fffd(sb) {
+    str_builder_add_byte(sb, 0xEF); str_builder_add_byte(sb, 0xBF); str_builder_add_byte(sb, 0xBD);
+    return 0;
+}
+
+# Start a character at lead byte b: emit it if it is ASCII, U+FFFD if it cannot lead, else hold it.
+fn _tnt_utf8_lead(u, b, sb) {
+    if (b < 0x80) {
+        var one[8];
+        store8(&one, b);
+        _json_escape_into(sb, &one, 1);
+        return 0;
+    }
+    var need = 0; var lo = 0x80; var hi = 0xBF;
+    if (b >= 0xC2 && b <= 0xDF) { need = 2; }
+    if (b >= 0xE0 && b <= 0xEF) { need = 3; }
+    if (b >= 0xF0 && b <= 0xF4) { need = 4; }
+    if (need == 0) { return _tnt_fffd(sb); }
+    if (b == 0xE0) { lo = 0xA0; }
+    if (b == 0xED) { hi = 0x9F; }
+    if (b == 0xF0) { lo = 0x90; }
+    if (b == 0xF4) { hi = 0x8F; }
+    store8(u, b); store64(u + 8, 1); store64(u + 16, need); store64(u + 24, lo); store64(u + 32, hi);
+    return 0;
+}
+
+# Feed one byte.
+fn tnt_utf8_feed(u, b, sb) {
+    var pn = load64(u + 8);
+    if (pn == 0) { return _tnt_utf8_lead(u, b, sb); }
+    if (b < load64(u + 24) || b > load64(u + 32)) {
+        _tnt_fffd(sb);                      # the sequence so far is one maximal subpart
+        store64(u + 8, 0);
+        return _tnt_utf8_lead(u, b, sb);
+    }
+    store8(u + pn, b);
+    pn = pn + 1;
+    store64(u + 8, pn);
+    store64(u + 24, 0x80); store64(u + 32, 0xBF);
+    if (pn == load64(u + 16)) {
+        _json_escape_into(sb, u, pn);
+        store64(u + 8, 0);
+    }
+    return 0;
+}
+
+# End of the reply: an unfinished character becomes U+FFFD.
+fn tnt_utf8_finish(u, sb) {
+    if (load64(u + 8) > 0) { _tnt_fffd(sb); store64(u + 8, 0); }
+    return 0;
+}
+
+# ---- replies ---------------------------------------------------------------------------------------------------
+
+# A buffered reply, as provider_forward's result record: text(0, JSON-escaped) 0(8) ptok(16) ctok(24) tool_calls(32)
+# finish(40), in the request arena. 0 when no model is loaded or it was reloaded mid-reply (retryable: the retry
+# serves the new model); provider_err holds why.
+fn tnt_forward(route, model, prompt, messages_raw, messages_len, gen) {
+    var t0 = clock_now_ns();
+    var a = req_arena();
+    provider_err_reset();
+    var plenb[8];
+    var pb = tnt_prompt_a(a, messages_raw, messages_len, prompt, &plenb);
+    var plen = load64(&plenb);
+    var g = tnt_gen_begin(a, pb, plen);
+    if (g == 0) {
+        provider_err_set(503, "tentib: no model is loaded", 26);
+        return FWD_PERMANENT;
+    }
+    var maxn = tnt_max_new(gen);
+    var raw = alloc_via(a, maxn + 1);
+    if (raw == 0) { return 0; }
+    var n = 0;
+    var finish = FIN_LENGTH;
+    while (n < maxn) {
+        var b = tnt_gen_step(g);
+        if (b < 0) {
+            provider_err_set(503, "tentib: the model was reloaded during the reply", 47);
+            return 0;
+        }
+        if (b == 0) { finish = FIN_STOP; break; }
+        store8(raw + n, b);
+        n = n + 1;
+    }
+    var sb = sb_room_a(a, n * 3 + 16);
+    var u = tnt_utf8_new(a);
+    var i = 0;
+    while (i < n) { tnt_utf8_feed(u, load8(raw + i), sb); i = i + 1; }
+    tnt_utf8_finish(u, sb);
+    var text = sb_cstr(sb);
+    var ms = (clock_now_ns() - t0) / 1000000;
+    metrics_record(plen, n);
+    metrics_record_latency(PROV_TENTIB, ms);
+    event_inference_completed("tentib", model, ms, plen + n);
+    otlp_enqueue_inference_span("tentib", model, ms, plen + n, 1);
+    var result = alloc_via(a, 48);
+    if (result == 0) { return 0; }
+    store64(result, text);
+    store64(result + 8, 0);
+    store64(result + 16, plen);
+    store64(result + 24, n);
+    store64(result + 32, 0);
+    store64(result + 40, finish);
+    return result;
+}
+
+# A streamed reply to cfd, after the caller's http_sse_begin: each character goes out as one SSE content chunk once
+# its last byte is decoded. Fills oc's token counts and finish reason. Returns 1 when it served (a client that went
+# away mid-reply counts: what it was sent is billed), 0 when no model was loaded at its start. Records what any
+# provider's stream does: its usage, through the handler's _stream_meter. (A buffered reply records its latency, a
+# completion event and an OTLP span, as provider_forward's do; a stream from any provider records none of them.)
+fn tnt_stream(cfd, model, messages_raw, messages_len, gen, oc) {
+    var a = req_arena();
+    var plenb[8];
+    var pb = tnt_prompt_a(a, messages_raw, messages_len, 0, &plenb);
+    var plen = load64(&plenb);
+    var g = tnt_gen_begin(a, pb, plen);
+    if (g == 0) { return 0; }
+    var maxn = tnt_max_new(gen);
+    var u = tnt_utf8_new(a);
+    var hdr[24];
+    var cbuf[64];
+    var n = 0;
+    var finish = FIN_LENGTH;
+    var live = 1;
+    while (n < maxn) {
+        var b = tnt_gen_step(g);
+        if (b < 0) {
+            var eb = upstream_error_sse_body(model, 503, "tentib: the model was reloaded during the reply");
+            http_sse_event(cfd, eb, strlen(eb));
+            finish = FIN_LENGTH;
+            break;
+        }
+        if (b == 0) { finish = FIN_STOP; break; }
+        n = n + 1;
+        var sb = sb_on(&hdr, &cbuf, 64);
+        tnt_utf8_feed(u, b, sb);
+        if (sb_len(sb) > 0) {
+            if (sse_content_send(cfd, model, sb_cstr(sb), sb_len(sb)) < 0) { live = 0; break; }
+        }
+    }
+    if (live == 1) {
+        var fsb = sb_on(&hdr, &cbuf, 64);
+        tnt_utf8_finish(u, fsb);
+        if (sb_len(fsb) > 0) { sse_content_send(cfd, model, sb_cstr(fsb), sb_len(fsb)); }
+    }
+    store64(oc + OC_PTOK, plen);
+    store64(oc + OC_CTOK, n);
+    store64(oc + OC_FINISH, finish);
+    return 1;
+}

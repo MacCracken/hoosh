@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.7.18)
-- **Version**: SemVer 2.10.3 stable
+- **Version**: SemVer 2.11.0 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -16,7 +16,7 @@
 
 All AGNOS apps (LLM inference), daimon (inference routing)
 
-**Note**: 17 LLM providers. Uses murti for local inference. OpenAI-compatible API.
+**Note**: 18 LLM providers, tentib served in-process since 2.11.0 (ADR 014). murti, the planned local inference engine, is adopted once it has a Cyrius port. OpenAI-compatible API.
 
 **Data files**: `data/cloud_pricing.json` + `data/models.json` are vendored from
 ai-hwaccel (power `/v1/hardware/cost` + `/compatible-models`). Re-sync them when

@@ -1,7 +1,7 @@
 # types.cyr — enums, error codes, provider types for hoosh
 # All shared constants and type definitions.
 
-var HOOSH_VERSION = "2.10.3";
+var HOOSH_VERSION = "2.11.0";
 
 # ================================================================
 # Error types
@@ -69,13 +69,15 @@ enum Provider {
     PROV_VLLM       = 14;
     PROV_TENSORRT   = 15;
     PROV_ONNX       = 16;
-    PROV_COUNT      = 17;
+    PROV_TENTIB     = 17;   # 2.11.0: in-process ternary inference (tentib_local.cyr, ADR 014)
+    PROV_COUNT      = 18;
 }
 
 fn provider_is_local(prov) {
     if (prov == PROV_OLLAMA || prov == PROV_LLAMACPP || prov == PROV_SYNAPSE) { return 1; }
     if (prov == PROV_LMSTUDIO || prov == PROV_LOCALAI || prov == PROV_WHISPER) { return 1; }
     if (prov == PROV_VLLM || prov == PROV_TENSORRT || prov == PROV_ONNX) { return 1; }
+    if (prov == PROV_TENTIB) { return 1; }     # in the gateway's own process: nothing leaves the host
     return 0;
 }
 
@@ -97,6 +99,7 @@ fn provider_name(prov) {
     if (prov == PROV_VLLM) { return "vllm"; }
     if (prov == PROV_TENSORRT) { return "tensorrt"; }
     if (prov == PROV_ONNX) { return "onnx"; }
+    if (prov == PROV_TENTIB) { return "tentib"; }
     return "unknown";
 }
 
@@ -136,6 +139,7 @@ fn provider_parse(name) {
     if (streq(lname, "trtllm") == 1) { return PROV_TENSORRT; }
     if (streq(lname, "onnx") == 1) { return PROV_ONNX; }
     if (streq(lname, "onnxruntime") == 1) { return PROV_ONNX; }
+    if (streq(lname, "tentib") == 1) { return PROV_TENTIB; }
     return 0 - 1;
 }
 
@@ -159,6 +163,8 @@ fn provider_default_url(prov) {
     if (prov == PROV_VLLM) { return "http://localhost:8000"; }
     if (prov == PROV_TENSORRT) { return "http://localhost:8000"; }
     if (prov == PROV_ONNX) { return "http://localhost:8000"; }
+    # 2.11.0: a tentib route has no URL; config.cyr sets its base to the `model_file` path.
+    if (prov == PROV_TENTIB) { return ""; }
     return "http://localhost:8080";
 }
 

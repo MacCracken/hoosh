@@ -8,14 +8,15 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.10.3 (cyrius 6.7.18). 2.10.3 made hoosh's span the caller's child and gave the chat path a request
-arena: a buffered chat keeps 974 bytes, about 500 of them the cache's, and a stream 352 bytes whatever its length
-(2.10.2: 4.6 KB, and 1 MB for a 1,000-token stream). See the CHANGELOG.
+**Current**: v2.11.0 (cyrius 6.7.18). 2.11.0 serves a packed ternary model in hoosh's own process, through tentib's
+library bundle: a `type = "tentib"` provider, buffered and streamed ([ADR 014](../decisions/014-in-process-ternary-inference.md)).
+See the CHANGELOG.
 **Next**: the rest of ADR 013 below, then *Then, in any order*.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
-- **2.10.x and later minors** add features or change answers.
+- **2.10.x and later minors** add features or change answers. 2.11.0 took tentib's adoption, so the bands after it moved
+  up one minor.
 
 ---
 
@@ -141,7 +142,35 @@ request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `
 
 ---
 
-## 2.11.x — requests for current models
+## 2.11.x — in-process inference through tentib
+
+### 2.11.0 — a ternary model served in hoosh's process *(done)*
+
+- A `tentib` route loads the packed model its `model_file` names (bounded, validated, skipped on a reload when its
+  bytes are the model serving) and answers through tentib's integer kernel, buffered and streamed. One per process;
+  bytes are tokens; greedy decoding. [ADR 014](../decisions/014-in-process-ternary-inference.md).
+
+### 2.11.x — what tentib's next releases make possible
+
+Each waits on tentib (`docs/development/roadmap.md` there), then is a pin bump and a change here.
+- **Incremental decode.** Each token is a full forward over the window today, about 50 µs per token on the bench's
+  C = 16 model and growing with the window. A KV cache in tentib makes it one position per token.
+- **A model's own vocabulary.** tentib's format v1 carries none, so hoosh requires V = 256 and reads bytes as tokens.
+  When the artifact can carry a tokenizer (tentib format v2 or a flag), read it and lift the byte rule.
+- **Memory per model loaded.** A load of another model keeps the one it replaces: 802,376 bytes at T = 30, C = 16, and
+  `tx_model_alloc_bytes` in general. tentib's 1.4.x serving-only allocation shrinks it; its 2.0.0 model handles end it,
+  and would also allow more than one tentib route per process.
+
+### 2.11.x — hoosh's own follow-ups
+
+- **Sampling.** `temperature` and `top_p` are ignored on a tentib route (greedy only). tentib leaves the logits in
+  `ki_logits`, so hoosh can sample from them itself.
+- **murti, when it is ported.** murti is AGNOS's general local inference engine and still a Rust tree. Once it has a
+  Cyrius port, adopt it as a provider; whether ternary models then move behind it is a new decision, not ADR 014's.
+
+---
+
+## 2.12.x — requests for current models
 
 - **Thinking on Gemini and Ollama.** `reasoning_effort` maps to Anthropic's thinking and is forwarded to
   OpenAI-compatible reasoning models. Gemini's `generationConfig.thinkingConfig` and Ollama's `think` are not
@@ -157,7 +186,7 @@ request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `
 
 ---
 
-## 2.12.x — tools and observability
+## 2.13.x — tools and observability
 
 - **szál's MCP tools.** No longer upstream-gated.
   - **What szál delivered:** szál 2.2.0 (2026-09-25) shipped everything hoosh filed for: `szal_` renames, a consumer

@@ -1240,6 +1240,10 @@ fn _provider_err_capture(status, body, blen) {
 }
 
 fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw, tools_len, gen) {
+    # 2.11.0: a tentib route is served in this process (tentib_local.cyr), with no body to build and no socket.
+    if (route_provider(route) == PROV_TENTIB) {
+        return tnt_forward(route, model, prompt, messages_raw, messages_len, gen);
+    }
     var _fwd_t0 = clock_now_ns();
     # 2.10.3: the body, the remote answer's copy and the result record are in this thread's request arena
     # (reqmem.cyr); every caller is done with them before its job ends.
@@ -1424,6 +1428,8 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     # 2.10.2: as provider_forward. The slot is per thread, and the handler reads it for its 502: without this, a stream
     # that could not connect reported whatever this worker's last request was refused for, another client's included.
     provider_err_reset();
+    # 2.11.0: a tentib route streams in-process from handle_chat_stream and has no backend fd to hand back.
+    if (route_provider(route) == PROV_TENTIB) { return FWD_PERMANENT; }
     # Local-only fast path: raw fd + sys_read can't decrypt TLS. Remote
     # providers stream incrementally via sandhi_http_stream in the handler
     # (handle_chat_stream's remote branch) and never reach here.
