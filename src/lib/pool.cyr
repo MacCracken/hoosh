@@ -145,7 +145,7 @@ fn _handle_conn(cfd) {
         }
 
         var method = http_parse_method(req_buf, req_len);
-        var path = http_parse_path(req_buf, req_len);
+        var path = http_parse_path_a(req_arena(), req_buf, req_len);   # 2.11.2: in the request arena
         if (path != 0) {
             http_route(cfd, method, path, req_buf, req_len);
         } else {
@@ -161,12 +161,14 @@ fn _handle_conn(cfd) {
 fn job_process(job) {
     job_begin(job);   # 2.10.3 (wq.cyr): each job's own trace context, and the thread's request arena released
     if (load64(job) == JOB_CONN) {
-        _handle_conn(load64(job + 8));
+        var cfd = load64(job + 8);
+        job_conn_release(job);   # 2.11.2 (wq.cyr): the record is the next connection's once its descriptor is read
+        _handle_conn(cfd);
         return 0;
     }
     if (load64(job) == JOB_OTLP_EXPORT) {
         # On a worker: TLS to a remote OTLP collector.
-        _otlp_post(load64(job + 8), load64(job + 16));
+        otlp_export_job(job);   # 2.11.2 (otlp_export.cyr): posts, then hands the batch buffer back
         return 0;
     }
     if (load64(job) == JOB_CATALOG_REFRESH) {

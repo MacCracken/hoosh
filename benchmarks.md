@@ -1,52 +1,52 @@
 # Benchmarks
 
-Latest: **2026-11-10T03:42:10Z** — commit `ca49d76`
+Latest: **2026-11-11T18:53:40Z** — commit `be58ca0`
 
 ## hoosh
 
-| Benchmark | Baseline (`6df894d`) | Previous (`f4edde5`) | Current (`ca49d76`) |
+| Benchmark | Baseline (`f4edde5`) | Previous (`ca49d76`) | Current (`be58ca0`) |
 |-----------|------|------|------|
-| `route_select_20_providers` | 814 ns | 851 ns +5% | 919 ns +13% |
-| `route_round_robin_10` | 124 ns | 129 ns +4% | 138 ns +11% |
-| `pool_reserve_commit` | 36 ns | 38 ns +6% | 41 ns +14% |
+| `route_select_20_providers` | 851 ns | 919 ns +8% | 812 ns **-5%** |
+| `route_round_robin_10` | 129 ns | 138 ns +7% | 159 ns +23% |
+| `pool_reserve_commit` | 38 ns | 41 ns +8% | 38 ns |
 | `pool_available` | 5 ns | 5 ns | 5 ns |
-| `cache_get_hit` | 124 ns | 129 ns +4% | 142 ns +15% |
-| `cache_get_miss` | 57 ns | 59 ns +4% | 65 ns +14% |
-| `cache_insert` | 195 ns | 207 ns +6% | 226 ns +16% |
-| `cache_insert_full` | 1.87 us | 2.02 us +8% | 2.16 us +15% |
-| `route_matches_model` | 32 ns | 33 ns +3% | 36 ns +12% |
-| `estimate_tokens_per_provider` | 9 ns | 9 ns | 10 ns +11% |
-| `dlp_scan_clean_prompt` | 4.22 us | 4.45 us +5% | 4.88 us +16% |
-| `mcp_tools_list` | 3.60 us | 3.77 us +5% | 4.12 us +15% |
-| `mcp_tools_call` | 5.17 us | 5.54 us +7% | 6.11 us +18% |
-| `batch_split_4` | 763 ns | 842 ns +10% | 897 ns +18% |
-| `latency_bucket_find` | 59 ns | 62 ns +5% | 65 ns +10% |
-| `work_queue_push_pop` | 154 ns | 163 ns +6% | 180 ns +17% |
-| `auth_verify_token` | 81 ns | 84 ns +4% | 92 ns +14% |
-| `auth_verify_wrong_late` | 81 ns | 85 ns +5% | 94 ns +16% |
-| `auth_verify_wrong_early` | 80 ns | 84 ns +5% | 93 ns +16% |
-| `rate_limit_check` | 9 ns | 9 ns | 10 ns +11% |
-| `cost_record_known_model` | 268 ns | 229 ns **-15%** | 262 ns |
-| `cost_record_local_free` | 112 ns | 117 ns +4% | 130 ns +16% |
-| `cost_record_live_catalog` | 639 ns | 569 ns **-11%** | 625 ns |
-| `metadata_lookup_live_catalog` | 536 ns | 465 ns **-13%** | 513 ns **-4%** |
-| `catalog_body_build_200` | 3.00 ms | 3.07 ms | 3.52 ms +18% |
-| `catalog_body_held_200` | 9 ns | 9 ns | 11 ns +22% |
-| `models_list_200_arena` | 1.36 ms | 1.43 ms +5% | 1.51 ms +10% |
-| `audit_record_sign` | 6.84 us | 7.21 us +5% | 7.90 us +16% |
-| `event_publish_ring` | 250 ns | 244 ns | 290 ns +16% |
-| `event_completed_ring` | 974 ns | 875 ns **-10%** | 984 ns |
-| `provider_err_set_utf8_511b` | 4.44 us | 4.63 us +4% | 4.91 us +11% |
-| `trace_begin_child` | 932 ns | 991 ns +6% | 1.08 us +16% |
-| `cache_key_arena` | 1.59 us | 1.67 us +4% | 1.80 us +13% |
-| `chat_body_arena` | 3.97 us | 4.22 us +6% | 4.57 us +15% |
-| `provider_body_arena` | 2.16 us | 2.29 us +6% | 2.43 us +12% |
-| `sse_chunk_send` | 1.76 us | 1.82 us +3% | 1.98 us +12% |
-| `tentib_reply_8tok` | — | 395.44 us | 98.09 us |
-| `tentib_load` | — | 454.93 us | 495.30 us |
-| `tentib_reload_same` | — | 131.78 us | 147.26 us |
-| `tentib_reply_22tok` | — | — | 258.99 us |
-| `tentib_load_same_shape` | — | — | 306.34 us |
+| `cache_get_hit` | 129 ns | 142 ns +10% | 128 ns |
+| `cache_get_miss` | 59 ns | 65 ns +10% | 58 ns |
+| `cache_insert` | 207 ns | 226 ns +9% | 189 ns **-9%** |
+| `cache_insert_full` | 2.02 us | 2.16 us +6% | 1.99 us |
+| `route_matches_model` | 33 ns | 36 ns +9% | 34 ns +3% |
+| `estimate_tokens_per_provider` | 9 ns | 10 ns +11% | 11 ns +22% |
+| `dlp_scan_clean_prompt` | 4.45 us | 4.88 us +10% | 4.50 us |
+| `mcp_tools_list` | 3.77 us | 4.12 us +9% | 3.60 us **-4%** |
+| `mcp_tools_call` | 5.54 us | 6.11 us +10% | 5.37 us **-3%** |
+| `batch_split_4` | 842 ns | 897 ns +7% | 830 ns |
+| `latency_bucket_find` | 62 ns | 65 ns +5% | 63 ns |
+| `work_queue_push_pop` | 163 ns | 180 ns +10% | 159 ns |
+| `auth_verify_token` | 84 ns | 92 ns +10% | 89 ns +6% |
+| `auth_verify_wrong_late` | 85 ns | 94 ns +11% | 82 ns **-4%** |
+| `auth_verify_wrong_early` | 84 ns | 93 ns +11% | 82 ns |
+| `rate_limit_check` | 9 ns | 10 ns +11% | 12 ns +33% |
+| `cost_record_known_model` | 229 ns | 262 ns +14% | 231 ns |
+| `cost_record_local_free` | 117 ns | 130 ns +11% | 115 ns |
+| `cost_record_live_catalog` | 569 ns | 625 ns +10% | 612 ns +8% |
+| `metadata_lookup_live_catalog` | 465 ns | 513 ns +10% | 514 ns +11% |
+| `catalog_body_build_200` | 3.07 ms | 3.52 ms +15% | 3.03 ms |
+| `catalog_body_held_200` | 9 ns | 11 ns +22% | 9 ns |
+| `models_list_200_arena` | 1.43 ms | 1.51 ms +6% | 1.45 ms |
+| `audit_record_sign` | 7.21 us | 7.90 us +10% | 5.67 us **-21%** |
+| `event_publish_ring` | 244 ns | 290 ns +19% | 259 ns +6% |
+| `event_completed_ring` | 875 ns | 984 ns +12% | 863 ns |
+| `provider_err_set_utf8_511b` | 4.63 us | 4.91 us +6% | 4.52 us |
+| `trace_begin_child` | 991 ns | 1.08 us +9% | 991 ns |
+| `cache_key_arena` | 1.67 us | 1.80 us +8% | 1.60 us **-4%** |
+| `chat_body_arena` | 4.22 us | 4.57 us +8% | 4.04 us **-4%** |
+| `provider_body_arena` | 2.29 us | 2.43 us +6% | 2.23 us |
+| `sse_chunk_send` | 1.82 us | 1.98 us +9% | 1.80 us |
+| `tentib_reply_8tok` | 395.44 us | 98.09 us **-75%** | 86.91 us **-78%** |
+| `tentib_load` | 454.93 us | 495.30 us +9% | 349.28 us **-23%** |
+| `tentib_reload_same` | 131.78 us | 147.26 us +12% | 130.72 us |
+| `tentib_reply_22tok` | — | 258.99 us | 230.71 us |
+| `tentib_load_same_shape` | — | 306.34 us | 293.14 us |
 
 ---
 

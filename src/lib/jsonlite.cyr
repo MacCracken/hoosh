@@ -99,13 +99,34 @@ fn _json_str_span(body, len, key, keylen, out) {
 # The string value of the first `"<key>"` field (escaped `\"` preserved), a fresh cstr. "" if absent or the value is
 # not a JSON string.
 fn _json_extract_str(body, len, key, keylen) {
+    return _json_extract_str_a(default_alloc(), body, len, key, keylen);
+}
+
+# _json_extract_str in `a` (2.11.2, ADR 013): the forward reads its reply text into the request arena. "" when the
+# key is absent, the value is not a string, or `a` refuses.
+fn _json_extract_str_a(a, body, len, key, keylen) {
     var sp[16];
     if (_json_str_span(body, len, key, keylen, &sp) == 0) { return ""; }
     var tlen = load64(&sp + 8);
-    var text = alloc(tlen + 1);
+    var text = alloc_via(a, tlen + 1);
+    if (text == 0) { return ""; }
     memcpy(text, load64(&sp), tlen);
     store8(text + tlen, 0);
     return text;
+}
+
+# _json_extract_str into the caller's buf[0..cap), for a short value that is read and dropped at once, such as a
+# finish reason (2.11.2, ADR 013): each one kept a heap copy through 2.11.1. A longer value is clipped to cap - 1
+# bytes. Returns buf ("" when absent, as _json_extract_str).
+fn _json_extract_str_in(body, len, key, keylen, buf, cap) {
+    store8(buf, 0);
+    var sp[16];
+    if (_json_str_span(body, len, key, keylen, &sp) == 0) { return buf; }
+    var tlen = load64(&sp + 8);
+    if (tlen > cap - 1) { tlen = cap - 1; }
+    memcpy(buf, load64(&sp), tlen);
+    store8(buf + tlen, 0);
+    return buf;
 }
 
 # 2.10.2: a JSON string's body as the text it stands for, a fresh cstr. _json_extract_str and bayan's pairs keep a
@@ -136,10 +157,20 @@ fn _json_extract_int(body, len, key, keylen) {
 }
 
 # Scan a JSON object's bytes for a string field `"<key>":"<value>"`. Returns
-# an alloc(16) {value_ptr(8), value_len(8)} for the value slice (escaped `\"`
+# a 16-byte {value_ptr(8), value_len(8)} for the value slice (escaped `\"`
 # preserved, quote-skipping mirrors the extractors above), or 0 when the key
 # is absent or its value is not a JSON string.
+# 2.11.2 (ADR 013): the record is in this thread's request arena (reqmem.cyr), released when its next job starts. Every
+# caller reads it where it gets it; through 2.11.1 each lookup kept 16 bytes on the heap, several per message of a
+# forwarded Anthropic or Gemini request. A per-token path uses _json_obj_str_field_in with a record on its stack.
 fn _json_obj_str_field(p, len, key, keylen) {
+    var r = alloc_via(req_arena(), 16);
+    if (r == 0) { return 0; }
+    return _json_obj_str_field_in(p, len, key, keylen, r);
+}
+
+# _json_obj_str_field into the caller's 16-byte record `out`: returns out, or 0.
+fn _json_obj_str_field_in(p, len, key, keylen, out) {
     var i = 0;
     while (i < len - keylen - 1) {
         if (load8(p + i) == 34) {
@@ -161,10 +192,9 @@ fn _json_obj_str_field(p, len, key, keylen) {
                         if (load8(p + j) == 92) { j = j + 1; }
                         j = j + 1;
                     }
-                    var r = alloc(16);
-                    store64(r, p + vs);
-                    store64(r + 8, j - vs);
-                    return r;
+                    store64(out, p + vs);
+                    store64(out + 8, j - vs);
+                    return out;
                 }
             }
         }

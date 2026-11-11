@@ -52,7 +52,8 @@ fn coarse_clock_start() {
 # still get structured logs. Level is set from hoosh.cyml `[logging]`
 # (see config.cyr); default is SK_INFO.
 #
-# Requires: sakshi.cyr (stdlib), string.cyr (strlen).
+# Requires: sakshi.cyr (stdlib), string.cyr (strlen), reqmem.cyr (sb_on, sb_len, sb_add_bytes; functions resolve
+# forward, so its place in the include order does not matter).
 
 fn hlog_info(msg) { sakshi_info(msg, strlen(msg)); return 0; }
 fn hlog_warn(msg) { sakshi_warn(msg, strlen(msg)); return 0; }
@@ -70,14 +71,23 @@ fn hlog_level_from_str(s) {
     return 0 - 1;
 }
 
-# Log "<method> <path>" at info for each request. Built once per call.
+# The longest request line hlog_request logs: sakshi cuts a line at 256 bytes, its prefix included.
+fn HLOG_REQ_MAX() { return 200; }
+
+# Log "request <method> <path>" at info for each request. 2.11.2: built on the stack (reqmem.cyr's sb_on), since
+# sakshi copies the message; through 2.11.1 each request kept a builder and its string on the heap (ADR 013). A path
+# that would take the line past HLOG_REQ_MAX bytes is clipped there.
 fn hlog_request(method, path) {
-    var sb = str_builder_new();
+    var hdr[24];
+    var line[256];
+    var sb = sb_on(&hdr, &line, 256);
     str_builder_add_cstr(sb, "request ");
     str_builder_add_cstr(sb, method);
     str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, path);
-    var s = str_builder_build(sb);
-    sakshi_info(str_data(s), str_len(s));
+    var room = HLOG_REQ_MAX() - sb_len(sb);
+    var pl = strlen(path);
+    if (pl > room) { pl = room; }
+    if (pl > 0) { sb_add_bytes(sb, path, pl); }
+    sakshi_info(load64(sb), sb_len(sb));
     return 0;
 }

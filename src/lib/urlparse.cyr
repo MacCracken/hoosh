@@ -33,18 +33,23 @@ fn url_port(url) {
     return dflt;
 }
 
+# The host's length in scheme://host[:port][/path], from _url_host_start: it stops at ':' (port) or '/' (path).
+fn _url_host_len(url, start) {
+    if (url == 0) { return 0; }
+    var i = start;
+    var c = load8(url + i);
+    while (c != 0 && c != 58 && c != 47) {
+        i = i + 1;
+        c = load8(url + i);
+    }
+    return i - start;
+}
+
 # The host of scheme://host[:port][/path], as a fresh cstr. An empty host falls back to "localhost" (the historical
 # target of a malformed local url).
 fn url_host(url) {
     var start = _url_host_start(url);
-    var i = start;
-    var c = 0;
-    if (url != 0) { c = load8(url + i); }
-    while (c != 0 && c != 58 && c != 47) {    # stop at ':' (port) or '/' (path)
-        i = i + 1;
-        c = load8(url + i);
-    }
-    var len = i - start;
+    var len = _url_host_len(url, start);
     if (len <= 0) {
         var lh = alloc(10);
         memcpy(lh, "localhost", 9);
@@ -55,4 +60,21 @@ fn url_host(url) {
     memcpy(h, url + start, len);
     store8(h + len, 0);
     return h;
+}
+
+# url_host into the caller's buf[0..cap), usually on its stack (2.11.2, ADR 013): the local client, the health probe
+# and the OTLP export took a heap copy of the host on every call. Returns buf, or url_host's heap copy for a host that
+# does not fit (cap must be at least 10, for "localhost").
+fn url_host_in(url, buf, cap) {
+    var start = _url_host_start(url);
+    var len = _url_host_len(url, start);
+    if (len <= 0) {
+        memcpy(buf, "localhost", 9);
+        store8(buf + 9, 0);
+        return buf;
+    }
+    if (len + 1 > cap) { return url_host(url); }
+    memcpy(buf, url + start, len);
+    store8(buf + len, 0);
+    return buf;
 }

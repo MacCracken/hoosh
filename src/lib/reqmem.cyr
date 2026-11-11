@@ -123,6 +123,28 @@ fn mem_copy_words(dst, src, n) {
     return dst;
 }
 
+# Copy p[0..n) and a NUL into a keeper's slot {buf, cap, len}, growing its buffer (doubling from min_cap) only for a
+# value larger than any it has held: a bounded keeper reuses its own storage (ADR 013 decision 3). The event ring's
+# pattern (2.10.3), shared with the OTLP ring since 2.11.2. Returns 0, or -1 when the buffer cannot grow, and then
+# the slot is left empty (len 0) for its reader to skip. Under the keeper's lock.
+fn mem_slot_put(slot, p, n, min_cap) {
+    if (load64(slot + 8) < n + 1) {
+        var cap = min_cap;
+        while (cap < n + 1) { cap = cap * 2; }
+        var b = alloc(cap);
+        if (b == 0) {
+            store64(slot + 16, 0);
+            return 0 - 1;
+        }
+        store64(slot, b);
+        store64(slot + 8, cap);
+    }
+    mem_copy_words(load64(slot), p, n);
+    store8(load64(slot) + n, 0);
+    store64(slot + 16, n);
+    return 0;
+}
+
 # p[0..n) and a NUL in process memory: what a keeper stores, so that nothing it keeps points into an arena.
 fn mem_keep(p, n) {
     var c = alloc(n + 1);

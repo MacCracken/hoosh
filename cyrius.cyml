@@ -43,7 +43,7 @@ modules = ["dist/ai-hwaccel.cyr"]
 # lib/unicode/normalize.cyr shares one, and a local shadows the global). Powers src/lib/tentib_local.cyr.
 [deps.tentib]
 git = "https://github.com/MacCracken/tentib"
-tag = "1.4.0"
+tag = "1.5.1"
 modules = ["dist/tentib.cyr"]
 
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers

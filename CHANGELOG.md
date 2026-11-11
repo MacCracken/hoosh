@@ -5,6 +5,221 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.11.2] — 2026-11-11
+
+**A request keeps nothing, and the keepers stop growing.** This finishes [ADR 013](docs/decisions/013-request-memory.md):
+- a stream keeps 0 bytes on the heap that never frees, at 1 token or 1,000 (352 in 2.11.1);
+- a cache hit keeps 0 (1,632);
+- with the response cache full, a buffered chat keeps 6 bytes, the keep pool settling (894 in 2.11.1), on every
+  provider shape;
+- with the audit chain on, a chat keeps 6 (2,318), and `GET /v1/audit` keeps 0 (155 KB at 100 entries);
+- with OTLP export on, a chat keeps 84 (2,875).
+
+hoosh also pins tentib 1.5.1 and loads a model for serving only: a model of T = 25, C = 16 takes 164,888 bytes, not
+732,136.
+
+**2263 assertions** in 187 groups. All gates are clean: fmt, lint, vet, deny, coverage (506/858, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test.
+
+⚠ **What changes on the wire.** Nothing a client reads.
+- **The request log line** clips a path at 200 bytes of the line. sakshi cut it at 256 anyway.
+- **If the request arena cannot grow,** which only happens when the process is out of memory, a stream or an
+  embeddings request now answers 503 "request memory unavailable" instead of failing later.
+- **The tentib config log** states the serving load's memory figure.
+
+### Changed — dependency pins
+
+- **tentib 1.4.0 → 1.5.1**, with `cyrius.lock` regenerated from empty: tentib `63cfcbf`. rosnet 1.4.1 and tyche 1.2.2
+  come with it, unchanged.
+- tentib 1.5.x adds 17 names: `tx_pack_deserialize_serving`, `tx_serve_alloc_bytes`, `tx_serve_only` and its internal
+  2-bit store's. None collides with a function or global in hoosh, its vendored bundles or its stdlib set. The build
+  prints no duplicate or undefined warning, and the static data grows by 1,264 bytes, tentib's 1 KB unpack table among
+  them.
+- Unchanged, and each the latest release (checked against GitHub's tags on 2026-11-11):
+  - cyrius 6.7.18, with its sandhi 1.13.7;
+  - ai-hwaccel 2.5.6;
+  - the vendored bote-core 3.8.15 and majra 2.13.0.
+
+### Changed — the tentib provider: a load for serving only ([ADR 014](docs/decisions/014-in-process-ternary-inference.md)'s 2.11.2 update)
+
+- **The load.** `tnt_load` calls `tx_pack_deserialize_serving`, tentib 1.5.0's load for a server.
+  - It has the same header and field checks, the same status codes and the same logits, bit for bit.
+  - It allocates only what a forward and a decode step read: none of the latent weights, gradients and training
+    scratch.
+- **Memory per change of shape:**
+
+  | model (V = 256) | full load (2.11.1) | serving load (2.11.2) |
+  |---|---:|---:|
+  | T = 15, C = 16, F = 32 | 592,856 | 115,528 |
+  | T = 25, C = 16, F = 32 | 732,136 | 164,888 |
+  | T = 30, C = 16, F = 32 | 802,376 | 190,168 |
+  | tentib's bench config, T = 32, C = 128, F = 512 | 12,192,728 | 1,434,536 |
+
+  A same-shape reload still allocates nothing: tentib's reuse rule covers serving loads since 1.5.0.
+- **`tnt_model_bytes()`** and the config log report `tx_serve_alloc_bytes`.
+- **tentib's 2-bit store** (1.5.1) is internal there and not used here.
+
+### Changed — the rest of ADR 013: request memory
+
+Measured with `scripts/memory-growth.py` against a `-D HOOSH_ALLOC_PROBE` build of each release on the same host:
+`alloc_used()` kept per request after 200 warm-up requests, with unique prompts unless the row says otherwise.
+
+| per request, bytes kept | 2.11.1 | 2.11.2 |
+|---|---:|---:|
+| buffered chat, the cache filling | 974 | 622, all of it the cached answer, held until evicted |
+| buffered chat, the cache full (`--cache-max 100`) | 894 | 6 |
+| a cache hit (`--hits`) | 1,632 | 0 |
+| a stream, 1 token / 1,000 tokens | 352 / 353 | 0 / 0 |
+| an OpenAI-compatible route, the cache full (`--provider openai`) | 900 | 12 |
+| an Anthropic / Gemini route, the cache full | 1,865 / 1,852 | 12 / 12 |
+| the audit chain on and full, buffered / streamed (`--audit 100`) | 2,318 / 1,776 | 6 / 0 |
+| `GET /v1/audit`, 100 entries | 154,961 | 0 |
+| OTLP export on (`--otlp`) | 2,875 | 84 |
+| `GET /v1/events/recent`, a full ring | 177 | 0 |
+
+The 6 and 12 bytes are the keep pool still allocating a block in a size class it has not used yet: over 6,000 requests
+a full cache keeps 2. The 84 is the export's batch buffer growing once to its size; over 8,000 requests it is 31.
+
+**1. Connection handling.** It kept 184 bytes.
+- The request path's copy is in the request arena (`http_parse_path_a`).
+- The request log line is built on the stack (`hlog_request`).
+- The accept loop's connection record is recycled: `job_process` hands it back once it has read the descriptor, and
+  the next connection takes it (`wq.cyr`, 16 bytes a connection through 2.11.1).
+- A sync batch's barrier reads nothing in the arena after it steals jobs, so the path is safe there.
+
+**2. The forward's extractions.** They kept 144 bytes.
+- The reply text is read into the arena (`_json_extract_str_a`), and the finish word onto the stack
+  (`_json_extract_str_in`, also used for a stream's per-event finish).
+- The local client keeps its parsed response record in its per-thread scratch block, so the record lives as long as
+  the body it points at. It writes the host and the Content-Length digits on the stack.
+- `url_host_in` puts a host into the caller's buffer, and the health probe and the OTLP export use it too.
+
+**Prep.** It kept 64 bytes, and now keeps nothing.
+- The message and tool spans, the model, the pool name and the prompt are in the arena.
+- The messages span is read once; prep scanned the body for it twice.
+- Compaction, compression and tool-pair pruning build in the arena (`compact_messages_a`, `compress_ws_json_a`,
+  `prune_tool_pairs_a`) and append each message in place. Through 2.11.1 a compaction kept its offset table, a copy of
+  every message it kept and the array twice, and an inspected field kept a 16-byte record per message.
+- `_validate_chat` reads the model's own bytes rather than a copy.
+- `_extract_messages` moved to `reqparse.cyr` as `_extract_messages_a`, so the tests run it.
+
+**3. The other paths.**
+- **The Anthropic and Gemini bodies** are built in the arena, every part appended in place. They kept about 1 KB a
+  request: three builders and their builds, a `str_new` per part, a record per field. `_build_anthropic_body_x` and
+  `_build_gemini_body_a` take the allocator.
+- **The JSON field readers** (`_json_obj_str_field`, `_json_obj_obj_span`, `_json_arr_span`) return their record from
+  the arena, and their `_in` forms take one on the caller's stack. A stream's per-event checks use the stack.
+- **A remote request's URL, bearer value and headers** are in the arena (`sandhi_headers_new_a`).
+- **The tool-call converters** return 0 before building anything when a reply has no call. Through 2.11.1 every
+  Anthropic reply and every Gemini stream event built one on the heap. They build in the arena when there is a call,
+  and the synthesized `call_N` ids are on the stack. An Anthropic stream's tool-call deltas are written from the
+  stack.
+- **Embeddings:** the handler's model, records and Ollama body, the normalized answer
+  (`_ollama_embed_to_openai`), and the semantic query's body, remote copy and record.
+- **The refusals:** `_resp_err` and its three message builders build in the arena. A client could repeat a refusal at
+  will, and each kept its body on the heap.
+- **A stream's outcome record** (`outcome_new_a`) and a local stream's error-body buffer.
+
+**4. `audit_record` copies what it keeps.** An entry keeps a copy of the model, the one argument that comes from a
+request, so the chat path's model moved into the arena.
+
+**5. Recycling: keepers with a bound reuse their own storage** (decision 3).
+- **`src/lib/keep.cyr`**, new: a size-class pool, four classes per power of two from 32 bytes to 1 MiB, so a block
+  wastes at most a fifth of itself. Larger requests get a block of their own, which a free drops.
+- **The response cache** puts a removed entry on its free list, and the key and value `cache_insert_kept` copied in back
+  to its pool. A full cache stops growing. While it fills, a cached answer takes about 90 bytes more than in 2.11.1: a
+  72-byte entry, the pool's 8-byte headers and its rounding. Two rules make the reuse safe:
+  - a hit is copied into the request arena under `_chat_lock` (`chat_rehead_a`), so the answer written after the lock
+    is released is never the cache's own memory;
+  - an entry's removal drops every semantic entry under its key (below) before the key goes back to the pool.
+
+  A second answer for a cached key keeps the entry and its key and replaces the value. `cache_insert`, the
+  caller-owned form, replaces in place too and allocates nothing; it took a new entry each time.
+- **The audit chain.**
+  - An entry holds its signature, its hash and the previous hash itself.
+  - What the chain evicts past `max_entries` is reused by the next record, and the model copy goes back to the
+    chain's pool. The anchor is copied into the chain.
+  - Hashing and signing build on the stack, so a record and a verify allocate nothing. Through 2.11.1 a verify of a
+    full chain kept about 5 MB.
+  - The storage write-through's column arrays are on the stack, and `GET /v1/audit` builds in the arena.
+- **OTLP.**
+  - A span is built on the stack and copied into its ring slot, which is reused as the ring wraps (`mem_slot_put`,
+    the event ring's pattern, now in `reqmem.cyr` and shared).
+  - The exporter writes each batch into one buffer of its own, grown only for a larger batch.
+  - An https export runs one at a time, the job record reused, and the exporter waits for it before building the
+    next batch.
+  - A local POST's head and read buffer are on the stack.
+
+### Fixed
+
+- **`GET /v1/audit` read the chain with no lock** while workers appended to it under `_chat_lock`. It was memory-safe
+  only because nothing was ever freed. The chain has a lock of its own now, held by `audit_record`, `audit_verify` and
+  `audit_json`. A verify of a full chain holds it while it checks every entry.
+- **Two answers for one prompt left a semantic entry behind.** Two misses that raced inserted the same key into the
+  semantic index twice, and an eviction removed only the first. `semantic_remove` removes every entry under the key
+  and returns how many.
+- **A cache hit could answer from the cache's own bytes.** An envelope without the standard head went out as the
+  cache's value, after `_chat_lock` was released. `chat_rehead_a` always copies.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2134 → 2263), six new groups:
+  - `tentib_local: the serving-only load`: an exact `tx_serve_alloc_bytes` allocation for two shapes, every logit of a
+    window bit for bit against tentib's full load, and same-shape reloads allocating nothing;
+  - `keep_pool`: every size against its class and the waste bound, reuse, the large-block path, poisoning;
+  - `cache recycling`: 1,000 inserts into a full cache with nothing from the heap. It also checks an evicted value
+    poisoned while a hit's earlier copy is intact, the replace paths, and an eviction dropping both semantic entries of
+    a raced key;
+  - `request memory: connection, forward, prep`: each conversion against the heap form's bytes, with nothing on the
+    heap, and the connection record recycled over 1,000 connections;
+  - `request memory: provider bodies and replies`: the Anthropic and Gemini bodies, tool calls, headers, URL and an
+    embedding answer;
+  - `audit recycling`: 1,000 records into a full chain with nothing from the heap, a verify allocating nothing, the
+    model copied out of a poisoned arena.
+
+  The OTLP groups use the slot ring (`otlp_ring_init`, `otlp_span_at`, `_otlp_batch_into`). 600 spans into a warm ring
+  and a repeated full batch allocate nothing.
+- **Mutation-checked:** 23 mutants of the change, each reverting one conversion or one recycling step, and the suite
+  kills all 23. A twenty-fourth, routing `cache_insert`'s in-place replace through remove-and-insert, is equivalent
+  in memory and shows only in the `cache_insert` bench row.
+- **Concurrency, live:** 16 clients sent 4,800 chats to a real gateway with a 4-entry cache, an 8-entry audit chain and
+  OTLP export on, while another thread read `GET /v1/audit` 208 times. Every reply was its own prompt's, including
+  1,076 cache hits under constant eviction, and every audit read verified.
+- **Live tentib:** a gateway served a buffered and a streamed reply, then a SIGHUP swapped in a same-shape model that
+  declares the byte vocabulary, logged as reused. It reported 164,888 bytes of model memory.
+- **`scripts/memory-growth.py`** gained `--cache-max`, `--hits`, `--provider`, `--audit` and `--otlp`. The fake
+  backend answers in each provider's shape and as an OTLP collector.
+
+### Sizes and performance
+
+| | 2.11.1 | 2.11.2 | |
+|---|---:|---:|---:|
+| x86_64 | 4,188,072 | 4,214,168 | +0.6% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,701,224 | 2,727,320 | +1.0% |
+| aarch64 | 4,920,904 | 4,922,416 | +0.03% |
+| AGNOS, `CYRIUS_DCE=1` | 2,669,648 | 2,691,640 | +0.8% |
+
+The 2.11.1 and 2.11.2 bench binaries were run alternately, seven times each, pinned to one core (medians, ns):
+
+| | 2.11.1 | 2.11.2 | |
+|---|---:|---:|---:|
+| `audit_record_sign` | 7,039 | 5,759 | 0.82 |
+| `tentib_load` (a fresh load) | 471,934 | 353,365 | 0.75 |
+| `cache_insert` (a replace of one key) | 203 | 190 | 0.94 |
+| `tentib_load_same_shape` | 281,976 | 294,464 | 1.04 |
+
+The other 37 rows are within 1% except three whose code did not change:
+- `metadata_lookup_live_catalog` +7%;
+- `batch_split_4` +4%;
+- `route_matches_model` +6%.
+
+Their functions have the same bytes at other 64-byte offsets (`CYRIUS_SYMS`), so the moves are placement, as 2.9.11
+found.
+
+### Changed — docs: there is no murti port (2026-11-10)
+
+The Rust `murti` repo was deleted on 2026-11-10. hoosh's docs said murti would be adopted as a provider "once it has a Cyrius port". No port is coming: per agnosticos `docs/development/planning/murti.md`, the model-load seam lives in hoosh's local providers. `CLAUDE.md`, the 2.11.x roadmap item and the ADR index in `docs/doc-health.md` say so now, and ADR 014 gained a dated update recording it (its decisions stand). No code change.
+
 ## [2.11.1] — 2026-11-09
 
 **A tentib reply is one decode step per token.** hoosh pins tentib 1.4.0 and uses what it added for its first consumer:

@@ -2,9 +2,10 @@
 # Handles request building, response parsing, and text/token extraction.
 # Requires: types.cyr, route.cyr, http_client.cyr, metrics.cyr
 
-# Build chat request JSON from model + prompt
+# Build chat request JSON from model + prompt. 2.11.2 (ADR 013): in the request arena, as every body builder here; the
+# forward sends it before the thread's next job.
 fn _build_chat_body(model, prompt) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 96 + strlen(model) + strlen(prompt));
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"stream\":false,");
@@ -12,8 +13,7 @@ fn _build_chat_body(model, prompt) {
     str_builder_add_cstr(sb, "\"content\":\"");
     str_builder_add_cstr(sb, prompt);
     str_builder_add_cstr(sb, "\"}]}");
-    var s = str_builder_build(sb);
-    return to_cstr(s);
+    return sb_cstr(sb);
 }
 
 # Build chat request JSON with raw messages array passthrough
@@ -28,13 +28,17 @@ fn _sb_add_span(sb, ptr, len) {
 # as an OpenAI {"object":"list","data":[{"object":"embedding","index":i,...}]}.
 # Returns 0 when the answer has no embeddings array. Moved from handlers.cyr in 2.9.22 (the tests had a copy);
 # /v1/embeddings and the semantic cache's query embedding both use it.
+# 2.11.2 (ADR 013): built in the request arena, with room for the answer it reshapes, and written or parsed before the
+# thread's next job; through 2.11.1 each normalized answer, vectors and all, stayed on the heap.
 fn _ollama_embed_to_openai(model, rb, rl) {
-    var span = alloc(16);
+    var spanb[16];
+    var span = &spanb;
     if (_json_raw_value(rb, rl, "embeddings", 10, span) == 0) { return 0; }
     var p = load64(span);
     var n = load64(span + 8);
     if (load8(p) != 91) { return 0; }
-    var sb = str_builder_new();
+    var a = req_arena();
+    var sb = sb_room_a(a, rl + strlen(model) + 256);
     str_builder_add_cstr(sb, "{\"object\":\"list\",\"data\":[");
     var idx = 0;
     var i = 1;
@@ -64,7 +68,7 @@ fn _ollama_embed_to_openai(model, rb, rl) {
     str_builder_add_cstr(sb, ",\"total_tokens\":");
     str_builder_add_int(sb, ptok);
     str_builder_add_cstr(sb, "}}");
-    return str_builder_build(sb);
+    return str_builder_build_a(a, sb);
 }
 
 # OpenAI tool-continuation messages → Ollama-shaped messages (cstr array), or 0 when nothing
@@ -408,7 +412,8 @@ fn _provider_path(route) {
 
 # True if a JSON object's bytes carry `"role":"system"`.
 fn _obj_is_system(p, len) {
-    var rf = _json_obj_str_field(p, len, "role", 4);
+    var rfb[16];
+    var rf = _json_obj_str_field_in(p, len, "role", 4, &rfb);
     if (rf == 0) { return 0; }
     if (load64(rf + 8) != 6) { return 0; }
     if (memeq(load64(rf), "system", 6) == 1) { return 1; }
@@ -418,7 +423,15 @@ fn _obj_is_system(p, len) {
 # Span (ptr,len) of the object value after `"key":{`, or 0 if not found. Keeps
 # searching past a same-name match that is a *value* (e.g. "function" appears as
 # both the value of "type" and the real object key in an OpenAI tool).
+# 2.11.2: the record is in the request arena, as _json_obj_str_field's (jsonlite.cyr).
 fn _json_obj_obj_span(p, len, key, keylen) {
+    var r = alloc_via(req_arena(), 16);
+    if (r == 0) { return 0; }
+    return _json_obj_obj_span_in(p, len, key, keylen, r);
+}
+
+# _json_obj_obj_span into the caller's 16-byte record `out`: returns out, or 0.
+fn _json_obj_obj_span_in(p, len, key, keylen, out) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
@@ -429,10 +442,9 @@ fn _json_obj_obj_span(p, len, key, keylen) {
             }
             if (j < len && load8(p + j) == 123) {
                 var end = _json_obj_end(p, len, j);
-                var r = alloc(16);
-                store64(r, p + j);
-                store64(r + 8, end - j);
-                return r;
+                store64(out, p + j);
+                store64(out + 8, end - j);
+                return out;
             }
         }
         i = i + 1;
@@ -488,9 +500,10 @@ fn _json_unesc_span(sb, ptr, len) {
 # Convert an OpenAI `tools` array to Anthropic/Gemini shape. Each OpenAI tool is
 # `{"type":"function","function":{name,description,parameters}}`; we emit
 # `{"name","description","<schema_key>":<parameters>}` where schema_key is
-# "input_schema" (Anthropic) or "parameters" (Gemini). Returns a cstr array.
+# "input_schema" (Anthropic) or "parameters" (Gemini). Returns a cstr array, in the request arena (2.11.2): never
+# longer than the tools it converts, and each field appended in place (a heap copy of each through 2.11.1).
 fn _tools_convert(tools_raw, tools_len, schema_key) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), tools_len + 64);
     str_builder_putc(sb, '[');
     var first = 1;
     var i = 0;
@@ -515,16 +528,16 @@ fn _tools_convert(tools_raw, tools_len, schema_key) {
                     if (nm != 0) {
                         if (first == 0) { str_builder_putc(sb, ','); }
                         str_builder_add_cstr(sb, "{\"name\":\"");
-                        str_builder_add(sb, str_new(load64(nm), load64(nm + 8)));
+                        sb_add_bytes(sb, load64(nm), load64(nm + 8));
                         str_builder_add_cstr(sb, "\",\"description\":\"");
                         if (ds != 0) {
-                            str_builder_add(sb, str_new(load64(ds), load64(ds + 8)));
+                            sb_add_bytes(sb, load64(ds), load64(ds + 8));
                         }
                         str_builder_add_cstr(sb, "\",\"");
                         str_builder_add_cstr(sb, schema_key);
                         str_builder_add_cstr(sb, "\":");
                         if (pm != 0) {
-                            str_builder_add(sb, str_new(load64(pm), load64(pm + 8)));
+                            sb_add_bytes(sb, load64(pm), load64(pm + 8));
                         } else {
                             str_builder_add_cstr(sb, "{}");
                         }
@@ -537,7 +550,7 @@ fn _tools_convert(tools_raw, tools_len, schema_key) {
         }
     }
     str_builder_putc(sb, ']');
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Build an Anthropic /v1/messages body. Anthropic requires max_tokens and
@@ -546,9 +559,12 @@ fn _tools_convert(tools_raw, tools_len, schema_key) {
 # {role,content} turns pass through unchanged. Objects whose content is not a
 # plain string are left in `messages` rather than dropped. `stream` adds the
 # top-level `"stream":true` flag for the incremental SSE path.
-fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw, tools_len, gen, cat_e) {
-    var sys_sb = str_builder_new();
-    var msgs_sb = str_builder_new();
+# 2.11.2 (ADR 013): built in `a`, the request arena, with every part appended in place and read in place. Through
+# 2.11.1 a forwarded Anthropic request kept about 1 KB on the heap: three builders and their builds, a str_new copy of
+# every part, and a 16-byte record for every field it looked at (scripts/memory-growth.py --provider anthropic).
+fn _build_anthropic_body_x(a, model, messages_raw, messages_len, stream, tools_raw, tools_len, gen, cat_e) {
+    var sys_sb = sb_room_a(a, messages_len + 16);
+    var msgs_sb = sb_room_a(a, messages_len + 256);
     str_builder_putc(msgs_sb, '[');
     var has_sys = 0;
     var first = 1;
@@ -577,7 +593,7 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
                     str_builder_putc(sys_sb, 92);
                     str_builder_putc(sys_sb, 110);
                 }
-                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                sb_add_bytes(sys_sb, load64(cf), load64(cf + 8));
                 has_sys = 1;
                 keep = 0;
             }
@@ -606,7 +622,7 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
                 if (cf2 != 0) {
                     if (load64(cf2 + 8) > 0) {
                         str_builder_add_cstr(msgs_sb, "{\"type\":\"text\",\"text\":\"");
-                        str_builder_add(msgs_sb, str_new(load64(cf2), load64(cf2 + 8)));
+                        sb_add_bytes(msgs_sb, load64(cf2), load64(cf2 + 8));
                         str_builder_add_cstr(msgs_sb, "\"}");
                         bf = 0;
                     }
@@ -629,9 +645,9 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
                                 if (nmf != 0) {
                                     if (bf == 0) { str_builder_putc(msgs_sb, ','); }
                                     str_builder_add_cstr(msgs_sb, "{\"type\":\"tool_use\",\"id\":\"");
-                                    str_builder_add(msgs_sb, str_new(load64(idf), load64(idf + 8)));
+                                    sb_add_bytes(msgs_sb, load64(idf), load64(idf + 8));
                                     str_builder_add_cstr(msgs_sb, "\",\"name\":\"");
-                                    str_builder_add(msgs_sb, str_new(load64(nmf), load64(nmf + 8)));
+                                    sb_add_bytes(msgs_sb, load64(nmf), load64(nmf + 8));
                                     str_builder_add_cstr(msgs_sb, "\",\"input\":");
                                     if (argf != 0) {
                                         if (load64(argf + 8) > 0) {
@@ -663,9 +679,9 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
                     if (first == 0) { str_builder_putc(msgs_sb, ','); }
                     str_builder_add_cstr(msgs_sb, "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",");
                     str_builder_add_cstr(msgs_sb, "\"tool_use_id\":\"");
-                    if (tidf != 0) { str_builder_add(msgs_sb, str_new(load64(tidf), load64(tidf + 8))); }
+                    if (tidf != 0) { sb_add_bytes(msgs_sb, load64(tidf), load64(tidf + 8)); }
                     str_builder_add_cstr(msgs_sb, "\",\"content\":\"");
-                    if (trc != 0) { str_builder_add(msgs_sb, str_new(load64(trc), load64(trc + 8))); }
+                    if (trc != 0) { sb_add_bytes(msgs_sb, load64(trc), load64(trc + 8)); }
                     str_builder_add_cstr(msgs_sb, "\"}]}");
                     first = 0;
                     keep = 0;
@@ -673,7 +689,7 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
             }
             if (keep == 1) {
                 if (first == 0) { str_builder_putc(msgs_sb, ','); }
-                str_builder_add(msgs_sb, str_new(mp, obj_len));
+                sb_add_bytes(msgs_sb, mp, obj_len);
                 first = 0;
             }
         }
@@ -681,7 +697,7 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     }
     str_builder_putc(msgs_sb, ']');
 
-    var body = str_builder_new();
+    var body = sb_room_a(a, sb_len(msgs_sb) + sb_len(sys_sb) + strlen(model) + tools_len + 512);
     str_builder_add_cstr(body, "{\"model\":\"");
     str_builder_add_cstr(body, model);
     # 2.5.0 extended thinking: `reasoning_effort` -> Anthropic thinking. 2.8.0: the SHAPE comes from the model's own
@@ -701,7 +717,8 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     # 2.8.1: the default too stays inside the model's ceiling (a client's own value was trimmed in _chat_prep), and the
     # thinking budget below is planned against what is actually sent.
     a_max = catalog_clamp_out(catalog_out_cap(cat_e, model), a_max);
-    var plan = alloc(24);
+    var planb[24];
+    var plan = &planb;
     catalog_thinking_plan(cat_e, effort, a_max, plan);
     var pmode = load64(plan);
     str_builder_add_cstr(body, "\",\"max_tokens\":");
@@ -731,34 +748,34 @@ fn _build_anthropic_body_x(model, messages_raw, messages_len, stream, tools_raw,
     }
     if (has_sys == 1) {
         str_builder_add_cstr(body, "\"system\":\"");
-        str_builder_add(body, str_builder_build(sys_sb));
+        sb_add_bytes(body, load64(sys_sb), sb_len(sys_sb));
         str_builder_add_cstr(body, "\",");
     }
     str_builder_add_cstr(body, "\"messages\":");
-    str_builder_add(body, str_builder_build(msgs_sb));
+    sb_add_bytes(body, load64(msgs_sb), sb_len(msgs_sb));
     if (tools_raw != 0 && tools_len > 0) {
         str_builder_add_cstr(body, ",\"tools\":");
         str_builder_add_cstr(body, _tools_convert(tools_raw, tools_len, "input_schema"));
     }
     str_builder_putc(body, '}');
-    return to_cstr(str_builder_build(body));
+    return sb_cstr(body);
 }
 
 # Non-streaming Anthropic body (the common case). `gen` = the per-request
-# generation options (thinking effort + sampling, 2.5.2; was a bare effort i64).
+# generation options (thinking effort + sampling, 2.5.2; was a bare effort i64). In the request arena (2.11.2).
 fn _build_anthropic_body(model, messages_raw, messages_len, tools_raw, tools_len, gen, cat_e) {
-    return _build_anthropic_body_x(model, messages_raw, messages_len, 0, tools_raw, tools_len, gen, cat_e);
+    return _build_anthropic_body_x(req_arena(), model, messages_raw, messages_len, 0, tools_raw, tools_len, gen, cat_e);
 }
 
-# Anthropic /v1/messages body from a bare prompt (no messages array).
+# Anthropic /v1/messages body from a bare prompt (no messages array), in the request arena (2.11.2).
 fn _build_anthropic_body_prompt(model, prompt) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 128 + strlen(model) + strlen(prompt));
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"");
     str_builder_add_cstr(sb, prompt);
     str_builder_add_cstr(sb, "\"}]}");
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Extract assistant text from an Anthropic response: content[].text.
@@ -788,10 +805,18 @@ fn extract_anthropic_tokens(body, blen) {
 # array. role:"system" turns hoist to `systemInstruction` (joined with `\n`);
 # the rest become `contents` entries with role mapped (assistant -> "model",
 # everything else -> "user") and content wrapped as a single text part. Content
-# bytes are already JSON-escaped, so they embed verbatim.
+# bytes are already JSON-escaped, so they embed verbatim. In the request arena (2.11.2, _build_gemini_body_a).
 fn _build_gemini_body(messages_raw, messages_len, tools_raw, tools_len) {
-    var sys_sb = str_builder_new();
-    var contents_sb = str_builder_new();
+    return _build_gemini_body_a(req_arena(), messages_raw, messages_len, tools_raw, tools_len);
+}
+
+# _build_gemini_body in `a` (2.11.2, ADR 013), every part appended and read in place: through 2.11.1 a forwarded Gemini
+# request kept about 1 KB on the heap, as an Anthropic one did.
+fn _build_gemini_body_a(a, messages_raw, messages_len, tools_raw, tools_len) {
+    var sys_sb = sb_room_a(a, messages_len + 16);
+    var contents_sb = sb_room_a(a, messages_len * 2 + 256);
+    var cfb[16];
+    var rfb[16];
     str_builder_putc(contents_sb, '[');
     var has_sys = 0;
     var first = 1;
@@ -812,20 +837,20 @@ fn _build_gemini_body(messages_raw, messages_len, tools_raw, tools_len) {
         var obj_start = i;
         var obj_end = _json_obj_end(messages_raw, messages_len, obj_start);
         var obj_len = obj_end - obj_start;
-        var cf = _json_obj_str_field(messages_raw + obj_start, obj_len, "content", 7);
+        var cf = _json_obj_str_field_in(messages_raw + obj_start, obj_len, "content", 7, &cfb);
         if (_obj_is_system(messages_raw + obj_start, obj_len) == 1) {
             if (cf != 0) {
                 if (has_sys == 1) {
                     str_builder_putc(sys_sb, 92);
                     str_builder_putc(sys_sb, 110);
                 }
-                str_builder_add(sys_sb, str_new(load64(cf), load64(cf + 8)));
+                sb_add_bytes(sys_sb, load64(cf), load64(cf + 8));
                 has_sys = 1;
             }
         } else {
             if (cf != 0) {
                 var role = "user";
-                var rf = _json_obj_str_field(messages_raw + obj_start, obj_len, "role", 4);
+                var rf = _json_obj_str_field_in(messages_raw + obj_start, obj_len, "role", 4, &rfb);
                 if (rf != 0) {
                     if (load64(rf + 8) == 9) {
                         if (memeq(load64(rf), "assistant", 9) == 1) { role = "model"; }
@@ -835,7 +860,7 @@ fn _build_gemini_body(messages_raw, messages_len, tools_raw, tools_len) {
                 str_builder_add_cstr(contents_sb, "{\"role\":\"");
                 str_builder_add_cstr(contents_sb, role);
                 str_builder_add_cstr(contents_sb, "\",\"parts\":[{\"text\":\"");
-                str_builder_add(contents_sb, str_new(load64(cf), load64(cf + 8)));
+                sb_add_bytes(contents_sb, load64(cf), load64(cf + 8));
                 str_builder_add_cstr(contents_sb, "\"}]}");
                 first = 0;
             }
@@ -844,31 +869,31 @@ fn _build_gemini_body(messages_raw, messages_len, tools_raw, tools_len) {
     }
     str_builder_putc(contents_sb, ']');
 
-    var body = str_builder_new();
+    var body = sb_room_a(a, sb_len(contents_sb) + sb_len(sys_sb) + tools_len + 256);
     str_builder_putc(body, '{');
     if (has_sys == 1) {
         str_builder_add_cstr(body, "\"systemInstruction\":{\"parts\":[{\"text\":\"");
-        str_builder_add(body, str_builder_build(sys_sb));
+        sb_add_bytes(body, load64(sys_sb), sb_len(sys_sb));
         str_builder_add_cstr(body, "\"}]},");
     }
     str_builder_add_cstr(body, "\"contents\":");
-    str_builder_add(body, str_builder_build(contents_sb));
+    sb_add_bytes(body, load64(contents_sb), sb_len(contents_sb));
     if (tools_raw != 0 && tools_len > 0) {
         str_builder_add_cstr(body, ",\"tools\":[{\"functionDeclarations\":");
         str_builder_add_cstr(body, _tools_convert(tools_raw, tools_len, "parameters"));
         str_builder_add_cstr(body, "}]");
     }
     str_builder_putc(body, '}');
-    return to_cstr(str_builder_build(body));
+    return sb_cstr(body);
 }
 
-# Gemini :generateContent body from a bare prompt (single user turn).
+# Gemini :generateContent body from a bare prompt (single user turn), in the request arena (2.11.2).
 fn _build_gemini_body_prompt(prompt) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 96 + strlen(prompt));
     str_builder_add_cstr(sb, "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"");
     str_builder_add_cstr(sb, prompt);
     str_builder_add_cstr(sb, "\"}]}]}");
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Extract assistant text from a Gemini response: candidates[].content.parts[].text.
@@ -889,10 +914,11 @@ fn extract_gemini_tokens(body, blen) {
     return _pack_tokens(prompt, comp);
 }
 
-# base + "/v1beta/models/<model>:generateContent?key=<key>" -> fresh cstr.
+# base + "/v1beta/models/<model>:generateContent?key=<key>" -> fresh cstr, in the request arena (2.11.2, as the other
+# URLs and headers below: a remote request kept each on the heap through 2.11.1).
 # Gemini authenticates via the key query param (no Authorization header).
 fn _gemini_url(base, model, key) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 96 + strlen(base) + strlen(model) + _cstr_len0(key));
     str_builder_add_cstr(sb, base);
     str_builder_add_cstr(sb, "/v1beta/models/");
     str_builder_add_cstr(sb, model);
@@ -901,13 +927,13 @@ fn _gemini_url(base, model, key) {
         str_builder_add_cstr(sb, "?key=");
         str_builder_add_cstr(sb, key);
     }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Streaming variant: :streamGenerateContent with `alt=sse` so the response is
 # an SSE stream of candidate deltas (key stays in the query string).
 fn _gemini_url_stream(base, model, key) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 96 + strlen(base) + strlen(model) + _cstr_len0(key));
     str_builder_add_cstr(sb, base);
     str_builder_add_cstr(sb, "/v1beta/models/");
     str_builder_add_cstr(sb, model);
@@ -916,45 +942,53 @@ fn _gemini_url_stream(base, model, key) {
         str_builder_add_cstr(sb, "&key=");
         str_builder_add_cstr(sb, key);
     }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
+}
+
+# strlen, or 0 for a null pointer.
+fn _cstr_len0(s) {
+    if (s == 0) { return 0; }
+    return strlen(s);
 }
 
 # base_url + path -> fresh cstr (e.g. "https://api.openai.com/v1/chat/completions")
 fn _provider_url(base, path) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 16 + strlen(base) + strlen(path));
     str_builder_add_cstr(sb, base);
     str_builder_add_cstr(sb, path);
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # "Bearer <key>" -> fresh cstr
 fn _bearer_value(key) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 16 + strlen(key));
     str_builder_add_cstr(sb, "Bearer ");
     str_builder_add_cstr(sb, key);
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # sandhi header set: Content-Type + per-provider auth. Anthropic uses
 # x-api-key + anthropic-version; Google authenticates via the URL key query
 # param (no auth header); everything else uses Authorization: Bearer.
+# 2.11.2: the set and its copies are in the request arena; every caller sends it within its job.
 fn _provider_headers(route) {
-    var h = sandhi_headers_new();
-    sandhi_headers_add(h, "Content-Type", "application/json");
-    sandhi_headers_add(h, "traceparent", trace_current_or_new());
+    var a = req_arena();
+    var h = sandhi_headers_new_a(a);
+    sandhi_headers_add_a(a, h, "Content-Type", "application/json");
+    sandhi_headers_add_a(a, h, "traceparent", trace_current_or_new());
     var key = route_api_key(route);
     if (key != 0) {
         if (route_provider(route) == PROV_ANTHROPIC) {
-            sandhi_headers_add(h, "x-api-key", key);
+            sandhi_headers_add_a(a, h, "x-api-key", key);
             # ANTHROPIC_API_VERSION overrides the pinned default, so a new API
             # version can be adopted without a rebuild (rust-old read the same
             # env var). Unset -> the version hoosh is tested against.
             var av = getenv("ANTHROPIC_API_VERSION");
             if (av == 0) { av = "2023-06-01"; }
-            sandhi_headers_add(h, "anthropic-version", av);
+            sandhi_headers_add_a(a, h, "anthropic-version", av);
         } else {
             if (route_provider(route) != PROV_GOOGLE) {
-                sandhi_headers_add(h, "Authorization", _bearer_value(key));
+                sandhi_headers_add_a(a, h, "Authorization", _bearer_value(key));
             }
         }
     }
@@ -966,7 +1000,15 @@ fn _provider_headers(route) {
 
 # Span (ptr,len) of the array value after `"key":[`, or 0. Keeps searching past
 # a same-name match whose value is not an array.
+# 2.11.2: the record is in the request arena, as _json_obj_str_field's (jsonlite.cyr).
 fn _json_arr_span(p, len, key, keylen) {
+    var r = alloc_via(req_arena(), 16);
+    if (r == 0) { return 0; }
+    return _json_arr_span_in(p, len, key, keylen, r);
+}
+
+# _json_arr_span into the caller's 16-byte record `out`: returns out, or 0.
+fn _json_arr_span_in(p, len, key, keylen, out) {
     var i = 0;
     while (i + keylen + 2 < len) {
         if (load8(p + i) == 34 && memeq(p + i + 1, key, keylen) == 1
@@ -977,10 +1019,9 @@ fn _json_arr_span(p, len, key, keylen) {
             }
             if (j < len && load8(p + j) == 91) {
                 var end = _json_span_end(p, len, j);
-                var r = alloc(16);
-                store64(r, p + j);
-                store64(r + 8, end - j);
-                return r;
+                store64(out, p + j);
+                store64(out + 8, end - j);
+                return out;
             }
         }
         i = i + 1;
@@ -989,11 +1030,12 @@ fn _json_arr_span(p, len, key, keylen) {
 }
 
 # Emit one OpenAI tool_call object into sb from (id, name, args-object span).
+# 2.11.2: each field appended in place (a str_new copy of each on the heap through 2.11.1).
 fn _emit_tool_call(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
     str_builder_add_cstr(sb, "{\"id\":\"");
-    str_builder_add(sb, str_new(id_p, id_l));
+    sb_add_bytes(sb, id_p, id_l);
     str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
-    str_builder_add(sb, str_new(nm_p, nm_l));
+    sb_add_bytes(sb, nm_p, nm_l);
     str_builder_add_cstr(sb, "\",\"arguments\":\"");
     if (args_l > 0) { _json_esc_span(sb, args_p, args_l); } else { str_builder_add_cstr(sb, "{}"); }
     str_builder_add_cstr(sb, "\"}}");
@@ -1006,22 +1048,27 @@ fn _emit_tool_call(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
 # 2.6.1: used by _ollama_tool_calls for builds that already send the OpenAI string form.
 fn _emit_tool_call_encoded(sb, id_p, id_l, nm_p, nm_l, args_p, args_l) {
     str_builder_add_cstr(sb, "{\"id\":\"");
-    str_builder_add(sb, str_new(id_p, id_l));
+    sb_add_bytes(sb, id_p, id_l);
     str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
-    str_builder_add(sb, str_new(nm_p, nm_l));
+    sb_add_bytes(sb, nm_p, nm_l);
     str_builder_add_cstr(sb, "\",\"arguments\":\"");
-    if (args_l > 0) { str_builder_add(sb, str_new(args_p, args_l)); } else { str_builder_add_cstr(sb, "{}"); }
+    if (args_l > 0) { sb_add_bytes(sb, args_p, args_l); } else { str_builder_add_cstr(sb, "{}"); }
     str_builder_add_cstr(sb, "\"}}");
     return 0;
 }
 
 # Anthropic content[] tool_use blocks → OpenAI tool_calls array (cstr), or 0.
+# 2.11.2 (ADR 013): 0 before anything is built when the content has no tool_use block (every reply that calls no tool
+# kept a builder on the heap through 2.11.1), and the array is built in the request arena, as are the other
+# converters' below: the completion body or an SSE chunk copies it before the thread's next job.
 fn _anthropic_tool_calls(rb, rbl) {
-    var cspan = _json_arr_span(rb, rbl, "content", 7);
+    var csb[16];
+    var cspan = _json_arr_span_in(rb, rbl, "content", 7, &csb);
     if (cspan == 0) { return 0; }
     var cp = load64(cspan);
     var cl = load64(cspan + 8);
-    var sb = str_builder_new();
+    if (_cmp_substr(cp, cl, "\"tool_use\"", 10) < 0) { return 0; }
+    var sb = sb_room_a(req_arena(), cl * 2 + 64);
     str_builder_putc(sb, '[');
     var first = 1;
     var i = 1;
@@ -1054,12 +1101,17 @@ fn _anthropic_tool_calls(rb, rbl) {
     }
     str_builder_putc(sb, ']');
     if (first == 1) { return 0; }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Gemini candidates parts[].functionCall → OpenAI tool_calls (cstr), or 0.
+# 2.11.2: 0 before anything is built when there is no functionCall, which is every event of a stream that calls no
+# tool (each kept a builder on the heap through 2.11.1); the ids are on the stack.
 fn _gemini_tool_calls(rb, rbl) {
-    var sb = str_builder_new();
+    if (_cmp_substr(rb, rbl, "\"functionCall\":", 15) < 0) { return 0; }
+    var sb = sb_room_a(req_arena(), rbl * 2 + 64);
+    var idh[24];
+    var idbuf[32];
     str_builder_putc(sb, '[');
     var first = 1;
     var idx = 0;
@@ -1075,10 +1127,10 @@ fn _gemini_tool_calls(rb, rbl) {
                 var argf = _json_obj_obj_span(rb + j, ol, "args", 4);
                 if (nmf != 0) {
                     if (first == 0) { str_builder_putc(sb, ','); }
-                    var idb = str_builder_new();
+                    var idb = sb_on(&idh, &idbuf, 32);
                     str_builder_add_cstr(idb, "call_");
                     str_builder_add_int(idb, idx);
-                    var idc = to_cstr(str_builder_build(idb));
+                    var idc = sb_cstr(idb);
                     var ap = 0;
                     var al = 0;
                     if (argf != 0) { ap = load64(argf); al = load64(argf + 8); }
@@ -1097,7 +1149,7 @@ fn _gemini_tool_calls(rb, rbl) {
     }
     str_builder_putc(sb, ']');
     if (first == 1) { return 0; }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Ollama native /api/chat tool_calls → OpenAI tool_calls (cstr), or 0.
@@ -1117,11 +1169,14 @@ fn _gemini_tool_calls(rb, rbl) {
 # already-encoded string when it is one (some builds/proxies do send the OpenAI form) — the
 # string case is emitted verbatim, since re-escaping an escaped string double-encodes it.
 fn _ollama_tool_calls(rb, rbl) {
-    var span = _json_arr_span(rb, rbl, "tool_calls", 10);
+    var spb[16];
+    var span = _json_arr_span_in(rb, rbl, "tool_calls", 10, &spb);
     if (span == 0) { return 0; }
     var cp = load64(span);
     var cl = load64(span + 8);
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), cl * 2 + 64);     # 2.11.2: in the request arena, as _anthropic_tool_calls's
+    var idh[24];
+    var idbuf[32];
     str_builder_putc(sb, '[');
     var first = 1;
     var idx = 0;
@@ -1146,12 +1201,11 @@ fn _ollama_tool_calls(rb, rbl) {
                         idp = load64(idf);
                         idl = load64(idf + 8);
                     } else {
-                        var idb = str_builder_new();
+                        var idb = sb_on(&idh, &idbuf, 32);
                         str_builder_add_cstr(idb, "call_");
                         str_builder_add_int(idb, idx);
-                        var idc = to_cstr(str_builder_build(idb));
-                        idp = idc;
-                        idl = strlen(idc);
+                        idp = sb_cstr(idb);
+                        idl = sb_len(idb);
                     }
                     if (first == 0) { str_builder_putc(sb, ','); }
                     var argo = _json_obj_obj_span(fp, fl, "arguments", 9);
@@ -1178,7 +1232,7 @@ fn _ollama_tool_calls(rb, rbl) {
     }
     str_builder_putc(sb, ']');
     if (first == 1) { return 0; }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Extract the raw "tool_calls":[...] array from an OpenAI-compatible response,
@@ -1211,7 +1265,8 @@ fn _extract_openai_tool_calls(rb, rbl) {
                 var len = j - start;
                 # Empty array "[]" carries no calls.
                 if (len <= 2) { return 0; }
-                var out = alloc(len + 1);
+                var out = alloc_via(req_arena(), len + 1);     # 2.11.2: in the request arena (ADR 013)
+                if (out == 0) { return 0; }
                 memcpy(out, rb + start, len);
                 store8(out + len, 0);
                 return out;
@@ -1340,18 +1395,20 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
         rbl = http_body_len(resp);
     }
 
+    # 2.11.2 (ADR 013): the reply text in the request arena, as the record that carries it; the completion body copies
+    # it, and nothing else keeps it. Through 2.11.1 it was a heap copy per forward. The keys are the extractors' above.
     var text = 0;
     var tokens = 0;
     if (is_anthropic == 1) {
         # Anthropic: content[].text + usage.{input,output}_tokens.
-        text = anthropic_extract_text(rb, rbl);
+        text = _json_extract_str_a(a, rb, rbl, "text", 4);
         tokens = extract_anthropic_tokens(rb, rbl);
     } else { if (is_google == 1) {
             # Gemini: candidates[].content.parts[].text + usageMetadata counts.
-            text = gemini_extract_text(rb, rbl);
+            text = _json_extract_str_a(a, rb, rbl, "text", 4);
             tokens = extract_gemini_tokens(rb, rbl);
         } else {
-            text = ollama_extract_text(rb, rbl);
+            text = _json_extract_str_a(a, rb, rbl, "content", 7);
             # Ollama exposes prompt_eval_count/eval_count; OpenAI-compat uses
             # usage.prompt_tokens/completion_tokens. Try Ollama first, fall back.
             tokens = extract_ollama_tokens(rb, rbl);
@@ -1392,15 +1449,17 @@ fn provider_forward(route, model, prompt, messages_raw, messages_len, tools_raw,
 
     # 2.8.0: how the provider says the reply ended (outcome.cyr) — a reply cut at max_tokens and a classifier
     # refusal no longer read as a clean stop. Ollama's native shape says done_reason, in OpenAI's words.
+    # 2.11.2: the word is read on the stack (ADR 013).
     var finish = FIN_NONE;
+    var fw[64];
     if (is_anthropic == 1) {
-        finish = outcome_finish_anthropic(_json_extract_str(rb, rbl, "stop_reason", 11));
+        finish = outcome_finish_anthropic(_json_extract_str_in(rb, rbl, "stop_reason", 11, &fw, 64));
     } else { if (is_google == 1) {
-            finish = outcome_finish_gemini(_json_extract_str(rb, rbl, "finishReason", 12));
+            finish = outcome_finish_gemini(_json_extract_str_in(rb, rbl, "finishReason", 12, &fw, 64));
         } else { if (route_provider(route) == PROV_OLLAMA) {
-                finish = outcome_finish_openai(_json_extract_str(rb, rbl, "done_reason", 11));
+                finish = outcome_finish_openai(_json_extract_str_in(rb, rbl, "done_reason", 11, &fw, 64));
             } else {
-                finish = outcome_finish_openai(_json_extract_str(rb, rbl, "finish_reason", 13));
+                finish = outcome_finish_openai(_json_extract_str_in(rb, rbl, "finish_reason", 13, &fw, 64));
             } } }
 
     # Result: text(0) 0(8) ptok(16) ctok(24) tool_calls(32) finish(40) — 2.8.0 grew it by the finish slot.
@@ -1460,7 +1519,7 @@ fn provider_forward_stream(route, model, messages_raw, messages_len, tools_raw, 
     if (sst < 200 || sst >= 300) {
         # Capture a bounded prefix of the error body so the caller can report
         # WHY, then stop — the caller's _sse_error_chunk path takes over.
-        var ebuf = alloc(1024);
+        var ebuf = alloc_via(req_arena(), 1024);   # 2.11.2: in the request arena (provider_err_set copies it)
         var elen = 0;
         if (ebuf != 0) {
             var er = sys_read(fd, ebuf, 1023);

@@ -25,6 +25,17 @@ fn to_cstr(s) {
     return buf;
 }
 
+# to_cstr in `a` (2.11.2, ADR 013): the chat path's model, pool and prompt in the request arena. "" when `a` refuses.
+fn to_cstr_a(a, s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc_via(a, len + 1);
+    if (buf == 0) { return ""; }
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
 # `s` written at p, as much of it as fits before `end`. Returns the new p.
 fn _head_add(p, end, s) {
     var n = strlen(s);
@@ -242,15 +253,21 @@ fn _resp_set_header(r, hdr) {
 }
 
 # Error-response descriptor mirroring http_error / http_bad_request bodies.
+# 2.11.2 (ADR 013): the descriptor and its body are in this thread's request arena (reqmem.cyr). Every caller is the
+# chat path, which writes it before the thread's next job or copies a batch item's out (_resp_keep); through 2.11.1
+# each refusal kept a builder, its copy and the descriptor on the heap, which a client could repeat at will.
 fn _resp_err(status, status_text, msg, etype) {
-    var sb = str_builder_new();
+    var a = req_arena();
+    var room = 64 + strlen(etype);
+    if (msg != 0) { room = room + strlen(msg) * 2; }   # sb_add_json_escaped at most doubles a byte
+    var sb = sb_room_a(a, room);
     str_builder_add_cstr(sb, "{\"error\":{\"message\":\"");
     sb_add_json_escaped(sb, msg);
     str_builder_add_cstr(sb, "\",\"type\":\"");
     str_builder_add_cstr(sb, etype);
     str_builder_add_cstr(sb, "\"}}");
-    var b = str_builder_build(sb);
-    return _resp_new(status, status_text, to_cstr(b), str_len(b));
+    var n = sb_len(sb);
+    return _resp_new_a(a, status, status_text, sb_cstr(sb), n);
 }
 
 fn _resp_write(cfd, r) {
@@ -258,7 +275,10 @@ fn _resp_write(cfd, r) {
       load64(r + 32));
 }
 
-fn http_parse_path(buf, len) {
+# The request line's path, a cstr in `a`, or 0 when the line has none. 2.11.2: the connection job passes its request
+# arena (reqmem.cyr; ADR 013's first item), since nothing keeps the path past the answer: the route chain compares it,
+# the request log line copies it, and the batch handlers read an id out of it. Through 2.11.1 it was a heap copy.
+fn http_parse_path_a(a, buf, len) {
     var i = 0;
     while (i < len && load8(buf + i) != 32) { i = i + 1; }
     i = i + 1;
@@ -267,7 +287,8 @@ fn http_parse_path(buf, len) {
     while (i < len && load8(buf + i) != 32 && load8(buf + i) != 10 && load8(buf + i) != 13) {
         i = i + 1;
     }
-    var path = alloc(i - start + 1);
+    var path = alloc_via(a, i - start + 1);
+    if (path == 0) { return 0; }
     memcpy(path, buf + start, i - start);
     store8(path + i - start, 0);
     return path;

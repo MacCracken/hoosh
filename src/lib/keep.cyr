@@ -1,0 +1,103 @@
+# keep.cyr — process memory a bounded keeper recycles (2.11.2, ADR 013 decision 3).
+#
+# hoosh's allocator never frees. A keeper with a bound, the response cache at its max_entries, drops something every
+# time it takes something new, and through 2.11.1 what it dropped stayed allocated for good: a full cache grew by
+# each evicted entry's key and value, about 500 bytes a response. A KEEP POOL takes those blocks back and hands them
+# out again.
+#
+# - Size classes run from 32 bytes to 1 MiB, four per power of two (32, 40, 48, 56, 64, 80, ...), so a block wastes at
+#   most a fifth of itself: a cached reply of about 420 bytes takes a 448-byte block. Each block has an 8-byte header
+#   before what keep_alloc returns, holding its class.
+# - A request larger than the largest class gets a block of its own, class -1, which keep_free drops: it leaks, as
+#   everything did through 2.11.1.
+# - A pool has no lock of its own. Its keeper's lock covers it (every caller of the response cache holds _chat_lock).
+# - In the tests a free fills the block with 0xA5 (KEEP_POISON), so a reader that kept a pointer to it reads poison
+#   and fails an assertion, instead of passing on stale bytes; reqmem.cyr does the same for the request arena.
+#
+# Requires: lib/alloc.cyr (alloc), lib/string.cyr (memset), reqmem.cyr (mem_copy_words).
+
+var KEEP_NCLASS = 61;    # 32 << 15 = 1 MiB is class 60
+var KEEP_POISON = 0;     # the tests set 1: a free fills the block with 0xA5
+
+# Pool layout: the class heads (8 each), then the counters.
+var KEEP_P_NEW = 488;      # blocks allocated from the heap, ever
+var KEEP_P_REUSED = 496;   # keep_alloc calls served from a free list
+var KEEP_P_FREED = 504;    # keep_free calls that put a block on a free list
+var KEEP_P_HELD = 512;     # bytes on the free lists now, headers included
+var KEEP_P_SIZE = 520;
+
+fn keep_pool_new() {
+    var p = alloc(KEEP_P_SIZE);
+    if (p == 0) { return 0; }
+    memset(p, 0, KEEP_P_SIZE);
+    return p;
+}
+
+# The bytes of class c, its header included: b + q * b / 4 for b = 32 << (c / 4) and q = c % 4.
+fn keep_class_bytes(c) {
+    var b = 32 << (c / 4);
+    return b + (b / 4) * (c % 4);
+}
+
+# The smallest class whose block holds n bytes after its header, or -1 when none does.
+fn keep_class_of(n) {
+    var need = n + 8;
+    if (need <= 32) { return 0; }
+    var k = 0;
+    while ((32 << (k + 1)) < need) { k = k + 1; }    # b = 32 << k < need <= 2b
+    var b = 32 << k;
+    var q = ((need - b) * 4 + b - 1) / b;              # 1..4 quarters of b past b (4 is the next power's class 0)
+    var c = k * 4 + q;
+    if (c >= KEEP_NCLASS) { return 0 - 1; }
+    return c;
+}
+
+# n bytes from `pool`: a block from its class's free list, else a new one. 0 when the heap refuses.
+fn keep_alloc(pool, n) {
+    var c = keep_class_of(n);
+    if (c < 0) {
+        var big = alloc(n + 8);
+        if (big == 0) { return 0; }
+        store64(big, 0 - 1);
+        return big + 8;
+    }
+    var head = load64(pool + c * 8);
+    if (head != 0) {
+        store64(pool + c * 8, load64(head));
+        store64(pool + KEEP_P_REUSED, load64(pool + KEEP_P_REUSED) + 1);
+        store64(pool + KEEP_P_HELD, load64(pool + KEEP_P_HELD) - keep_class_bytes(c));
+        return head;
+    }
+    var b = alloc(keep_class_bytes(c));
+    if (b == 0) { return 0; }
+    store64(b, c);
+    store64(pool + KEEP_P_NEW, load64(pool + KEEP_P_NEW) + 1);
+    return b + 8;
+}
+
+# Give block p (from keep_alloc on this pool) back. Nothing may read it after; a block of its own is dropped.
+fn keep_free(pool, p) {
+    if (p == 0) { return 0; }
+    var c = load64(p - 8);
+    if (c < 0 || c >= KEEP_NCLASS) { return 0; }
+    if (KEEP_POISON == 1) { memset(p, 0xA5, keep_class_bytes(c) - 8); }
+    store64(p, load64(pool + c * 8));
+    store64(pool + c * 8, p);
+    store64(pool + KEEP_P_FREED, load64(pool + KEEP_P_FREED) + 1);
+    store64(pool + KEEP_P_HELD, load64(pool + KEEP_P_HELD) + keep_class_bytes(c));
+    return 0;
+}
+
+# src[0..n) and a NUL in a block from `pool`, or 0.
+fn keep_mem(pool, src, n) {
+    var p = keep_alloc(pool, n + 1);
+    if (p == 0) { return 0; }
+    if (n > 0) { mem_copy_words(p, src, n); }
+    store8(p + n, 0);
+    return p;
+}
+
+fn keep_new_count(pool) { return load64(pool + KEEP_P_NEW); }
+fn keep_reused_count(pool) { return load64(pool + KEEP_P_REUSED); }
+fn keep_freed_count(pool) { return load64(pool + KEEP_P_FREED); }
+fn keep_held_bytes(pool) { return load64(pool + KEEP_P_HELD); }

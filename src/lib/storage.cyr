@@ -110,14 +110,16 @@ fn _ins_str(types, sptrs, slens, col, s) {
 
 # Write-through one audit entry (typed insert — message may contain quotes,
 # so never build SQL from it). No-op when persistence is disabled.
+# 2.11.2 (ADR 013): the row's column arrays are on the stack (480 bytes of heap per audit record through 2.11.1).
 fn storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev, ehash) {
     if (_storage == 0) { return 0; }
-    var types = alloc(80);
-    var ivals = alloc(80);
-    var sptrs = alloc(80);
-    var slens = alloc(80);
-    var bptrs = alloc(80);
-    var blens = alloc(80);
+    var typesb[80]; var ivalsb[80]; var sptrsb[80]; var slensb[80]; var bptrsb[80]; var blensb[80];
+    var types = &typesb;
+    var ivals = &ivalsb;
+    var sptrs = &sptrsb;
+    var slens = &slensb;
+    var bptrs = &bptrsb;
+    var blens = &blensb;
     memset(types, 0, 80);
     memset(ivals, 0, 80);
     memset(sptrs, 0, 80);
@@ -164,6 +166,7 @@ fn storage_restore_audit(chain) {
     var maxid = 0;
     while (i < n) {
         var e = alloc(AUDIT_ENTRY_SIZE);
+        store64(e + 88, 0);                        # 2.11.2: its strings are copies of the stored ones, not the pool's
         var id = patra_result_get_int(rs, i, 0);
         store64(e + 0, id);
         store64(e + 8, patra_result_get_int(rs, i, 1));
@@ -192,12 +195,10 @@ fn storage_restore_audit(chain) {
     # audit_record evicts just one entry per new record, so a chain restored from a larger table never shrank back
     # to its setting: memory was bounded by the table, not by [audit] max_entries. Each dropped entry's hash becomes
     # the chain's anchor, so the newest kept entry's link still verifies (audit.cyr, offset 64).
+    # 2.11.2: through audit.cyr's eviction, which copies the anchor and recycles the dropped entries.
     var max = load64(chain + 48);
-    while (load64(chain + 40) > max && load64(chain + 24) != 0) {
-        var head = load64(chain + 24);
-        store64(chain + 64, load64(head + 72));
-        store64(chain + 24, load64(head + 80));
-        store64(chain + 40, load64(chain + 40) - 1);
+    while (load64(chain + 40) > max) {
+        if (_audit_evict_head(chain) == 0) { break; }
     }
     return n;
 }

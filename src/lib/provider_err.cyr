@@ -176,30 +176,51 @@ fn sse_tool_send(cfd, model, tool_calls) {
     return sse_delta_send(cfd, model, "\"tool_calls\":", tool_calls, strlen(tool_calls), "},\"finish_reason\":null}]}");
 }
 
-# A cached chat.completion with a fresh head. The cache stores whole envelopes,
+# A cached chat.completion with a fresh head, as a copy in `a`. The cache stores whole envelopes,
 # so a hit used to replay the first response's id and created time; a client
-# that dedupes by id would drop it. Returns the envelope unchanged if it does
-# not start with the head sb_add_chat_head writes.
-fn chat_rehead(env) {
+# that dedupes by id would drop it. An envelope that does not start with the head
+# sb_add_chat_head writes is copied unchanged.
+#
+# 2.11.2 (ADR 013): always a copy, in the caller's allocator (the chat path's request arena), and made under the lock
+# that guards the cache. The cache recycles what it evicts (keep.cyr), so an answer must never point into the cache's
+# memory once _chat_lock is released: through 2.11.1 an envelope of another shape went out as the cache's own bytes.
+# And through 2.11.1 every hit kept a builder, its growth and a copy of the envelope on the heap.
+fn chat_rehead_a(a, env) {
     if (env == 0) { return env; }
-    if (memeq(env, "{\"id\":\"", 7) == 0) { return env; }
     var n = strlen(env);
+    var at = _chat_rehead_at(env, n);
+    if (at < 0) { return _mem_keep_a(a, env, n); }
+    chat_id_new();
+    var sb = sb_room_a(a, n + 64);
+    sb_add_chat_head(sb, "chat.completion");
+    sb_add_bytes(sb, env + at, n - at);
+    return sb_cstr(sb);
+}
+
+# The index in env[0..n) just past its head's `"created":<digits>,`, or -1 when env does not open with the head
+# sb_add_chat_head writes.
+fn _chat_rehead_at(env, n) {
+    if (n < 7 || memeq(env, "{\"id\":\"", 7) == 0) { return 0 - 1; }
     var i = 7;
     var key = "\"created\":";
     while (i + 10 <= n && memeq(env + i, key, 10) == 0) {
-        if (i > 96) { return env; }
+        if (i > 96) { return 0 - 1; }
         i = i + 1;
     }
-    if (i + 10 > n) { return env; }
+    if (i + 10 > n) { return 0 - 1; }
     i = i + 10;
     while (i < n && load8(env + i) >= 48 && load8(env + i) <= 57) { i = i + 1; }
-    if (i >= n || load8(env + i) != 44) { return env; }
-    i = i + 1;
-    chat_id_new();
-    var sb = str_builder_new();
-    sb_add_chat_head(sb, "chat.completion");
-    str_builder_add_cstr(sb, env + i);
-    return to_cstr(str_builder_build(sb));
+    if (i >= n || load8(env + i) != 44) { return 0 - 1; }
+    return i + 1;
+}
+
+# p[0..n) and a NUL in `a` (mem_keep's shape, for an allocator rather than process memory), or 0.
+fn _mem_keep_a(a, p, n) {
+    var c = alloc_via(a, n + 1);
+    if (c == 0) { return 0; }
+    if (n > 0) { mem_copy_words(c, p, n); }
+    store8(c + n, 0);
+    return c;
 }
 
 # Build an OpenAI-compatible chat-completion body. Moved here from handlers.cyr in 2.9.21, so the tests run it
@@ -509,7 +530,8 @@ fn upstream_error_sse_body(model, status, message) {
 fn _sse_is_error_event(ev, data, dlen) {
     var nm = sandhi_sse_event_name(ev);
     if (nm != 0) { if (streq(nm, "error") == 1) { return 1; } }
-    var tf = _json_obj_str_field(data, dlen, "type", 4);
+    var tfb[16];                           # 2.11.2: on the stack, as this runs for every event of a stream
+    var tf = _json_obj_str_field_in(data, dlen, "type", 4, &tfb);
     if (tf != 0) {
         if (load64(tf + 8) == 5) { if (memeq(load64(tf), "error", 5) == 1) { return 1; } }
     }

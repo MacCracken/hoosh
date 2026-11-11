@@ -24,9 +24,19 @@ token kept about 500 bytes.
 
 --prefill N sends N chats before a --get run, so `--get /v1/events/recent --prefill 200` reads a full event ring.
 
+2.11.2: --cache-max N sets `[cache] max_entries`, so the response cache is full after N chats and every later one
+evicts an entry: `--cache-max 100` measures what a full cache keeps per insert (ADR 013 decision 3: it recycles what it
+evicts). --hits sends chats that repeat one prompt instead of unique ones, so each is answered from the cache.
+--provider openai|anthropic|google makes the route that type at the same plain-http fake, which answers in that
+provider's shape, so each body builder and extractor is measured (an http:// route uses the local client).
+--audit N turns on the audit chain with `max_entries = N` (a small N measures it full, evicting per request), and
+--otlp exports a span per request to the fake, which also answers OTLP's POST /v1/traces.
+
 Usage: scripts/memory-growth.py [build/hoosh] [requests]   (defaults: build/hoosh, 3000)
        scripts/memory-growth.py build/hoosh-probe 500 --stream-only --chunks 100
        scripts/memory-growth.py build/hoosh 3000 --get /v1/models/catalog --tags 200 --shape claude
+       scripts/memory-growth.py build/hoosh-probe 2000 --cache-max 100
+       scripts/memory-growth.py build/hoosh-probe 2000 --hits
 """
 import argparse
 import http.server
@@ -57,6 +67,7 @@ class FakeOllama(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     tags = 1
     chunks = 1      # 2.10.3: NDJSON lines in a streamed reply, one token each (--chunks)
+    provider = "ollama"   # 2.11.2: the shape a chat is answered in (--provider)
 
     def log_message(self, *args):
         pass
@@ -84,6 +95,40 @@ class FakeOllama(http.server.BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(length))
         except ValueError:
             req = {}
+        reply = "A reply of moderate length to exercise the path."
+        if self.path.startswith("/v1/traces"):
+            self._send({})
+            return
+        if self.provider == "anthropic":
+            self._send({"id": "msg_1", "type": "message", "role": "assistant", "model": req.get("model", "claude"),
+                        "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 42, "output_tokens": 17}})
+            return
+        if self.provider == "google":
+            self._send({"candidates": [{"content": {"role": "model", "parts": [{"text": reply}]},
+                                        "finishReason": "STOP"}],
+                        "usageMetadata": {"promptTokenCount": 42, "candidatesTokenCount": 17}})
+            return
+        if self.provider == "openai":
+            if req.get("stream"):
+                lines = [json.dumps({"id": "c1", "object": "chat.completion.chunk", "choices": [
+                    {"index": 0, "delta": {"content": f"tok{i} "}, "finish_reason": None}]})
+                    for i in range(max(self.chunks - 1, 1))]
+                lines.append(json.dumps({"id": "c1", "object": "chat.completion.chunk", "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 42, "completion_tokens": self.chunks}}))
+                body = "".join(f"data: {ln}\n\n" for ln in lines).encode() + b"data: [DONE]\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self._send({"id": "c1", "object": "chat.completion", "model": req.get("model", "gpt"),
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": reply},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 42, "completion_tokens": 17}})
+            return
         if not self.path.startswith("/api/chat"):
             self._send({}, 404)
             return
@@ -119,16 +164,24 @@ def rss_kib(pid):
     return 0
 
 
-def run(binary, n, stream, get=None, shape="ollama", prefill=0):
+def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hits=False, audit=0, otlp=False):
     backend = Server(("127.0.0.1", 0), FakeOllama)
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     probe = Server(("127.0.0.1", 0), FakeOllama)
     port = probe.server_address[1]
     probe.server_close()
     kind, pattern = ("anthropic", "claude-*") if shape == "claude" else ("ollama", "llama*")
+    if FakeOllama.provider != "ollama":
+        kind, pattern = FakeOllama.provider, "llama*"
     cfg = (f'[server]\nbind = "127.0.0.1"\nport = {port}\nhealth_check_interval_secs = 0\n\n'
            f'[[providers]]\ntype = "{kind}"\nbase_url = "http://127.0.0.1:{backend.server_address[1]}"\n'
            f'priority = 1\nmodels = ["{pattern}"]\n')
+    if cache_max > 0:
+        cfg += f'\n[cache]\nmax_entries = {cache_max}\n'
+    if audit > 0:
+        cfg += f'\n[audit]\nenabled = true\nmax_entries = {audit}\n'
+    if otlp:
+        cfg += f'\n[telemetry]\notlp_endpoint = "http://127.0.0.1:{backend.server_address[1]}/v1/traces"\n'
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "hoosh.cyml")
         with open(path, "w") as f:
@@ -145,8 +198,8 @@ def run(binary, n, stream, get=None, shape="ollama", prefill=0):
                     time.sleep(0.05)
 
             def chat(i):
-                body = {"model": "llama3",
-                        "messages": [{"role": "user", "content": f"unique prompt {i} on topic {i * 7919 % 10007}"}]}
+                text = "one repeated prompt" if hits else f"unique prompt {i} on topic {i * 7919 % 10007}"
+                body = {"model": "llama3", "messages": [{"role": "user", "content": text}]}
                 if stream:
                     body["stream"] = True
                 req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
@@ -188,7 +241,15 @@ def run(binary, n, stream, get=None, shape="ollama", prefill=0):
             used1 = alloc_used()
             time.sleep(0.5)
             after = rss_kib(gw.pid)
-            what = get or ("streamed" if stream else "buffered")
+            what = get or ("streamed" if stream else ("cache hits" if hits else "buffered"))
+            if FakeOllama.provider != "ollama":
+                what = f"{FakeOllama.provider} {what}"
+            if cache_max > 0:
+                what += f" (cache max {cache_max})"
+            if audit > 0:
+                what += f" (audit max {audit})"
+            if otlp:
+                what += " (otlp)"
             line = (f"{what}: {ok}/{n} ok in {time.time() - t0:.1f}s; VmRSS {before} -> {after} KiB, "
                     f"{(after - before) * 1024 / max(ok, 1):.0f} bytes per request")
             if used0 is not None and used1 is not None:
@@ -210,14 +271,24 @@ if __name__ == "__main__":
     ap.add_argument("--chunks", type=int, default=1, help="tokens in a streamed reply (2.10.3)")
     ap.add_argument("--stream-only", action="store_true", help="measure only streamed chats")
     ap.add_argument("--prefill", type=int, default=0, help="chats to send before a --get run (2.10.3)")
+    ap.add_argument("--cache-max", type=int, default=0, help="[cache] max_entries (2.11.2): fill the cache")
+    ap.add_argument("--hits", action="store_true", help="repeat one prompt, so the cache answers (2.11.2)")
+    ap.add_argument("--provider", choices=("ollama", "openai", "anthropic", "google"), default="ollama",
+                    help="the route's type, and the shape the fake answers a chat in (2.11.2)")
+    ap.add_argument("--audit", type=int, default=0, help="[audit] on with this max_entries (2.11.2)")
+    ap.add_argument("--otlp", action="store_true", help="export a span per request to the fake (2.11.2)")
     args = ap.parse_args()
+    FakeOllama.provider = args.provider
     FakeOllama.tags = args.tags
     FakeOllama.chunks = args.chunks
     if args.get:
-        run(args.binary, args.requests, False, args.get, args.shape, args.prefill)
+        run(args.binary, args.requests, False, args.get, args.shape, args.prefill, args.cache_max, audit=args.audit,
+            otlp=args.otlp)
     elif args.stream_only:
-        run(args.binary, args.requests, True)
+        run(args.binary, args.requests, True, cache_max=args.cache_max)
     else:
-        run(args.binary, args.requests, False)
-        time.sleep(2)
-        run(args.binary, args.requests, True)
+        run(args.binary, args.requests, False, cache_max=args.cache_max, hits=args.hits, audit=args.audit,
+            otlp=args.otlp)
+        if not args.hits:
+            time.sleep(2)
+            run(args.binary, args.requests, True, cache_max=args.cache_max, audit=args.audit, otlp=args.otlp)

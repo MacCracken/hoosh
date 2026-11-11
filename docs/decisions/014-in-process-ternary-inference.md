@@ -1,6 +1,6 @@
 # ADR-014: In-process ternary inference through tentib
 
-**Status:** Accepted (2.11.0)
+**Status:** Accepted (2.11.0); updates for 2.11.1, 2026-11-10 and 2.11.2 below
 **Date:** 2026-11-09
 
 ## Context
@@ -125,3 +125,34 @@ except where this says otherwise.
   - hoosh now depends on tentib's decode cache being per process, and keeps an owner variable beside it;
   - a model whose dims match the live one's but which was built in-process (tests only) would make hoosh's "reused"
     log line wrong. Only the suite builds models in-process, and it writes every model before the first load.
+
+## Update (2026-11-10): there is no murti port
+
+The Context and the "Wait for murti" alternative describe murti as a Rust tree that hoosh would adopt once it had a
+Cyrius port. No port is coming: the Rust repo (`MacCracken/murti` 0.1.0) was deleted on 2026-11-10. agnosticos
+`docs/development/planning/murti.md` (2026-07-01) had already homed the model-load seam in hoosh: load a sovereign
+weight file, place it, dispatch to rosnet or tentib, and keep the resident models. This provider is the first piece of
+that seam. A murti repo comes back only if a second consumer needs the seam outside hoosh. Whether ternary models would
+then move behind it is still a new decision. The decisions above stand.
+
+## Update (2.11.2): tentib 1.5.1 — a load for serving only
+
+hoosh pins tentib 1.5.1 and loads through `tx_pack_deserialize_serving` (tentib 1.5.0, its ADR 0004). The decisions
+above stand.
+
+- **What changes:** a load allocates `tx_serve_alloc_bytes(V, T, C, F)`: the packed store, the embeddings, gains and
+  bias, and one forward's scratch. A full load also allocates the latent weights, gradients and training scratch, which
+  a served model never reads.
+  - At T = 25, C = 16, F = 32 that is 164,888 bytes, not 732,136.
+  - At tentib's bench config it is 1,434,536, not 12,192,728.
+- **What does not change:**
+  - the checks and their order, the status codes, so `tnt_status_text` reads them as before;
+  - the logits, bit for bit (tested against tentib's full load);
+  - a same-shape reload, which allocates nothing (tentib's reuse rule covers serving loads).
+- **What the "kept memory" consequence above now costs:** a change of shape keeps the replaced model's
+  `tx_serve_alloc_bytes`: about a quarter of a full model at the suite's sizes, an eighth at tentib's bench config.
+  tentib's 2.0.0 model handles still end it.
+- **tentib 1.5.1's 2-bit weight store** is internal there and is not used. It would cut the weights to a quarter, at
+  2–3× the decode cost until cyrius has a vector byte shuffle.
+- **A model built in this process** (the tests only) is never reused by a serving load. So hoosh's "reused" log line
+  would be wrong for one of the same dims, as this ADR already says for the full load.

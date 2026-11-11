@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Version** | **2.11.1** (tentib 1.4.0: a token is one cached decode step until the window slides, the header is peeked, a same-shape reload keeps no memory; 2.11.0 added the `type = "tentib"` provider that serves a packed ternary model in hoosh's own process: [ADR 014](../decisions/014-in-process-ternary-inference.md)) |
-| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.4.0** (since 2.11.1; 1.3.0 at 2.11.0; brings `rosnet` 1.4.1 and `tyche` 1.2.2); vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0** |
+| **Version** | **2.11.2** (the rest of [ADR 013](../decisions/013-request-memory.md): a request keeps nothing on the heap, and the response cache, the audit chain and the OTLP ring recycle what they drop through `keep.cyr`; tentib 1.5.1 and the serving-only load. 2.11.1: tentib 1.4.0, one cached decode step per token; 2.11.0: the `type = "tentib"` provider, [ADR 014](../decisions/014-in-process-ternary-inference.md)) |
+| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.5.1** (since 2.11.2; 1.4.0 at 2.11.1, 1.3.0 at 2.11.0; brings `rosnet` 1.4.1 and `tyche` 1.2.2); vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0**; every one the latest tag on 2026-11-11 |
 | **Binary** (x86_64 static ELF) | ~2.7 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~4.2 MB without |
-| **Source** | ~17,800 lines / 47 files (`src/main.cyr` + 46 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 2134 assertions, 181 groups (`tests/hoosh.tcyr`); 40 of 46 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does |
+| **Source** | ~18,600 lines / 48 files (`src/main.cyr` + 47 `src/lib/*.cyr`) + 2 vendored distlib bundles |
+| **Tests** | 2263 assertions, 187 groups (`tests/hoosh.tcyr`); 41 of 47 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does; `scripts/memory-growth.py` measures what each path and keeper keeps per request |
 | **Benchmarks** | 41 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3, a tentib reply, load and unchanged reload since 2.11.0, a 22-token reply and a same-shape load since 2.11.1); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract (on the real `trace.cyr` since 2.10.3), inference request, message content |
-| **Coverage** | symbol coverage 58% (479/816; `scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 58% (506/858; `scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 18 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 1 in-process: tentib since 2.11.0, 8 remote) |
 | **ADRs** | 14 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |

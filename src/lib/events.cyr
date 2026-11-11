@@ -44,23 +44,7 @@ fn events_total_published() {
 
 # Copy json[0..n) into a ring slot, growing its buffer only when the event does not fit. Under _event_lock. If the
 # buffer cannot grow, the slot is left empty (len 0), and the reader skips it.
-fn _ev_slot_put(slot, json, n) {
-    if (load64(slot + 8) < n + 1) {
-        var cap = EVENT_SLOT_MIN;
-        while (cap < n + 1) { cap = cap * 2; }
-        var b = alloc(cap);
-        if (b == 0) {
-            store64(slot + 16, 0);
-            return 0 - 1;
-        }
-        store64(slot, b);
-        store64(slot + 8, cap);
-    }
-    mem_copy_words(load64(slot), json, n);
-    store8(load64(slot) + n, 0);
-    store64(slot + 16, n);
-    return 0;
-}
+fn _ev_slot_put(slot, json, n) { return mem_slot_put(slot, json, n, EVENT_SLOT_MIN); }   # reqmem.cyr since 2.11.2
 
 # Publish a finished JSON event to the majra bus + copy it into the recent ring. `json` is the caller's: an event
 # builder's stack, a test's string. The bus has no subscribers in hoosh; one would have to copy the payload before

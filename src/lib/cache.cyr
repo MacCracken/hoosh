@@ -10,6 +10,16 @@
 # TTL is the same for every entry of a cache, so expired entries are always the oldest created: the sweep pops the
 # creation tail while it is expired, and LRU eviction pops the access tail. Every caller holds _chat_lock (warming
 # runs before the workers start), so the lists need no lock of their own.
+#
+# 2.11.2: what the cache drops is recycled (ADR 013 decision 3). Through 2.11.1 a full cache kept every entry it
+# evicted, about 570 bytes a response with its key and value, for good. Now an entry goes on the cache's free list,
+# and the key and value cache_insert_kept copied in go back to the cache's keep pool (keep.cyr), so a full cache stops
+# growing. Two rules make that safe:
+# - cache_get's value is the cache's own memory. A caller copies what it needs before it releases _chat_lock: the chat
+#   path's hit is copied into the request arena under the lock (handlers.cyr, chat_rehead_a).
+# - The semantic index keeps the cache's keys, so an entry's removal drops every semantic entry with its key
+#   (semantic_remove) before the key goes back to the pool.
+# cache_insert, the form the warming list and the tests use, keeps its caller's key and value and frees neither.
 
 enum CacheField {
     CACHE_ENTRIES = 0; CACHE_MAX = 8;
@@ -17,26 +27,38 @@ enum CacheField {
     CACHE_ENABLED = 40; CACHE_TTL_MS = 48;
     CACHE_A_HEAD = 56; CACHE_A_TAIL = 64;     # by last access: head most recent, tail least (2.10.0)
     CACHE_C_HEAD = 72; CACHE_C_TAIL = 80;     # by creation: head newest, tail oldest (2.10.0)
-    CACHE_SIZE = 88;
+    CACHE_POOL = 88;                          # the keep pool for the keys and values it copied in (2.11.2)
+    CACHE_FREE_E = 96;                        # removed entries, threaded through CE_ANEXT (2.11.2)
+    CACHE_SIZE = 104;
 }
 
 # Entry layout: 0=value(8), 8=last_access_ms(8), 16=created_ms(8), 24=key(8), 32=access prev(8), 40=access next(8),
-# 48=creation prev(8), 56=creation next(8).
+# 48=creation prev(8), 56=creation next(8), 64=owned(8): bit 0 the key and bit 1 the value are the pool's (2.11.2).
 #
 # 2.5.4: `created_ms` is new. Before it, the entry carried only the LRU recency
 # stamp — rewritten on every read — so there was nothing to measure an age
 # against and `[cache] ttl_secs` (shipped in hoosh.cyml since the port) was
 # silently ignored. A cached response was served as a hit forever; eviction was
 # capacity-only. rust-old had CacheEntry.ttl + is_expired (cache/mod.rs:40-44).
-var CACHE_ENTRY_SIZE = 64;
+var CACHE_ENTRY_SIZE = 72;
 var CE_KEY = 24;
 var CE_APREV = 32;
 var CE_ANEXT = 40;
 var CE_CPREV = 48;
 var CE_CNEXT = 56;
+var CE_OWNED = 64;
+var CE_OWN_KEY = 1;
+var CE_OWN_VALUE = 2;
 
-fn _cache_entry_new(key, value) {
-    var e = alloc(CACHE_ENTRY_SIZE);
+# An entry for key and value: one from the cache's free list, else a new one. 0 when the heap refuses.
+fn _cache_entry_new(c, key, value, owned) {
+    var e = load64(c + CACHE_FREE_E);
+    if (e != 0) {
+        store64(c + CACHE_FREE_E, load64(e + CE_ANEXT));
+    } else {
+        e = alloc(CACHE_ENTRY_SIZE);
+        if (e == 0) { return 0; }
+    }
     var now = hoosh_now_ms();
     store64(e, value);
     store64(e + 8, now);
@@ -46,6 +68,7 @@ fn _cache_entry_new(key, value) {
     store64(e + CE_ANEXT, 0);
     store64(e + CE_CPREV, 0);
     store64(e + CE_CNEXT, 0);
+    store64(e + CE_OWNED, owned);
     return e;
 }
 
@@ -65,8 +88,13 @@ fn cache_new(max_entries, enabled, ttl_secs) {
     store64(c + CACHE_A_TAIL, 0);
     store64(c + CACHE_C_HEAD, 0);
     store64(c + CACHE_C_TAIL, 0);
+    store64(c + CACHE_POOL, keep_pool_new());
+    store64(c + CACHE_FREE_E, 0);
     return c;
 }
+
+# The cache's keep pool (keep.cyr), for its stats and the tests.
+fn cache_pool(c) { return load64(c + CACHE_POOL); }
 
 fn cache_ttl_ms(c) { return load64(c + CACHE_TTL_MS); }
 fn cache_max_entries(c) { return load64(c + CACHE_MAX); }
@@ -103,13 +131,29 @@ fn _cache_list_unlink(c, h, e, p) {
 }
 
 # Drop `e` from the map, both lists and the semantic index (semantic_find would otherwise keep returning a key
-# whose response is gone).
+# whose response is gone), then recycle it (2.11.2): what the pool owns goes back to it, and the entry onto the free
+# list. Nothing may read e, or what it owned, after.
 fn _cache_remove(c, e) {
     var key = load64(e + CE_KEY);
     map_delete(load64(c + CACHE_ENTRIES), key);
     _cache_list_unlink(c, CACHE_A_HEAD, e, CE_APREV);
     _cache_list_unlink(c, CACHE_C_HEAD, e, CE_CPREV);
     semantic_remove(key);
+    _cache_recycle(c, e);
+    return 0;
+}
+
+# What `e` owns back to the cache's pool, and `e` onto the free list.
+fn _cache_recycle(c, e) {
+    var pool = load64(c + CACHE_POOL);
+    var own = load64(e + CE_OWNED);
+    if ((own & CE_OWN_KEY) != 0) { keep_free(pool, load64(e + CE_KEY)); }
+    if ((own & CE_OWN_VALUE) != 0) { keep_free(pool, load64(e)); }
+    store64(e, 0);
+    store64(e + CE_KEY, 0);
+    store64(e + CE_OWNED, 0);
+    store64(e + CE_ANEXT, load64(c + CACHE_FREE_E));
+    store64(c + CACHE_FREE_E, e);
     return 0;
 }
 
@@ -183,39 +227,90 @@ fn cache_evict_expired(c) {
 # 2.10.3: insert copies of a request's key and body (ADR 013's boundary: on the chat path both are in the request
 # arena, reqmem.cyr, released when the thread's next job starts). Returns the cache's copy of the key, which the
 # semantic index may keep too, or 0 when the cache is off and keeps nothing.
+# 2.11.2: the copies are the cache's keep pool's, and go back to it when the entry is removed. A second answer for a
+# key already cached (two misses for one prompt raced) replaces the value and keeps the entry and its key, which the
+# semantic index may hold: the entry moves to the front of both lists, as a new one would.
 fn cache_insert_kept(c, key, value, vlen) {
     if (c == 0 || key == 0 || value == 0) { return 0; }
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
-    var k = cstr_keep(key);
-    var v = mem_keep(value, vlen);
-    if (k == 0 || v == 0) { return 0; }
-    cache_insert(c, k, v);
+    var pool = load64(c + CACHE_POOL);
+    var old = map_get(load64(c + CACHE_ENTRIES), key);
+    if (old != 0) {
+        var nv = keep_mem(pool, value, vlen);
+        if (nv == 0) { return 0; }
+        if ((load64(old + CE_OWNED) & CE_OWN_VALUE) != 0) { keep_free(pool, load64(old)); }
+        store64(old, nv);
+        store64(old + CE_OWNED, load64(old + CE_OWNED) | CE_OWN_VALUE);
+        _cache_renew(c, old);
+        return load64(old + CE_KEY);
+    }
+    var k = keep_mem(pool, key, strlen(key));
+    if (k == 0) { return 0; }
+    var v = keep_mem(pool, value, vlen);
+    if (v == 0) { keep_free(pool, k); return 0; }
+    if (_cache_insert_new(c, k, v, CE_OWN_KEY | CE_OWN_VALUE) == 0) {
+        keep_free(pool, k);
+        keep_free(pool, v);
+        return 0;
+    }
     return k;
 }
 
+# An entry that took a new value: created now, and at the front of both lists, as a new entry would be.
+fn _cache_renew(c, e) {
+    var now = hoosh_now_ms();
+    store64(e + 8, now);
+    store64(e + 16, now);
+    _cache_list_unlink(c, CACHE_A_HEAD, e, CE_APREV);
+    _cache_list_unlink(c, CACHE_C_HEAD, e, CE_CPREV);
+    _cache_list_push_front(c, CACHE_A_HEAD, e, CE_APREV);
+    _cache_list_push_front(c, CACHE_C_HEAD, e, CE_CPREV);
+    return 0;
+}
+
+# Insert the caller's key and value, which the cache keeps as given and never frees (the warming list's, the tests').
+# A second insert for a key replaces its entry. It frees no slot and takes none, so it evicts nothing (through 2.9.26 it
+# evicted one entry at capacity anyway), and since 2.11.2 it allocates nothing: an entry holding a caller's key takes
+# the new key and value in place (a value the pool owned goes back to it). One that owns its key, a kept answer's,
+# is removed whole first, its semantic entries with it, since the caller's key replaces the pool's.
 fn cache_insert(c, key, value) {
     if (load64(c + CACHE_ENABLED) == 0) { return 0; }
     var m = load64(c + CACHE_ENTRIES);
     var old = map_get(m, key);
     if (old != 0) {
-        # A second insert for a key replaces its entry. It frees no slot and takes none, so it evicts nothing
-        # (through 2.9.26 it evicted one entry at capacity anyway).
-        _cache_list_unlink(c, CACHE_A_HEAD, old, CE_APREV);
-        _cache_list_unlink(c, CACHE_C_HEAD, old, CE_CPREV);
-    } else {
-        var max = load64(c + CACHE_MAX);
+        var own = load64(old + CE_OWNED);
+        if ((own & CE_OWN_KEY) == 0) {
+            if ((own & CE_OWN_VALUE) != 0) { keep_free(load64(c + CACHE_POOL), load64(old)); }
+            map_set(m, key, old);
+            store64(old + CE_KEY, key);
+            store64(old, value);
+            store64(old + CE_OWNED, 0);
+            _cache_renew(c, old);
+            return 0;
+        }
+        _cache_remove(c, old);
+    }
+    _cache_insert_new(c, key, value, 0);
+    return 0;
+}
+
+# Insert an entry for a key the map does not hold, evicting first at capacity. Returns the entry, or 0 when the heap
+# refuses one (nothing changed).
+fn _cache_insert_new(c, key, value, owned) {
+    var m = load64(c + CACHE_ENTRIES);
+    var max = load64(c + CACHE_MAX);
+    if (map_count(m) >= max) {
+        # Reclaim expired entries first — evicting a live entry while dead ones
+        # sit in the map would throw away a usable response for no reason.
+        cache_evict_expired(c);
         if (map_count(m) >= max) {
-            # Reclaim expired entries first — evicting a live entry while dead ones
-            # sit in the map would throw away a usable response for no reason.
-            cache_evict_expired(c);
-            if (map_count(m) >= max) {
-                _cache_evict_lru(c);
-            }
+            _cache_evict_lru(c);
         }
     }
-    var e = _cache_entry_new(key, value);
+    var e = _cache_entry_new(c, key, value, owned);
+    if (e == 0) { return 0; }
     map_set(m, key, e);
     _cache_list_push_front(c, CACHE_A_HEAD, e, CE_APREV);
     _cache_list_push_front(c, CACHE_C_HEAD, e, CE_CPREV);
-    return 0;
+    return e;
 }

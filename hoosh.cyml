@@ -207,7 +207,8 @@ models = ["ornith*", "llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*
 # In-process ternary (1.58-bit) inference (2.11.0, ADR 014): a packed model tentib's tx_pack_serialize wrote,
 # served in this process with no socket. One tentib route per process. Tokens are bytes (the model's V must be
 # 256; the file may declare it), decoding is greedy, a reload whose file is unchanged loads nothing, and one to
-# another model of the same shape reuses the model's memory (2.11.1). List literal ids: the route has no
+# another model of the same shape reuses the model's memory (2.11.1). A model is loaded for serving only
+# (2.11.2), a quarter to an eighth of a full load. List literal ids: the route has no
 # provider to ask, so its patterns are its model list.
 #[[providers]]
 # type = "tentib"

@@ -127,11 +127,38 @@ fn wq_status_json() {
 }
 
 # ── Job constructors ──
+# 2.11.2 (ADR 013): a connection's record is recycled. Through 2.11.1 the accept loop took 16 bytes from the heap that
+# never frees for every connection. job_process hands the record back (job_conn_release) once it has read the
+# descriptor, and the next connection takes it again, so the records number the connections queued or being read at
+# once. The free list, threaded through +8, has its own lock: the accept loop takes from it and the workers give back.
+var _wq_conn_free = 0;
+var _wq_conn_lock = 0;   # created by the first _job_conn (the accept loop's thread, or a test)
+var _wq_conn_made = 0;   # records allocated, ever (tests: steady under recycling)
+
 fn _job_conn(cfd) {
-    var j = alloc(16);
+    if (_wq_conn_lock == 0) { _wq_conn_lock = mutex_new(); }
+    mutex_lock(_wq_conn_lock);
+    var j = _wq_conn_free;
+    if (j != 0) { _wq_conn_free = load64(j + 8); }
+    mutex_unlock(_wq_conn_lock);
+    if (j == 0) {
+        j = alloc(16);
+        if (j == 0) { return 0; }
+        _wq_conn_made = _wq_conn_made + 1;
+    }
     store64(j, JOB_CONN);
     store64(j + 8, cfd);
     return j;
+}
+
+# Give a connection record back once its descriptor has been read (job_process). Nothing may read it after.
+fn job_conn_release(j) {
+    if (j == 0 || _wq_conn_lock == 0) { return 0; }
+    mutex_lock(_wq_conn_lock);
+    store64(j + 8, _wq_conn_free);
+    _wq_conn_free = j;
+    mutex_unlock(_wq_conn_lock);
+    return 0;
 }
 
 # A batch item: [type, req_ptr, req_len, result_slot, completed_ctr, failed_ctr, trace_in].

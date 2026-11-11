@@ -69,6 +69,10 @@ the bench sets as the gateway's ticker would:
   each released by the next job's start; `sse_chunk_send`, one streamed token from the reused chunk buffer to
   `/dev/null`; `event_completed_ring`, a completion's event built on the stack and copied into its recycled ring slot.
   Since 2.10.3 `event_publish_ring` includes that copy (it stored a pointer before), so it reads ~55 ns higher
+- **What a request keeps** (2.11.2) is not a bench row: the suite asserts it (`alloc_used()` deltas of 0 for each path and
+  keeper), and `scripts/memory-growth.py` measures it on a real gateway against a `-D HOOSH_ALLOC_PROBE` build
+  (`--cache-max`, `--hits`, `--audit`, `--otlp`, `--provider`). `cache_insert` times a replace of one key, which since
+  2.11.2 takes the new value in place and allocates nothing; `audit_record_sign` signs on the stack
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a

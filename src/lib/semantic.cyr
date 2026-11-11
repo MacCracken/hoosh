@@ -96,33 +96,33 @@ fn semantic_insert(key, vec_ptr, n) {
     return semantic_insert_model(key, vec_ptr, n, 0);
 }
 
-# Drop the entry stored under `key`, if any. Returns 1 when one was removed.
+# Drop every entry stored under `key`. Returns how many were removed.
 # Called by the response cache when an entry expires or is evicted: without it
 # the embedding index outlives the response it points at, so semantic_find
 # keeps returning a key that resolves to nothing — a wasted lookup on every
 # subsequent query, and the stale embedding still competes for `max_search`.
+# 2.11.2: EVERY entry, in one pass. Two answers for one prompt (two misses that raced) leave two entries under one key,
+# and through 2.11.1 only the first went. The cache now recycles a removed entry's key (keep.cyr), so an entry left
+# behind would point at memory that is reused for another key, and could answer a query with another prompt's reply.
 fn semantic_remove(key) {
     if (_sem_entries == 0) { return 0; }
     var count = vec_len(_sem_entries);
+    var w = 0;
     var i = 0;
     while (i < count) {
         var e = vec_get(_sem_entries, i);
         # streq, not pointer equality: the caller passes a freshly allocated
         # sha256_hex cstr, so `load64(e) == key` never matched and the
         # expired-on-read removal path was dead.
-        if (streq(load64(e), key) == 1) {
-            # Compact in place: move the tail down one slot, then drop the last.
-            var j = i;
-            while (j + 1 < count) {
-                vec_set(_sem_entries, j, vec_get(_sem_entries, j + 1));
-                j = j + 1;
-            }
-            vec_pop(_sem_entries);
-            return 1;
+        if (streq(load64(e), key) == 0) {
+            if (w != i) { vec_set(_sem_entries, w, e); }
+            w = w + 1;
         }
         i = i + 1;
     }
-    return 0;
+    var removed = count - w;
+    while (vec_len(_sem_entries) > w) { vec_pop(_sem_entries); }
+    return removed;
 }
 
 # Find the cache key of the best match above threshold, or 0 if none.

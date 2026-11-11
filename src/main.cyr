@@ -41,6 +41,7 @@ include "src/vendor/majra.cyr"
 
 include "src/lib/types.cyr"
 include "src/lib/reqmem.cyr"        # 2.10.3: the per-thread request arena and its boundary (ADR 013)
+include "src/lib/keep.cyr"          # 2.11.2: the size-class pool a bounded keeper recycles into (ADR 013 decision 3)
 # 2.8.0: the live model catalog's pure half (parsers, snapshot, request shaping). Early, because pricing.cyr,
 # metadata.cyr and provider.cyr consult it; it reaches no hoosh module, so tests include it for real.
 include "src/lib/catalog.cyr"
@@ -521,7 +522,9 @@ fn cmd_serve(port) {
             sock_close(client_v);
             break;
         }
-        wq_push(_job_conn(client_v));
+        var cj = _job_conn(client_v);
+        if (cj == 0) { sock_close(client_v); continue; }   # out of memory: refuse the connection
+        wq_push(cj);
         wq_serial_turn(&job_process);
     }
 

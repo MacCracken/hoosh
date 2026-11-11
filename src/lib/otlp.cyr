@@ -17,17 +17,44 @@
 # thread, otlp_init) is otlp_export.cyr. provider.cyr enqueues a span per request
 # and needed nothing else from here, but the I/O half needs pool.cyr and
 # provider.cyr's scratch arena, which made provider.cyr part of a cycle no test
-# could include. Requires: trace.cyr, bote-core (_json_emit_escaped), chrono.
+# could include. Requires: trace.cyr, bote-core (_json_emit_escaped), chrono, reqmem.cyr (sb_on, sb_add_bytes,
+# mem_slot_put; 2.11.2).
 
 var _otlp_endpoint = 0;        # cstr "http://host:port/path", or 0 = disabled
 var _otlp_service = "hoosh";
 var OTLP_RING_MAX = 256;
 var OTLP_BATCH_MS = 1000;
-var _otlp_spans = 0;           # alloc(OTLP_RING_MAX*8): span-fragment cstrs
+var _otlp_spans = 0;           # OTLP_RING_MAX slots of OTLP_SLOT bytes: {buf, cap, len} (2.11.2)
 var _otlp_head = 0;
 var _otlp_count = 0;
 var _otlp_lock = 0;
 var _otlp_started = 0;
+
+# 2.11.2 (ADR 013 decision 3): each ring slot is a buffer that a span is COPIED into and that is reused as the ring
+# wraps (reqmem.cyr's mem_slot_put, the event ring's pattern), and a span is built on the stack. Through 2.11.1 each
+# span was a builder and its build on the heap, and the slot kept a pointer to it, so every span ever enqueued stayed
+# allocated: about 2 KB a request with export on (scripts/memory-growth.py --otlp), the batch documents included.
+var OTLP_SLOT = 24;
+var OTLP_SLOT_MIN = 512;
+
+# Allocate the ring's slots, empty, and its lock (otlp_init; the tests, without the exporter). 0, or -1.
+fn otlp_ring_init() {
+    _otlp_spans = alloc(OTLP_RING_MAX * OTLP_SLOT);
+    if (_otlp_spans == 0) { return 0 - 1; }
+    memset(_otlp_spans, 0, OTLP_RING_MAX * OTLP_SLOT);
+    _otlp_head = 0;
+    _otlp_count = 0;
+    if (_otlp_lock == 0) { _otlp_lock = mutex_new(); }
+    return 0;
+}
+
+# The span in ring position i (taken mod OTLP_RING_MAX), a cstr in its slot's buffer; "" for an empty slot. The next
+# span enqueued into that position overwrites it.
+fn otlp_span_at(i) {
+    var slot = _otlp_spans + (i % OTLP_RING_MAX) * OTLP_SLOT;
+    if (load64(slot + 16) == 0) { return ""; }
+    return load64(slot);
+}
 
 # Unix-epoch nanoseconds (OTLP timestamps are wall-clock, unlike clock_now_ns
 # which is CLOCK_MONOTONIC). chrono's clock_epoch_ns is the same CLOCK_REALTIME
@@ -75,7 +102,9 @@ fn otlp_enqueue_inference_span(provider, model, latency_ms, tokens, ok) {
     var tp = trace_current_or_new();
     var end_ns = _otlp_epoch_ns();
     var start_ns = end_ns - latency_ms * 1000000;
-    var sb = str_builder_new();
+    var hdr[24];
+    var buf[1024];
+    var sb = sb_on(&hdr, &buf, 1024);
     str_builder_add_cstr(sb, "{\"traceId\":\"");
     var i = 0;
     while (i < 32) { str_builder_add_byte(sb, load8(tp + 3 + i)); i = i + 1; }
@@ -104,29 +133,56 @@ fn otlp_enqueue_inference_span(provider, model, latency_ms, tokens, ok) {
     str_builder_add_cstr(sb, "],\"status\":{\"code\":");
     if (ok == 1) { str_builder_add_cstr(sb, "1"); } else { str_builder_add_cstr(sb, "2"); }
     str_builder_add_cstr(sb, "}}");
-    var frag = str_data(str_builder_build(sb));
+    var n = sb_len(sb);
+    var frag = sb_cstr(sb);
     mutex_lock(_otlp_lock);
-    store64(_otlp_spans + (_otlp_head % OTLP_RING_MAX) * 8, frag);
+    mem_slot_put(_otlp_spans + (_otlp_head % OTLP_RING_MAX) * OTLP_SLOT, frag, n, OTLP_SLOT_MIN);
     _otlp_head = _otlp_head + 1;
     _otlp_count = _otlp_count + 1;
     mutex_unlock(_otlp_lock);
     return 0;
 }
 
-# Wrap n span fragments (oldest-first) in an OTLP ResourceSpans document.
-fn _otlp_build_batch(frags, n) {
-    var sb = str_builder_new();
+# Wrap the ring's newest n spans (oldest first) in an OTLP ResourceSpans document, written into `doc`, the exporter's
+# own slot {buf, cap, len}, which is reused for every batch and grown only for a batch larger than any before it.
+# Returns the document (doc's buffer, NUL-terminated; its length is at doc + 16). Under _otlp_lock: the spans are
+# copied out of their slots before an enqueue can overwrite them. 2.11.2: through 2.11.1 every batch was a new
+# document on the heap.
+fn _otlp_batch_into(doc, n) {
+    var need = 192 + strlen(_otlp_service) * 2;
+    var i = 0;
+    while (i < n) {
+        need = need + load64(_otlp_spans + ((_otlp_head - n + i) % OTLP_RING_MAX) * OTLP_SLOT + 16) + 1;
+        i = i + 1;
+    }
+    if (load64(doc + 8) < need) {
+        var b = alloc(need * 2);
+        if (b != 0) { store64(doc, b); store64(doc + 8, need * 2); }
+    }
+    var hdr[24];
+    var sb = sb_on(&hdr, load64(doc), load64(doc + 8));
     str_builder_add_cstr(sb, "{\"resourceSpans\":[{\"resource\":{\"attributes\":[");
     _otlp_attr_str(sb, "service.name", _otlp_service);
     str_builder_add_cstr(sb, "]},\"scopeSpans\":[{\"scope\":{\"name\":\"hoosh\"},\"spans\":[");
-    var i = 0;
+    var k = 0;
+    i = 0;
     while (i < n) {
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, load64(frags + i * 8));
+        var slot = _otlp_spans + ((_otlp_head - n + i) % OTLP_RING_MAX) * OTLP_SLOT;
+        var sl = load64(slot + 16);
+        if (sl > 0) {
+            if (k > 0) { str_builder_add_cstr(sb, ","); }
+            sb_add_bytes(sb, load64(slot), sl);
+            k = k + 1;
+        }
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]}]}]}");
-    return str_builder_build(sb);
+    var dl = sb_len(sb);
+    sb_cstr(sb);
+    # A builder that outgrew the buffer moved to a larger one on the heap: the slot adopts it for the next batch.
+    if (load64(sb) != load64(doc)) { store64(doc, load64(sb)); store64(doc + 8, load64(sb + 16)); }
+    store64(doc + 16, dl);
+    return load64(doc);
 }
 
 # True if the configured endpoint is a remote https:// collector.

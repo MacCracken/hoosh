@@ -67,9 +67,48 @@ fn _req_num_milli(body_ptr, body_len, key, keylen) {
     return v;
 }
 
-# Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0.
-# Balanced-bracket scan with JSON string handling (mirrors _extract_messages).
-fn _extract_tools(body_ptr, body_len) {
+# The raw top-level "messages":[...] array span of a request body: a 16-byte { ptr, len } in `a`, or 0. 2.11.2: from
+# handlers.cyr, so the tests run it, and in the caller's allocator (the request arena on the chat path, ADR 013); its
+# span points into the body.
+fn _extract_messages_a(a, body_ptr, body_len) {
+    # Depth-aware: an identical "messages" key nested inside a tools schema used
+    # to win whenever it appeared first, so the validator saw a messages array,
+    # the request passed, and this returned the NESTED span — forwarding a
+    # schema fragment as the conversation.
+    var mi = _top_key_value(body_ptr, body_len, "\"messages\"", 10);
+    if (mi < 0) { return 0; }
+    if (mi >= body_len) { return 0; }
+    if (load8(body_ptr + mi) != 91) { return 0; }
+    var depth = 1;
+    var ms = mi;
+    mi = mi + 1;
+    while (mi < body_len && depth > 0) {
+        var ch = load8(body_ptr + mi);
+        if (ch == 91) { depth = depth + 1; }
+        if (ch == 93) { depth = depth - 1; }
+        if (ch == 34) {
+            mi = mi + 1;
+            while (mi < body_len) {
+                if (load8(body_ptr + mi) == 34) { break; }
+                if (load8(body_ptr + mi) == 92) { mi = mi + 1; }
+                mi = mi + 1;
+            }
+        }
+        mi = mi + 1;
+    }
+    var mlen = mi - ms;
+    var result = alloc_via(a, 16);
+    if (result == 0) { return 0; }
+    store64(result, body_ptr + ms);
+    store64(result + 8, mlen);
+    return result;
+}
+
+# Extract the raw "tools":[...] array span (ptr,len) from a request body, or 0: a 16-byte record in `a` (2.11.2).
+# Balanced-bracket scan with JSON string handling (mirrors _extract_messages_a).
+fn _extract_tools(body_ptr, body_len) { return _extract_tools_a(default_alloc(), body_ptr, body_len); }
+
+fn _extract_tools_a(a, body_ptr, body_len) {
     # Depth-aware, same reason as _extract_messages.
     var j = _top_key_value(body_ptr, body_len, "\"tools\"", 7);
     if (j < 0) { return 0; }
@@ -104,7 +143,7 @@ fn _extract_tools(body_ptr, body_len) {
         k = k + 1;
     }
     if (empty == 1) { return 0; }
-    var result = alloc(16);
+    var result = alloc_via(a, 16);
     if (result == 0) { return 0; }
     store64(result, body_ptr + ts);
     store64(result + 8, tlen);

@@ -1,9 +1,10 @@
 # audit.cyr — HMAC-SHA256 linked audit chain
 # Each entry is signed with HMAC and links to the previous entry's hash.
 # Provides tamper detection for request/response logging.
-# Requires: sigil.cyr (sha256_hex, hmac_sha256, hex_encode), chrono.cyr (clock_epoch_ns)
+# Requires: sigil.cyr (sha256, hmac_sha256), chrono.cyr (clock_epoch_ns), lib/sync (mutex_*), reqmem.cyr (sb_on, sb_len,
+# sb_cstr), keep.cyr (keep_pool_new, keep_mem, keep_free).
 
-# Entry layout (96 bytes):
+# Entry layout (312 bytes):
 #   0: id (i64)              — monotonic counter
 #   8: timestamp_ms (i64)    — epoch milliseconds
 #  16: event (ptr)           — event type string
@@ -15,11 +16,24 @@
 #  64: prev_hash (ptr)       — previous entry hash hex
 #  72: entry_hash (ptr)      — this entry's SHA256 hex
 #  80: next (ptr)            — next entry in chain
-#  88: (reserved)
+#  88: model_owned (i64)     — 1 when model is the chain's keep pool's copy (2.11.2)
+#  96: signature, 168: entry hash, 240: previous hash — each 64 hex characters and a NUL, in 72 bytes (2.11.2)
+#
+# 2.11.2 (ADR 013): an entry holds its three hashes itself, and what the chain evicts past max_entries is recycled.
+# Through 2.11.1 each record kept a builder and a hex string for its hash and for its signature, the entry, and the
+# copies those were built from, and the evicted entry stayed allocated: a full chain grew by about 1.4 KB a request
+# (scripts/memory-growth.py --audit 100). Now the next record reuses an evicted entry, and the model copy goes back to
+# the chain's keep pool (keep.cyr). The three pointers stay, at the offsets they always had, so a reader (and the
+# tests' tampering) goes through them; audit_record points them at the entry's own buffers. An entry restored from
+# storage points at copies of the stored strings instead.
 
-var AUDIT_ENTRY_SIZE = 96;
+var AUDIT_ENTRY_SIZE = 312;
+var AE_SIG = 96;
+var AE_HASH = 168;
+var AE_PREV = 240;
+var AE_HEX = 72;             # one hash's room: 64 hex characters and a NUL
 
-# Chain layout (48 bytes):
+# Chain layout (168 bytes):
 #   0: key (ptr)       — signing key
 #   8: key_len (i64)
 #  16: last_hash (ptr) — hash of most recent entry
@@ -29,18 +43,51 @@ var AUDIT_ENTRY_SIZE = 96;
 #  48: max_entries (i64)
 #  56: next_id (i64)
 #  64: anchor (ptr)    — the hash the first entry links to: GENESIS until an entry
-#                        is evicted, then the last evicted entry's hash (2.9.12)
+#                        is evicted, then the last evicted entry's hash (2.9.12), copied into 96 (2.11.2)
+#  72: lock            — held by audit_record, audit_verify and audit_json (2.11.2): GET /v1/audit read the chain
+#                        unlocked while workers appended, which was safe only while nothing was ever reused
+#  80: free (ptr)      — evicted entries, threaded through +80, for the next records (2.11.2)
+#  88: pool (ptr)      — the keep pool the model copies come from (2.11.2)
+#  96: anchor's copy (72 bytes)
 
-var AUDIT_CHAIN_SIZE = 72;
+var AUDIT_CHAIN_SIZE = 168;
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 
 # HMAC-SHA256 → lowercase hex string. Replaces the old sigil `hmac_sign`
 # (removed in cyrius 6.x): hmac_sha256 writes 32 raw bytes into `out`,
-# then hex_encode renders the hex digest the audit chain stores/compares.
-fn _hmac_hex(key, key_len, msg, msg_len) {
-    var digest = alloc(32);
-    hmac_sha256(key, key_len, msg, msg_len, digest);
-    return hex_encode(digest, 32);
+# then the hex digest the audit chain stores/compares is rendered into `out` (2.11.2: no allocation, the digest on
+# the stack, the hex where the caller keeps it). Returns out.
+fn _hmac_hex_into(out, key, key_len, msg, msg_len) {
+    var digest[32];
+    hmac_sha256(key, key_len, msg, msg_len, &digest);
+    return _audit_hex_into(out, &digest, 32);
+}
+
+# n bytes as lowercase hex and a NUL into out (2n + 1 bytes): hex_encode's output, with no allocation. Returns out.
+fn _audit_hex_into(out, bytes, n) {
+    var digits = "0123456789abcdef";
+    var i = 0;
+    while (i < n) {
+        var b = load8(bytes + i);
+        store8(out + i * 2, load8(digits + (b >> 4)));
+        store8(out + i * 2 + 1, load8(digits + (b & 15)));
+        i = i + 1;
+    }
+    store8(out + n * 2, 0);
+    return out;
+}
+
+# The signature of an entry whose hash and previous hash are given, into out (2.11.2): HMAC over "hash:prev", built on
+# the stack. Returns out.
+fn _audit_sign_into(out, chain, ehash, prev) {
+    var hdr[24];
+    var buf[160];
+    var sb = sb_on(&hdr, &buf, 160);
+    str_builder_add_cstr(sb, ehash);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, prev);
+    var n = sb_len(sb);
+    return _hmac_hex_into(out, load64(chain), load64(chain + 8), sb_cstr(sb), n);
 }
 
 fn audit_chain_new(key, key_len, max_entries) {
@@ -54,6 +101,10 @@ fn audit_chain_new(key, key_len, max_entries) {
     store64(c + 48, max_entries);
     store64(c + 56, 1);
     store64(c + 64, GENESIS_HASH);
+    store64(c + 72, mutex_new());
+    store64(c + 80, 0);
+    store64(c + 88, keep_pool_new());
+    store8(c + 96, 0);
     return c;
 }
 
@@ -105,9 +156,13 @@ fn audit_chain_from_config() {
     return audit_chain_new(key, klen, _audit_max_entries);
 }
 
-# Compute SHA256 hex of the entry data fields
-fn _audit_entry_hash(id, ts, event, level, message, provider, model) {
-    var sb = str_builder_new();
+# Compute SHA256 hex of the entry data fields into out[0..65) (2.11.2): the fields joined on the stack and hashed there,
+# so neither a record nor a verify allocates (a verify of a full chain took 10,000 builders and their copies through
+# 2.11.1). A join past the stack buffer grows on the heap, as any builder does, and leaks only that. Returns out.
+fn _audit_entry_hash_into(out, id, ts, event, level, message, provider, model) {
+    var hdr[24];
+    var buf[512];
+    var sb = sb_on(&hdr, &buf, 512);
     str_builder_add_int(sb, id);
     str_builder_add_cstr(sb, ":");
     str_builder_add_int(sb, ts);
@@ -125,36 +180,75 @@ fn _audit_entry_hash(id, ts, event, level, message, provider, model) {
         str_builder_add_cstr(sb, ":");
         str_builder_add_cstr(sb, model);
     }
-    var s = str_builder_build(sb);
-    var data = to_cstr(s);
-    return sha256_hex(data, str_len(s));
+    var n = sb_len(sb);
+    var digest[32];
+    sha256(sb_cstr(sb), n, &digest);
+    return _audit_hex_into(out, &digest, 32);
 }
 
-# Record an audit event. Returns the new entry pointer.
-fn audit_record(chain, event, level, message, provider, model) {
+# Drop the chain's oldest entry (2.9.12): its hash becomes the anchor the new first entry must link to, copied into
+# the chain (2.11.2), since the entry itself goes onto the free list and its model copy back to the pool. Under the
+# chain's lock, or before any other thread can see the chain (storage_restore_audit). Never the only entry.
+fn _audit_evict_head(chain) {
+    var head = load64(chain + 24);
+    if (head == 0 || head == load64(chain + 32)) { return 0; }
+    var h = load64(head + 72);
+    var hl = strlen(h);
+    if (hl > AE_HEX - 1) { hl = AE_HEX - 1; }
+    memcpy(chain + 96, h, hl);
+    store8(chain + 96 + hl, 0);
+    store64(chain + 64, chain + 96);
+    store64(chain + 24, load64(head + 80));
+    store64(chain + 40, load64(chain + 40) - 1);
+    if (load64(head + 88) == 1) { keep_free(load64(chain + 88), load64(head + 48)); }
+    store64(head + 48, 0);
+    store64(head + 88, 0);
+    store64(head + 80, load64(chain + 80));
+    store64(chain + 80, head);
+    return 1;
+}
+
+# An entry for the next record: one the chain evicted, else a new one. Under the chain's lock.
+fn _audit_entry_take(chain) {
+    var e = load64(chain + 80);
+    if (e != 0) {
+        store64(chain + 80, load64(e + 80));
+        return e;
+    }
+    return alloc(AUDIT_ENTRY_SIZE);
+}
+
+# Record an audit event. Returns the new entry pointer, which is the chain's: a later record reuses it once it is
+# evicted.
+# 2.11.2 (ADR 013's boundary): the entry keeps a copy of `model`, the one argument that comes from a request (the
+# chat path's model is in the request arena, released when the thread's next job starts), from the chain's keep pool.
+# The event, level, message and provider are literals at every call site, and the entry keeps them as given. A model
+# of 0 stays 0, as through 2.11.1 (the hash and storage leave it out).
+fn audit_record(chain, event, level, message, provider, model_in) {
+    mutex_lock(load64(chain + 72));
+    var e = _audit_entry_take(chain);
+    if (e == 0) { mutex_unlock(load64(chain + 72)); return 0; }
+    var model = model_in;
+    var owned = 0;
+    if (model_in != 0) {
+        model = keep_mem(load64(chain + 88), model_in, strlen(model_in));
+        owned = 1;
+        if (model == 0) { model = ""; owned = 0; }
+    }
     var id = load64(chain + 56);
     store64(chain + 56, id + 1);
     var ts = clock_epoch_ns() / 1000000;
 
-    # Compute entry hash
-    var ehash = _audit_entry_hash(
-      id, ts, event, level, message, provider, model);
+    # The entry hash, the previous entry's hash and the signature (HMAC(entry_hash:prev_hash, key)), each into the
+    # entry's own buffer.
+    var ehash = _audit_entry_hash_into(e + AE_HASH, id, ts, event, level, message, provider, model);
+    var pl = strlen(load64(chain + 16));
+    if (pl > AE_HEX - 1) { pl = AE_HEX - 1; }
+    memcpy(e + AE_PREV, load64(chain + 16), pl);
+    store8(e + AE_PREV + pl, 0);
+    var prev_hash = e + AE_PREV;
+    var sig = _audit_sign_into(e + AE_SIG, chain, ehash, prev_hash);
 
-    # Sign: HMAC(entry_hash:prev_hash, key)
-    var prev_hash = load64(chain + 16);
-    var sig_sb = str_builder_new();
-    str_builder_add_cstr(sig_sb, ehash);
-    str_builder_add_cstr(sig_sb, ":");
-    str_builder_add_cstr(sig_sb, prev_hash);
-    var sig_s = str_builder_build(sig_sb);
-    var sig_data = to_cstr(sig_s);
-    var sig_len = str_len(sig_s);
-    var key = load64(chain);
-    var key_len = load64(chain + 8);
-    var sig = _hmac_hex(key, key_len, sig_data, sig_len);
-
-    # Build entry
-    var e = alloc(AUDIT_ENTRY_SIZE);
     store64(e, id);
     store64(e + 8, ts);
     store64(e + 16, event);
@@ -166,6 +260,7 @@ fn audit_record(chain, event, level, message, provider, model) {
     store64(e + 64, prev_hash);
     store64(e + 72, ehash);
     store64(e + 80, 0);
+    store64(e + 88, owned);
 
     # Append to chain
     var tail = load64(chain + 32);
@@ -183,19 +278,11 @@ fn audit_record(chain, event, level, message, provider, model) {
     # the new first entry must link to. Before, audit_verify still demanded GENESIS
     # there, so once a chain passed max_entries (default 10000) every later
     # GET /v1/audit reported "valid":false, the same answer as tampering.
-    var max = load64(chain + 48);
-    if (count > max) {
-        var head = load64(chain + 24);
-        if (head != 0) {
-            store64(chain + 64, load64(head + 72));
-            store64(chain + 24, load64(head + 80));
-            store64(chain + 40, count - 1);
-        }
-    }
+    if (count > load64(chain + 48)) { _audit_evict_head(chain); }
 
     # Write-through to durable storage (no-op when persistence is disabled).
     storage_audit_insert(id, ts, event, level, message, provider, model, sig, prev_hash, ehash);
-
+    mutex_unlock(load64(chain + 72));
     return e;
 }
 
@@ -213,7 +300,16 @@ fn audit_record(chain, event, level, message, provider, model) {
 # the first entry links to the last evicted entry, whose hash the chain keeps as its
 # anchor (offset 64). Removing entries at the front still breaks that link, so an
 # excision there is still caught; only the chain's own eviction moves the anchor.
+# 2.11.2: under the chain's lock, and with nothing allocated per entry (the hash and signature are recomputed on the
+# stack; through 2.11.1 one GET /v1/audit of a full chain kept about 5 MB).
 fn audit_verify(chain) {
+    mutex_lock(load64(chain + 72));
+    var ok = _audit_verify_held(chain);
+    mutex_unlock(load64(chain + 72));
+    return ok;
+}
+
+fn _audit_verify_held(chain) {
     var key = load64(chain);
     var key_len = load64(chain + 8);
     var e = load64(chain + 24);
@@ -232,23 +328,18 @@ fn audit_verify(chain) {
         var ehash = load64(e + 72);
 
         # Recompute entry hash
-        var check = _audit_entry_hash(
-          id, ts, event, level, message, provider, model);
-        if (streq(check, ehash) != 1) { return 0; }
+        var check[72];
+        _audit_entry_hash_into(&check, id, ts, event, level, message, provider, model);
+        if (streq(&check, ehash) != 1) { return 0; }
 
         # Chain linkage: this entry must point at the previous entry's hash.
         # This is the check that catches an excised or reordered record.
         if (streq(prev, expect_prev) != 1) { return 0; }
 
         # Verify HMAC signature
-        var sig_sb = str_builder_new();
-        str_builder_add_cstr(sig_sb, ehash);
-        str_builder_add_cstr(sig_sb, ":");
-        str_builder_add_cstr(sig_sb, prev);
-        var sig_s = str_builder_build(sig_sb);
-        var sig_data = to_cstr(sig_s);
-        var expected = _hmac_hex(key, key_len, sig_data, str_len(sig_s));
-        if (streq(sig, expected) != 1) { return 0; }
+        var expected[72];
+        _audit_sign_into(&expected, chain, ehash, prev);
+        if (streq(sig, &expected) != 1) { return 0; }
 
         expect_prev = ehash;
         e = load64(e + 80);
@@ -256,12 +347,13 @@ fn audit_verify(chain) {
     return 1;
 }
 
-# JSON output for /v1/audit endpoint
+# JSON output for /v1/audit endpoint. 2.11.2: under the chain's lock, which a record takes too.
 fn audit_json(chain, sb, max_recent) {
+    mutex_lock(load64(chain + 72));
     str_builder_add_cstr(sb, "{\"count\":");
     str_builder_add_int(sb, audit_count(chain));
     str_builder_add_cstr(sb, ",\"valid\":");
-    if (audit_verify(chain) == 1) {
+    if (_audit_verify_held(chain) == 1) {
         str_builder_add_cstr(sb, "true");
     } else {
         str_builder_add_cstr(sb, "false");
@@ -296,5 +388,6 @@ fn audit_json(chain, sb, max_recent) {
         e = load64(e + 80);
     }
     str_builder_add_cstr(sb, "]}");
+    mutex_unlock(load64(chain + 72));
     return 0;
 }

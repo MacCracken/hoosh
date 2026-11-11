@@ -32,8 +32,8 @@
 - [ADR-010: Observability](decisions/010-observability.md) — latency histograms, event bus, traceparent, OTLP export
 - [ADR-011: Multi-threaded accept loop](decisions/011-multithreaded-accept-loop.md) — unified 7-worker pool, crypto-bank budget, synchronization pass
 - [ADR-012: The model catalog is asked of the providers](decisions/012-live-model-catalog.md) — live per-route lists, the snapshot, `[[models]]`, capability-shaped requests
-- [ADR-013: What a request's memory belongs to](decisions/013-request-memory.md) — the request arena, the boundary keepers copy across, recycling process memory
-- [ADR-014: In-process ternary inference through tentib](decisions/014-in-process-ternary-inference.md) — a `tentib` route, one model per process, bytes as tokens, reloads, the memory a model keeps; 2.11.1: the shared decode cache, the header peek, same-shape reloads
+- [ADR-013: What a request's memory belongs to](decisions/013-request-memory.md) — the request arena, the boundary keepers copy across, recycling process memory (done for the request paths and bounded keepers in 2.11.2)
+- [ADR-014: In-process ternary inference through tentib](decisions/014-in-process-ternary-inference.md) — a `tentib` route, one model per process, bytes as tokens, reloads, the memory a model keeps; 2.11.1: the shared decode cache, the header peek, same-shape reloads; 2.11.2: the serving-only load
 
 ## Reference
 

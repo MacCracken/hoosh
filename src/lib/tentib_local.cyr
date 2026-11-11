@@ -38,13 +38,17 @@
 #   an invalid or unfinished sequence each turning into U+FFFD, and are JSON-escaped; the escaper drops control bytes
 #   other than tab, LF and CR.
 # - Memory. Every load reads into one buffer (file_read_whole_into), grown only for a file larger than any before it,
-#   and a reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing. Since tentib 1.4.0
-#   a load of another model of the same V, T, C, F overwrites the loaded model's buffers and allocates nothing (its
-#   ADR 0003). A model of another shape allocates a whole tentib model, and the one it replaces is never freed
-#   (tentib's buffers come from the allocator that does not free; model handles are tentib's 2.0.0 backlog item):
-#   tx_model_alloc_bytes(V, T, C, F) per change of shape, which the config log states. The decode cache,
-#   tx_dec_alloc_bytes(T, C) = 16 * T * C bytes, is allocated by the load (tx_dec_reset) of a model larger than any
-#   before it, never by a reply.
+#   and a reload whose file holds the bytes of the model serving (the same SHA-256) loads nothing. A load is for
+#   serving only (tentib 1.5.0's tx_pack_deserialize_serving, since 2.11.2): tentib allocates what a forward and a
+#   decode step read, the packed store, the embeddings, gains and bias and one forward's scratch, and none of the
+#   latent weights, gradients or training scratch a full load also allocates (1.4 MB against 12.2 MB at tentib's bench
+#   config, 190,168 against 802,376 bytes at T = 30, C = 16, F = 32). The status codes, the checks and the logits are
+#   the full load's, bit for bit. A load of another model of the same V, T, C, F overwrites the loaded model's buffers
+#   and allocates nothing (tentib's ADR 0003, for serving loads since its 1.5.0). A model of another shape allocates
+#   tx_serve_alloc_bytes(V, T, C, F), which the config log states, and the one it replaces is never freed (tentib's
+#   buffers come from the allocator that does not free; model handles are tentib's 2.0.0 backlog item). The decode
+#   cache, tx_dec_alloc_bytes(T, C) = 16 * T * C bytes, is allocated by the load (tx_dec_reset) of a model larger than
+#   any before it, never by a reply.
 
 # ---- policy ----------------------------------------------------------------------------------------------------
 
@@ -53,14 +57,15 @@ fn TNT_VOCAB() { return 256; }
 # The largest model file a load reads (256 MiB).
 fn TNT_MAX_FILE() { return 268435456; }
 # What one load may allocate (4 GiB): tentib refuses a model that needs more before it allocates anything
-# (tx_model_alloc_bytes), because a failed allocation would end the process.
+# (tx_serve_alloc_bytes, the serving load's figure), because a failed allocation would end the process.
 fn TNT_MAX_LOAD() { return 4294967296; }
 # Tokens a reply may have when the request sets no max_tokens.
 fn TNT_DEFAULT_MAX_NEW() { return 128; }
 # The most tokens one reply may have, whatever the request asks.
 fn TNT_MAX_NEW() { return 4096; }
 
-# tnt_load's own status codes (tentib's tx_pack_deserialize codes, -1 to -9, pass through).
+# tnt_load's own status codes (tentib's load codes, -1 to -9, pass through: tx_pack_deserialize_serving returns
+# tx_pack_deserialize's).
 # Success with nothing loaded: the file holds the bytes of the model serving.
 fn TNT_UNCHANGED() { return 1; }
 # The file could not be read (missing, unreadable, or past TNT_MAX_FILE).
@@ -134,8 +139,8 @@ fn _tnt_keep_path(path) {
     return 0;
 }
 
-# Load the packed model at `path`. Returns 0 (loaded), TNT_UNCHANGED (the file holds the model serving: nothing is
-# loaded, and replies in progress go on), TNT_ERR_READ / TNT_ERR_VOCAB, or tentib's tx_pack_deserialize status
+# Load the packed model at `path`, for serving only. Returns 0 (loaded), TNT_UNCHANGED (the file holds the model
+# serving: nothing is loaded, and replies in progress go on), TNT_ERR_READ / TNT_ERR_VOCAB, or tentib's load status
 # (-1 .. -9). A refused load leaves the current model, if any, serving: the file is read and its header checked before
 # tentib is touched, and tentib itself validates everything before it replaces anything.
 fn tnt_load(path) {
@@ -169,14 +174,14 @@ fn _tnt_load_held(path) {
         }
     }
     mutex_lock(_tnt_lock);
-    # tentib reuses the loaded model's buffers for a model of the same shape (its _pk_reusable: the live model was
-    # loaded, which every model in this process is, and the dims match).
+    # tentib reuses the loaded model's buffers for a model of the same shape (its _pk_reusable_serving: the live model
+    # was loaded for serving, which every model this module loads is, and the dims match).
     var same = 0;
     if (_tnt_ready == 1) {
         same = (load64(&info) == _tnt_V) & (load64(&info + 8) == _tnt_T);
         same = same & (load64(&info + 16) == _tnt_C) & (load64(&info + 24) == _tnt_F);
     }
-    var rc = tx_pack_deserialize(buf, n, TNT_MAX_LOAD());
+    var rc = tx_pack_deserialize_serving(buf, n, TNT_MAX_LOAD());
     if (rc != 0) { mutex_unlock(_tnt_lock); return rc; }
     var dims[32];
     tx_pack_dims(&dims);
@@ -195,10 +200,10 @@ fn _tnt_load_held(path) {
     return 0;
 }
 
-# What the loaded model holds in memory, in bytes (tentib's figure for its dims); 0 before a load.
+# What the loaded model holds in memory, in bytes (tentib's serving-load figure for its dims); 0 before a load.
 fn tnt_model_bytes() {
     if (_tnt_ready == 0) { return 0; }
-    return tx_model_alloc_bytes(_tnt_V, _tnt_T, _tnt_C, _tnt_F);
+    return tx_serve_alloc_bytes(_tnt_V, _tnt_T, _tnt_C, _tnt_F);
 }
 
 # A sentence for tnt_load's status, for the log.

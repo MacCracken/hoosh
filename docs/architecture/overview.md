@@ -88,15 +88,16 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
 | `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring: 128 slots each event is copied into and reused as the ring wraps, events built on the stack (2.10.3) |
-| `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring, span and batch JSON |
+| `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring (slots reused as it wraps since 2.11.2), span and batch JSON |
 | `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
 | `trace.cyr` | W3C `traceparent` propagation: per job, the caller's context and hoosh's own under it, in one block per thread; ids from a keyed permutation of a counter (2.10.3, [ADR 010](../decisions/010-observability.md)'s update) |
 | `reqmem.cyr` | The request arena (2.10.3, [ADR 013](../decisions/013-request-memory.md)): one growable arena per thread, released when a job starts; builders with room in it; `mem_keep`, the copy a keeper stores |
+| `keep.cyr` | The keep pool (2.11.2, [ADR 013](../decisions/013-request-memory.md) decision 3): size classes, four per power of two from 32 bytes to 1 MiB, that a bounded keeper frees into and allocates from again; the response cache's keys and values and the audit chain's model copies recycle through it |
 | `metrics.cyr` | Prometheus counters + per-provider latency histograms; the `/metrics` body (`metrics_render`, 2.9.21) |
-| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry, evicting in O(1) through two lists in each entry (2.10.0) + semantic (embedding cosine) cache |
+| `cache.cyr` / `semantic.cyr` | Exact-key LRU cache with TTL expiry, evicting in O(1) through two lists in each entry (2.10.0), and recycling what it evicts: entries on a free list, its copies of keys and values through its keep pool (2.11.2) + semantic (embedding cosine) cache |
 | `budget.cyr` | Named token pools (reserve → commit/release) |
 | `ratelimit.cyr` | Per-provider RPM token bucket (`hoosh_ratelimit_*` — majra exports colliding names) |
-| `audit.cyr` | HMAC-SHA256 tamper-proof audit chain |
+| `audit.cyr` | HMAC-SHA256 tamper-proof audit chain; since 2.11.2 its entries hold their hashes, evicted entries are reused, and a lock of its own covers records and `GET /v1/audit`'s reads |
 | `dlp.cyr` | PII/secret scanner + privacy-aware routing |
 | `compact.cyr` / `compression.cyr` | Context compaction + whitespace/tool-pair compression |
 | `catalog.cyr` / `catalog_fetch.cyr` | The live model catalog (2.8.0, [ADR 012](../decisions/012-live-model-catalog.md)): per-provider list parsers (each saying `kind`, tools and vision where its provider does, 2.10.2), the published per-route snapshot, `[[models]]` operator entries, the per-model thinking plan and output ceiling, and since 2.9.25 an index over each published list (exact id and dated alias) so lookups do not scan (pure; tested for real) — and the refresh that asks each live route on a banked pool worker |
@@ -107,7 +108,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `pricing.cyr` / `metadata.cyr` | Pricing table (with long-context tiers), per-(provider, base_url) cost accumulation, cost optimizer (cheapest capable model), the compiled model table — the catalog's fallback, refreshed 2026-10-09, and what `metadata_lend` fills into what an entry does not say (2.10.2) |
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
-| `tentib_local.cyr` | In-process ternary inference (2.11.0, [ADR 014](../decisions/014-in-process-ternary-inference.md)): a `tentib` route's packed model loaded through tentib's library bundle (bounded, header-peeked, validated, skipped when unchanged, a same-shape reload reusing the model's memory since 2.11.1), byte-token greedy decoding one locked step at a time (one cached decode step per token until the window slides, since 2.11.1), buffered replies and per-character streams, UTF-8 assembly with U+FFFD |
+| `tentib_local.cyr` | In-process ternary inference (2.11.0, [ADR 014](../decisions/014-in-process-ternary-inference.md)): a `tentib` route's packed model loaded through tentib's library bundle (bounded, header-peeked, validated, skipped when unchanged, a same-shape reload reusing the model's memory since 2.11.1, loaded for serving only since 2.11.2), byte-token greedy decoding one locked step at a time (one cached decode step per token until the window slides, since 2.11.1), buffered replies and per-character streams, UTF-8 assembly with U+FFFD |
 | `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string lists (read with bayan's array parser since 2.9.23), a provider's TLS policy and rate limit |
 | `cli.cyr` | The command line's flag parser (2.9.19 split from `main.cyr`): `--name value`, `-s value`, `--name=value`, positionals, `infer`'s model and prompt, over an argument vec |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
@@ -131,7 +132,7 @@ distlibs:
 | Dependency | Role | Consumed as |
 |-----------|------|-------------|
 | **ai-hwaccel** | Hardware detection for model placement / cost | `[deps.ai-hwaccel]` → `lib/ai-hwaccel.cyr` |
-| **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0), and its incremental decoder (1.4.0, since 2.11.1) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
+| **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0), its incremental decoder (1.4.0, since 2.11.1), and its serving-only load (1.5.0, since 2.11.2) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
 | **majra** | Provider event bus (pub/sub) | vendored `src/vendor/majra.cyr` |
 | cyrius **sandhi** | HTTPS client (URL parse + DNS + TLS) for remote providers | stdlib |

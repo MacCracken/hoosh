@@ -41,6 +41,7 @@ include "src/vendor/majra.cyr"
 # status_retryable. They replaced the test file's own copies of all of it.
 include "src/lib/types.cyr"
 include "src/lib/reqmem.cyr"
+include "src/lib/keep.cyr"   # 2.11.2: for real, as the cache recycles through it
 include "src/lib/logging.cyr"
 # 2.5.12: http_server is self-contained (it defines its own make_crlf/to_cstr and
 # needs only sys_write), so the response-header path is tested against the REAL
@@ -2537,13 +2538,9 @@ fn _t2103_trace_wire() {
     assert_streq(sandhi_headers_get(h, "traceparent"), own, "wire: a remote provider is sent hoosh's own");
     # The span: hoosh's id, the caller's as its parent.
     _otlp_endpoint = "http://localhost:4318/v1/traces";
-    _otlp_spans = alloc(OTLP_RING_MAX * 8);
-    memset(_otlp_spans, 0, OTLP_RING_MAX * 8);
-    _otlp_lock = mutex_new();
-    _otlp_head = 0;
-    _otlp_count = 0;
+    otlp_ring_init();
     otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
-    var sp = load64(_otlp_spans);
+    var sp = otlp_span_at(0);
     var want = _t_cat("{\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\",\"spanId\":\"", own + 36);
     store8(want + strlen(want) - 3, 0);   # own + 36 runs to "-01": keep its 16 digits
     want = _t_cat(want, "\",\"parentSpanId\":\"00f067aa0ba902b7\",\"name\":\"inference\",");
@@ -2552,14 +2549,14 @@ fn _t2103_trace_wire() {
     var bare = _t2103_req(0);
     trace_begin(bare, strlen(bare));
     otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
-    var sr = load64(_otlp_spans + 8);
+    var sr = otlp_span_at(1);
     assert_eq(_t_has(sr, strlen(sr), "parentSpanId"), 0, "span: a root names no parent");
     assert_eq(memeq(sr + 56, trace_current_or_new() + 36, 16), 1, "span: and its id is the one sent upstream");
     # An invalid header is a root, so no zeros reach the collector as a parent.
     var zr = _t2103_req("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01");
     trace_begin(zr, strlen(zr));
     otlp_enqueue_inference_span("ollama", "llama3", 5, 3, 1);
-    var sz = load64(_otlp_spans + 16);
+    var sz = otlp_span_at(2);
     assert_eq(_t_has(sz, strlen(sz), "parentSpanId"), 0, "span: an all-zero parent is no parent");
     _otlp_endpoint = 0;
     _otlp_spans = 0;
@@ -3224,6 +3221,437 @@ fn _t2111_tentib_decode() {
     return 0;
 }
 
+# 2.11.2: tentib 1.5.x's serving-only load (tx_pack_deserialize_serving), through the provider. A load allocates
+# exactly tentib's serving figure, a fraction of a full load's, and serves the full load's logits bit for bit.
+fn _t2112_tentib_serving() {
+    test_group("tentib_local: the serving-only load (2.11.2)");
+    # every model is written before the first load: training replaces tentib's model
+    var dir = _t_line("/tmp/hoosh-tcyr-", sys_getpid(), "-s-");
+    var ma = _t_cat(dir, "a.tpk"); var mb = _t_cat(dir, "b.tpk"); var mc = _t_cat(dir, "c.tpk");
+    assert_eq(_t2111_write(ma, "the gateway serves ternary", 16, 32, 300, 11, 0) > 0, 1, "serving: wrote A (T = 25)");
+    assert_eq(_t2111_write(mb, "short model text", 16, 32, 200, 12, 0) > 0, 1, "serving: wrote B (T = 15)");
+    assert_eq(_t2111_write(mc, "the gateway serves ternary", 16, 32, 300, 13, 1) > 0, 1,
+      "serving: wrote C (A's shape, other weights, the byte vocabulary declared)");
+    var full_a = tx_model_alloc_bytes(256, 25, 16, 32); var serve_a = tx_serve_alloc_bytes(256, 25, 16, 32);
+    var serve_b = tx_serve_alloc_bytes(256, 15, 16, 32);
+    # A's load sizes the file buffer, the path buffer and the decode cache for this group's models (B and C are no
+    # larger, and their paths are as long), so every load below allocates tentib's model and nothing else
+    assert_eq(tnt_load(ma), 0, "serving: A loads");
+    var u0 = alloc_used();
+    assert_eq(tnt_load(mb), 0, "serving: B (another shape) loads over A");
+    assert_eq(alloc_used() - u0, serve_b, "serving: ... allocating exactly tx_serve_alloc_bytes for B's dims");
+    assert_eq(tnt_model_bytes(), serve_b, "serving: ... which tnt_model_bytes reports (the config log's figure)");
+    assert_eq(tnt_load_reused(), 0, "serving: ... as new memory");
+    assert_eq(serve_b * 5 < tx_model_alloc_bytes(256, 15, 16, 32), 1,
+      "serving: ... under a fifth of a full load's (115,528 against 592,856 bytes)");
+    var sh = "short";
+    assert_eq(_t2111_lone(sh, 5, 30), 1, "serving: B decodes (cached, then slid at T = 15)");
+    # the oracle: A's logits over a whole window after tentib's FULL load, through tentib's own API
+    var fl[8];
+    var fbuf = file_read_whole_max(ma, 1 << 24, &fl);
+    assert_eq(tx_pack_deserialize(fbuf, load64(&fl), TNT_MAX_LOAD()), 0,
+      "serving: tentib's full load of A (the oracle)");
+    var txt = "the gateway serves ternar";
+    var win = alloc(25 * 8); var wi = 0;
+    while (wi < 25) { store64(win + wi * 8, load8(txt + wi)); wi = wi + 1; }
+    tx_fwd_packed(win, 256, 25, 16, 32);
+    var nlog = 25 * 256 * 8;
+    var want = alloc(nlog);
+    memcpy(want, ki_logits, nlog);
+    # A again through tnt_load: a serving load over the full model is not a reuse (tentib's rule), and hoosh's last
+    # model was B, another shape, so tnt_load_reused agrees
+    u0 = alloc_used();
+    assert_eq(tnt_load(ma), 0, "serving: A loads for serving over tentib's full A");
+    assert_eq(alloc_used() - u0, serve_a, "serving: ... allocating exactly tx_serve_alloc_bytes for A's dims");
+    assert_eq(serve_a * 4 < full_a, 1, "serving: ... under a quarter of a full load's (164,888 against 732,136 bytes)");
+    tx_fwd_packed(win, 256, 25, 16, 32);
+    assert_eq(memeq(ki_logits, want, nlog), 1,
+      "serving: every logit of a 25-token window is the full load's, bit for bit");
+    var the = "the";
+    assert_eq(_t2111_lone(the, 3, 40), 1, "serving: A decodes 40 tokens (cached steps, then full forwards)");
+    # a same-shape serving load over a serving model overwrites its buffers (tentib 1.5.0's reuse rule)
+    var gr = tnt_gen_begin(req_arena(), the, 3);
+    assert_eq(tnt_gen_step(gr) >= 0, 1, "serving: a reply on A begins");
+    u0 = alloc_used();
+    assert_eq(tnt_load(mc), 0, "serving: C (A's shape) loads over A");
+    assert_eq(alloc_used() - u0, 0, "serving: ... allocating nothing (tentib reused A's serving memory)");
+    assert_eq(tnt_load_reused(), 1, "serving: ... which tnt_load_reused reports");
+    assert_eq(tnt_vocab_declared(), 1, "serving: ... and C declares the byte vocabulary");
+    assert_eq(tnt_gen_step(gr), 0 - 1, "serving: the reply begun on A stops");
+    tx_fwd_packed(win, 256, 25, 16, 32);
+    assert_eq(memeq(ki_logits, want, nlog), 0, "serving: C's logits are its own (none of A's weights left)");
+    assert_eq(_t2111_lone(the, 3, 40), 1, "serving: C decodes 40 tokens");
+    u0 = alloc_used();
+    assert_eq(tnt_load(ma), 0, "serving: A loads back over C");
+    assert_eq(alloc_used() - u0, 0, "serving: ... allocating nothing");
+    tx_fwd_packed(win, 256, 25, 16, 32);
+    assert_eq(memeq(ki_logits, want, nlog), 1, "serving: ... and serves A's full-load logits again");
+    sys_unlink(ma); sys_unlink(mb); sys_unlink(mc);
+    return 0;
+}
+
+# ── 2.11.2: the rest of ADR 013 — request memory on every path, and keepers that recycle ──
+
+# 2.11.2: keep.cyr, the size-class pool a bounded keeper frees into.
+fn _t2112_keep_pool() {
+    test_group("keep_pool (2.11.2)");
+    var ok = 1;
+    var waste_ok = 1;
+    var n = 1;
+    while (n < 1048000) {
+        var c = keep_class_of(n);
+        if (c < 0) { ok = 0; }
+        if (c >= 0) {
+            var b = keep_class_bytes(c);
+            if (b < n + 8) { ok = 0; }
+            if (c > 0) { if (keep_class_bytes(c - 1) >= n + 8) { ok = 0; } }
+            if (n + 8 > 32 && (b - (n + 8)) * 5 > b) { waste_ok = 0; }   # below 32 bytes, the smallest class
+        }
+        n = n + 1 + n / 64;
+    }
+    assert_eq(ok, 1, "keep: each size gets the smallest class that holds it and its header");
+    assert_eq(waste_ok, 1, "keep: ... and, past the 32-byte class, wastes at most a fifth of the block");
+    assert_eq(keep_class_bytes(keep_class_of(1048576 - 8)), 1048576, "keep: the largest class is 1 MiB");
+    assert_eq(keep_class_of(1048576), 0 - 1, "keep: past it, no class");
+    var p = keep_pool_new();
+    var a1 = keep_alloc(p, 100);
+    assert_eq(keep_new_count(p), 1, "keep: a first block comes from the heap");
+    memset(a1, 1, 100);
+    keep_free(p, a1);
+    assert_eq(keep_held_bytes(p), keep_class_bytes(keep_class_of(100)), "keep: a freed block is held");
+    var u0 = alloc_used();
+    var a2 = keep_alloc(p, 90);
+    assert_eq(a2, a1, "keep: the next request of its class gets it back");
+    assert_eq(alloc_used() - u0, 0, "keep: ... with nothing from the heap");
+    assert_eq(keep_reused_count(p), 1, "keep: counted as reused");
+    assert_eq(keep_held_bytes(p), 0, "keep: and no longer held");
+    var big = keep_alloc(p, 2000000);
+    assert_eq(big != 0 && load64(big - 8) == 0 - 1, 1, "keep: a request past 1 MiB is a block of its own");
+    keep_free(p, big);
+    assert_eq(keep_freed_count(p), 1, "keep: which a free drops");
+    KEEP_POISON = 1;
+    keep_free(p, a2);
+    assert_eq(load8(a2 + 8), 0xA5, "keep: in the tests a free poisons the block");
+    KEEP_POISON = 0;
+    assert_streq(keep_mem(p, "hello", 5), "hello", "keep: keep_mem copies and terminates");
+    return 0;
+}
+
+# A 64-byte key and a 420-byte chat envelope for answer i, in kb and vb.
+fn _t2112_kv(kb, vb, i) {
+    memset(kb, 107, 64);
+    store8(kb + 64, 0);
+    var d[24];
+    var dl = fmt_int_buf(i, &d);
+    memcpy(kb + 64 - dl, &d, dl);
+    var head = "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\"created\":5,\"n\":\"";
+    var hl = strlen(head);
+    memcpy(vb, head, hl);
+    memset(vb + hl, 118, 420 - hl - 2);
+    memcpy(vb + 420 - 2 - dl, &d, dl);
+    store8(vb + 418, 34);
+    store8(vb + 419, 125);
+    store8(vb + 420, 0);
+    return 0;
+}
+
+# 2.11.2: what the cache evicts goes back to its keep pool, and a hit is copied before the lock is released.
+fn _t2112_cache_recycle() {
+    test_group("cache recycling (2.11.2)");
+    var c = cache_new(10, 1, 0);
+    var kb = alloc(80);
+    var vb = alloc(512);
+    var i = 0;
+    while (i < 40) { _t2112_kv(kb, vb, i); cache_insert_kept(c, kb, vb, strlen(vb)); i = i + 1; }
+    var u0 = alloc_used();
+    while (i < 1040) { _t2112_kv(kb, vb, i); cache_insert_kept(c, kb, vb, strlen(vb)); i = i + 1; }
+    assert_eq(alloc_used() - u0, 0, "cache: 1000 inserts into a full cache take nothing from the heap (2.11.1: 570 each)");
+    assert_eq(cache_len(c), 10, "cache: ... and it holds max_entries");
+    assert_eq(keep_reused_count(cache_pool(c)) >= 2000, 1, "cache: ... its keys and values reused");
+    _t2112_kv(kb, vb, 1039);
+    var vwant = cstr_keep(vb);
+    assert_streq(cache_get(c, kb), vwant, "cache: the newest answer is served");
+    _t2112_kv(kb, vb, 1029);
+    assert_eq(cache_get(c, kb), 0, "cache: the eleventh newest was evicted");
+    _t2112_kv(kb, vb, 1030);
+    assert_eq(cache_get(c, kb) != 0, 1, "cache: the tenth newest was not");
+    # The hazard the chat path guards against: a value read with cache_get is the cache's, and is recycled when the
+    # entry goes. The hit's copy (chat_rehead_a, under _chat_lock) is the answer's own.
+    KEEP_POISON = 1;
+    var c2 = cache_new(1, 1, 0);
+    var env = "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\"created\":5,\"choices\":[\"x1\"]}";
+    cache_insert_kept(c2, "ka", env, strlen(env));
+    var raw = cache_get(c2, "ka");
+    var copy = chat_rehead_a(req_arena(), raw);
+    cache_insert_kept(c2, "kb", env, strlen(env));
+    assert_eq(load8(raw + 8), 0xA5, "cache: an evicted value is recycled (poisoned in the tests)");
+    assert_eq(_t_has(copy, strlen(copy), "\"choices\":[\"x1\"]}"), 1, "cache: the hit's copy, made before, is intact");
+    KEEP_POISON = 0;
+    # A second answer for a key (two misses that raced) keeps the entry and its key, and recycles the old value.
+    var c3 = cache_new(4, 1, 0);
+    var k1 = cache_insert_kept(c3, "same", "one", 3);
+    var k2 = cache_insert_kept(c3, "same", "two!", 4);
+    assert_eq(k2, k1, "cache: a second answer for a key keeps the entry's key");
+    assert_streq(cache_get(c3, "same"), "two!", "cache: ... serves the new value");
+    assert_eq(cache_len(c3), 1, "cache: ... in one entry");
+    assert_eq(keep_freed_count(cache_pool(c3)), 1, "cache: ... and recycles the old value");
+    cache_insert(c3, "same", "caller's");
+    assert_eq(keep_freed_count(cache_pool(c3)), 3, "cache: the caller's own over a kept entry frees its copies");
+    assert_streq(cache_get(c3, "same"), "caller's", "cache: ... and serves the caller's value");
+    assert_eq(cache_len(c3), 1, "cache: ... still one entry");
+    # A replace of the caller's own allocates nothing (2.11.1 took a new entry each time) and keeps one entry.
+    var c5 = cache_new(4, 1, 0);
+    cache_insert(c5, "w", "1");
+    var ru0 = alloc_used();
+    var ri = 0;
+    while (ri < 100) { cache_insert(c5, "w", "2"); ri = ri + 1; }
+    assert_eq(alloc_used() - ru0, 0, "cache: 100 replaces of a caller's entry take nothing from the heap");
+    assert_eq(cache_len(c5), 1, "cache: ... in one entry");
+    assert_streq(cache_get(c5, "w"), "2", "cache: ... serving the last value");
+    # The semantic index holds the cache's keys: every entry under an evicted key goes with it.
+    semantic_configure(1, 850, 0, 0);
+    var s0 = semantic_count();
+    var c4 = cache_new(1, 1, 0);
+    var sk = cache_insert_kept(c4, "sem-key", "v", 1);
+    semantic_insert(sk, _vec2(10000, 0), 2);
+    semantic_insert(sk, _vec2(0, 10000), 2);            # two answers for one prompt both reached the index
+    semantic_insert("sem-other", _vec2(7071, 7071), 2);
+    assert_eq(semantic_count(), s0 + 3, "semantic: three entries, two under one key");
+    cache_insert_kept(c4, "next-key", "w", 1);          # evicts sem-key
+    assert_eq(semantic_count(), s0 + 1, "semantic: an eviction drops every entry under its key (2.11.1: the first)");
+    assert_eq(semantic_remove("sem-other"), 1, "semantic: the other entry was untouched");
+    semantic_configure(0, 850, 0, 0);
+    return 0;
+}
+
+# 2.11.2: ADR 013's first three items, through the real functions.
+fn _t2112_request_paths() {
+    test_group("request memory: connection, forward, prep (2.11.2)");
+    var rq = "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n\r\n";
+    req_arena_begin();
+    http_parse_path_a(req_arena(), rq, strlen(rq));
+    req_arena_begin();
+    var u0 = alloc_used();
+    var pth = http_parse_path_a(req_arena(), rq, strlen(rq));
+    assert_eq(alloc_used() - u0, 0, "path: in the request arena (2.11.1: a heap copy per connection)");
+    assert_streq(pth, "/v1/chat/completions", "path: ... parsed");
+    assert_eq(http_parse_path_a(req_arena(), "GET", 3), 0, "path: a line with no path");
+    var longp = alloc(5000);
+    memset(longp, 47, 4999);
+    store8(longp + 4999, 0);
+    var lvl = sakshi_get_level();
+    sakshi_set_level(SK_WARN);
+    u0 = alloc_used();
+    hlog_request("GET", "/v1/models");
+    hlog_request("POST", longp);
+    assert_eq(alloc_used() - u0, 0, "log: a request line, however long its path, takes nothing from the heap");
+    sakshi_set_level(lvl);
+    var hb[256];
+    assert_streq(url_host_in("http://127.0.0.1:11434/x", &hb, 256), "127.0.0.1", "host: into the caller's buffer");
+    assert_eq(url_host_in("http://127.0.0.1:11434", &hb, 256), &hb, "host: ... that buffer");
+    assert_streq(url_host_in("http://:80", &hb, 256), "localhost", "host: an empty host is localhost");
+    var tiny[16];
+    var lh = url_host_in("https://a-very-long-hostname.example.com", &tiny, 16);
+    assert_eq(lh != &tiny, 1, "host: one that does not fit is a heap copy");
+    assert_streq(lh, "a-very-long-hostname.example.com", "host: ... of the whole host");
+    u0 = alloc_used();
+    url_host_in("http://10.0.0.1:80", &hb, 256);
+    assert_eq(alloc_used() - u0, 0, "host: one that fits takes nothing from the heap");
+    # The forward's extractions: the reply text in the arena, the finish word on the stack.
+    var rjb = _t_cat("{\"message\":{\"content\":\"hi \\\"x\\\"\"},\"done_reason\":\"stop\"}", "");
+    var rjl = strlen(rjb);
+    var fwb[64];
+    req_arena_begin();
+    _json_extract_str_a(req_arena(), rjb, rjl, "content", 7);
+    req_arena_begin();
+    u0 = alloc_used();
+    var tx = _json_extract_str_a(req_arena(), rjb, rjl, "content", 7);
+    var fw = _json_extract_str_in(rjb, rjl, "done_reason", 11, &fwb, 64);
+    assert_eq(alloc_used() - u0, 0, "extract: the text and the finish word take nothing from the heap");
+    assert_streq(tx, "hi \\\"x\\\"", "extract: the text, escapes kept");
+    assert_streq(fw, "stop", "extract: the finish word");
+    assert_streq(_json_extract_str_in(rjb, rjl, "content", 7, &fwb, 4), "hi ", "extract: a word clipped to its buffer");
+    assert_streq(_json_extract_str_in(rjb, rjl, "absent", 6, &fwb, 64), "", "extract: an absent key is empty");
+    assert_streq(_json_extract_str_a(req_arena(), rjb, rjl, "absent", 6), "", "extract: ... in the arena too");
+    # prep's spans and the compaction, compression and pruning of the messages: in the arena, the same bytes.
+    var body = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"a  b\"}],\"tools\":[{\"type\":\"function\"}]}";
+    var bl = strlen(body);
+    req_arena_begin();
+    _extract_messages_a(req_arena(), body, bl);
+    _extract_tools_a(req_arena(), body, bl);
+    req_arena_begin();
+    u0 = alloc_used();
+    var ms = _extract_messages_a(req_arena(), body, bl);
+    var ts = _extract_tools_a(req_arena(), body, bl);
+    assert_eq(alloc_used() - u0, 0, "prep: the message and tool spans take nothing from the heap");
+    assert_eq(load64(ms + 8), strlen("[{\"role\":\"user\",\"content\":\"a  b\"}]"), "prep: the messages span");
+    assert_eq(load8(load64(ts)), 91, "prep: the tools span");
+    var conv = alloc(4096);
+    var cp = conv;
+    var ci = 0;
+    store8(cp, 91); cp = cp + 1;
+    while (ci < 20) {
+        if (ci > 0) { store8(cp, 44); cp = cp + 1; }
+        var one = "{\"role\":\"user\",\"content\":\"message  number   twenty-something, padded out\"}";
+        memcpy(cp, one, strlen(one));
+        cp = cp + strlen(one);
+        ci = ci + 1;
+    }
+    store8(cp, 93); store8(cp + 1, 0);
+    var cl = strlen(conv);
+    var hc = load64(compact_messages(conv, cl, 40, CHARS_PER_TOKEN_X10));
+    var hz = load64(compress_ws_json(conv, cl));
+    req_arena_begin();
+    compact_messages_a(req_arena(), conv, cl, 40, CHARS_PER_TOKEN_X10);
+    compress_ws_json_a(req_arena(), conv, cl);
+    req_arena_begin();
+    u0 = alloc_used();
+    var ac = compact_messages_a(req_arena(), conv, cl, 40, CHARS_PER_TOKEN_X10);
+    var az = compress_ws_json_a(req_arena(), conv, cl);
+    assert_eq(alloc_used() - u0, 0, "prep: a compaction and a compression take nothing from the heap");
+    assert_streq(load64(ac), hc, "prep: the compaction's bytes are the heap form's");
+    assert_eq(strlen(hc) < cl, 1, "prep: ... and it compacted");
+    assert_streq(load64(az), hz, "prep: the compression's bytes are the heap form's");
+    var tp = "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"r1\"},";
+    tp = _t_cat(tp, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c2\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"r2\"},");
+    tp = _t_cat(tp, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c3\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c3\",\"content\":\"r3\"},");
+    tp = _t_cat(tp, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c4\"}]},{\"role\":\"tool\",\"tool_call_id\":\"c4\",\"content\":\"r4\"}]");
+    var hp = load64(prune_tool_pairs(tp, strlen(tp)));
+    req_arena_begin();
+    prune_tool_pairs_a(req_arena(), tp, strlen(tp));
+    req_arena_begin();
+    u0 = alloc_used();
+    var ap = prune_tool_pairs_a(req_arena(), tp, strlen(tp));
+    assert_eq(alloc_used() - u0, 0, "prep: a pruning takes nothing from the heap");
+    assert_streq(load64(ap), hp, "prep: the pruning's bytes are the heap form's");
+    assert_eq(strlen(hp) < strlen(tp), 1, "prep: ... and it pruned");
+    # A stream's record, a refusal's descriptor, and a connection's job record.
+    req_arena_begin();
+    u0 = alloc_used();
+    var oc = outcome_new_a(req_arena());
+    var re = _resp_err("400", "Bad Request", "a \"quoted\" reason", "invalid_request_error");
+    assert_eq(alloc_used() - u0, 0, "stream and refusal: the outcome record and the error descriptor are the arena's");
+    assert_eq(outcome_ptok(oc), 0 - 1, "stream: the record starts with no counts");
+    assert_streq(load64(re + 16), "{\"error\":{\"message\":\"a \\\"quoted\\\" reason\",\"type\":\"invalid_request_error\"}}",
+      "refusal: the body, escaped");
+    assert_eq(load64(re + 24), strlen(load64(re + 16)), "refusal: ... and its length");
+    var j1 = _job_conn(5);
+    job_conn_release(j1);
+    var j2 = _job_conn(6);
+    assert_eq(j2, j1, "conn job: a released record is the next connection's");
+    assert_eq(load64(j2) == JOB_CONN && load64(j2 + 8) == 6, 1, "conn job: ... with its type and descriptor");
+    job_conn_release(j2);
+    var made = _wq_conn_made;
+    var ji = 0;
+    while (ji < 1000) { job_conn_release(_job_conn(ji)); ji = ji + 1; }
+    assert_eq(_wq_conn_made, made, "conn job: 1000 connections, one after another, allocate no record");
+    return 0;
+}
+
+# 2.11.2: the provider bodies, tool calls, headers and embeddings of item 3, in the request arena.
+fn _t2112_provider_paths() {
+    test_group("request memory: provider bodies and replies (2.11.2)");
+    var msgs = "[{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"hi\"},";
+    msgs = _t_cat(msgs, "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",");
+    msgs = _t_cat(msgs, "\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]},");
+    msgs = _t_cat(msgs, "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"ok\"}]");
+    var tools = "[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}}]";
+    var ml = strlen(msgs);
+    var tl = strlen(tools);
+    var g = genopts_new(0, 100, GEN_UNSET, GEN_UNSET);   # on the heap: the arena is released below
+    req_arena_begin();
+    _build_anthropic_body_x(req_arena(), "claude", msgs, ml, 0, tools, tl, g, 0);
+    _build_gemini_body_a(req_arena(), msgs, ml, tools, tl);
+    req_arena_begin();
+    var u0 = alloc_used();
+    var ab = _build_anthropic_body_x(req_arena(), "claude", msgs, ml, 0, tools, tl, g, 0);
+    var gb = _build_gemini_body_a(req_arena(), msgs, ml, tools, tl);
+    assert_eq(alloc_used() - u0, 0, "bodies: an Anthropic and a Gemini body take nothing from the heap (2.11.1: ~1 KB)");
+    var abl = strlen(ab);
+    assert_eq(_t_has(ab, abl, "\"system\":\"be brief\""), 1, "bodies: Anthropic's system hoisted");
+    assert_eq(_t_has(ab, abl, "{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"f\",\"input\":{\"a\":1}}"), 1,
+      "bodies: Anthropic's tool_use block");
+    assert_eq(_t_has(ab, abl, "{\"type\":\"tool_result\",\"tool_use_id\":\"c1\",\"content\":\"ok\"}"), 1,
+      "bodies: Anthropic's tool_result block");
+    assert_eq(_t_has(ab, abl, "\"input_schema\":{\"type\":\"object\"}"), 1, "bodies: Anthropic's tools converted");
+    assert_eq(_t_has(gb, strlen(gb), "\"systemInstruction\":{\"parts\":[{\"text\":\"be brief\"}]}"), 1,
+      "bodies: Gemini's system instruction");
+    assert_eq(_t_has(gb, strlen(gb), "\"functionDeclarations\":[{\"name\":\"f\""), 1, "bodies: Gemini's tools");
+    # Tool calls in a reply: nothing built when there are none, the arena when there are.
+    var nt = _t_cat("{\"content\":[{\"type\":\"text\",\"text\":\"plain\"}],\"stop_reason\":\"end_turn\"}", "");
+    var at = _t_cat("{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"g\",\"input\":{\"b\":2}}]}", "");
+    var gn = _t_cat("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"plain\"}]}}]}", "");
+    var gt = _t_cat("{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"h\",\"args\":{\"c\":3}}}]}}]}", "");
+    req_arena_begin();
+    _anthropic_tool_calls(at, strlen(at));
+    _gemini_tool_calls(gt, strlen(gt));
+    req_arena_begin();
+    u0 = alloc_used();
+    assert_eq(_anthropic_tool_calls(nt, strlen(nt)), 0, "tool calls: an Anthropic reply with none");
+    assert_eq(_gemini_tool_calls(gn, strlen(gn)), 0, "tool calls: a Gemini event with none");
+    var atc = _anthropic_tool_calls(at, strlen(at));
+    var gtc = _gemini_tool_calls(gt, strlen(gt));
+    assert_eq(alloc_used() - u0, 0, "tool calls: read with nothing from the heap (2.11.1: a builder per call)");
+    assert_streq(atc, "[{\"id\":\"t1\",\"type\":\"function\",\"function\":{\"name\":\"g\",\"arguments\":\"{\\\"b\\\":2}\"}}]",
+      "tool calls: Anthropic's, as OpenAI's");
+    assert_streq(gtc, "[{\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"h\",\"arguments\":\"{\\\"c\\\":3}\"}}]",
+      "tool calls: Gemini's, with a stack-built id");
+    # A remote request's URL and headers, and an Ollama embedding answer reshaped.
+    var rt = route_new(PROV_ANTHROPIC, 1, "https://api.example");
+    store64(rt + ROUTE_API_KEY, "sk-test");
+    var emb = _t_cat("{\"embeddings\":[[0.1,0.2],[0.3,0.4]],\"prompt_eval_count\":4}", "");
+    req_arena_begin();
+    _provider_headers(rt);
+    _provider_url("https://api.example", "/v1/messages");
+    _ollama_embed_to_openai("nomic", emb, strlen(emb));
+    req_arena_begin();
+    u0 = alloc_used();
+    var hh = _provider_headers(rt);
+    var uu = _provider_url("https://api.example", "/v1/messages");
+    var en = _ollama_embed_to_openai("nomic", emb, strlen(emb));
+    assert_eq(alloc_used() - u0, 0, "remote: the headers, the URL and an embedding answer take nothing from the heap");
+    assert_streq(sandhi_headers_get(hh, "x-api-key"), "sk-test", "remote: the key header");
+    assert_streq(uu, "https://api.example/v1/messages", "remote: the URL");
+    assert_eq(_t_has(str_data(en), str_len(en), "{\"object\":\"embedding\",\"index\":1,\"embedding\":[0.3,0.4]}"), 1,
+      "embeddings: the second vector, reshaped");
+    return 0;
+}
+
+# 2.11.2: the audit chain keeps a copy of the model, recycles what it evicts, and verifies with nothing allocated.
+fn _t2112_audit_recycle() {
+    test_group("audit recycling (2.11.2)");
+    REQ_ARENA_POISON = 1;
+    var ch = audit_chain_new("k", 1, 10);
+    var i = 0;
+    while (i < 40) { audit_record(ch, "inference.request", "info", "m", "ollama", "llama3"); i = i + 1; }
+    var u0 = alloc_used();
+    while (i < 1040) { audit_record(ch, "inference.request", "info", "m", "ollama", "llama3"); i = i + 1; }
+    assert_eq(alloc_used() - u0, 0, "audit: 1000 records into a full chain take nothing from the heap (2.11.1: 1.4 KB)");
+    assert_eq(audit_count(ch), 10, "audit: ... it holds max_entries");
+    u0 = alloc_used();
+    assert_eq(audit_verify(ch), 1, "audit: ... and verifies");
+    assert_eq(alloc_used() - u0, 0, "audit: a verify takes nothing from the heap");
+    assert_eq(load64(ch + 64), ch + 96, "audit: the anchor is the chain's own copy");
+    # The model is copied: the chat path's is in the request arena, released before GET /v1/audit reads it.
+    var a = req_arena_begin();
+    var mdl = alloc_via(a, 16);
+    memcpy(mdl, "gpt-4o", 7);
+    var e = audit_record(ch, "inference.request", "info", "m", "openai", mdl);
+    req_arena_begin();
+    assert_eq(load8(mdl), 0xA5, "audit: the arena's model reads poison after the job");
+    assert_streq(load64(e + 48), "gpt-4o", "audit: the entry's copy does not");
+    assert_eq(audit_verify(ch), 1, "audit: and the chain still verifies");
+    var sb = sb_room_a(req_arena(), 16384);
+    audit_json(ch, sb, 50);
+    var js = sb_cstr(sb);
+    assert_eq(_t_has(js, strlen(js), "{\"count\":10,\"valid\":true,"), 1, "audit: GET /v1/audit says valid");
+    var e0 = audit_record(ch, "e", "info", "no model", 0, 0);
+    assert_eq(load64(e0 + 48), 0, "audit: no model stays no model (the hash leaves it out)");
+    assert_eq(audit_verify(ch), 1, "audit: ... and verifies");
+    REQ_ARENA_POISON = 0;
+    return 0;
+}
+
 fn _t211_tentib_local() {
     test_group("tentib_local (2.11.0)");
     # the provider type
@@ -3333,7 +3761,7 @@ fn _t211_tentib_local() {
     assert_eq(tnt_gen_step(gen), 0 - 1, "tentib: a step after the reload refuses (the model changed)");
     # tentib's allocator does not free, so a model loaded keeps its memory: tentib's own figure for its dims
     assert_eq(lkept >= tnt_model_bytes() && lkept < tnt_model_bytes() + 4096, 1,
-      "tentib: a load of another model keeps one model's memory (tx_model_alloc_bytes)");
+      "tentib: a load of another model keeps one model's memory (tx_serve_alloc_bytes, a serving load's)");
 
     # the prompt: every message's content, decoded, joined by "\n"
     var pm = "[{\"role\":\"system\",\"content\":\"a\\\"b\"}, {\"role\":\"user\",\"content\":\"c\\nd\\u00e9\"}]";
@@ -3937,7 +4365,8 @@ fn main() {
     assert_streq(load64(ae1 + 64), GENESIS_HASH, "audit: the first entry links to GENESIS");
     assert_streq(load64(ae2 + 64), load64(ae1 + 72), "audit: the second links to the first's hash");
     assert_streq(load64(ae1 + 72),
-      _audit_entry_hash(1, load64(ae1 + 8), "inference.request", "info", "Request to llama3", "ollama", "llama3"),
+      _audit_entry_hash_into(alloc(72), 1, load64(ae1 + 8), "inference.request", "info", "Request to llama3",
+        "ollama", "llama3"),
       "audit: the hash covers id, time, event, level, message, provider and model");
     assert_eq(strlen(load64(ae1 + 56)), 64, "audit: the signature is 64 hex characters");
     assert(streq(load64(ae1 + 72), load64(ae2 + 72)) != 1, "audit: entry hashes unique");
@@ -4362,7 +4791,7 @@ fn main() {
 
     # Incremental streaming: request shaping for the SSE path.
     var sm1 = "[{\"role\":\"system\",\"content\":\"Be brief\"},{\"role\":\"user\",\"content\":\"hi\"}]";
-    var sb1 = _build_anthropic_body_x("claude", sm1, strlen(sm1), 1, 0, 0, 0, 0);
+    var sb1 = _build_anthropic_body_x(req_arena(), "claude", sm1, strlen(sm1), 1, 0, 0, 0, 0);
     assert_streq(sb1,
       "{\"model\":\"claude\",\"max_tokens\":4096,\"stream\":true,\"system\":\"Be brief\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
       "anthropic stream body: stream:true flag set");
@@ -4988,9 +5417,9 @@ fn main() {
     assert_eq(_cmp_span_end(cesc, strlen(cesc), 0), 22,
       "prune scan: an escaped backslash before the quote ends the string");
     var cfv = "{\"content\":\"C:\\\\\",\"role\":\"tool\"}";             # {"content":"C:\\","role":"tool"}
-    var cfr = _cmp_str_field(cfv, strlen(cfv), "content", 7);
+    var cfr = _cmp_str_field(cfv, strlen(cfv), "content", 7, alloc(16));
     assert_eq(load64(cfr + 8), 4, "prune field: a value ending in an escaped backslash is 4 bytes");
-    var cfrole = _cmp_str_field(cfv, strlen(cfv), "role", 4);
+    var cfrole = _cmp_str_field(cfv, strlen(cfv), "role", 4, alloc(16));
     assert_eq(load64(cfrole + 8), 4, "prune field: the next field is still found");
     assert_eq(memeq(load64(cfrole), "tool", 4), 1, "prune field: and reads as tool");
 
@@ -5221,16 +5650,14 @@ fn main() {
     # The ring as otlp_init sets it up, without its exporter thread (which would POST to a collector).
     _otlp_endpoint = "http://localhost:4318/v1/traces";
     assert_eq(_otlp_is_https(), 0, "otlp: an http endpoint is posted directly");
-    _otlp_spans = alloc(OTLP_RING_MAX * 8);
+    otlp_ring_init();
     var os_i = 0;
-    while (os_i < OTLP_RING_MAX) { store64(_otlp_spans + os_i * 8, 0); os_i = os_i + 1; }
-    _otlp_lock = mutex_new();
     trace_set("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
     otlp_enqueue_inference_span("ollama", "m\"x", 250, 42, 1);
     otlp_enqueue_inference_span("vllm", "llama3", 0, 0, 0);
     assert_eq(_otlp_count, 2, "otlp: two spans in the ring");
-    var os1 = load64(_otlp_spans);
-    var os2 = load64(_otlp_spans + 8);
+    var os1 = otlp_span_at(0);
+    var os2 = otlp_span_at(1);
     var os1l = strlen(os1);
     assert_eq(memeq(os1, "{\"traceId\":\"0af7651916cd43dd8448eb211c80319c\",\"spanId\":\"b7ad6b7169203331\",", 74), 1,
       "otlp: trace and span ids from the current traceparent");
@@ -5245,26 +5672,40 @@ fn main() {
     assert_eq(_t_has(os2, strlen(os2), "\"status\":{\"code\":2}}"), 1, "otlp: a failure is status 2");
     assert_eq(_t_json_qint(os1, "endTimeUnixNano") - _t_json_qint(os1, "startTimeUnixNano"), 250000000,
       "otlp: the span starts latency_ms before it ends");
-    var os_fr = alloc(16);
-    store64(os_fr, os1);
-    store64(os_fr + 8, os2);
-    var os_doc = str_data(_otlp_build_batch(os_fr, 2));
+    var os_dslot = alloc(24);
+    memset(os_dslot, 0, 24);
+    var os_doc = _otlp_batch_into(os_dslot, 2);
     var os_head = _t_cat("{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",",
       "\"value\":{\"stringValue\":\"hoosh\"}}]},");
     os_head = _t_cat(os_head, "\"scopeSpans\":[{\"scope\":{\"name\":\"hoosh\"},\"spans\":[");
     var os_want = _t_cat(_t_cat(_t_cat(os_head, os1), ","), _t_cat(os2, "]}]}]}"));
     assert_streq(os_doc, os_want, "otlp: the batch wraps the spans in one ResourceSpans document");
+    assert_eq(load64(os_dslot + 16), strlen(os_want), "otlp: ... and the slot says its length");
+    var os2c = cstr_keep(os2);
     # The ring keeps the newest OTLP_RING_MAX: the head wraps.
     os_i = 0;
     while (os_i < 300) { otlp_enqueue_inference_span("ollama", "llama3", 1, 1, 1); os_i = os_i + 1; }
     assert_eq(_otlp_count, 302, "otlp: every span counted");
-    assert_eq(load64(_otlp_spans + ((_otlp_head - 1) % OTLP_RING_MAX) * 8) != os2, 1, "otlp: the ring wrapped");
+    assert_eq(streq(otlp_span_at(1), os2c), 0, "otlp: the ring wrapped");
+    # 2.11.2 (ADR 013): a span is built on the stack and copied into its slot, which the ring reuses, and a batch
+    # is written into the exporter's one buffer. Once every slot has held a span this size, neither allocates.
+    var os_u0 = alloc_used();
+    os_i = 0;
+    while (os_i < 600) { otlp_enqueue_inference_span("ollama", "llama3", 1, 1, 1); os_i = os_i + 1; }
+    assert_eq(alloc_used() - os_u0, 0, "otlp: 600 spans into a warm ring take nothing from the heap");
+    _otlp_batch_into(os_dslot, OTLP_RING_MAX);
+    os_u0 = alloc_used();
+    var os_full = _otlp_batch_into(os_dslot, OTLP_RING_MAX);
+    assert_eq(alloc_used() - os_u0, 0, "otlp: a full ring's batch, again, takes nothing (the buffer is reused)");
+    assert_eq(_t_has(os_full, strlen(os_full), "]}]}]}"), 1, "otlp: ... and is a whole document");
+    assert_eq(_t_count(os_full, "\"name\":\"inference\""), OTLP_RING_MAX, "otlp: ... of every span in the ring");
     _otlp_endpoint = "https://collector.example:4318/v1/traces";
     assert_eq(_otlp_is_https(), 1, "otlp: an https endpoint goes through a pool worker");
     # A reload that drops otlp_endpoint stops enqueueing, though the ring stays allocated.
+    var os_cnt = _otlp_count;
     _otlp_endpoint = 0;
     otlp_enqueue_inference_span("ollama", "llama3", 1, 1, 1);
-    assert_eq(_otlp_count, 302, "otlp: endpoint cleared, nothing more enqueued");
+    assert_eq(_otlp_count, os_cnt, "otlp: endpoint cleared, nothing more enqueued");
     _otlp_spans = 0;
     _otlp_count = 0;
     _otlp_head = 0;
@@ -6756,13 +7197,22 @@ fn main() {
       "id: the upstream error frame carries it too");
     # A cache hit replays the stored envelope with a fresh head.
     var cenv = "{\"id\":\"chatcmpl-aaaa\",\"object\":\"chat.completion\",\"created\":5,\"model\":\"m\",\"choices\":[]}";
-    var rh = chat_rehead(cenv);
+    var rh = chat_rehead_a(req_arena(), cenv);
     assert_eq(str_contains(str_from(rh), str_from("chatcmpl-aaaa")), 0, "rehead: old id replaced");
     assert_eq(str_contains(str_from(rh), str_from("\"created\":5,")), 0, "rehead: old created replaced");
     assert_eq(str_contains(str_from(rh), str_from(",\"model\":\"m\",\"choices\":[]}")), 1, "rehead: body kept");
     assert_eq(str_contains(str_from(rh), str_from(chat_id())), 1, "rehead: carries the new id");
     var cother = "{\"object\":\"list\"}";
-    assert_eq(chat_rehead(cother), cother, "rehead: other shapes pass through");
+    var rho = chat_rehead_a(req_arena(), cother);
+    assert_streq(rho, cother, "rehead: other shapes pass through unchanged");
+    assert_eq(rho != cother, 1, "rehead: ... as a copy, never the cache's own bytes (2.11.2)");
+    # 2.11.2: a hit's answer is built in the request arena, never on the heap
+    req_arena_begin();
+    chat_rehead_a(req_arena(), cenv);
+    var rhu = alloc_used();
+    req_arena_begin();
+    chat_rehead_a(req_arena(), cenv); chat_rehead_a(req_arena(), cother);
+    assert_eq(alloc_used() - rhu, 0, "rehead: a hit's copy takes nothing from the heap");
 
     test_group("rustold_embeddings");
     # Ollama gets /api/embed with the caller's `input` (string or array), and its
@@ -7973,6 +8423,12 @@ fn main() {
     _t2103_event_ring();
     _t211_tentib_local();
     _t2111_tentib_decode();
+    _t2112_tentib_serving();
+    _t2112_keep_pool();
+    _t2112_cache_recycle();
+    _t2112_request_paths();
+    _t2112_provider_paths();
+    _t2112_audit_recycle();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

@@ -20,9 +20,13 @@ var HTTP_RESP_CAP = 131072;
 # (extracting text, copying ids, or writing it to the client) before it makes another local request; a provider's
 # error body is copied by provider_err_set. Slots 1..6 are taken (trace, request buffer, provider error, auth
 # identity, completion id, remote arena); 16 and up are the stdlib's.
+# 2.11.2 (ADR 013): the parsed response record is the block's too, so its lifetime is the body's, and a request takes
+# the host and the Content-Length digits on the stack. Through 2.11.1 a local request kept 80 bytes on the heap: the
+# host's copy, a 32-byte digit buffer and the 32-byte record.
 var LOCAL_HTTP_SLOT = 7;
-var LH_HDR = 0;          # the request header, 2048 bytes
-var LH_BUF = 2048;       # the response, HTTP_RESP_CAP + 1 bytes
+var LH_RESP = 0;         # the parsed response record, 32 bytes (lib/http.cyr's _http_parse_into), 64 reserved
+var LH_HDR = 64;         # the request header, 2048 bytes
+var LH_BUF = 2112;       # the response, HTTP_RESP_CAP + 1 bytes
 
 fn _local_http_scratch() {
     var b = thread_local_get(LOCAL_HTTP_SLOT);
@@ -96,9 +100,9 @@ fn _build_req_header(buf, method, path, host, body_len, cap) {
     memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
-    var cl_buf = alloc(32);
-    var cl_len = fmt_int_buf(body_len, cl_buf);
-    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    var cl_buf[32];
+    var cl_len = fmt_int_buf(body_len, &cl_buf);
+    memcpy(buf + pos, &cl_buf, cl_len); pos = pos + cl_len;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     var _tpl = strlen(_tp0);
     memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
@@ -131,9 +135,9 @@ fn _build_post_header(buf, path, host, body_len, cap) {
     memcpy(buf + pos, "Connection: close", 17); pos = pos + 17;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     memcpy(buf + pos, "Content-Length: ", 16); pos = pos + 16;
-    var cl_buf = alloc(32);
-    var cl_len = fmt_int_buf(body_len, cl_buf);
-    memcpy(buf + pos, cl_buf, cl_len); pos = pos + cl_len;
+    var cl_buf[32];
+    var cl_len = fmt_int_buf(body_len, &cl_buf);
+    memcpy(buf + pos, &cl_buf, cl_len); pos = pos + cl_len;
     store8(buf + pos, 13); store8(buf + pos + 1, 10); pos = pos + 2;
     var _tpl1 = strlen(_tp1);
     memcpy(buf + pos, "traceparent: ", 13); pos = pos + 13;
@@ -147,12 +151,14 @@ fn _build_post_header(buf, path, host, body_len, cap) {
 # method (GET/POST/DELETE). Connects to the URL's host:port — NOT a hardcoded
 # localhost — so LAN/remote http backends (e.g. an Ollama box at 192.168.x.y)
 # are reachable. body may be 0 with body_len 0 for bodyless methods. Returns
-# _http_parse_response result or 0.
+# the parsed response (status, body, length: http_status / http_body /
+# http_body_len), in this thread's scratch block like its body, or 0.
 fn http_req_local(method, base_url, path, body, body_len) {
     var _sr_t, _sr_v = tcp_socket();
     if (is_ok(_sr_t) == 0) { return 0; }
     var fd = _sr_v;
-    var host = url_host(base_url);
+    var hbuf[256];
+    var host = url_host_in(base_url, &hbuf, 256);
     # 2.5.3: bounded connect + read/write. rust-old had connect_timeout(10s) and
     # a 300 s request timeout (client.rs:127, provider/mod.rs:26); the port had
     # NEITHER, so a wedged local backend parked a worker inside connect() or
@@ -189,11 +195,11 @@ fn http_req_local(method, base_url, path, body, body_len) {
     # silent garbage, so refuse it instead.
     if (total >= HTTP_RESP_CAP) { return 0; }
     store8(rbuf + total, 0);
-    return _http_parse_response(rbuf, total);
+    return _http_parse_into(scr + LH_RESP, rbuf, total);
 }
 
 # HTTP POST to the http:// backend named by base_url. Returns
-# _http_parse_response result or 0.
+# http_req_local's response or 0.
 fn http_post_local(base_url, path, body, body_len) {
     return http_req_local("POST", base_url, path, body, body_len);
 }
@@ -205,7 +211,8 @@ fn http_post_stream(base_url, path, body, body_len) {
     var _sr_t, _sr_v = tcp_socket();
     if (is_ok(_sr_t) == 0) { return 0 - 1; }
     var fd = _sr_v;
-    var host = url_host(base_url);
+    var hbuf[256];
+    var host = url_host_in(base_url, &hbuf, 256);
     if (net_connect_nb(fd, host_addr(host), url_port(base_url), HTTP_CONNECT_TIMEOUT_MS) != 0) {
         sock_close(fd);
         return 0 - 1;

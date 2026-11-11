@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.7.18)
-- **Version**: SemVer 2.11.1 stable
+- **Version**: SemVer 2.11.2 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -16,7 +16,7 @@
 
 All AGNOS apps (LLM inference), daimon (inference routing)
 
-**Note**: 18 LLM providers, tentib served in-process since 2.11.0 (ADR 014). murti, the planned local inference engine, is adopted once it has a Cyrius port. OpenAI-compatible API.
+**Note**: 18 LLM providers, tentib served in-process since 2.11.0 (ADR 014). There is no murti to adopt: its Rust repo was deleted 2026-11-10, and the model-load seam it was planned as lives in hoosh's local providers (agnosticos `docs/development/planning/murti.md`; ADR 014's 2026-11-10 update). OpenAI-compatible API.
 
 **Data files**: `data/cloud_pricing.json` + `data/models.json` are vendored from
 ai-hwaccel (power `/v1/hardware/cost` + `/compatible-models`). Re-sync them when
@@ -69,8 +69,10 @@ wrapper (guarded by the `hardware_data_files` test).
 - **On the request path, allocate from the request arena** (`req_arena()`, `src/lib/reqmem.cyr`, ADR 013): it is released
   when the thread's next job starts. Anything a keeper stores (the cache, the semantic index, audit, batch results,
   the event ring) must be copied out with `mem_keep`, or stay on the heap. A string copied out before its function
-  returns can be built on the stack (`sb_on`), as the events are. Measure with a `-D HOOSH_ALLOC_PROBE` build
-  and `scripts/memory-growth.py` (`--chunks N` for streams).
+  returns can be built on the stack (`sb_on`), as the events are. A keeper with a bound recycles what it drops
+  (`src/lib/keep.cyr`, 2.11.2: the cache, the audit chain), and a value it hands out is copied before its lock is
+  released. Measure with a `-D HOOSH_ALLOC_PROBE` build and `scripts/memory-growth.py` (`--chunks N` for streams;
+  `--cache-max`, `--hits`, `--audit`, `--otlp`, `--provider` for the keepers and provider shapes).
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
 - **Do not panic in library code** — return error codes / `Result`; reserve fatal exits for `main`.
 

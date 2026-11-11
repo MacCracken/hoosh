@@ -30,24 +30,30 @@ fn handle_health(cfd) {
 
 # _json_raw_value is jsonlite.cyr's and _ollama_embed_to_openai provider.cyr's since 2.9.22, so the tests run them.
 
+# 2.11.2 (ADR 013): the request's model, its records, the Ollama body and the error sentences are in the request arena,
+# or on the stack; through 2.11.1 every embeddings request kept them on the heap.
 fn handle_embeddings(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
-    var mf = _json_obj_str_field(body_ptr, body_len, "model", 5);
+    var a = req_arena();
+    var mfb[16];
+    var mf = _json_obj_str_field_in(body_ptr, body_len, "model", 5, &mfb);
     if (mf == 0 || load64(mf + 8) == 0) { return http_bad_request(cfd, "model field is required"); }
-    var model = alloc(load64(mf + 8) + 1);
+    var model = alloc_via(a, load64(mf + 8) + 1);
+    if (model == 0) { return http_error(cfd, "503", "Service Unavailable", "request memory unavailable"); }
     memcpy(model, load64(mf), load64(mf + 8));
     store8(model + load64(mf + 8), 0);
-    var input = alloc(16);
+    var inb[16];
+    var input = &inb;
     if (_json_raw_value(body_ptr, body_len, "input", 5, input) == 0) {
         return http_bad_request(cfd, "input is required (a string or an array of strings)");
     }
     var route = router_select(_router, model);
     if (route == 0) {
-        var nsb = str_builder_new();
+        var nsb = sb_room_a(a, 64 + strlen(model));
         str_builder_add_cstr(nsb, "No provider configured for model '");
         str_builder_add_cstr(nsb, _json_text(model));      # 2.10.2: text: http_error escapes, once
         str_builder_add_cstr(nsb, "'");
-        return http_error(cfd, "404", "Not Found", to_cstr(str_builder_build(nsb)));
+        return http_error(cfd, "404", "Not Found", sb_cstr(nsb));
     }
     # Same DLP policy as /v1/chat/completions: RESTRICTED is refused, and
     # CONFIDENTIAL may only go to a local provider.
@@ -68,11 +74,11 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     }
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC || prov == PROV_GOOGLE || prov == PROV_TENTIB) {
-        var usb = str_builder_new();
+        var usb = sb_room_a(a, 96);
         str_builder_add_cstr(usb, "provider '");
         str_builder_add_cstr(usb, provider_name(prov));
         str_builder_add_cstr(usb, "' does not serve /v1/embeddings");
-        return http_bad_request(cfd, to_cstr(str_builder_build(usb)));
+        return http_bad_request(cfd, sb_cstr(usb));
     }
     var erl = route_rate_limiter(route);
     if (erl != 0 && hoosh_ratelimit_check(erl) == 0) {
@@ -95,14 +101,14 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     } else {
         var resp = 0;
         if (prov == PROV_OLLAMA) {
-            var osb = str_builder_new();
+            var osb = sb_room_a(a, load64(input + 8) + strlen(model) * 2 + 64);
             str_builder_add_cstr(osb, "{\"model\":\"");
             _json_escape_into(osb, model, strlen(model));
             str_builder_add_cstr(osb, "\",\"input\":");
             _sb_add_span(osb, load64(input), load64(input + 8));
             str_builder_add_cstr(osb, "}");
-            var ob = str_builder_build(osb);
-            resp = http_post_local(base, "/api/embed", to_cstr(ob), str_len(ob));
+            var obl = sb_len(osb);
+            resp = http_post_local(base, "/api/embed", sb_cstr(osb), obl);
         } else {
             resp = http_post_local(base, "/v1/embeddings", body_ptr, body_len);
         }
@@ -853,9 +859,11 @@ fn handle_audit(cfd) {
         return http_error(cfd, "404", "Not Found",
           "audit logging not enabled");
     }
-    var sb = str_builder_new();
+    # 2.11.2: built in the request arena (ADR 013); audit_json takes the chain's lock while it reads.
+    var sb = sb_room_a(req_arena(), 16384);
     audit_json(_audit_chain, sb, 50);
-    return http_json_ok(cfd, str_builder_build(sb));
+    var n = sb_len(sb);
+    return http_ok(cfd, sb_cstr(sb), n);
 }
 
 # GET /v1/health/heartbeat
@@ -1312,8 +1320,9 @@ fn handle_metrics(cfd) {
 fn _validate_chat(pairs, body_ptr, body_len) {
     var model = bayan_json_get_by_cstr(pairs, "model");
     if (model == 0) { return "model field is required"; }
-    var mc = to_cstr(model);
-    var mlen = strlen(mc);
+    # 2.11.2: the value's own bytes are checked (a heap copy each request through 2.11.1, ADR 013).
+    var mc = str_data(model);
+    var mlen = str_len(model);
     if (mlen == 0) { return "model field is required"; }
     if (mlen > 256) { return "invalid model name"; }
     # Check for control chars in model name
@@ -1339,8 +1348,9 @@ var MAX_MESSAGES = 256;
 
 # "temperature must be between 0.0 and 2.0, got 3.5" — the offending value is
 # echoed so a client can see what it actually sent.
+# 2.11.2: these three messages are built in the request arena, as _resp_err, which copies them, is (ADR 013).
 fn _range_err(field, milli, lo, hi) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 128);
     str_builder_add_cstr(sb, field);
     str_builder_add_cstr(sb, " must be between ");
     str_builder_add_cstr(sb, lo);
@@ -1353,28 +1363,28 @@ fn _range_err(field, milli, lo, hi) {
     } else {
         _sb_add_milli(sb, milli);
     }
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # "Token pool 'staging' does not exist"
 fn _pool_err(name) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 64 + strlen(name));
     str_builder_add_cstr(sb, "Token pool '");
     str_builder_add_cstr(sb, _json_text(name));        # 2.10.2: text: _resp_err escapes, once
     str_builder_add_cstr(sb, "' does not exist");
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # "Too many messages: 300 (max 256)"
 fn _count_err(label, got, max) {
-    var sb = str_builder_new();
+    var sb = sb_room_a(req_arena(), 64 + strlen(label));
     str_builder_add_cstr(sb, label);
     str_builder_add_cstr(sb, ": ");
     str_builder_add_int(sb, got);
     str_builder_add_cstr(sb, " (max ");
     str_builder_add_int(sb, max);
     str_builder_add_cstr(sb, ")");
-    return to_cstr(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Check if request has "stream":true
@@ -1386,40 +1396,7 @@ fn _req_is_stream(body_ptr, body_len) {
 }
 
 # Extract raw "messages" array from request body
-fn _extract_messages(body_ptr, body_len) {
-    # Depth-aware: an identical "messages" key nested inside a tools schema used
-    # to win whenever it appeared first, so the validator saw a messages array,
-    # the request passed, and this returned the NESTED span — forwarding a
-    # schema fragment as the conversation.
-    var mi = _top_key_value(body_ptr, body_len, "\"messages\"", 10);
-    if (mi < 0) { return 0; }
-    if (mi >= body_len) { return 0; }
-    if (load8(body_ptr + mi) != 91) { return 0; }
-    var depth = 1;
-    var ms = mi;
-    mi = mi + 1;
-    while (mi < body_len && depth > 0) {
-        var ch = load8(body_ptr + mi);
-        if (ch == 91) { depth = depth + 1; }
-        if (ch == 93) { depth = depth - 1; }
-        if (ch == 34) {
-            mi = mi + 1;
-            while (mi < body_len) {
-                if (load8(body_ptr + mi) == 34) { break; }
-                if (load8(body_ptr + mi) == 92) { mi = mi + 1; }
-                mi = mi + 1;
-            }
-        }
-        mi = mi + 1;
-    }
-    # Return packed: ptr * 0x100000000 + len
-    var mlen = mi - ms;
-    var result = alloc(16);
-    if (result == 0) { return 0; }
-    store64(result, body_ptr + ms);
-    store64(result + 8, mlen);
-    return result;
-}
+# _extract_messages and _extract_messages_a are reqparse.cyr's since 2.11.2, so the tests run them.
 
 # Stream one SSE chunk wrapping a content token (already escaped from the provider), one carrying an
 # extended-thinking delta (2.5.0) and one carrying tool_calls (passed through verbatim). 2.10.3: built in this
@@ -1464,29 +1441,38 @@ fn _sse_stop(cfd, model, finish, usage) {
 # Convert an Anthropic streaming event into an OpenAI tool_call delta and emit
 # it. `content_block_start` (tool_use) carries the id+name; `input_json_delta`
 # carries incremental `partial_json` argument fragments. Returns 1 if emitted.
+# 2.11.2 (ADR 013): this runs for every event of an Anthropic stream, so its records and the delta it writes are on
+# the stack, and its fields are appended in place. Through 2.11.1 each tool-call fragment kept a builder, two field
+# records, a copy of each field and the delta's copy on the heap. A delta past the stack buffer grows on the heap, as
+# any builder does, and leaks only that.
 fn _emit_anthropic_tool_delta(cfd, model, data, dlen, st) {
     var is_start = _cmp_substr(data, dlen, "content_block_start", 19) >= 0;
     var is_delta = _cmp_substr(data, dlen, "input_json_delta", 16) >= 0;
     if (is_start == 0 && is_delta == 0) { return 0; }
     var idx = _json_extract_int(data, dlen, "index", 5);
+    var hdr[24];
+    var buf[512];
     if (is_start == 1) {
         if (_cmp_substr(data, dlen, "tool_use", 8) < 0) { return 0; }
-        var idf = _json_obj_str_field(data, dlen, "id", 2);
-        var nmf = _json_obj_str_field(data, dlen, "name", 4);
+        var idb[16];
+        var nmb[16];
+        var idf = _json_obj_str_field_in(data, dlen, "id", 2, &idb);
+        var nmf = _json_obj_str_field_in(data, dlen, "name", 4, &nmb);
         if (idf == 0 || nmf == 0) { return 0; }
         outcome_tool_started(st, idx);             # 2.8.0: fragments for this index may now be forwarded
-        var sb = str_builder_new();
+        var sb = sb_on(&hdr, &buf, 512);
         str_builder_add_cstr(sb, "[{\"index\":");
         str_builder_add_int(sb, idx);
         str_builder_add_cstr(sb, ",\"id\":\"");
-        str_builder_add(sb, str_new(load64(idf), load64(idf + 8)));
+        sb_add_bytes(sb, load64(idf), load64(idf + 8));
         str_builder_add_cstr(sb, "\",\"type\":\"function\",\"function\":{\"name\":\"");
-        str_builder_add(sb, str_new(load64(nmf), load64(nmf + 8)));
+        sb_add_bytes(sb, load64(nmf), load64(nmf + 8));
         str_builder_add_cstr(sb, "\",\"arguments\":\"\"}}]");
-        _sse_tool_chunk(cfd, model, to_cstr(str_builder_build(sb)));
+        _sse_tool_chunk(cfd, model, sb_cstr(sb));
         return 1;
     }
-    var pjf = _json_obj_str_field(data, dlen, "partial_json", 12);
+    var pjb[16];
+    var pjf = _json_obj_str_field_in(data, dlen, "partial_json", 12, &pjb);
     if (pjf == 0) { return 0; }
     # 2.8.0: arguments for a block whose START was never forwarded belong to no call — see outcome.cyr's tool
     # guard. Dropped and counted, never sent headerless.
@@ -1494,14 +1480,14 @@ fn _emit_anthropic_tool_delta(cfd, model, data, dlen, st) {
         outcome_note_orphan(st);
         return 0;
     }
-    var sb2 = str_builder_new();
+    var sb2 = sb_on(&hdr, &buf, 512);
     str_builder_add_cstr(sb2, "[{\"index\":");
     str_builder_add_int(sb2, idx);
     str_builder_add_cstr(sb2, ",\"function\":{\"arguments\":\"");
     # partial_json is already escaped to fit the event string — emit verbatim.
-    str_builder_add(sb2, str_new(load64(pjf), load64(pjf + 8)));
+    sb_add_bytes(sb2, load64(pjf), load64(pjf + 8));
     str_builder_add_cstr(sb2, "\"}}]");
-    _sse_tool_chunk(cfd, model, to_cstr(str_builder_build(sb2)));
+    _sse_tool_chunk(cfd, model, sb_cstr(sb2));
     return 1;
 }
 
@@ -1599,7 +1585,7 @@ fn _remote_stream_cb(ctx, ev) {
 fn _remote_stream_body(route, model, msg_raw, msg_len, tools_raw, tools_len, gen) {
     var prov = route_provider(route);
     if (prov == PROV_ANTHROPIC) {
-        return _build_anthropic_body_x(model, msg_raw, msg_len, 1, tools_raw, tools_len, gen,
+        return _build_anthropic_body_x(req_arena(), model, msg_raw, msg_len, 1, tools_raw, tools_len, gen,
           catalog_find_on(PROV_ANTHROPIC, route_base_url(route), model));
     }
     if (prov == PROV_GOOGLE) {
@@ -1655,7 +1641,15 @@ fn _stream_meter(route, model, bpool, est_tokens, st, gen, served) {
 fn handle_chat_stream(cfd, route, model, msg_raw, msg_len, tools_raw, tools_len, gen, bpool, est_tokens) {
     # 2.7.0: one id and created time for every chunk of this stream.
     chat_id_new();
-    var oc = outcome_new();                   # 2.8.0: finish reason, usage, the tool guard (outcome.cyr)
+    var oc = outcome_new_a(req_arena());      # 2.8.0: finish reason, usage, the tool guard (outcome.cyr); 2.11.2: arena
+    if (oc == 0) {
+        if (bpool != 0) {
+            mutex_lock(_chat_lock);
+            pool_commit(bpool, est_tokens, 0);
+            mutex_unlock(_chat_lock);
+        }
+        return http_error(cfd, "503", "Service Unavailable", "request memory unavailable");
+    }
     # 2.11.0: a tentib route decodes in this process (tentib_local.cyr): each character goes out as it is decoded.
     if (route_provider(route) == PROV_TENTIB) {
         if (tnt_ready() == 0) {
@@ -1923,14 +1917,17 @@ fn _embed_query_body(body_ptr, body_len) {
     var route = router_select(_router, model);
     if (route == 0) { return 0; }
     if (route_provider(route) == PROV_TENTIB) { return 0; }     # 2.11.0: a tentib model embeds nothing
-    var sb = str_builder_new();
+    # 2.11.2 (ADR 013): the query, the remote answer's copy and the result record are in the request arena. The vector
+    # stays on the heap: the semantic index keeps it when the answer is cached.
+    var a = req_arena();
+    var sb = sb_room_a(a, body_len * 2 + strlen(model) + 64);   # _json_escape_into at most doubles a byte
     str_builder_add_cstr(sb, "{\"model\":\"");
     str_builder_add_cstr(sb, model);
     str_builder_add_cstr(sb, "\",\"input\":\"");
     _json_escape_into(sb, body_ptr, body_len);
     str_builder_add_cstr(sb, "\"}");
-    var body = to_cstr(str_builder_build(sb));
-    var blen = strlen(body);
+    var blen = sb_len(sb);
+    var body = sb_cstr(sb);
     var rb = 0;
     var rbl = 0;
     if (route_is_remote(route) == 1) {
@@ -1946,7 +1943,8 @@ fn _embed_query_body(body_ptr, body_len) {
         var sst = sandhi_http_status(sresp);
         if (sst < 200 || sst >= 300) { return 0; }
         rbl = sandhi_http_body_len(sresp);
-        rb = alloc(rbl + 1);
+        rb = alloc_via(a, rbl + 1);
+        if (rb == 0) { return 0; }
         memcpy(rb, sandhi_http_body(sresp), rbl);
         store8(rb + rbl, 0);
     } else {
@@ -1969,10 +1967,13 @@ fn _embed_query_body(body_ptr, body_len) {
             rbl = str_len(norm);
         }
     }
-    var nptr = alloc(8);
+    var nb[8];
+    var nptr = &nb;
+    store64(nptr, 0);
     var vec = semantic_parse_embedding(rb, rbl, nptr);
     if (load64(nptr) == 0) { return 0; }
-    var r = alloc(16);
+    var r = alloc_via(a, 16);
+    if (r == 0) { return 0; }
     store64(r, vec);
     store64(r + 8, load64(nptr));
     return r;
@@ -2000,9 +2001,10 @@ fn _embed_query_body(body_ptr, body_len) {
 # streaming responses are never cache-served).
 #
 # 2.10.3: the record, the parsed request, the cache key and the generation options are in this thread's request
-# arena (reqmem.cyr), released when its next job starts. What the record hands on is either there, process memory
-# (the route, the pool) or heap strings a keeper may store (model_cstr: audit, the cost records); a terminal
-# descriptor is on the heap.
+# arena (reqmem.cyr), released when its next job starts. 2.11.2: so are the model, the pool name, the prompt and the
+# message and tool spans, since audit_record copies the model it keeps (ADR 013's fourth item). What the record
+# hands on is there or process memory (the route, the pool); so is a terminal descriptor (2.11.2: a refusal and a
+# cache hit, whose copy is made here under _chat_lock, since the cache recycles what it evicts).
 fn _chat_prep(body_ptr, body_len, is_stream) {
     var a = req_arena();
     var out = alloc_via(a, 112);   # 2.5.0: +104 holds the extended-thinking budget (104 bytes were all used)
@@ -2058,7 +2060,8 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
 
     # Message-count bounds. An empty array reaches a provider as a malformed
     # request; an unbounded one is a cheap way to make hoosh do expensive work.
-    var vmsgs = _extract_messages(body_ptr, body_len);
+    # 2.11.2: the span once, in the arena; the forward below reuses it (it scanned the body twice through 2.11.1).
+    var vmsgs = _extract_messages_a(a, body_ptr, body_len);
     if (vmsgs != 0) {
         var vmc = _json_array_count(load64(vmsgs), load64(vmsgs + 8));
         if (vmc == 0) {
@@ -2074,7 +2077,8 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     }
 
     var model = bayan_json_get_by_cstr(pairs, "model");
-    var model_cstr = to_cstr(model);
+    # 2.11.2: in the arena (ADR 013's fourth item). audit_record copies what it keeps; nothing else stores it.
+    var model_cstr = to_cstr_a(a, model);
     # 2.5.9: hardware-aware selection. When the model's size can be read from
     # its name and it does not fit the VRAM actually free, prefer a remote
     # provider over a local one that would OOM. Unknown-size models and
@@ -2121,11 +2125,13 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     var sem_n = 0;
     if (is_stream == 0) {
         ckey = _cache_key_a(a, model_cstr, body_ptr, body_len);
+        # 2.11.2: a hit is copied into the arena here, under _chat_lock (chat_rehead_a): the cache recycles what it
+        # evicts, so the answer written after the lock is released must not be the cache's own bytes.
         var cached = cache_get(_cache, ckey);
+        if (cached != 0) { cached = chat_rehead_a(a, cached); }
         if (cached != 0) {
             hlog_info("chat: response cache hit");
-            cached = chat_rehead(cached);
-            store64(out + 8, _resp_set_header(_resp_new("200", "OK", cached, strlen(cached)),
+            store64(out + 8, _resp_set_header(_resp_new_a(a, "200", "OK", cached, strlen(cached)),
                 "X-Hoosh-Cache: HIT"));
             return out;
         }
@@ -2148,11 +2154,11 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                 var skey = semantic_find_model(sem_vec, sem_n, _sem_scope(model_cstr));
                 if (skey != 0) {
                     var scached = cache_get(_cache, skey);
+                    if (scached != 0) { scached = chat_rehead_a(a, scached); }
                     if (scached != 0) {
                         hlog_info("chat: semantic cache hit");
-                        scached = chat_rehead(scached);
                         store64(out + 8,
-                          _resp_set_header(_resp_new("200", "OK", scached, strlen(scached)),
+                          _resp_set_header(_resp_new_a(a, "200", "OK", scached, strlen(scached)),
                             "X-Hoosh-Cache: SEMANTIC"));
                         return out;
                     }
@@ -2172,7 +2178,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     # Token budget: reserve before inference
     var pool_name = "default";
     var pool_str = bayan_json_get_by_cstr(pairs, "pool");
-    if (pool_str != 0) { pool_name = to_cstr(pool_str); }
+    if (pool_str != 0) { pool_name = to_cstr_a(a, pool_str); }   # a lookup key (budget_get_pool)
     # 2.5.2: per-provider output clamp. A route may cap what any one request can
     # ask for, so an over-limit request is trimmed rather than refused.
     var mt_limit = route_max_tokens_limit(route);
@@ -2234,17 +2240,17 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     pool_reserve(bpool, est_tokens);
 
     # Extract messages + optional compression + compaction
-    var msgs = _extract_messages(body_ptr, body_len);
+    var msgs = vmsgs;
     var msg_raw = 0;
     var msg_raw_len = 0;
     if (msgs != 0) {
         msg_raw = load64(msgs);
         msg_raw_len = load64(msgs + 8);
         if (msg_raw_len > 0 && compression_is_enabled() == 1) {
-            var compressed = compress_ws_json(msg_raw, msg_raw_len);
+            var compressed = compress_ws_json_a(a, msg_raw, msg_raw_len);    # 2.11.2: in the arena
             msg_raw = load64(compressed);
             msg_raw_len = load64(compressed + 8);
-            var pruned = prune_tool_pairs(msg_raw, msg_raw_len);
+            var pruned = prune_tool_pairs_a(a, msg_raw, msg_raw_len);
             msg_raw = load64(pruned);
             msg_raw_len = load64(pruned + 8);
         }
@@ -2262,7 +2268,7 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
                 var derived = context_token_limit(load64(mmeta));
                 if (derived > 0) { token_limit = derived; }
             }
-            var compacted = compact_messages(msg_raw, msg_raw_len, token_limit, cpt_x10);
+            var compacted = compact_messages_a(a, msg_raw, msg_raw_len, token_limit, cpt_x10);
             msg_raw = load64(compacted);
             msg_raw_len = load64(compacted + 8);
         }
@@ -2271,10 +2277,10 @@ fn _chat_prep(body_ptr, body_len, is_stream) {
     var prompt_cstr = "hello";
     if (msg_raw == 0) {
         var prompt_val = bayan_json_get_by_cstr(pairs, "prompt");
-        if (prompt_val != 0) { prompt_cstr = to_cstr(prompt_val); }
+        if (prompt_val != 0) { prompt_cstr = to_cstr_a(a, prompt_val); }
     }
 
-    var tools = _extract_tools(body_ptr, body_len);
+    var tools = _extract_tools_a(a, body_ptr, body_len);
     var tools_raw = 0;
     var tools_len = 0;
     if (tools != 0) {

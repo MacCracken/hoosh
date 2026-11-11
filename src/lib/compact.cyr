@@ -118,12 +118,21 @@ fn _msg_role_is(p, len, i, want, want_len) {
 var MAX_MSG_OFFSETS = 256;
 
 fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
+    return compact_messages_a(default_alloc(), msg_ptr, msg_len, max_tokens, cpt_x10);
+}
+
+# compact_messages in `a` (2.11.2, ADR 013): the chat path passes its request arena, where the result, the offset
+# table and the compacted array are built, and the array is read in place. Through 2.11.1 the result alone kept 16
+# bytes per request on the heap, and a compaction kept its offset table, a copy of every message it kept, and the
+# array twice over.
+fn compact_messages_a(a, msg_ptr, msg_len, max_tokens, cpt_x10) {
     var ratio = cpt_x10;
     if (ratio < 1) { ratio = CHARS_PER_TOKEN_X10; }
     var est = estimate_tokens(msg_ptr, msg_len, ratio);
     if (est <= max_tokens) {
         # Already fits
-        var r = alloc(16);
+        var r = alloc_via(a, 16);
+        if (r == 0) { return 0; }
         store64(r, msg_ptr);
         store64(r + 8, msg_len);
         return r;
@@ -176,9 +185,10 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
 
     # Find message boundaries (scan for {"role": patterns)
     # Collect start offsets of each message
-    var offsets = alloc(MAX_MSG_OFFSETS * 8);
+    var offsets = alloc_via(a, MAX_MSG_OFFSETS * 8);
     if (offsets == 0) {
-        var oom = alloc(16);
+        var oom = alloc_via(a, 16);
+        if (oom == 0) { return 0; }
         store64(oom, msg_ptr);
         store64(oom + 8, msg_len);
         return oom;
@@ -268,15 +278,13 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
     if (floor_from < 0) { floor_from = 0; }
     if (keep_from > floor_from) { keep_from = floor_from; }
 
-    # Build compacted array: [system_msg, ...recent_msgs]
-    var sb = str_builder_new();
+    # Build compacted array: [system_msg, ...recent_msgs]. It is never longer than the array it compacts, so a
+    # builder with that much room in `a` never grows (sb_room_a), and each message is appended in place.
+    var sb = sb_room_a(a, msg_len + 16);
     str_builder_add_cstr(sb, "[");
     var first = 1;
     if (has_system == 1) {
-        var sys_buf = alloc(sys_chars + 1);
-        memcpy(sys_buf, msg_ptr + sys_start, sys_chars);
-        store8(sys_buf + sys_chars, 0);
-        str_builder_add_cstr(sb, sys_buf);
+        sb_add_bytes(sb, msg_ptr + sys_start, sys_chars);
         first = 0;
     }
     i = keep_from;
@@ -309,20 +317,15 @@ fn compact_messages(msg_ptr, msg_len, max_tokens, cpt_x10) {
             j = j + 1;
         }
         if (first == 0) { str_builder_add_cstr(sb, ","); }
-        var mlen = end - start;
-        var mbuf = alloc(mlen + 1);
-        memcpy(mbuf, msg_ptr + start, mlen);
-        store8(mbuf + mlen, 0);
-        str_builder_add_cstr(sb, mbuf);
+        sb_add_bytes(sb, msg_ptr + start, end - start);
         first = 0;
         i = i + 1;
     }
     str_builder_add_cstr(sb, "]");
-    var result_str = str_builder_build(sb);
-    var result_data = to_cstr(result_str);
-    var result_len = str_len(result_str);
-    var r = alloc(16);
+    var result_data = sb_cstr(sb);
+    var r = alloc_via(a, 16);
+    if (r == 0) { return 0; }
     store64(r, result_data);
-    store64(r + 8, result_len);
+    store64(r + 8, sb_len(sb));
     return r;
 }

@@ -60,7 +60,8 @@ fn health_probe(route) {
         if (is_ok(_sr_t) == 0) { return 0; }
         var fd = _sr_v;
         var ok = 0;
-        if (net_connect_nb(fd, host_addr(url_host(base)), url_port(base),
+        var hbuf[256];                     # 2.11.2: the host on the stack (ADR 013), not a heap copy per probe
+        if (net_connect_nb(fd, host_addr(url_host_in(base, &hbuf, 256)), url_port(base),
             HTTP_CONNECT_TIMEOUT_MS) == 0) {
             ok = 1;
         }

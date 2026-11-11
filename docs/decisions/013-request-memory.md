@@ -1,7 +1,10 @@
 # ADR-013: What a request's memory belongs to
 
-**Status:** Accepted (2.10.3). 2.10.0 and 2.10.2 ship the fixes in their "Done" sections, and 2.10.3 decision 1 for
-the chat path, with decision 2's boundary for the keepers it reaches. The rest is on the roadmap.
+**Status:** Accepted (2.10.3), done for the gateway's request paths and bounded keepers in 2.11.2.
+- 2.10.0 and 2.10.2 ship the fixes in their "Done" sections.
+- 2.10.3 ships decision 1 for the chat path, with decision 2's boundary for the keepers it reaches.
+- 2.11.2 ships the rest of decisions 1–3: every other path a chat reaches, and the recycling.
+- What is left (the semantic index, the endpoints not yet measured) is on the roadmap.
 **Date:** 2026-11-05
 
 ## Context
@@ -111,6 +114,57 @@ marks in a scratch build, median of 300 unique chats; the rest of the 974 is the
 | the cache's copies | 496 | its key, value and entry: process memory, kept until evicted (decision 3) |
 | assemble and write | 0 | |
 
+## Done in 2.11.2
+
+**Decision 1, the rest of the request:**
+- **Connection handling:** the path's copy is in the arena, the request log line on the stack, and the accept loop's
+  connection record is recycled (`wq.cyr`).
+- **The forward:** the reply text is in the arena, the finish word on the stack, and the local client's response record
+  in its per-thread scratch block, which also holds the body it points at.
+- **Prep:** the spans, the model, the pool and the prompt, and compaction, compression and pruning.
+- **The other paths:** every provider's body (Anthropic's and Gemini's kept about 1 KB a request), the JSON field
+  readers' records, a remote request's URL and headers, the tool-call converters, embeddings, refusals and a stream's
+  record.
+- A per-event path (a stream's finish word, its error check, an Anthropic tool delta) uses the stack, so a long stream
+  does not grow the arena.
+
+**Decision 2:** `audit_record` copies the model, the one argument that comes from a request.
+
+**Decision 3, recycling** (`src/lib/keep.cyr`: a size-class pool, four classes per power of two from 32 bytes to 1 MiB,
+each block's class in an 8-byte header, poisoned on free in the tests):
+- **The response cache.** Its entries go on a free list, and its key and value copies go back to its pool. Two rules
+  keep that safe:
+  - a hit is copied into the request arena under `_chat_lock` before the answer is written;
+  - a removal drops every semantic entry under the key before the key is reused.
+- **The audit chain.** An entry holds its three hashes, and evicted entries and model copies are reused. Hashing and
+  verifying allocate nothing. The chain has a lock of its own, which `GET /v1/audit` takes: it read the chain unlocked,
+  which was safe only while nothing was reused.
+- **OTLP.** Its ring slots are reused as the event ring's are (`mem_slot_put`, shared in `reqmem.cyr`), and the exporter
+  writes every batch into one buffer, with one https export in flight.
+
+**After 2.11.2** (`scripts/memory-growth.py`, `-D HOOSH_ALLOC_PROBE` builds of both releases, same host, bytes kept per
+request after 200 warm-up requests):
+
+| | 2.11.1 | 2.11.2 |
+|---|---:|---:|
+| buffered chat, the cache filling | 974 | 622: the cached answer, held until evicted |
+| buffered chat, the cache full (`--cache-max 100`) | 894 | 6 |
+| a cache hit | 1,632 | 0 |
+| a stream, 1 token / 1,000 tokens | 352 / 353 | 0 / 0 |
+| an Anthropic / Gemini / OpenAI-compatible route, the cache full | 1,865 / 1,852 / 900 | 12 / 12 / 12 |
+| the audit chain on and full, buffered / streamed | 2,318 / 1,776 | 6 / 0 |
+| `GET /v1/audit`, 100 entries | 154,961 | 0 |
+| OTLP export on | 2,875 | 84 |
+
+- The 6 and 12 bytes are the pool allocating a block in a class it has not used yet: a full cache keeps 2 over 6,000
+  requests.
+- The 84 is the export's batch buffer growing once: 31 over 8,000 requests.
+- While the cache fills, a cached answer takes about 90 bytes more than it did, for a 72-byte entry, the pool's headers
+  and its rounding. The growth stops at `max_entries`.
+
+The target this ADR set, request memory under 1 KiB per request, is met with room to spare: request memory is now 0 for
+every shape measured, and what remains is process memory the keepers bound.
+
 ## Decision
 
 Treat the two kinds separately.
@@ -137,7 +191,7 @@ A request-arena pointer must never be stored where it outlives the job. The plac
 | `cache_insert` | the response envelope and the cache key | copy both to process memory |
 | semantic index (`semantic_insert_model`) | the key, the scope string and the embedding vector | copy |
 | events (`event_emit`) | the event JSON in the recent-events ring | copy |
-| audit (`audit_record`) | event, level, message, provider, model strings | copy (it keeps the caller's pointers today) |
+| audit (`audit_record`) | event, level, message, provider, model strings | copy (the model since 2.11.2; the rest are literals) |
 | async batch (`batch_submit`) | the response descriptors a later `GET /v1/batch/{id}` reads | allocate from process memory |
 | cost records (`_cost_find`) | the route's `base_url` | already process memory (the route's) |
 | OTLP spans | span fields | copy |
@@ -179,6 +233,6 @@ made. It stays an option for later, behind an audit of every lazy initialization
 
 ## References
 
-- CHANGELOG 2.10.0 (the measurements), 2.10.3 (the arena, the stream, the boundary), 2.9.3 (`_remote_arena`), 2.5.11
-  (the per-thread request buffer).
+- CHANGELOG 2.10.0 (the measurements), 2.10.3 (the arena, the stream, the boundary), 2.11.2 (the rest, and the
+  recycling), 2.9.3 (`_remote_arena`), 2.5.11 (the per-thread request buffer).
 - ADR 011 (the worker pool and its jobs).

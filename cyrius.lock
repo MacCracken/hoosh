@@ -1,6 +1,6 @@
 commit	ccdcd9c035e205c1373b3c0d2c5878004da6edbc	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel	2.5.6
 commit	af2bb1a98f31d6447ff2ea4b937dcb92acc543cb	rosnet	https://github.com/MacCracken/rosnet	1.4.1
-commit	b29ae7ce74fdb8bdd88c21f29a36a9f61b55de06	tentib	https://github.com/MacCracken/tentib	1.4.0
+commit	63cfcbf0a4a9c041eb3d29e89f3ec9a732f79bf8	tentib	https://github.com/MacCracken/tentib	1.5.1
 commit	cdb74e281920da6130bd48f1de37d9b150ab0d3d	tyche	https://github.com/MacCracken/tyche	1.2.2
 807532a0cfad2147fdb6ecebea11a5e2224611d89454349545f50b3daed59d9d  lib/ai-hwaccel.cyr
 346716377b00f36e58eb16cf7fe1dd62dd8fe577930d0d0429f822795b35817c  lib/alloc.cyr
@@ -66,7 +66,7 @@ cba3e2340becea360bfd1f7a7ee2c8f80b949924bec4d70b82b1a69bddc0ae08  lib/syscalls_m
 82c313fb07ab75bd24d813d57ed0b8f2ba9ac4c6240246f9b72d1582576e0cdb  lib/syscalls_x86_64_agnos.cyr
 c09cac68c708fba7aa2165cfd5033f002557889148b69102c53080bd253eb40b  lib/syscalls_x86_64_linux.cyr
 e07669b3f49bc0b2050b3b4982acb7cf8630d8d21b1e762b08adeeb7cb2ad267  lib/tagged.cyr
-16753a8ffe1d1e86cd96a5412ba8c0b3698568f7e6c13676d7a1f1cd32c348b7  lib/tentib.cyr
+55c581cc2cfb5dd32938da9689cc19eae4718738aa67d21074b91b1764cd07dd  lib/tentib.cyr
 a4e493bd4b8ce6fbc69557009d4e08cc24d394628b95432bf717cbe32c0928bc  lib/thread.cyr
 9238120a45447c7ac6ce916aeeade6ffacf6065b207a3a16a04f74d20eaf41df  lib/thread_agnos.cyr
 f097f73da5541511cd2f30fb12bbd464a636ae8a905750e16326121c944af8f6  lib/thread_local.cyr

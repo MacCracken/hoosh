@@ -41,6 +41,7 @@ include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
 include "src/lib/types.cyr"
 include "src/lib/reqmem.cyr"
+include "src/lib/keep.cyr"   # 2.11.2: for real, as the cache recycles through it
 include "src/lib/logging.cyr"
 include "src/lib/dlp.cyr"
 include "src/lib/ratelimit.cyr"

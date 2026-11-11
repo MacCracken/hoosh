@@ -8,10 +8,12 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.11.1 (cyrius 6.7.18). 2.11.0 serves a packed ternary model in hoosh's own process, through tentib's
+**Current**: v2.11.2 (cyrius 6.7.18). 2.11.0 serves a packed ternary model in hoosh's own process, through tentib's
 library bundle: a `type = "tentib"` provider, buffered and streamed ([ADR 014](../decisions/014-in-process-ternary-inference.md)).
-2.11.1 pins tentib 1.4.0: a token is one cached decode step, and a same-shape reload keeps no memory. See the CHANGELOG.
-**Next**: the rest of ADR 013 below, then *Then, in any order*.
+2.11.1 pins tentib 1.4.0: a token is one cached decode step, and a same-shape reload keeps no memory. 2.11.2 pins tentib
+1.5.1 and loads for serving only, and finishes [ADR 013](../decisions/013-request-memory.md): a request keeps nothing,
+and the cache, the audit chain and the OTLP ring recycle what they drop. See the CHANGELOG.
+**Next**: *Then, in any order* below.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-04.
 - **2.9.x patches** fix things without changing what a client sees.
@@ -103,23 +105,30 @@ per insert** once full, which with mostly new prompts was within about a minute.
 - **The event ring recycles its slots** (decision 3), and an event is built on the stack: 328 bytes per completion, and
   57.5 KB per `GET /v1/events/recent`, are gone.
 
-### 2.10.x — the rest of ADR 013 *(highest priority)*
+### 2.11.2 — the rest of ADR 013 *(done)*
 
-What a buffered chat still keeps, about 480 bytes besides the cache's copy (`alloc_used()` per phase, ADR 013's table):
-1. **Connection handling before the handler** (184 bytes): `http_parse_path`'s copy, the log line, auth.
-2. **The forward's extractions** (144 bytes): the local client's record, and each `_json_extract_str` copy of the reply
-   text and finish reason. `_json_str_span`
-   (2.10.3) reads them with no copy; give the extractors an `_a` form, or read spans where the text goes straight into
-   the completion body.
-3. **The other paths:** embeddings, the Anthropic and Gemini body builders (`_build_anthropic_body_x` has three
-   builders and a `str_new` per part), the remote stream callback's tool-call deltas, and error descriptors.
-4. **Decision 2's remaining keepers:** `audit_record` keeps its caller's pointers, so anything that reaches it must stay
-   on the heap (today `model_cstr` does). Copy in `audit_record` before moving such strings into the arena.
-5. **Decision 3, recycling:** cache entries, values and keys, and audit and OTLP past their maxima, on free lists. The
-   event ring's recycled slots (2.10.3) are the pattern: a keeper with a bound reuses its own storage.
+- **A request keeps nothing:** connection handling, the forward's extractions, prep, every provider's body, tool calls,
+  embeddings, refusals and a stream's record build in the request arena or on the stack. A stream keeps 0 bytes at
+  1,000 tokens, and a cache hit 0.
+- **`audit_record` copies the model it keeps,** so the chat path's model moved into the arena.
+- **The keepers recycle** (`src/lib/keep.cyr`): with the response cache full a chat keeps 6 bytes (894 in 2.11.1), with
+  the audit chain full 6 (2,318), and `GET /v1/audit` keeps nothing (155 KB at 100 entries). ADR 013's "Done in 2.11.2"
+  has the table.
+
+### ADR 013 — what is left
+
+- **The semantic index.** An insert keeps a 32-byte entry, the embedding vector and a scope string, and a removal frees
+  none of them; a lookup that inserts nothing leaves its query vector and scope string on the heap. It is opt-in
+  (`[semantic]`, an embedding model). Recycle the entries and vectors as the cache does, and build the lookup's in the
+  arena.
+- **Paths not measured yet:** the hardware endpoints (ai-hwaccel allocates for each answer), `POST /v1/tools/call`
+  (bote), the token-pool endpoints and the batch handler's own bodies. Measure each with `scripts/memory-growth.py`
+  (`--get`, or a POST mode to add) before converting it.
+- **A remote request's TLS state** (~179 KB each) is sandhi's; see *Upstream-gated*.
 
 Measure each step with `scripts/memory-growth.py` against a `-D HOOSH_ALLOC_PROBE` build: it reports `alloc_used()` per
-request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `--get` measures a listing.
+request, buffered and streamed. `--chunks N` makes a stream N tokens long, `--get` measures a listing, `--cache-max`,
+`--hits`, `--audit` and `--otlp` exercise the keepers, and `--provider` each provider's shape.
 
 ### Then, in any order
 
@@ -155,23 +164,34 @@ request, buffered and streamed, and `--chunks N` makes a stream N tokens long. `
 - Incremental decode with one cache shared by turns, the header peek and the declared byte vocabulary, and same-shape
   reloads that keep no memory ([ADR 014](../decisions/014-in-process-ternary-inference.md)'s 2.11.1 update).
 
+### 2.11.2 — tentib 1.5.1 *(done)*
+
+- A load for serving only (`tx_pack_deserialize_serving`): the same checks and logits, and only what serving reads,
+  164,888 bytes at T = 25, C = 16 instead of 732,136 ([ADR 014](../decisions/014-in-process-ternary-inference.md)'s 2.11.2
+  update).
+
 ### 2.11.x — what tentib's next releases make possible
 
 Each waits on tentib (`docs/development/roadmap.md` there), then is a pin bump and a change here.
 - **A model's own vocabulary.** A file can declare the byte vocabulary (tentib 1.4.0), but not another one, so hoosh
   still requires V = 256 and reads bytes as tokens. When the artifact can carry a tokenizer (tentib's 1.4.x token
   table), read it and lift the byte rule.
-- **Memory per change of shape.** A load of a model of another shape keeps the one it replaces: 802,376 bytes at
-  T = 30, C = 16, and `tx_model_alloc_bytes` in general (a same-shape reload keeps nothing since 2.11.1). tentib's 1.5.x
-  serving-only allocation shrinks it. Its 2.0.0 model handles end it, and would also allow more than one tentib route per
-  process and a decode cache per reply.
+- **Memory per change of shape.** A load of a model of another shape keeps the one it replaces. Since 2.11.2 that is
+  `tx_serve_alloc_bytes`, tentib 1.5.0's serving-only figure: 190,168 bytes at T = 30, C = 16 (802,376 for a full load).
+  A same-shape reload keeps nothing since 2.11.1.
+  - **tentib's 2-bit store** (1.5.1, internal there) would cut the weights to a quarter, at 2–3× the decode cost
+    until cyrius has a vector shuffle. Adopt it when tentib makes it public, as an opt-in for large models.
+  - **tentib's 2.0.0 model handles** end the kept memory, and would also allow more than one tentib route per process
+    and a decode cache per reply.
 
 ### 2.11.x — hoosh's own follow-ups
 
 - **Sampling.** `temperature` and `top_p` are ignored on a tentib route (greedy only). tentib leaves the logits in
   `ki_logits`, so hoosh can sample from them itself.
-- **murti, when it is ported.** murti is AGNOS's general local inference engine and still a Rust tree. Once it has a
-  Cyrius port, adopt it as a provider; whether ternary models then move behind it is a new decision, not ADR 014's.
+- **The model-load seam stays in hoosh.** There is no murti port to adopt: the Rust repo was deleted 2026-11-10.
+  Per agnosticos `docs/development/planning/murti.md`, the load → place → dispatch → pool seam grows inside hoosh's
+  local providers, and the tentib provider is its first piece. It moves to its own repo only if a second consumer
+  needs it outside hoosh. Whether ternary models would then move behind that repo is a new decision, not ADR 014's.
 
 ---
 

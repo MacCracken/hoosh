@@ -16,10 +16,10 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.7.18) |
-| **Source** | ~17,800 lines / 47 files (+ 2 vendored distlib bundles) |
+| **Source** | ~18,600 lines / 48 files (+ 2 vendored distlib bundles) |
 | **Binary** | ~2.7 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
 | **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, tentib with rosnet + tyche, bote, majra) + cyrius stdlib |
-| **Tests** | 2134 assertions, 181 groups, 0 failures |
+| **Tests** | 2263 assertions, 187 groups, 0 failures |
 | **Benchmarks** | 39 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 18 (9 local, 1 in-process, 8 remote) |
@@ -247,7 +247,8 @@ tokens = "your-secret-token"
 
 # In-process ternary inference (2.11.0): a packed model tentib wrote, served with no socket.
 # One per process; tokens are bytes (V = 256); a reload of the same file loads nothing, and one of
-# another model of the same shape reuses the model's memory (2.11.1).
+# another model of the same shape reuses the model's memory (2.11.1). A model is loaded for serving
+# only (2.11.2): 164,888 bytes at T = 25, C = 16, not the 732,136 of a full load.
 # [[providers]]
 # type = "tentib"
 # model_file = "/var/lib/hoosh/model.tpk"
@@ -283,14 +284,15 @@ cyrius test tests/hoosh.tcyr
 cyrius bench tests/hoosh.bcyr
 ```
 
-`tests/hoosh.tcyr` includes 40 of the 46 `src/lib` modules for real, and copies no `src/` code (since 2.9.22;
+`tests/hoosh.tcyr` includes 41 of the 47 `src/lib` modules for real, and copies no `src/` code (since 2.9.22;
 `scripts/coverage.sh` lists them). `scripts/wire-smoke.py` runs a real gateway at stub providers and reads it as a
 strict client does. The suite covers: error/HTTP mapping, routing (4 strategies), token budgets,
 cache + cost, queue priority, health FSM, rate limiting, metrics, audit chain
 (HMAC-SHA256), config (TOML), JSON, token counting, DLP, cosine similarity, auth,
 tool-call conversion + pruning, MCP dispatch, batch parsing + lane pool, and
 observability (latency buckets, the trace context and its child span, OTLP spans), the request arena and
-what crosses out of it, and in-process ternary inference (models trained and served through tentib).
+what crosses out of it, the keepers that recycle what they drop (the cache, the audit chain, the OTLP ring; 2.11.2),
+and in-process ternary inference (models trained and served through tentib).
 
 ---
 

@@ -1,5 +1,5 @@
 # outcome.cyr — how a completion ENDED, and what it used, as the provider said (2.8.0).
-# Requires: jsonlite.cyr (_json_value_pos, _json_extract_str, _json_extract_int), provider_err.cyr
+# Requires: jsonlite.cyr (_json_value_pos, _json_extract_str_in, _json_extract_int), provider_err.cyr
 #           (sb_add_chat_head), string + str (lib). Nothing that reaches `_router`, so tests include it for real.
 #
 # Two things every OpenAI-compatible client reads off a completion, which hoosh did not carry through 2.7.1:
@@ -109,8 +109,13 @@ enum OutcomeField {
     OC_SIZE    = 48;
 }
 
-fn outcome_new() {
-    var st = alloc(OC_SIZE);
+fn outcome_new() { return outcome_new_a(default_alloc()); }
+
+# outcome_new in `a` (2.11.2, ADR 013): a stream's record in its request arena; through 2.11.1 each stream kept it
+# on the heap. 0 when `a` refuses.
+fn outcome_new_a(a) {
+    var st = alloc_via(a, OC_SIZE);
+    if (st == 0) { return 0; }
     store64(st + OC_PTOK, 0 - 1);
     store64(st + OC_CTOK, 0 - 1);
     store64(st + OC_FINISH, FIN_NONE);
@@ -156,7 +161,8 @@ fn outcome_feed_anthropic(st, data, dlen) {
     _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "input_tokens", 12));
     _oc_set_if(st, OC_CTOK, _oc_int(data, dlen, "output_tokens", 13));
     if (is_delta == 1) {
-        var f = outcome_finish_anthropic(_json_extract_str(data, dlen, "stop_reason", 11));
+        var fw[64];                        # 2.11.2: on the stack (ADR 013), as every word below
+        var f = outcome_finish_anthropic(_json_extract_str_in(data, dlen, "stop_reason", 11, &fw, 64));
         if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
     }
     return 0;
@@ -165,7 +171,8 @@ fn outcome_feed_anthropic(st, data, dlen) {
 # One OpenAI-compatible stream chunk: a non-null finish_reason, and the usage object of the final chunk (sent when
 # the request carried stream_options.include_usage, or always by some providers).
 fn outcome_feed_openai(st, data, dlen) {
-    var f = outcome_finish_openai(_json_extract_str(data, dlen, "finish_reason", 13));
+    var fw[64];
+    var f = outcome_finish_openai(_json_extract_str_in(data, dlen, "finish_reason", 13, &fw, 64));
     if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
     if (_json_value_pos(data, dlen, "usage", 5) >= 0) {
         _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "prompt_tokens", 13));
@@ -177,7 +184,8 @@ fn outcome_feed_openai(st, data, dlen) {
 # One Gemini stream chunk: usageMetadata is on every chunk, cumulative; thinking tokens (thoughtsTokenCount) are
 # billed as output, so they count as completion tokens.
 fn outcome_feed_gemini(st, data, dlen) {
-    var f = outcome_finish_gemini(_json_extract_str(data, dlen, "finishReason", 12));
+    var fw[64];
+    var f = outcome_finish_gemini(_json_extract_str_in(data, dlen, "finishReason", 12, &fw, 64));
     if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
     if (_json_value_pos(data, dlen, "usageMetadata", 13) >= 0) {
         _oc_set_if(st, OC_PTOK, _oc_int(data, dlen, "promptTokenCount", 16));
@@ -196,7 +204,8 @@ fn outcome_feed_ollama(st, line, len) {
     if ((_oc_has(line, len, "\"done\":true") == 0) && (_oc_has(line, len, "\"done\": true") == 0)) { return 0; }
     _oc_set_if(st, OC_PTOK, _oc_int(line, len, "prompt_eval_count", 17));
     _oc_set_if(st, OC_CTOK, _oc_int(line, len, "eval_count", 10));
-    var f = outcome_finish_openai(_json_extract_str(line, len, "done_reason", 11));
+    var fw[64];
+    var f = outcome_finish_openai(_json_extract_str_in(line, len, "done_reason", 11, &fw, 64));
     if (f != FIN_NONE) { store64(st + OC_FINISH, f); }
     return 0;
 }
