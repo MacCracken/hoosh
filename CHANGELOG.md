@@ -216,6 +216,29 @@ The other 37 rows are within 1% except three whose code did not change:
 Their functions have the same bytes at other 64-byte offsets (`CYRIUS_SYMS`), so the moves are placement, as 2.9.11
 found.
 
+### Changed — docs: the roadmap re-banded (2026-11-11)
+
+Shipped items left the roadmap, and the open ones were re-checked against the code and their upstreams:
+- **2.12.x:** the command line through cmdit (1.5.1, every name the plan uses present), then speech and szál's MCP
+  tools.
+- **2.13.x – 2.15.x:** accounting and capacity, requests for current models, observability.
+- **Patches** after the minors: what is left of ADR 013, and two fixes waiting on upstream. They ship on whichever
+  minor is current, and none holds a band up.
+- **2.x.x:** what waits on tentib or on demand.
+- **A 3.0.0 backlog:** the compatibility forms a major would drop.
+
+Three corrections came out of the check:
+- **svara.** The svara section said STT and TTS were "migrating to svara". svara 3.6.3 is formant synthesis only (its
+  ADR 0006); text to phonemes is shabda 3.1.1's, and AGNOS has no speech-recognition engine in Cyrius. The item is
+  now `POST /v1/audio/speech` served in-process through shabda and svara, with recognition out of scope, and the
+  non-goal reads accordingly.
+- **szál.** The MCP-tools item called `hash` a pure group, but `hash` and `template` read a file when given a path.
+  szál's toolchain wait is over (2.3.2 is on cyrius 6.7.18); its bote-core (3.8.9) is older than hoosh's (3.8.15).
+- **cmdit.** The plan cited three scanners in `main.cyr` that 2.9.19 moved to `cli.cyr`, and a test "mirror" that
+  2.9.19 replaced with the real functions.
+
+`state.md`'s Open section and providers row and `architecture/overview.md`'s audio note follow. No code change.
+
 ### Changed — docs: there is no murti port (2026-11-10)
 
 The Rust `murti` repo was deleted on 2026-11-10. hoosh's docs said murti would be adopted as a provider "once it has a Cyrius port". No port is coming: per agnosticos `docs/development/planning/murti.md`, the model-load seam lives in hoosh's local providers. `CLAUDE.md`, the 2.11.x roadmap item and the ADR index in `docs/doc-health.md` say so now, and ADR 014 gained a dated update recording it (its decisions stand). No code change.

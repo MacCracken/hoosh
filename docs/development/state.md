@@ -17,7 +17,7 @@
 | **Benchmarks** | 41 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3, a tentib reply, load and unchanged reload since 2.11.0, a 22-token reply and a same-shape load since 2.11.1); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract (on the real `trace.cyr` since 2.10.3), inference request, message content |
 | **Coverage** | symbol coverage 58% (506/858; `scripts/coverage.sh`, CI floor 30%) |
-| **Providers** | 18 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper-STT→svara, 1 in-process: tentib since 2.11.0, 8 remote) |
+| **Providers** | 18 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper, a type no endpoint uses yet; 1 in-process: tentib since 2.11.0; 8 remote) |
 | **ADRs** | 14 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
 | **Concurrency** | unified 7-worker pool (sigil crypto lanes from a pool of 64 since 2.9.1; no per-thread banks); accept loop enqueues — [ADR 011](../decisions/011-multithreaded-accept-loop.md); on a target with no second thread (AGNOS) the accept loop runs each job itself ([ADR 011](../decisions/011-multithreaded-accept-loop.md)'s 2.10.1 addendum) |
@@ -82,22 +82,21 @@ is unguarded and is the top structural item in the roadmap.
 
 ## Open
 
-See [roadmap.md](roadmap.md), banded by release (2026-11-04).
-- **Next, 2.9.x patches:** the test file's mirror drift is done (2.9.2–2.9.22: it copies no current `src/` code;
-  37 of 43 modules are included for real and the testable parts of the other six were split out). 2.9.23 fixed the
-  TOML string-array reader 2.9.22 found splitting quoted values (auth tokens included). 2.9.24 moved the bench file
-  onto the real code, which showed cost accounting scanning the pricing table; 2.9.25 indexed it and every live
-  model list (cost_record 22 µs → 0.6 µs with a live catalog). Then remote TLS connection pooling, which is measured (−33 ms per
-  request) and waits on the two preconditions in the roadmap.
-- **Memory:** 2.9.3 found that each remote request kept megabytes on the never-freeing heap (~2.2 MB buffered,
-  ~6.4 MB per stream) and fixed it with a per-thread arena. ~170–190 KB per new TLS connection remains; that is in
-  sandhi, which opens TLS on the global heap even when given an arena.
-- **2.10.0: request memory, measured.** Through a local Ollama route with unique prompts, 2.9.26 kept 139 KB per
-  buffered request and 79 KB per stream, and a full response cache took 524 KB and 4 ms per insert. 2.10.0 fixed
-  both: 5.6 KB per buffered request and 3.5 KB per stream remain, steady with the cache full.
-- **Next: the per-request arena** for that residual ([ADR 013](../decisions/013-request-memory.md), Proposed): a
-  per-thread arena threaded through the chat path, copies at the boundary into process memory, and free lists for
-  the process memory that churns.
+See [roadmap.md](roadmap.md), banded by release (re-checked 2026-11-11):
+- **2.12.x, next:** the command line through cmdit 1.5.1 (2.12.0), speech (`POST /v1/audio/speech`) through shabda and
+  svara, served in-process, and szál 2.3.2's MCP tools behind an allow-list.
+- **2.13.x – 2.15.x:** accounting and capacity (cache tokens, cost recommendations over the live catalog, a
+  configurable worker pool), requests for current models (thinking on Gemini and Ollama, multimodal parts, the
+  Responses API, sampling on a tentib route), observability (nested spans, OTLP/protobuf, an AGNOS CI lane).
+- **Patches, on whichever minor is current (none gates a band):** what is left of ADR 013 (the semantic index; the
+  hardware, MCP, token-pool and batch paths, not measured yet), the layout-dependent string costs waiting on cyrius
+  and ai-hwaccel, and remote TLS connection pooling, measured at −33 ms per request and waiting on two sandhi
+  preconditions.
+- **2.x.x:** tentib's next releases (a model's own vocabulary, the 2-bit store, model handles) and demand-gated items.
+- **3.0.0 backlog:** the compatibility forms a major would drop (`queued`/`pending`, `rate_limit_rpm`, the bare
+  `serve` port).
+- **Memory:** ~170–190 KB per new TLS connection remains, in sandhi, which opens TLS on the global heap even when given
+  an arena (upstream-gated).
 
 > **Handoff (2026-07-23):** 2.5.11 closes the arc. Two hot-path wins worth
 > knowing: a coarse clock ticker replaced `clock_now_ms` in the cache and rate

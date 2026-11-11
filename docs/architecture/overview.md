@@ -62,8 +62,9 @@ Background threads: health prober │ hardware re-detect │ coarse clock │ OT
 ai-hwaccel: hardware detection for placement / simulate / telemetry / cost
 ```
 
-(Whisper STT is present as a provider but its audio pipeline is migrating to
-**svara**; see the roadmap's Deferred section.)
+(The `whisper` provider type exists, but no endpoint uses it: AGNOS has no speech-recognition
+engine in Cyrius yet. Speech synthesis through **shabda** and **svara**, served in-process as
+tentib is, is the roadmap's 2.12.x item.)
 
 ---
 
