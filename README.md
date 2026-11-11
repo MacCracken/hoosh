@@ -16,11 +16,11 @@ Multi-provider LLM routing, token budgets, caching, and cost tracking. OpenAI-co
 | Metric | Value |
 |--------|-------|
 | **Language** | Cyrius (pin 6.7.18) |
-| **Source** | ~18,600 lines / 48 files (+ 2 vendored distlib bundles) |
-| **Binary** | ~2.7 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
-| **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, tentib with rosnet + tyche, bote, majra) + cyrius stdlib |
-| **Tests** | 2263 assertions, 187 groups, 0 failures |
-| **Benchmarks** | 39 operations |
+| **Source** | ~18,800 lines / 48 files (+ 2 vendored distlib bundles) |
+| **Binary** | ~2.8 MB (static ELF, x86_64, `CYRIUS_DCE=1`) |
+| **Dependencies** | 0 third-party — AGNOS distlibs (ai-hwaccel, tentib with rosnet + tyche, cmdit, bote, majra) + cyrius stdlib |
+| **Tests** | 2316 assertions, 187 groups, 0 failures |
+| **Benchmarks** | 42 operations |
 | **Fuzz targets** | 4 |
 | **Providers** | 18 (9 local, 1 in-process, 8 remote) |
 | **API** | OpenAI-compatible `/v1/chat/completions` |
@@ -99,19 +99,27 @@ cyrius build src/main.cyr build/hoosh
 # Start the gateway (default port 8088, bound to 127.0.0.1)
 ./build/hoosh serve
 
-# Custom port / bind address / config file
+# Custom port / bind address / config file (-c goes before or after the command)
 ./build/hoosh serve --port 9000
-./build/hoosh serve --bind 0.0.0.0 --config /etc/hoosh/prod.cyml
+./build/hoosh -c /etc/hoosh/prod.cyml serve --bind 0.0.0.0
 
 # Talk to a RUNNING gateway instead of reading the local config
 ./build/hoosh models --server http://gateway:8088
 ./build/hoosh health --server http://gateway:8088    # non-zero exit if degraded
 ./build/hoosh infer  --server http://gateway:8088 --stream llama3 "hello"
 
-# System info / version
+# System info / version / help (a command's own help: hoosh serve --help)
 ./build/hoosh info
-./build/hoosh version
+./build/hoosh version                     # or --version, -V
+./build/hoosh --help
+
+# A prompt that starts with a dash goes after --
+./build/hoosh infer llama3 -- "-1 is negative?"
 ```
+
+The command line is parsed whole before anything runs (cmdit, [ADR 015](docs/decisions/015-command-line-through-cmdit.md)):
+help, version and a usage error answer without reading the config. A usage error (an unknown flag, a missing value, a
+bad port, an extra argument) exits **2** with the command's usage on stderr; a command that runs and fails exits 1.
 
 `hoosh serve` binds **loopback only** unless you set `[server] bind` (or `--bind`).
 It shuts down gracefully on `SIGINT`/`SIGTERM` — the listener closes and in-flight

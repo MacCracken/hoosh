@@ -46,6 +46,15 @@ git = "https://github.com/MacCracken/tentib"
 tag = "1.5.1"
 modules = ["dist/tentib.cyr"]
 
+# The command line (2.12.0, ADR 015): cmdit's single-file bundle, the AGNOS CLI parser. It has no git sub-deps, and
+# its `# Requires` block names only stdlib leaves listed above (args, alloc, string, io). Its names are `cmdit_*`,
+# `CMDIT_*` and `_cmdit_*`, and none collides with hoosh, its vendored bundles or its stdlib set (checked
+# 2026-11-11). src/lib/cli.cyr builds hoosh's handles on it.
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit"
+tag = "1.5.1"
+modules = ["dist/cmdit.cyr"]
+
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
 # /v1/tools/list + /v1/tools/call. We consume bote's **core** bundle
 # (`[lib.core]`, 12 transport-free modules: error/protocol/jsonx/registry/

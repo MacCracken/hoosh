@@ -111,7 +111,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
 | `tentib_local.cyr` | In-process ternary inference (2.11.0, [ADR 014](../decisions/014-in-process-ternary-inference.md)): a `tentib` route's packed model loaded through tentib's library bundle (bounded, header-peeked, validated, skipped when unchanged, a same-shape reload reusing the model's memory since 2.11.1, loaded for serving only since 2.11.2), byte-token greedy decoding one locked step at a time (one cached decode step per token until the window slides, since 2.11.1), buffered replies and per-character streams, UTF-8 assembly with U+FFFD |
 | `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string lists (read with bayan's array parser since 2.9.23), a provider's TLS policy and rate limit |
-| `cli.cyr` | The command line's flag parser (2.9.19 split from `main.cyr`): `--name value`, `-s value`, `--name=value`, positionals, `infer`'s model and prompt, over an argument vec |
+| `cli.cyr` | The command line through cmdit (2.12.0, [ADR 015](../decisions/015-command-line-through-cmdit.md)): the global and per-verb handles, and `cli_parse_argv`, a pure parse of the whole argv into a record `main()` acts on (help, version and usage errors before setup; exit 2 for a usage error) |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
 | `retry.cyr` | Jittered exponential backoff, gated on retryability (permanent 4xx are not retried) |
 | `health.cyr` | Background provider probing + per-route circuit breaker; `router_select` routes around unhealthy backends; `/v1/health`'s verdict and body (2.9.21) |
@@ -134,6 +134,7 @@ distlibs:
 |-----------|------|-------------|
 | **ai-hwaccel** | Hardware detection for model placement / cost | `[deps.ai-hwaccel]` → `lib/ai-hwaccel.cyr` |
 | **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0), its incremental decoder (1.4.0, since 2.11.1), and its serving-only load (1.5.0, since 2.11.2) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
+| **cmdit** | The command line (2.12.0): getopt-long flags, verb dispatch, generated per-verb help, cmdit's exit codes | `[deps.cmdit]` → `lib/cmdit.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
 | **majra** | Provider event bus (pub/sub) | vendored `src/vendor/majra.cyr` |
 | cyrius **sandhi** | HTTPS client (URL parse + DNS + TLS) for remote providers | stdlib |

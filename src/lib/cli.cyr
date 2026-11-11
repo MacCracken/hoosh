@@ -1,102 +1,282 @@
-# cli.cyr — the command line's flag parser (2.9.19, split from main.cyr).
+# cli.cyr — the command line, through cmdit (2.12.0, ADR 015).
 #
-# main.cyr's _flag_val / _flag_set / _positional read the process's argv() directly, so the test suite could not
-# call them and kept copies over a vec of cstrs. These take that vec instead: `args` is argv as a vec, element 0
-# the program, element 1 the subcommand. main.cyr's wrappers pass cli_args(). Requires: vec, string, args (lib).
+# hoosh's command line is a cmdit verb tool. cli_parse_argv reads a whole argv into a CLI record before anything else
+# runs: the global `-c/--config`, which binds on either side of the verb, the verb, and the verb's own flags and
+# positionals. main.cyr acts on the record (cli_parse, then the record's CLI_ACT):
+# - help, version and usage errors answer before config, hardware and storage are touched;
+# - every other verb runs with what was parsed.
+# The parse is pure (cmdit's `_argv` cores read no process state), so the tests drive it with synthetic argv.
+#
+# Through 2.11.x three hand-rolled scanners re-read argv for each flag (here since 2.9.19, in main.cyr before that):
+# - an unknown flag was ignored and ate the next positional, and a missing value or a bad port was dropped silently;
+# - `-c` before the verb was read as the verb (`hoosh -c f serve`: unknown command: -c);
+# - `hoosh serve --help` started the gateway.
+#
+# Exit codes are cmdit's (the AGNOS userland convention): 0, 1 for a command that ran and failed, 2 for a usage error.
+#
+# Requires: lib/cmdit.cyr (cmdit 1.5.1, [deps.cmdit]), lib/string (strlen, memset), lib/alloc, lib/syscalls
+# (sys_write).
 
-# argv as a vec of cstrs, built once (the command line does not change).
-var _cli_args = 0;
-fn cli_args() {
-    if (_cli_args != 0) { return _cli_args; }
-    var v = vec_new();
-    var ac = argc();
+# The verbs, in the order they are registered (cmdit_verb's ids are registration order).
+enum CliVerb {
+    CLI_V_SERVE = 0; CLI_V_MODELS = 1; CLI_V_HEALTH = 2; CLI_V_INFER = 3;
+    CLI_V_INFO = 4; CLI_V_HELP = 5; CLI_V_VERSION = 6; CLI_V_BENCH = 7;
+}
+
+# What main does with a parsed command line (the record's CLI_ACT).
+enum CliAct {
+    CLI_RUN = 0;          # run CLI_VERB
+    CLI_HELP = 1;         # hoosh's own help (main.cyr's cmd_help) on stdout, exit 0
+    CLI_VERB_HELP = 2;    # the verb's generated help (cmdit_help_fd(CLI_H, 1)), exit 0
+    CLI_VERSION = 3;      # "hoosh v<HOOSH_VERSION>" on stdout, exit 0
+    CLI_ERROR = 4;        # a usage error (cli_print_error), exit 2
+}
+
+# The record cli_parse_argv fills, CLI_SIZE bytes, all 0 until set. Every string is an interior pointer into argv.
+enum CliField {
+    CLI_ACT = 0;          # a CliAct
+    CLI_VERB = 8;         # a CliVerb (serve when the command line names none)
+    CLI_H = 16;           # the cmdit handle the help or the error belongs to: the global one, or the verb's
+    CLI_CONFIG = 24;      # -c/--config, or 0
+    CLI_PORT = 32;        # serve's port, from -p/--port or the bare positional, or 0 for the config's
+    CLI_BIND = 40;        # serve's --bind, or 0
+    CLI_SERVER = 48;      # --server for models, health and infer, or 0
+    CLI_MODEL = 56;       # infer's model
+    CLI_PROMPT = 64;      # infer's prompt
+    CLI_STREAM = 72;      # infer's --stream (0 / 1)
+    CLI_URL = 80;         # bench's url
+    CLI_COUNT = 88;       # bench's count (2000 when not given)
+    CLI_MSG = 96;         # a usage error hoosh found itself (cmdit has no API to set one): its sentence, or 0
+    CLI_MSGV = 104;       # ... and the argv text it names, written escaped, or 0
+    CLI_USAGE = 112;      # the line printed after a usage error: the verb's usage, or a pointer to --help
+    CLI_SIZE = 120;
+}
+
+# The connections `hoosh bench` makes when the command line gives no count.
+fn CLI_BENCH_DEFAULT() { return 2000; }
+
+fn _cli_act(out, act) {
+    store64(out + CLI_ACT, act);
+    return act;
+}
+
+# A usage error of hoosh's own: `msg` and the argv text `val` it names.
+fn _cli_msg(out, msg, val) {
+    store64(out + CLI_MSG, msg);
+    store64(out + CLI_MSGV, val);
+    return _cli_act(out, CLI_ERROR);
+}
+
+# The value of a string of decimal digits, at most `maxd` of them, or -1 for anything else (empty, a sign, a
+# letter, too long).
+fn _cli_digits(s, maxd) {
+    if (s == 0) { return 0 - 1; }
+    var n = strlen(s);
+    if (n == 0 || n > maxd) { return 0 - 1; }
+    var v = 0;
     var i = 0;
-    while (i < ac) {
-        vec_push(v, argv(i));
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
         i = i + 1;
     }
-    _cli_args = v;
     return v;
 }
 
-# Value for `--name` / `-short` (short may be 0), or 0 when absent. Accepts `--name value`, `-s value` and
-# `--name=value`; a flag at the end with no value is absent.
-fn cli_flag_val(args, name, short) {
-    var ac = vec_len(args);
-    var nlen = strlen(name);
-    var i = 1;
-    while (i < ac) {
-        var a = vec_get(args, i);
-        if (streq(a, name) == 1) {
-            if (i + 1 < ac) { return vec_get(args, i + 1); }
-            return 0;
-        }
-        if (short != 0 && streq(a, short) == 1) {
-            if (i + 1 < ac) { return vec_get(args, i + 1); }
-            return 0;
-        }
-        # --name=value
-        if (memeq(a, name, nlen) == 1) {
-            if (load8(a + nlen) == 61) { return a + nlen + 1; }
-        }
-        i = i + 1;
-    }
-    return 0;
+# A listen port, 1..65535, or -1.
+fn cli_port_value(s) {
+    var v = _cli_digits(s, 5);
+    if (v < 1 || v > 65535) { return 0 - 1; }
+    return v;
 }
 
-# Whether a valueless flag is present.
-fn cli_flag_set(args, name) {
-    var ac = vec_len(args);
-    var i = 1;
-    while (i < ac) {
-        if (streq(vec_get(args, i), name) == 1) { return 1; }
-        i = i + 1;
-    }
-    return 0;
+# Parse the verb's remainder slice with its handle `vh` (cmdit_parse_verb), and record vh as the handle any help or
+# error belongs to. Returns CLI_RUN to go on, or the act the parse decided.
+fn _cli_verb_parse(vh, h, out) {
+    if (vh == 0) { return _cli_msg(out, "hoosh: out of memory", 0); }
+    store64(out + CLI_H, vh);
+    var r = cmdit_parse_verb(vh, h);
+    if (r == CMDIT_HELP) { return _cli_act(out, CLI_VERB_HELP); }
+    if (r == CMDIT_VERSION) { return _cli_act(out, CLI_VERSION); }
+    if (r == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    return CLI_RUN;
 }
 
-# Nth positional argument after the subcommand (0-based), skipping flags and
-# their values. Returns 0 when absent.
-fn cli_positional(args, n) {
-    var ac = vec_len(args);
-    var seen = 0;
-    var i = 2;
-    while (i < ac) {
-        var a = vec_get(args, i);
-        if (load8(a) == 45) {
-            # A flag. Skip its value too unless it used --name=value form or is
-            # one of the known valueless flags.
-            if (streq(a, "--stream") == 0) {
-                var has_eq = 0;
-                var j = 0;
-                while (load8(a + j) != 0) {
-                    if (load8(a + j) == 61) { has_eq = 1; }
-                    j = j + 1;
-                }
-                if (has_eq == 0) { i = i + 1; }
-            }
-        } else {
-            if (seen == n) { return a; }
-            seen = seen + 1;
-        }
-        i = i + 1;
-    }
-    return 0;
+# A verb that takes no flags and no positionals: info, help, version.
+fn _cli_bare(h, name, act, usage, out) {
+    store64(out + CLI_USAGE, usage);
+    var vh = cmdit_new(name);
+    var r = _cli_verb_parse(vh, h, out);
+    if (r != CLI_RUN) { return r; }
+    if (cmdit_require_positionals_max(vh, 0) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    return _cli_act(out, act);
 }
 
-# `hoosh infer`'s model and prompt into out[0] / out[8] (either may be 0). 2.7.0: -m/--model <model> <prompt> is
-# rust-old's form. Without it, `-m llama3` took llama3 as the flag's value and left one positional.
-# (2.9.19: lifted out of main()'s infer branch.)
-fn cli_infer_args(args, out) {
-    var im = cli_flag_val(args, "--model", "-m");
-    var ip = 0;
-    if (im != 0) {
-        ip = cli_positional(args, 0);
+# serve [port] [-p/--port <n>] [--bind <addr>]. The bare positional port is the pre-2.5.8 form, kept until 3.0.0; a
+# given -p wins over it.
+fn _cli_serve(h, out) {
+    store64(out + CLI_USAGE, "usage: hoosh serve [-p <n>] [--bind <addr>] [port]");
+    var vh = cmdit_new("hoosh serve");
+    var f_port = cmdit_int(vh, 'p', "port", 0, "listen port (default: [server] port, else 8088)");
+    cmdit_range(vh, f_port, 1, 65535);
+    cmdit_metavar(vh, f_port, "n");
+    var f_bind = cmdit_str(vh, 0, "bind", 0, "listen address (default: [server] bind, else 127.0.0.1)");
+    cmdit_metavar(vh, f_bind, "addr");
+    var r = _cli_verb_parse(vh, h, out);
+    if (r != CLI_RUN) { return r; }
+    if (cmdit_require_positionals_max(vh, 1) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    if (cmdit_seen(vh, f_port) == 1) {
+        store64(out + CLI_PORT, cmdit_get_int(vh, f_port));
     } else {
-        im = cli_positional(args, 0);
-        ip = cli_positional(args, 1);
+        if (cmdit_positional_count(vh) == 1) {
+            var pv = cmdit_positional(vh, 0);
+            var pn = cli_port_value(pv);
+            if (pn < 0) { return _cli_msg(out, "hoosh serve: invalid port: ", pv); }
+            store64(out + CLI_PORT, pn);
+        }
     }
-    store64(out, im);
-    store64(out + 8, ip);
+    store64(out + CLI_BIND, cmdit_get_str(vh, f_bind));
+    return _cli_act(out, CLI_RUN);
+}
+
+# models / health [--server <url>].
+fn _cli_server_verb(h, name, usage, out) {
+    store64(out + CLI_USAGE, usage);
+    var vh = cmdit_new(name);
+    var f_srv = cmdit_str(vh, 0, "server", 0, "ask a running hoosh over HTTP, not the local config");
+    cmdit_metavar(vh, f_srv, "url");
+    var r = _cli_verb_parse(vh, h, out);
+    if (r != CLI_RUN) { return r; }
+    if (cmdit_require_positionals_max(vh, 0) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    store64(out + CLI_SERVER, cmdit_get_str(vh, f_srv));
+    return _cli_act(out, CLI_RUN);
+}
+
+# infer [--server <url>] [--stream] (-m/--model <model> <prompt> | <model> <prompt>). 2.7.0's -m form is rust-old's.
+# A prompt that starts with a dash follows `--`.
+fn _cli_infer(h, out) {
+    store64(out + CLI_USAGE, "usage: hoosh infer [--server <url>] [--stream] (-m <model> <prompt> | <model> <prompt>)");
+    var vh = cmdit_new("hoosh infer");
+    var f_model = cmdit_str(vh, 'm', "model", 0, "the model (then the prompt is the one argument)");
+    cmdit_metavar(vh, f_model, "model");
+    var f_srv = cmdit_str(vh, 0, "server", 0, "ask a running hoosh over HTTP, not the local config");
+    cmdit_metavar(vh, f_srv, "url");
+    var f_stream = cmdit_bool(vh, 0, "stream", "stream tokens to stdout as they arrive");
+    var r = _cli_verb_parse(vh, h, out);
+    if (r != CLI_RUN) { return r; }
+    var want = 2;
+    if (cmdit_seen(vh, f_model) == 1) { want = 1; }
+    if (cmdit_require_positionals_exact(vh, want) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    if (want == 1) {
+        store64(out + CLI_MODEL, cmdit_get_str(vh, f_model));
+        store64(out + CLI_PROMPT, cmdit_positional(vh, 0));
+    } else {
+        store64(out + CLI_MODEL, cmdit_positional(vh, 0));
+        store64(out + CLI_PROMPT, cmdit_positional(vh, 1));
+    }
+    store64(out + CLI_SERVER, cmdit_get_str(vh, f_srv));
+    store64(out + CLI_STREAM, cmdit_get_bool(vh, f_stream));
+    return _cli_act(out, CLI_RUN);
+}
+
+# bench <url> [count]: hidden from help, the command list and completions (cmdit_verb_hidden), a diagnostic.
+fn _cli_bench(h, out) {
+    store64(out + CLI_USAGE, "usage: hoosh bench <url> [count]");
+    var vh = cmdit_new("hoosh bench");
+    var r = _cli_verb_parse(vh, h, out);
+    if (r != CLI_RUN) { return r; }
+    if (cmdit_require_positionals(vh, 1) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    if (cmdit_require_positionals_max(vh, 2) == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    store64(out + CLI_URL, cmdit_positional(vh, 0));
+    store64(out + CLI_COUNT, CLI_BENCH_DEFAULT());
+    if (cmdit_positional_count(vh) == 2) {
+        var cv = cmdit_positional(vh, 1);
+        var cn = _cli_digits(cv, 9);
+        if (cn < 1) { return _cli_msg(out, "hoosh bench: invalid count: ", cv); }
+        store64(out + CLI_COUNT, cn);
+    }
+    return _cli_act(out, CLI_RUN);
+}
+
+# Parse argv[0..argc) (a cstr array, argv[0] the program) into the CLI record `out`. Returns its CLI_ACT.
+fn cli_parse_argv(argc, argv, out) {
+    memset(out, 0, CLI_SIZE);
+    store64(out + CLI_USAGE, "Try 'hoosh --help'.");
+    var h = cmdit_new("hoosh");
+    if (h == 0) { return _cli_msg(out, "hoosh: out of memory", 0); }
+    store64(out + CLI_H, h);
+    var f_cfg = cmdit_str(h, 'c', "config", 0, "config file (default: hoosh.cyml)");
+    cmdit_metavar(h, f_cfg, "file");
+    cmdit_verb(h, "serve", "start the gateway server (the default)");
+    cmdit_verb(h, "models", "list models");
+    cmdit_verb(h, "health", "check provider connectivity");
+    cmdit_verb(h, "infer", "one-shot inference");
+    cmdit_verb(h, "info", "show system information");
+    cmdit_verb(h, "help", "show this help");
+    cmdit_verb(h, "version", "show version");
+    cmdit_verb_hidden(h, cmdit_verb(h, "bench", "time connections to a gateway"));
+    var r = cmdit_dispatch_argv(h, argc, argv);
+    if (r == CMDIT_HELP) { return _cli_act(out, CLI_HELP); }
+    if (r == CMDIT_VERSION) { return _cli_act(out, CLI_VERSION); }
+    if (r == CMDIT_RESULT_ERR) { return _cli_act(out, CLI_ERROR); }
+    store64(out + CLI_CONFIG, cmdit_get_str(h, f_cfg));
+    var v = cmdit_verb_matched(h);
+    if (v < 0) { v = CLI_V_SERVE; }                 # no verb: serve, with the defaults and the config
+    store64(out + CLI_VERB, v);
+    if (cmdit_verb_matched(h) < 0) { return _cli_act(out, CLI_RUN); }
+    if (v == CLI_V_SERVE) { return _cli_serve(h, out); }
+    if (v == CLI_V_MODELS) { return _cli_server_verb(h, "hoosh models", "usage: hoosh models [--server <url>]", out); }
+    if (v == CLI_V_HEALTH) { return _cli_server_verb(h, "hoosh health", "usage: hoosh health [--server <url>]", out); }
+    if (v == CLI_V_INFER) { return _cli_infer(h, out); }
+    if (v == CLI_V_INFO) { return _cli_bare(h, "hoosh info", CLI_RUN, "usage: hoosh info", out); }
+    if (v == CLI_V_HELP) { return _cli_bare(h, "hoosh help", CLI_HELP, "usage: hoosh help", out); }
+    if (v == CLI_V_VERSION) { return _cli_bare(h, "hoosh version", CLI_VERSION, "usage: hoosh version", out); }
+    return _cli_bench(h, out);
+}
+
+# Parse the process's command line into `out` (cmdit_argv materializes it). Returns its CLI_ACT.
+fn cli_parse(out) {
+    var h0 = cmdit_new("hoosh");
+    var n = cmdit_argv(h0);
+    if (n == 0) {
+        memset(out, 0, CLI_SIZE);
+        store64(out + CLI_H, h0);                   # cmdit_error says why (CMDIT_ERR_ARGV / CMDIT_ERR_NOMEM)
+        return _cli_act(out, CLI_ERROR);
+    }
+    return cli_parse_argv(n, cmdit_raw_argv(h0), out);
+}
+
+# Write a usage error to stderr: cmdit's line for the handle it belongs to, or hoosh's own, with any control byte of
+# the argv text it names shown as `?`, as cmdit shows them; then the verb's usage, or where help is. Returns
+# CMDIT_EXIT_USAGE.
+fn cli_print_error(out) {
+    var msg = load64(out + CLI_MSG);
+    if (msg == 0) {
+        cmdit_print_error(load64(out + CLI_H));
+    } else {
+        _cli_print_msg(out, msg);
+    }
+    var u = load64(out + CLI_USAGE);
+    if (u != 0) {
+        sys_write(2, u, strlen(u));
+        sys_write(2, "\n", 1);
+    }
+    return CMDIT_EXIT_USAGE;
+}
+
+# hoosh's own error line: the sentence and the argv text it names, escaped.
+fn _cli_print_msg(out, msg) {
+    sys_write(2, msg, strlen(msg));
+    var v = load64(out + CLI_MSGV);
+    if (v != 0) {
+        var i = 0;
+        while (load8(v + i) != 0) {
+            var c = load8(v + i);
+            if (c < 32 || c == 127) { sys_write(2, "?", 1); } else { sys_write(2, v + i, 1); }
+            i = i + 1;
+        }
+    }
+    sys_write(2, "\n", 1);
     return 0;
 }

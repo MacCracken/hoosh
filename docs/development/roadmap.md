@@ -8,10 +8,11 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.11.2 (cyrius 6.7.18). A packed ternary model is served in hoosh's own process through tentib 1.5.1
-([ADR 014](../decisions/014-in-process-ternary-inference.md)), and a request keeps nothing on the heap that never frees
-([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
-**Next**: 2.12.x, the command line, speech and tools.
+**Current**: v2.12.0 (cyrius 6.7.18). The command line goes through cmdit 1.5.1
+([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary model is served in hoosh's own process
+through tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a request keeps nothing on the
+heap that never frees ([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
+**Next**: the rest of 2.12.x, speech and tools.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-11.
 - **2.12.x – 2.15.x minors** each take one theme: they add features or change answers, compatibly. They go in order,
@@ -22,87 +23,10 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 ---
 
-## 2.12.x — the command line, speech and tools
+## 2.12.x — speech and tools
 
-Three items, each its own release, in this order: cmdit first, since it touches only the CLI, then speech and tools.
-
-### 2.12.0 — the command line through cmdit
-
-A tier-2 ("verb tool") candidate from the 2026-06-25 ecosystem CLI review
-([agnosticos `planning/cmdit.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/cmdit.md)).
-It changes CLI behavior on purpose (exit codes, last-wins flags), which is why it is a minor.
-
-**What is hand-rolled today** (checked 2026-11-11; line numbers as of 2.11.2):
-
-- **Three argv scanners** in `src/lib/cli.cyr` (split from `main.cyr` in 2.9.19, so the suite runs them for real):
-  `cli_flag_val` (first-wins), `cli_flag_set` and `cli_positional`, behind `main.cyr`'s `_flag_val` / `_flag_set` /
-  `_positional` wrappers (`:1001-1003`). `cli_positional` assumes every dash token but `--stream` takes a value, so an
-  unknown flag is silently ignored and eats the next positional, a dash-led prompt is skipped, and `--` counts as a
-  flag.
-- **`-c/--config`** is read globally (`main.cyr:1061`), but the verb is always `argv(1)` (`:1122`), so
-  `hoosh -c f serve` fails with `unknown command: -c`.
-- **Verbs** (`:1121-1183`):
-  - no verb → `serve`; `serve` takes `-p/--port`, `--bind` or a bare positional port, and silently ignores a bad port;
-  - `models` and `health` take `--server`; `bench <url> [count]` is missing from `cmd_help`;
-  - `infer` takes `-m/--model`, `--server`, `--stream` and 1–2 positionals (`cli_infer_args`);
-  - `info`; `help` / `--help` / `-h` work as `argv(1)` only; `version` / `--version` print `hoosh v<HOOSH_VERSION>`
-    to stdout.
-- **Every verb, help and version included, runs after config parse, `hw_init()` and storage open** (`:1080-1110`).
-  So `hoosh --help` exits 1 under a broken config, and `hoosh serve --help` starts the gateway.
-- **Help and errors:** `cmd_help` (`:857`) is a stdout wall with per-verb rows, and the header comment (`:4-8`) is
-  stale. An unknown command (`:1179`) prints its text to stderr and its newline to stdout, and exits 1.
-- `HOOSH_LOG` (`:1054`) is the environment, not argv, and stays as it is.
-
-**Site → cmdit:**
-
-- [ ] **Top level:** `cmdit_str(h, 'c', "config", "hoosh.cyml", …)` + `cmdit_verb` × 8. Call `cmdit_dispatch(h)`
-  **before** `load_config`, so `-c` binds on either side of the verb and help, version and usage errors exit before
-  config, hardware and storage are touched. `cmdit_verb_matched(h) < 0` → `serve`.
-- [ ] **Per-verb handles** (`cmdit_parse_verb`), then delete the three scanners:
-  - `serve`: `cmdit_int` `-p` + `cmdit_range(…, 1, 65535)`, `--bind`, at most 1 positional (the bare port stays until
-    3.0.0); `cmdit_seen` picks flag, positional or config port;
-  - `models` / `health`: `--server`;
-  - `infer`: `-m`, `--server`, `cmdit_bool` `--stream`; exactly 1 positional if `-m` was seen, else 2;
-  - `bench`: 1..2 positionals.
-- [ ] **Version and help:** `CMDIT_VERSION` keeps the `hoosh v` + `HOOSH_VERSION` print, because `cmdit_version`
-  would need a `v`-prefixed string. `CMDIT_HELP` keeps `cmd_help`; per-verb `cmdit_help(vh)` is new. Errors →
-  `cmdit_print_error` + `CMDIT_EXIT_USAGE`.
-
-**Gaps (none blocking):**
-
-- **Deliberate changes, for the CHANGELOG:**
-  - unknown flags, a missing value and a bad port become exit-2 errors (`cli_flag_parsing`'s "dangling flag -> 0"
-    asserts today's silence on a missing value);
-  - repeated flags become last-wins;
-  - an unknown command exits 2, not 1;
-  - a dash-led prompt needs `--`.
-- **Help:** cmdit renders on stderr and has no renderer for `cmd_help`'s per-verb rows, so `cmd_help` stays
-  hand-written.
-- **`bench`:** cmdit cannot hide a verb, so a registered `bench` shows in the unknown-command list and in
-  completions. Accept that, or match it on `cmdit_raw_argv` before dispatch.
-
-**cyrius.cyml:** `[deps].stdlib` already lists `args` and `io` (no `flags`). Add the block below. cmdit 1.5.1
-(2026-11-06) pins cyrius 6.7.18, hoosh's pin, and has every name above. 1.5.1 adds `cmdit_continue_on_error`
-(off by default), which hoosh does not need.
-
-```
-[deps.cmdit]
-git = "https://github.com/MacCracken/cmdit.git"
-tag = "1.5.1"
-modules = ["dist/cmdit.cyr"]
-```
-
-**Tests:**
-
-- [ ] **Move the CLI groups onto cmdit.** `cli_flag_parsing`, `cli_positionals` and `rustold_config_cli`'s infer
-  cases drive `cli.cyr` for real today. Rewrite them as synthetic-argv cases on the pure `cmdit_dispatch_argv`, with
-  the handle builder in `src/lib/cli.cyr` (rewritten, so the suite includes it and `scripts/coverage.sh` counts it).
-- [ ] **Output-identity bar:** the only binary-level CLI check is `release.yml:55-56`. Before migrating, capture
-  stdout, stderr and exit code for every verb and error arm (at least `README.md:100-113`'s invocations). Diff
-  afterwards: only the deliberate changes above may differ.
-
-References: cmdit `README.md` ("Verb dispatch", API reference), `docs/adr/0002-verb-dispatch.md`; stiva's
-`src/main.cyr` is the worked verb tool.
+2.12.0 took the command line (cmdit, [ADR 015](../decisions/015-command-line-through-cmdit.md)). Two items are left,
+each its own release.
 
 ### 2.12.x — speech: `POST /v1/audio/speech` through svara
 
@@ -311,8 +235,8 @@ keeps working through 2.x, and the release before 3.0.0 logs a warning where an 
   (`wq_status_json`). Keep one.
 - **`rate_limit_rpm`**, rust-old's provider key, is accepted beside `rate_limit` (`_config_rate_limit_str`). Drop the
   alias.
-- **`hoosh serve <port>`**, the bare positional port of before 2.5.8, beside `--port`. Drop it once cmdit (2.12.0)
-  has given the flag form a release of its own.
+- **`hoosh serve <port>`**, the bare positional port of before 2.5.8, beside `--port` (cli.cyr's `_cli_serve`). 2.12.0
+  checks it as cmdit checks `-p`; drop it once the flag form has had a release of its own.
 
 Add to this list only what removes or changes something a client or a config can see. Internal renames ship in any
 release.

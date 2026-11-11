@@ -34,6 +34,7 @@
 - [ADR-012: The model catalog is asked of the providers](decisions/012-live-model-catalog.md) — live per-route lists, the snapshot, `[[models]]`, capability-shaped requests
 - [ADR-013: What a request's memory belongs to](decisions/013-request-memory.md) — the request arena, the boundary keepers copy across, recycling process memory (done for the request paths and bounded keepers in 2.11.2)
 - [ADR-014: In-process ternary inference through tentib](decisions/014-in-process-ternary-inference.md) — a `tentib` route, one model per process, bytes as tokens, reloads, the memory a model keeps; 2.11.1: the shared decode cache, the header peek, same-shape reloads; 2.11.2: the serving-only load
+- [ADR-015: The command line through cmdit](decisions/015-command-line-through-cmdit.md) — cmdit verb dispatch, one parse before setup, usage errors exit 2, what changed for scripts
 
 ## Reference
 

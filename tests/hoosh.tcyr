@@ -109,8 +109,9 @@ include "src/lib/reqparse.cyr"
 # 2.9.18: config.cyr's self-contained helpers, split out as cfgparse.cyr and included for real: strategy names,
 # $NAME expansion, TOML string arrays, the bind address text, a provider block's TLS policy and rate limit.
 include "src/lib/cfgparse.cyr"
-# 2.9.19: the command line's flag parser, split from main.cyr as cli.cyr; it takes the arguments as a vec, so the
-# tests run it instead of a copy.
+# 2.12.0: the command line through cmdit (cli.cyr, ADR 015): a pure parse of a whole argv, so the tests drive it
+# with synthetic argv. cmdit's bundle first: cli.cyr reads its CMDIT_* enums.
+include "lib/cmdit.cyr"
 include "src/lib/cli.cyr"
 # 2.9.20: the worker pool's work queue and job constructors, split from pool.cyr as wq.cyr; the copy here had no
 # lock, no in-flight count and a push that refused instead of waiting.
@@ -2057,6 +2058,33 @@ fn _t_line(prefix, n, suffix) {
     str_builder_add_int(sb, n);
     str_builder_add_cstr(sb, suffix);
     return str_data(str_builder_build(sb));
+}
+
+# 2.12.0: one command line through cli_parse_argv: `spec` is its words, `|`-separated (argv[0] first), each a heap
+# copy. Returns the CLI record.
+fn _t_cli(spec) {
+    var n = strlen(spec);
+    var words = vec_new();
+    var st = 0;
+    var i = 0;
+    while (i <= n) {
+        if (i == n || load8(spec + i) == 124) {
+            var w = alloc(i - st + 1);
+            memcpy(w, spec + st, i - st);
+            store8(w + i - st, 0);
+            vec_push(words, w);
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    var c = vec_len(words);
+    var arr = alloc((c + 1) * 8);
+    var k = 0;
+    while (k < c) { store64(arr + k * 8, vec_get(words, k)); k = k + 1; }
+    store64(arr + c * 8, 0);
+    var out = alloc(CLI_SIZE);
+    cli_parse_argv(c, arr, out);
+    return out;
 }
 
 fn _t_cat(a, b) {
@@ -6685,66 +6713,96 @@ fn main() {
     assert_eq(context_token_limit(128000), 64000, "context: threshold is configurable");
     context_configure(1, 80, 0 - 1);
 
-    test_group("cli_flag_parsing");
-    # `hoosh serve --port 9000 --bind 0.0.0.0`
-    var fa = vec_new();
-    vec_push(fa, "hoosh"); vec_push(fa, "serve");
-    vec_push(fa, "--port"); vec_push(fa, "9000");
-    vec_push(fa, "--bind"); vec_push(fa, "0.0.0.0");
-    assert_streq(cli_flag_val(fa, "--port", "-p"), "9000", "flag: --port value");
-    assert_streq(cli_flag_val(fa, "--bind", 0), "0.0.0.0", "flag: --bind value");
-    assert_eq(cli_flag_val(fa, "--config", "-c"), 0, "flag: absent flag -> 0");
-    # Short form.
-    var fs = vec_new();
-    vec_push(fs, "hoosh"); vec_push(fs, "serve"); vec_push(fs, "-p"); vec_push(fs, "8080");
-    assert_streq(cli_flag_val(fs, "--port", "-p"), "8080", "flag: short -p value");
-    # --name=value form.
-    var fe = vec_new();
-    vec_push(fe, "hoosh"); vec_push(fe, "serve"); vec_push(fe, "--port=7000");
-    assert_streq(cli_flag_val(fe, "--port", "-p"), "7000", "flag: --port=value form");
-    # A flag at the very end with no value must not read past argv.
-    var ft = vec_new();
-    vec_push(ft, "hoosh"); vec_push(ft, "serve"); vec_push(ft, "--port");
-    assert_eq(cli_flag_val(ft, "--port", "-p"), 0, "flag: dangling flag -> 0");
-    # A longer flag that starts with the name is another flag, not `--port=...`.
-    var fl = vec_new();
-    vec_push(fl, "hoosh"); vec_push(fl, "serve"); vec_push(fl, "--portal"); vec_push(fl, "x");
-    assert_eq(cli_flag_val(fl, "--port", "-p"), 0, "flag: --portal is not --port");
+    # 2.12.0: the command line through cmdit (cli.cyr). Each case is one argv, `|`-separated, through the real
+    # cli_parse_argv. Through 2.11.x three scanners (2.9.19's cli_flag_val, cli_flag_set, cli_positional) read argv
+    # one flag at a time, and these groups tested them.
+    test_group("cli: flags and the port (2.12.0)");
+    var tc_ca = _t_cli("hoosh|serve|--port|9000|--bind|0.0.0.0");
+    assert_eq(load64(tc_ca + CLI_ACT), CLI_RUN, "cli: serve --port --bind runs");
+    assert_eq(load64(tc_ca + CLI_VERB), CLI_V_SERVE, "cli: ... serve");
+    assert_eq(load64(tc_ca + CLI_PORT), 9000, "cli: --port value");
+    assert_streq(load64(tc_ca + CLI_BIND), "0.0.0.0", "cli: --bind value");
+    assert_eq(load64(tc_ca + CLI_CONFIG), 0, "cli: no -c, no config path");
+    assert_eq(load64(_t_cli("hoosh|serve|-p|8080") + CLI_PORT), 8080, "cli: short -p value");
+    assert_eq(load64(_t_cli("hoosh|serve|--port=7000") + CLI_PORT), 7000, "cli: --port=value form");
+    assert_eq(load64(_t_cli("hoosh|serve|8088") + CLI_PORT), 8088, "cli: the bare positional port (until 3.0.0)");
+    assert_eq(load64(_t_cli("hoosh|serve|-p|9000|8000") + CLI_PORT), 9000, "cli: -p wins over the bare port");
+    assert_eq(load64(_t_cli("hoosh|serve|-p|1000|--port|2000") + CLI_PORT), 2000, "cli: a repeated flag is last-wins");
+    assert_streq(load64(_t_cli("hoosh|-c|a.cyml|serve|-c|b.cyml") + CLI_CONFIG), "b.cyml", "cli: ... -c too");
+    assert_eq(load64(_t_cli("hoosh|serve") + CLI_PORT), 0, "cli: no port: the config's");
+    # What 2.11.x let through silently is a usage error now.
+    var tc_cd = _t_cli("hoosh|serve|--port");
+    assert_eq(load64(tc_cd + CLI_ACT), CLI_ERROR, "cli: a dangling --port is an error (2.11.x: ignored)");
+    assert_eq(cmdit_error(load64(tc_cd + CLI_H)), CMDIT_ERR_MISSING_VALUE, "cli: ... a missing value");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|serve|--portal|x") + CLI_H)), CMDIT_ERR_UNKNOWN,
+      "cli: --portal is an unknown flag, not --port");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|serve|-p|abc") + CLI_H)), CMDIT_ERR_BAD_INT, "cli: -p abc is not a port");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|serve|-p|70000") + CLI_H)), CMDIT_ERR_OUT_OF_RANGE,
+      "cli: -p 70000 is out of range");
+    var tc_cb = _t_cli("hoosh|serve|abc");
+    assert_eq(load64(tc_cb + CLI_ACT), CLI_ERROR, "cli: a bare port that is not one is an error (2.11.x: ignored)");
+    assert_streq(load64(tc_cb + CLI_MSG), "hoosh serve: invalid port: ", "cli: ... hoosh's own sentence");
+    assert_streq(load64(tc_cb + CLI_MSGV), "abc", "cli: ... naming what was typed");
+    assert_eq(load64(_t_cli("hoosh|serve|0") + CLI_ACT), CLI_ERROR, "cli: port 0 is an error");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|serve|8088|extra") + CLI_H)), CMDIT_ERR_TOO_MANY_POSITIONAL,
+      "cli: a second positional is an error (2.11.x: ignored)");
+    assert_eq(load64(_t_cli("hoosh|serve|--|8099") + CLI_PORT), 8099, "cli: -- ends the flags (2.11.x: read as one)");
+    assert_eq(cli_port_value("65535"), 65535, "cli: port 65535");
+    assert_eq(cli_port_value("65536"), 0 - 1, "cli: port 65536 is none");
+    assert_eq(cli_port_value("+80"), 0 - 1, "cli: a sign is not a digit");
+    assert_eq(cli_port_value(""), 0 - 1, "cli: nor is nothing");
 
-    test_group("cli_positionals");
-    # `hoosh infer --server URL --stream MODEL PROMPT` — positionals must skip
-    # both the flag AND its value, but --stream takes no value.
-    var pa = vec_new();
-    vec_push(pa, "hoosh"); vec_push(pa, "infer");
-    vec_push(pa, "--server"); vec_push(pa, "http://h:8088");
-    vec_push(pa, "--stream");
-    vec_push(pa, "llama3"); vec_push(pa, "hello world");
-    assert_streq(cli_positional(pa, 0), "llama3", "pos: model after flags");
-    assert_streq(cli_positional(pa, 1), "hello world", "pos: prompt after flags");
-    assert_eq(cli_positional(pa, 2), 0, "pos: third positional absent");
-    assert_streq(cli_flag_val(pa, "--server", 0), "http://h:8088", "pos: --server still parsed");
-    # A bare positional port keeps working (`hoosh serve 8088`, pre-2.5.8 form).
-    var pb = vec_new();
-    vec_push(pb, "hoosh"); vec_push(pb, "serve"); vec_push(pb, "8088");
-    assert_streq(cli_positional(pb, 0), "8088", "pos: bare positional port");
-    # --name=value must NOT swallow the next argument as its value.
-    var pc = vec_new();
-    vec_push(pc, "hoosh"); vec_push(pc, "infer"); vec_push(pc, "--server=http://h");
-    vec_push(pc, "m"); vec_push(pc, "p");
-    assert_streq(cli_positional(pc, 0), "m", "pos: --name=value does not eat a positional");
-    assert_streq(cli_positional(pc, 1), "p", "pos: second positional intact");
-    # 2.9.19: cli_flag_set (no copy existed) and cli_args, which hands main.cyr's wrappers the process's argv.
-    assert_eq(cli_flag_set(pa, "--stream"), 1, "flag set: a valueless flag is seen");
-    assert_eq(cli_flag_set(pa, "--json"), 0, "flag set: an absent one is not");
-    assert_eq(cli_flag_set(pb, "serve"), 1, "flag set: matches any argument after the program name");
-    var pd = vec_new();
-    vec_push(pd, "--stream");
-    assert_eq(cli_flag_set(pd, "--stream"), 0, "flag set: argument 0 is the program, never a flag");
-    args_init();   # as main() does at startup; argc()/argv() read nothing before it
-    var pargs = cli_args();
-    assert_eq(vec_len(pargs) >= 1 && vec_len(pargs) == argc(), 1, "cli_args: one element per argument");
-    assert_streq(vec_get(pargs, 0), argv(0), "cli_args: element 0 is the program");
-    assert_eq(cli_args(), pargs, "cli_args: built once");
+    test_group("cli: the config, the verbs, help and version (2.12.0)");
+    var tc_cn = _t_cli("hoosh");
+    assert_eq(load64(tc_cn + CLI_ACT) == CLI_RUN && load64(tc_cn + CLI_VERB) == CLI_V_SERVE, 1, "cli: no command serves");
+    var tc_cc = _t_cli("hoosh|-c|f.cyml");
+    assert_eq(load64(tc_cc + CLI_VERB), CLI_V_SERVE, "cli: -c alone serves");
+    assert_streq(load64(tc_cc + CLI_CONFIG), "f.cyml", "cli: ... with the config");
+    var tc_cbf = _t_cli("hoosh|-c|f.cyml|serve");
+    assert_eq(load64(tc_cbf + CLI_ACT), CLI_RUN, "cli: -c before the verb (2.11.x: unknown command: -c)");
+    assert_streq(load64(tc_cbf + CLI_CONFIG), "f.cyml", "cli: ... binds");
+    assert_streq(load64(_t_cli("hoosh|serve|-c|g.cyml") + CLI_CONFIG), "g.cyml", "cli: -c after the verb");
+    var tc_cm = _t_cli("hoosh|--config=h.cyml|models|--server|http://h:8088");
+    assert_eq(load64(tc_cm + CLI_VERB), CLI_V_MODELS, "cli: models");
+    assert_streq(load64(tc_cm + CLI_CONFIG), "h.cyml", "cli: --config=value before it");
+    assert_streq(load64(tc_cm + CLI_SERVER), "http://h:8088", "cli: models --server");
+    var tc_ch = _t_cli("hoosh|health");
+    assert_eq(load64(tc_ch + CLI_VERB) == CLI_V_HEALTH && load64(tc_ch + CLI_SERVER) == 0, 1, "cli: health, local");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|models|extra") + CLI_H)), CMDIT_ERR_TOO_MANY_POSITIONAL,
+      "cli: models takes no argument");
+    assert_eq(load64(_t_cli("hoosh|info") + CLI_VERB), CLI_V_INFO, "cli: info");
+    assert_eq(load64(_t_cli("hoosh|info|x") + CLI_ACT), CLI_ERROR, "cli: info takes no argument");
+    assert_eq(load64(_t_cli("hoosh|help") + CLI_ACT), CLI_HELP, "cli: help");
+    assert_eq(load64(_t_cli("hoosh|--help") + CLI_ACT), CLI_HELP, "cli: --help");
+    assert_eq(load64(_t_cli("hoosh|-h") + CLI_ACT), CLI_HELP, "cli: -h");
+    assert_eq(load64(_t_cli("hoosh|version") + CLI_ACT), CLI_VERSION, "cli: version");
+    assert_eq(load64(_t_cli("hoosh|--version") + CLI_ACT), CLI_VERSION, "cli: --version");
+    assert_eq(load64(_t_cli("hoosh|-V") + CLI_ACT), CLI_VERSION, "cli: -V (new in 2.12.0)");
+    var tc_csh = _t_cli("hoosh|serve|--help");
+    assert_eq(load64(tc_csh + CLI_ACT), CLI_VERB_HELP, "cli: serve --help is serve's help (2.11.x: it served)");
+    assert_eq(load64(tc_csh + CLI_H) != load64(tc_cn + CLI_H), 1, "cli: ... from serve's own handle");
+    assert_eq(load64(_t_cli("hoosh|-c|f.cyml|--help") + CLI_ACT), CLI_HELP, "cli: help with a config named");
+    var tc_cu = _t_cli("hoosh|bogus");
+    assert_eq(load64(tc_cu + CLI_ACT), CLI_ERROR, "cli: an unknown command");
+    assert_eq(cmdit_error(load64(tc_cu + CLI_H)), CMDIT_ERR_UNKNOWN_VERB, "cli: ... is cmdit's unknown verb");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|--port|9000") + CLI_H)), CMDIT_ERR_UNKNOWN,
+      "cli: serve's flag before any verb is unknown");
+    var tc_cbn = _t_cli("hoosh|bench|http://h:8088");
+    assert_eq(load64(tc_cbn + CLI_VERB), CLI_V_BENCH, "cli: bench");
+    assert_streq(load64(tc_cbn + CLI_URL), "http://h:8088", "cli: ... its url");
+    assert_eq(load64(tc_cbn + CLI_COUNT), CLI_BENCH_DEFAULT(), "cli: ... the default count");
+    assert_eq(load64(_t_cli("hoosh|bench|http://h|50") + CLI_COUNT), 50, "cli: bench's count");
+    assert_streq(load64(_t_cli("hoosh|bench|http://h|x") + CLI_MSGV), "x", "cli: a count that is not one");
+    assert_eq(load64(_t_cli("hoosh|bench|http://h|0") + CLI_ACT), CLI_ERROR, "cli: a count of 0 is none");
+    assert_eq(load64(_t_cli("hoosh|bench") + CLI_ACT), CLI_ERROR, "cli: bench needs a url");
+    assert_eq(load64(_t_cli("hoosh|bench|u|1|2") + CLI_ACT), CLI_ERROR, "cli: bench takes two at most");
+    assert_eq(cmdit_verb_is_hidden(load64(tc_cn + CLI_H), CLI_V_BENCH), 1, "cli: bench is hidden from help");
+    assert_eq(cmdit_verb_is_hidden(load64(tc_cn + CLI_H), CLI_V_INFER), 0, "cli: infer is not");
+    # After cmdit's error line, the verb's usage (2.11.x printed infer's and bench's), or where help is.
+    assert_streq(load64(_t_cli("hoosh|infer|llama3") + CLI_USAGE),
+      "usage: hoosh infer [--server <url>] [--stream] (-m <model> <prompt> | <model> <prompt>)", "cli: infer's usage");
+    assert_streq(load64(_t_cli("hoosh|bench") + CLI_USAGE), "usage: hoosh bench <url> [count]", "cli: bench's usage");
+    assert_streq(load64(tc_cu + CLI_USAGE), "Try 'hoosh --help'.", "cli: before any verb, a pointer to --help");
 
     test_group("hardware_disabled_backends");
     # disabled_backends clears one bit per named backend; everything else keeps probing. Every backend ai-hwaccel
@@ -7093,24 +7151,31 @@ fn main() {
     assert_streq(to_cstr(_config_rate_limit_str(rl_both)), "600", "cfg: rate_limit wins over rate_limit_rpm");
     var rl_none = _t_pp("[[providers]]\ntype = \"openai\"\n");
     assert_eq(_config_rate_limit_str(rl_none), 0, "cfg: neither set means no limit");
-    # `hoosh infer -m llama3 "hi"` is rust-old's form; -m used to swallow the model.
-    var ia = alloc(16);
-    var iv = vec_new();
-    vec_push(iv, "hoosh"); vec_push(iv, "infer"); vec_push(iv, "-m"); vec_push(iv, "llama3"); vec_push(iv, "hi");
-    assert_eq(cli_positional(iv, 1), 0, "infer: before 2.7.0 -m left no prompt");
-    cli_infer_args(iv, ia);
-    assert_streq(load64(ia), "llama3", "infer: -m names the model");
-    assert_streq(load64(ia + 8), "hi", "infer: prompt is the positional");
-    var iv2 = vec_new();
-    vec_push(iv2, "hoosh"); vec_push(iv2, "infer"); vec_push(iv2, "--model=qwen3"); vec_push(iv2, "yo");
-    cli_infer_args(iv2, ia);
-    assert_streq(load64(ia), "qwen3", "infer: --model=value form");
-    assert_streq(load64(ia + 8), "yo", "infer: prompt after --model=value");
-    var iv3 = vec_new();
-    vec_push(iv3, "hoosh"); vec_push(iv3, "infer"); vec_push(iv3, "--stream"); vec_push(iv3, "phi3"); vec_push(iv3, "q");
-    cli_infer_args(iv3, ia);
-    assert_streq(load64(ia), "phi3", "infer: positional form unchanged");
-    assert_streq(load64(ia + 8), "q", "infer: positional prompt unchanged");
+    # `hoosh infer -m llama3 "hi"` is rust-old's form (2.7.0); -m used to swallow the model. 2.12.0: through cmdit.
+    var tc_ia = _t_cli("hoosh|infer|-m|llama3|hi");
+    assert_streq(load64(tc_ia + CLI_MODEL), "llama3", "infer: -m names the model");
+    assert_streq(load64(tc_ia + CLI_PROMPT), "hi", "infer: prompt is the positional");
+    var tc_ib = _t_cli("hoosh|infer|--model=qwen3|yo");
+    assert_streq(load64(tc_ib + CLI_MODEL), "qwen3", "infer: --model=value form");
+    assert_streq(load64(tc_ib + CLI_PROMPT), "yo", "infer: prompt after --model=value");
+    var tc_ic = _t_cli("hoosh|infer|--stream|phi3|q");
+    assert_streq(load64(tc_ic + CLI_MODEL), "phi3", "infer: positional form unchanged");
+    assert_streq(load64(tc_ic + CLI_PROMPT), "q", "infer: positional prompt unchanged");
+    assert_eq(load64(tc_ic + CLI_STREAM), 1, "infer: --stream");
+    var tc_id = _t_cli("hoosh|infer|--server|http://h:8088|--stream|llama3|hello world");
+    assert_streq(load64(tc_id + CLI_SERVER), "http://h:8088", "infer: --server");
+    assert_streq(load64(tc_id + CLI_PROMPT), "hello world", "infer: a prompt with a space, one argument");
+    assert_streq(load64(_t_cli("hoosh|infer|--server=http://h|m|p") + CLI_MODEL), "m",
+      "infer: --server=value does not eat a positional");
+    assert_eq(load64(_t_cli("hoosh|infer|m|p") + CLI_STREAM), 0, "infer: no --stream");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|infer|llama3") + CLI_H)), CMDIT_ERR_MISSING_POSITIONAL,
+      "infer: a model and no prompt is an error");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|infer|a|b|c") + CLI_H)), CMDIT_ERR_TOO_MANY_POSITIONAL,
+      "infer: a third positional is an error (2.11.x: ignored)");
+    assert_eq(load64(_t_cli("hoosh|infer|-m|m|a|b") + CLI_ACT), CLI_ERROR, "infer: -m and two positionals");
+    assert_eq(cmdit_error(load64(_t_cli("hoosh|infer|llama3|-x") + CLI_H)), CMDIT_ERR_UNKNOWN,
+      "infer: a dash-led prompt is read as a flag");
+    assert_streq(load64(_t_cli("hoosh|infer|llama3|--|-x") + CLI_PROMPT), "-x", "infer: ... so it goes after --");
 
     test_group("rustold_health_metrics");
     # /v1/health carries version and providers_configured (rust-old's conformance

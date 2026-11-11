@@ -1,4 +1,5 @@
 commit	ccdcd9c035e205c1373b3c0d2c5878004da6edbc	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel	2.5.6
+commit	efffc544d4b3f740194feb2d33563eb0029f6fbd	cmdit	https://github.com/MacCracken/cmdit	1.5.1
 commit	af2bb1a98f31d6447ff2ea4b937dcb92acc543cb	rosnet	https://github.com/MacCracken/rosnet	1.4.1
 commit	63cfcbf0a4a9c041eb3d29e89f3ec9a732f79bf8	tentib	https://github.com/MacCracken/tentib	1.5.1
 commit	cdb74e281920da6130bd48f1de37d9b150ab0d3d	tyche	https://github.com/MacCracken/tyche	1.2.2
@@ -22,6 +23,7 @@ eba2079d68fe37db226c7d6803e8a35fe822dd906f4be22f3760e468da441e38  lib/async_agno
 cd9321d9400401cd8895d1f488d969ea391a1194b327f7a1fa60b99912b73cf2  lib/bench.cyr
 b99081e633d572569ee63c6a915fe4aa39b3ac4ff5665c08cc4c9416ed2f6928  lib/boxed.cyr
 2e2e802085112d781225c517fca853b4adbf29850a96b21b6ff32469f0736516  lib/chrono.cyr
+900a8c421c03b757710d15d05a587f99bb328629b118fefe074423756067a4f4  lib/cmdit.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr
 263ba39de07857c917211756c549463f8c8115ed22c892631fac474e3ed2c5d5  lib/dynlib.cyr
 d0c40dfccf051ca0b141c31633570b3fa08d82b71729d237bbb519c287d2e5bb  lib/fdlopen.cyr

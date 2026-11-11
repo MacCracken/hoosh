@@ -1,11 +1,9 @@
 # hoosh — AI inference gateway
 # Multi-provider LLM routing, token budgets, caching, OpenAI-compatible API
 #
-# Usage:
-#   hoosh serve [port]     Start the gateway (default: 8088)
-#   hoosh info             System info
-#   hoosh version          Show version
-#   hoosh help             Show help
+# Usage: hoosh [-c <file>] [<command>] [options] [args]   (src/lib/cli.cyr; `hoosh --help` lists the commands)
+#   hoosh [serve]          Start the gateway (the default command)
+#   hoosh models | health | infer | info | help | version
 
 # Stdlib auto-included via cyrius.cyml
 
@@ -22,6 +20,10 @@ include "lib/ai-hwaccel.cyr"
 include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
 include "lib/tentib.cyr"
+
+# cmdit (2.12.0, ADR 015) — the AGNOS CLI parser, which src/lib/cli.cyr builds hoosh's command line on. Included
+# before any hoosh module: cli.cyr reads its CMDIT_* enums.
+include "lib/cmdit.cyr"
 
 # MCP protocol core (bote 3.8.15) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
@@ -90,7 +92,7 @@ include "src/lib/otlp_export.cyr"   # 2.9.14: the I/O half, split so provider.cy
 include "src/lib/wq.cyr"           # 2.9.20: the work-queue ring + job constructors, includable by the tests
 include "src/lib/pool.cyr"
 include "src/lib/mcp.cyr"
-include "src/lib/cli.cyr"          # 2.9.19: the flag parser, over an argument vec the tests can build
+include "src/lib/cli.cyr"          # 2.12.0: the command line through cmdit, a pure parse the tests drive
 include "src/lib/cfgparse.cyr"     # 2.9.18: config.cyr's self-contained helpers, includable by the tests
 include "src/lib/config.cyr"
 
@@ -857,16 +859,15 @@ fn cmd_infer_remote(url, model, prompt, stream) {
 fn cmd_help() {
     println("hoosh — AI inference gateway");
     println("");
-    println("Usage: hoosh <command> [options] [args]");
+    println("Usage: hoosh [-c <file>] [<command>] [options] [args]");
     println("");
     println("Commands:");
-    println("  serve [port]       start the gateway server (default: 8088)");
+    println("  serve [port]       start the gateway server (the default command; port 8088)");
     println("    -p, --port <n>     listen port");
     println("        --bind <addr>  listen address (default: 127.0.0.1)");
-    println("    -c, --config <f>   config file (default: hoosh.cyml)");
     println("  models             list models");
     println("  health             check provider connectivity");
-    println("  infer <model> <p>  one-shot inference");
+    println("  infer <model> <p>  one-shot inference (-m, --model <model> <p> also)");
     println("        --stream       stream tokens to stdout as they arrive");
     println("  info               show system information");
     println("  help               show this help");
@@ -875,6 +876,13 @@ fn cmd_help() {
     println("Options for models / health / infer:");
     println("    --server <url>     query a RUNNING hoosh over HTTP instead of");
     println("                       reading the local config (e.g. http://host:8088)");
+    println("");
+    println("Options for every command, before or after it:");
+    println("    -c, --config <f>   config file (default: hoosh.cyml)");
+    println("    -h, --help         this help; after a command, that command's");
+    println("    -V, --version      show version");
+    println("");
+    println("A prompt that starts with '-' goes after '--'. A usage error exits 2.");
     println("");
     println("Environment:");
     println("  HOOSH_LOG            log level: fatal|error|warn|info|debug|trace");
@@ -988,19 +996,22 @@ fn signals_init() {
 }
 
 # ================================================================
-# CLI flag parsing (2.5.8)
+# The command line (2.12.0, src/lib/cli.cyr)
 # ================================================================
-#
-# Before this, `serve` took a bare positional port and nothing else accepted a
-# flag — so bind address, config path, and the `--server` target rust-old
-# supported were all unreachable from the command line. Supports
-# `--name value`, `--name=value` and short `-p value`.
 
-# The flag parser is cli.cyr's since 2.9.19 (it reads its arguments from a vec, so the tests can run it); these
-# hand it the process's argv.
-fn _flag_val(name, short) { return cli_flag_val(cli_args(), name, short); }
-fn _flag_set(name) { return cli_flag_set(cli_args(), name); }
-fn _positional(n) { return cli_positional(cli_args(), n); }
+# Answer a command line that does not run a command: help, version, or a usage error. Before config, hardware and
+# storage are touched, so `hoosh --help` and `hoosh serve --help` need nothing but the binary. Returns the exit code.
+fn _cli_answer(cli) {
+    var act = load64(cli + CLI_ACT);
+    if (act == CLI_HELP) { cmd_help(); return 0; }
+    if (act == CLI_VERB_HELP) { cmdit_help_fd(load64(cli + CLI_H), 1); return 0; }
+    if (act == CLI_VERSION) {
+        sys_write(1, "hoosh v", 7);
+        println(HOOSH_VERSION);
+        return 0;
+    }
+    return cli_print_error(cli);
+}
 
 # ================================================================
 # Main
@@ -1010,6 +1021,11 @@ fn main() {
     alloc_init();
     args_init();
     sha256_global_init();
+
+    # 2.12.0: the whole command line first (cli.cyr). Help, version and a usage error answer here; through 2.11.x
+    # every one of them ran after the config, hardware detection and storage, and `serve --help` served.
+    var cli = alloc(CLI_SIZE);
+    if (cli_parse(cli) != CLI_RUN) { return _cli_answer(cli); }
 
     # Native TLS is sandhi's default backend (no build flag needed since
     # cyrius 6.1.21 / sandhi native-default). use_native here is a belt-and-
@@ -1057,8 +1073,8 @@ fn main() {
         if (lv >= 0) { sakshi_set_level(lv); }
     }
 
-    # -c/--config (2.5.8): an alternate config file.
-    var cfgv = _flag_val("--config", "-c");
+    # -c/--config (2.5.8): an alternate config file, before or after the command (2.12.0).
+    var cfgv = load64(cli + CLI_CONFIG);
     if (cfgv != 0) { _config_path = cfgv; }
 
     # Install THIS thread's thread-local block (sigil's lane slot,
@@ -1115,71 +1131,34 @@ fn main() {
         }
     }
 
-    # CLI
-    var ac = argc();
-    if (ac < 2) { return cmd_serve(_http_port); }
-
-    var cmd = argv(1);
-    if (streq(cmd, "serve") == 1) {
-        # --port/-p, else a bare positional port (the pre-2.5.8 form), else config.
+    # The command (cli.cyr parsed it; help and version have answered). A runtime failure exits 1.
+    var verb = load64(cli + CLI_VERB);
+    if (verb == CLI_V_SERVE) {
+        # --port/-p, else a bare positional port (the pre-2.5.8 form, until 3.0.0), else config.
         var port = _http_port;
-        var pv = _flag_val("--port", "-p");
-        if (pv == 0) { pv = _positional(0); }
-        if (pv != 0) {
-            var pnum = atoi(pv);
-            if (pnum > 0) { port = pnum; }
-        }
+        if (load64(cli + CLI_PORT) != 0) { port = load64(cli + CLI_PORT); }
         # --bind overrides [server] bind.
-        var bv = _flag_val("--bind", 0);
+        var bv = load64(cli + CLI_BIND);
         if (bv != 0) { _http_bind = host_addr(bv); }
         return cmd_serve(port);
     }
-    if (streq(cmd, "models") == 1) {
-        var msrv = _flag_val("--server", 0);
-        if (msrv != 0) { return cmd_models_remote(msrv); }
+    var srv = load64(cli + CLI_SERVER);
+    if (verb == CLI_V_MODELS) {
+        if (srv != 0) { return cmd_models_remote(srv); }
         return cmd_models();
     }
-    if (streq(cmd, "health") == 1) {
-        var hsrv = _flag_val("--server", 0);
-        if (hsrv != 0) { return cmd_health_remote(hsrv); }
+    if (verb == CLI_V_HEALTH) {
+        if (srv != 0) { return cmd_health_remote(srv); }
         return cmd_health();
     }
-    if (streq(cmd, "bench") == 1) {
-        if (ac < 3) { println("Usage: hoosh bench <url> [count]"); return 1; }
-        var bn = 2000;
-        if (ac >= 4) { bn = atoi(argv(3)); }
-        return cmd_bench_connect(argv(2), bn);
-    }
-    if (streq(cmd, "infer") == 1) {
-        # Model and prompt: cli.cyr's cli_infer_args (-m/--model <model> <prompt>, else <model> <prompt>).
-        var iargs = alloc(16);
-        cli_infer_args(cli_args(), iargs);
-        var im = load64(iargs);
-        var ip = load64(iargs + 8);
-        if (im == 0 || ip == 0) {
-            println("Usage: hoosh infer [--server <url>] [--stream] [-m] <model> <prompt>");
-            return 1;
-        }
-        var isrv = _flag_val("--server", 0);
-        if (isrv != 0) {
-            return cmd_infer_remote(isrv, im, ip, _flag_set("--stream"));
-        }
+    if (verb == CLI_V_INFER) {
+        var im = load64(cli + CLI_MODEL);
+        var ip = load64(cli + CLI_PROMPT);
+        if (srv != 0) { return cmd_infer_remote(srv, im, ip, load64(cli + CLI_STREAM)); }
         return cmd_infer(im, ip);
     }
-    if (streq(cmd, "info") == 1) { return cmd_info(); }
-    if (streq(cmd, "help") == 1) { return cmd_help(); }
-    if (streq(cmd, "--help") == 1) { return cmd_help(); }
-    if (streq(cmd, "-h") == 1) { return cmd_help(); }
-    if (streq(cmd, "version") == 1 || streq(cmd, "--version") == 1) {
-        sys_write(1, "hoosh v", 7);
-        println(HOOSH_VERSION);
-        return 0;
-    }
-
-    sys_write(2, "unknown command: ", 17);
-    sys_write(2, cmd, strlen(cmd));
-    println("");
-    return 1;
+    if (verb == CLI_V_BENCH) { return cmd_bench_connect(load64(cli + CLI_URL), load64(cli + CLI_COUNT)); }
+    return cmd_info();
 }
 
 var r = main();

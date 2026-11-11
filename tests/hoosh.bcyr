@@ -31,12 +31,13 @@ include "lib/sigil.cyr"
 # "undefined variable 'sys_getrandom'". Let syscalls auto-inject before tls.
 include "lib/sakshi.cyr"
 
-# src/lib, in tests/hoosh.tcyr's order (which follows src/main.cyr's), minus the two leaf modules nothing here
-# calls (cli.cyr, models.cyr).
+# src/lib, in tests/hoosh.tcyr's order (which follows src/main.cyr's). 2.12.0: cli.cyr, for the command-line parse,
+# and cmdit's bundle before it.
 include "lib/ai-hwaccel.cyr"
 include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
 include "lib/tentib.cyr"
+include "lib/cmdit.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
 include "src/lib/types.cyr"
@@ -76,6 +77,7 @@ include "src/lib/retry.cyr"
 include "src/lib/reqparse.cyr"
 include "src/lib/cfgparse.cyr"
 include "src/lib/wq.cyr"
+include "src/lib/cli.cyr"
 include "src/lib/keyindex.cyr"
 include "src/lib/pricing.cyr"
 include "src/lib/metadata.cyr"
@@ -364,6 +366,28 @@ fn main() {
         i = i + 1;
     }
     bench_batch_stop(b, 100000);
+    bench_report(b);
+
+    # ── Benchmark: cli_parse_serve (2.12.0) ──────────────────────
+    # The whole command line through cmdit (cli.cyr), once at startup: the global -c, the verb, serve's handle and
+    # its flags. Each parse builds two handles, as main() does.
+    var cl_words = vec_new();
+    vec_push(cl_words, _b_s("hoosh")); vec_push(cl_words, _b_s("-c")); vec_push(cl_words, _b_s("hoosh.cyml"));
+    vec_push(cl_words, _b_s("serve")); vec_push(cl_words, _b_s("--port")); vec_push(cl_words, _b_s("9000"));
+    vec_push(cl_words, _b_s("--bind")); vec_push(cl_words, _b_s("0.0.0.0"));
+    var cl_argv = alloc(9 * 8);
+    i = 0;
+    while (i < 8) { store64(cl_argv + i * 8, vec_get(cl_words, i)); i = i + 1; }
+    store64(cl_argv + 64, 0);
+    var cl_out = alloc(CLI_SIZE);
+    b = bench_new("cli_parse_serve");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 2000) {
+        cli_parse_argv(8, cl_argv, cl_out);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 2000);
     bench_report(b);
 
     # ── 2.5.10: per-request cost of the security + accounting paths ──

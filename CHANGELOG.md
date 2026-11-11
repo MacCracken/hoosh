@@ -5,6 +5,105 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.12.0] — 2026-11-11
+
+**The command line goes through cmdit.** hoosh's command line is a cmdit 1.5.1 verb tool
+([ADR 015](docs/decisions/015-command-line-through-cmdit.md)). The whole command line is parsed before anything else
+runs, so:
+- help, version and usage errors answer without touching the config, the hardware or storage;
+- `-c` binds on either side of the command;
+- what 2.11.x ignored is now a usage error, exit 2.
+
+**2316 assertions** in 187 groups. All gates are clean: fmt, lint, vet, deny, coverage (504/867, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test.
+
+⚠ **What changes for a script that runs hoosh.** The gateway's API does not change. 41 command lines were captured
+before and after, stdout, stderr and exit code. 17 answer the same (apart from the version string), and the other 24
+change as follows:
+
+| command line | 2.11.2 | 2.12.0 |
+|---|---|---|
+| `hoosh -c f.cyml serve`, `hoosh -c f.cyml` | `unknown command: -c`, exit 1 | serves with `f.cyml` |
+| `hoosh serve --help` | started the gateway | serve's help on stdout, exit 0 |
+| `hoosh -V` | `unknown command: -V`, exit 1 | `hoosh v2.12.0`, exit 0 |
+| `hoosh -c broken.cyml help` / `version` / `--help` | `unknown command: -c`, exit 1 | answers, exit 0, the config unread |
+| `hoosh serve -p`, `serve -p abc`, `serve -p 0`, `serve abc` | served on the default port | `--port: missing value` (etc.), exit 2 |
+| `hoosh serve 8088 extra`, `hoosh infer a b c` | ignored the extra argument | `too many arguments: …`, exit 2 |
+| `hoosh serve -- 8099` | `--` ate the port; served on 8088 | serves on 8099 |
+| `hoosh infer`, `infer llama3`, `hoosh bench` | the usage line on stdout, exit 1 | cmdit's error and the usage line on stderr, exit 2 |
+| `hoosh infer llama3 -x` | the usage line, exit 1 | `unknown flag: -x`, exit 2; a dash-led prompt goes after `--` |
+| `hoosh bogus`, `hoosh --bogus`, `hoosh --port 9000` | `unknown command: …`, exit 1 | `unknown command` (with the command list) or `unknown flag`, exit 2 |
+| `hoosh help` / `--help` / `-h` | | the same help, with `-c`, `-h`, `-V`, `--` and exit 2 under "Options for every command" |
+
+A repeated flag is last-wins; it was first-wins. A command that runs and fails still exits 1. The scripts in this repo
+(`shutdown-smoke.sh`, `wire-smoke.py`, `memory-growth.py`) and the release workflow's `version` / `help` checks run
+unchanged.
+
+### Changed — the command line (`src/lib/cli.cyr`, rewritten; `src/main.cyr`)
+
+- **One parse, first.** `cli_parse_argv(argc, argv, out)` fills a record of what to do and with what:
+  - the act: run, help, a verb's help, version or a usage error;
+  - the verb, and the handle the help or the error belongs to;
+  - the values: the config, the port, the bind address, the server, the model, the prompt, `--stream`, bench's url and
+    count.
+
+  It is pure (cmdit's `_argv` cores). `main()` calls it right after `args_init()`, answers what is not a command, and
+  runs the command from the record after setup.
+- **The handles:**
+  - the global one has `-c/--config`, the auto `-h/--help` and `-V/--version`, and the verbs;
+  - `bench` is hidden from help, the command list and completions (`cmdit_verb_hidden`);
+  - each verb has a handle of its own: `serve` (`-p/--port`, ranged 1–65535, `--bind`, at most one positional),
+    `models` and `health` (`--server`), `infer` (`-m/--model`, `--server`, `--stream`, exactly one positional with
+    `-m`, else two), `bench` (a url and an optional count), and `info`, `help`, `version` (none).
+- **Errors:** cmdit's line, which names what was typed (`hoosh serve: --port: value '0' out of range`), then the
+  verb's usage, or `Try 'hoosh --help'.` before any verb. hoosh checks the bare port and bench's count itself, and
+  writes their sentence with control bytes shown as `?`, as cmdit does.
+- **Kept:** `cmd_help` (hand-written, stdout; it now lists the options every command takes), the `hoosh v<version>`
+  line, no command meaning `serve`, and the bare positional port (until 3.0.0; `-p` wins over it).
+- **Removed:** `cli_args`, `cli_flag_val`, `cli_flag_set`, `cli_positional`, `cli_infer_args` and `main.cyr`'s
+  `_flag_val` / `_flag_set` / `_positional`. The header comment, which listed four commands, now gives the shape.
+
+### Changed — dependency pins
+
+- **cmdit 1.5.1** is new (`[deps.cmdit]`), with `cyrius.lock` regenerated from empty: cmdit `efffc54`. It has no git
+  sub-deps, and its `# Requires` block names only stdlib leaves hoosh already lists (args, alloc, string, io).
+- Its 191 functions and globals and its enum members (`cmdit_*`, `CMDIT_*`, `_cmdit_*`) collide with nothing in hoosh,
+  its vendored bundles or its stdlib set. The build prints no duplicate or undefined warning on x86_64, aarch64 or
+  AGNOS.
+- Unchanged: cyrius 6.7.18, ai-hwaccel 2.5.6, tentib 1.5.1, the vendored bote-core 3.8.15 and majra 2.13.0.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2263 → 2316). Two new groups replace `cli_flag_parsing` and `cli_positionals`:
+  `cli: flags and the port` and `cli: the config, the verbs, help and version`. `rustold_config_cli`'s infer cases
+  moved onto the new parse too. Each case is one argv through the real `cli_parse_argv`, and they cover:
+  - every form of each flag, `--`, the bare port and `-p` over it, and last-wins;
+  - each error 2.11.x let through, with its cmdit code;
+  - `-c` before, after and without a verb;
+  - help, version and a verb's help, unknown commands and flags;
+  - bench's url, count and hidden verb, and the usage lines.
+- **Mutation-checked:** 12 mutants of `cli.cyr`, and the suite kills all 12. The first run left one alive, a count of
+  0 accepted by `bench`, and a case for it was added.
+- **`tests/hoosh.bcyr`** (41 → 42): `cli_parse_serve`, a whole `hoosh -c f serve --port --bind` parse, 2.8 µs.
+
+### Sizes
+
+| | 2.11.2 | 2.12.0 | |
+|---|---:|---:|---:|
+| x86_64 | 4,214,168 | 4,284,536 | +1.7% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,727,320 | 2,769,016 | +1.5% |
+| aarch64 | 4,922,416 | 4,992,792 | +1.4% |
+| AGNOS, `CYRIUS_DCE=1` | 2,691,640 | 2,733,336 | +1.5% |
+
+The bench rows other than the new one time code this release did not change.
+
+### Documented
+
+- **[ADR 015](docs/decisions/015-command-line-through-cmdit.md)**, the command line through cmdit.
+- The README's quick start (`-c` anywhere, `--help` after a command, exit codes, `--` before a dash-led prompt).
+- The roadmap, with the cmdit item done and 2.12.x's speech and tools next.
+- `state.md`, the docs index, `doc-health.md` and the architecture overview's `cli.cyr` and dependency rows.
+
 ## [2.11.2] — 2026-11-11
 
 **A request keeps nothing, and the keepers stop growing.** This finishes [ADR 013](docs/decisions/013-request-memory.md):
