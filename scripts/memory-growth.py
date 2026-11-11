@@ -32,11 +32,15 @@ provider's shape, so each body builder and extractor is measured (an http:// rou
 --audit N turns on the audit chain with `max_entries = N` (a small N measures it full, evicting per request), and
 --otlp exports a span per request to the fake, which also answers OTLP's POST /v1/traces.
 
+2.12.2: --speech sends POST /v1/audio/speech to a `type = "svara"` route instead of chats, each input --input-bytes
+long (default 60) and different from the last, so shabda converts and svara renders every one (ADR 016).
+
 Usage: scripts/memory-growth.py [build/hoosh] [requests]   (defaults: build/hoosh, 3000)
        scripts/memory-growth.py build/hoosh-probe 500 --stream-only --chunks 100
        scripts/memory-growth.py build/hoosh 3000 --get /v1/models/catalog --tags 200 --shape claude
        scripts/memory-growth.py build/hoosh-probe 2000 --cache-max 100
        scripts/memory-growth.py build/hoosh-probe 2000 --hits
+       scripts/memory-growth.py build/hoosh-probe 500 --speech --input-bytes 400
 """
 import argparse
 import http.server
@@ -164,7 +168,21 @@ def rss_kib(pid):
     return 0
 
 
-def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hits=False, audit=0, otlp=False):
+SPEECH_WORDS = ("the quick brown fox jumps over a lazy dog while seven workers render speech one phoneme at a "
+                "time and every reply streams to its client as it is made").split()
+
+
+def speech_text(i, nbytes):
+    words = []
+    k = i
+    while len(" ".join(words)) < nbytes:
+        words.append(SPEECH_WORDS[k % len(SPEECH_WORDS)])
+        k = k * 31 + 7
+    return " ".join(words)[:nbytes].strip() + "."
+
+
+def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hits=False, audit=0, otlp=False,
+        speech=0):
     backend = Server(("127.0.0.1", 0), FakeOllama)
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     probe = Server(("127.0.0.1", 0), FakeOllama)
@@ -180,6 +198,8 @@ def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hit
         cfg += f'\n[cache]\nmax_entries = {cache_max}\n'
     if audit > 0:
         cfg += f'\n[audit]\nenabled = true\nmax_entries = {audit}\n'
+    if speech > 0:
+        cfg += '\n[[providers]]\ntype = "svara"\nmodels = ["tts-*"]\n'
     if otlp:
         cfg += f'\n[telemetry]\notlp_endpoint = "http://127.0.0.1:{backend.server_address[1]}/v1/traces"\n'
     with tempfile.TemporaryDirectory() as tmp:
@@ -209,13 +229,19 @@ def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hit
             def fetch(i):
                 return urllib.request.urlopen(url + get, timeout=10).read()
 
+            def speak(i):
+                body = {"model": "tts-1", "input": speech_text(i, speech)}
+                req = urllib.request.Request(url + "/v1/audio/speech", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                return urllib.request.urlopen(req, timeout=60).read()
+
             def alloc_used():
                 try:
                     return int(urllib.request.urlopen(url + "/v1/debug/alloc-used", timeout=2).read())
                 except (OSError, ValueError):
                     return None
 
-            once = fetch if get else chat
+            once = speak if speech > 0 else (fetch if get else chat)
             for i in range(prefill):         # 2.10.3: chats first, so a --get reads a full ring or cache
                 chat(1000000 + i)
             if get:
@@ -242,6 +268,8 @@ def run(binary, n, stream, get=None, shape="ollama", prefill=0, cache_max=0, hit
             time.sleep(0.5)
             after = rss_kib(gw.pid)
             what = get or ("streamed" if stream else ("cache hits" if hits else "buffered"))
+            if speech > 0:
+                what = f"speech ({speech}-byte input)"
             if FakeOllama.provider != "ollama":
                 what = f"{FakeOllama.provider} {what}"
             if cache_max > 0:
@@ -277,11 +305,15 @@ if __name__ == "__main__":
                     help="the route's type, and the shape the fake answers a chat in (2.11.2)")
     ap.add_argument("--audit", type=int, default=0, help="[audit] on with this max_entries (2.11.2)")
     ap.add_argument("--otlp", action="store_true", help="export a span per request to the fake (2.11.2)")
+    ap.add_argument("--speech", action="store_true", help="POST /v1/audio/speech to a svara route (2.12.2)")
+    ap.add_argument("--input-bytes", type=int, default=60, help="the length of each --speech input")
     args = ap.parse_args()
     FakeOllama.provider = args.provider
     FakeOllama.tags = args.tags
     FakeOllama.chunks = args.chunks
-    if args.get:
+    if args.speech:
+        run(args.binary, args.requests, False, speech=max(args.input_bytes, 1))
+    elif args.get:
         run(args.binary, args.requests, False, args.get, args.shape, args.prefill, args.cache_max, audit=args.audit,
             otlp=args.otlp)
     elif args.stream_only:

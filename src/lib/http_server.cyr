@@ -90,6 +90,32 @@ fn http_respond_h(cfd, status, status_text, body, body_len, extra_hdr) {
     return 0;
 }
 
+# 2.12.2: the head alone, for a body the caller writes after it in pieces (POST /v1/audio/speech): `ctype` its type,
+# `body_len` the bytes that will follow. On this stack, as http_respond_h's. Returns 0, or -1 when the client is gone.
+fn http_respond_head(cfd, status, status_text, ctype, body_len) {
+    var cr = make_crlf();
+    var head[512];
+    var end = &head + 512;
+    var p = _head_add(&head, end, "HTTP/1.1 ");
+    p = _head_add(p, end, status);
+    p = _head_add(p, end, " ");
+    p = _head_add(p, end, status_text);
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Content-Type: ");
+    p = _head_add(p, end, ctype);
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Access-Control-Allow-Origin: *");
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Connection: close");
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, "Content-Length: ");
+    p = _head_add_int(p, end, body_len);
+    p = _head_add(p, end, cr);
+    p = _head_add(p, end, cr);
+    if (sys_write(cfd, &head, p - &head) < 0) { return 0 - 1; }
+    return 0;
+}
+
 # Respond with the standard header set. The pre-2.5.12 entry point.
 fn http_respond(cfd, status, status_text, body, body_len) {
     return http_respond_h(cfd, status, status_text, body, body_len, 0);

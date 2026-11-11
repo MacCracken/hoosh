@@ -386,6 +386,26 @@ fn load_config(path) {
                 }
             }
 
+            # 2.12.2: a svara route renders POST /v1/audio/speech in this process (svara_local.cyr, ADR 016). The
+            # first enabled one builds the G2P engine and the voices, once per process; every svara route shares
+            # them, so any number may be configured, each with its own `models`.
+            if (ptype == PROV_SVARA) {
+                route_set_catalog_live(route, 0);        # no provider to ask: its patterns are its list
+                if (route_enabled(route) == 1 && spk_ready() == 0) {
+                    if (spk_init() == 0) {
+                        var ssb = str_builder_new();
+                        str_builder_add_cstr(ssb, "config: svara speech loaded: English G2P, voices male, female and");
+                        str_builder_add_cstr(ssb, " child, 24000 Hz 16-bit mono, ");
+                        str_builder_add_int(ssb, spk_init_bytes());
+                        str_builder_add_cstr(ssb, " bytes");
+                        hlog_info(to_cstr(str_builder_build(ssb)));
+                    } else {
+                        hlog_error("config: svara speech could not be loaded (memory); route disabled");
+                        route_set_enabled(route, 0);
+                    }
+                }
+            }
+
             # Parse model patterns — TOML array: ["llama*", "mistral*"]
             var models_str = bayan_toml_get_by_cstr(pp, "models");
             if (models_str != 0) {

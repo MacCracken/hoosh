@@ -74,7 +74,17 @@ fn route_new(prov, priority, base_url) {
 fn route_catalog_default(prov) {
     if (prov == PROV_OPENROUTER) { return 0; }
     if (prov == PROV_TENTIB) { return 0; }     # 2.11.0: in-process, no provider to ask; its patterns are its list
+    if (prov == PROV_SVARA) { return 0; }      # 2.12.2: likewise
     if (prov == PROV_WHISPER) { return 0; }
+    return 1;
+}
+
+# 2.12.2: whether a route serves text: chat, completions, embeddings and the rest of the model API. A svara route
+# serves POST /v1/audio/speech and nothing else, so no text selection considers it (router.cyr), and a speech request
+# considers nothing else (router_select_speech). A route with no `models` matches every model, so without this an
+# unscoped svara route would take chat requests by priority.
+fn route_serves_text(r) {
+    if (route_provider(r) == PROV_SVARA) { return 0; }
     return 1;
 }
 fn route_catalog_live(r) { return load64(r + ROUTE_CATALOG); }

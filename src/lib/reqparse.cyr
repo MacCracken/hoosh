@@ -451,6 +451,7 @@ fn _batch_is_async(body, len) {
 fn _requires_post(path) {
     if (streq(path, "/v1/chat/completions") == 1) { return 1; }
     if (streq(path, "/v1/embeddings") == 1) { return 1; }
+    if (streq(path, "/v1/audio/speech") == 1) { return 1; }
     if (streq(path, "/v1/batch") == 1) { return 1; }
     if (streq(path, "/v1/tokens/check") == 1) { return 1; }
     if (streq(path, "/v1/tokens/reserve") == 1) { return 1; }

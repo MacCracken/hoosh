@@ -38,7 +38,7 @@ cyrius bench tests/hoosh.bcyr
 
 ## What's benched
 
-36 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
+45 CPU microbenchmarks over the per-request hot paths, each calling the gateway's own
 function (no live backend — inference latency is backend-bound and not meaningful to
 micro-measure here). The clock-reading rows run on the production coarse clock, which
 the bench sets as the gateway's ticker would:
@@ -73,6 +73,10 @@ the bench sets as the gateway's ticker would:
   keeper), and `scripts/memory-growth.py` measures it on a real gateway against a `-D HOOSH_ALLOC_PROBE` build
   (`--cache-max`, `--hits`, `--audit`, `--otlp`, `--provider`). `cache_insert` times a replace of one key, which since
   2.11.2 takes the new value in place and allocates nothing; `audit_record_sign` signs on the stack
+- **Speech** (2.12.2) — `speech_plan_sentence`, shabda's conversion of one 67-byte sentence and the layout of its
+  reply (102 µs); `speech_render_sentence`, that reply's 2.4 s of 24 kHz audio rendered phoneme by phoneme,
+  crossfaded and written as PCM to `/dev/null` (50.6 ms, about 48× real time). `scripts/memory-growth.py --speech`
+  measures what a speech request keeps
 
 Add a benchmark alongside any new hot-path code (dev-loop step 3) and re-run
 `bench-history.sh` so the CSV + `benchmarks.md` pick it up. Call the real function, never a

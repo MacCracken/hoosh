@@ -8,65 +8,20 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.12.1 (cyrius 6.7.18). szál's MCP tools are served behind an allow-list
-([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); the command line goes through cmdit 1.5.1
-([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary model is served in hoosh's own process
-through tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a request keeps nothing on the
-heap that never frees ([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
-**Next**: the rest of 2.12.x, speech.
+**Current**: v2.12.2 (cyrius 6.7.18). `POST /v1/audio/speech` is rendered in hoosh's own process through shabda 3.1.1
+and svara 3.6.3 ([ADR 016](../decisions/016-in-process-speech-through-svara.md)); szál's MCP tools are served behind
+an allow-list ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); the command line goes through cmdit 1.5.1
+([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary model is served in process through
+tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a request's own data is released
+when its thread's next request starts ([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
+**Next**: 2.13.x, accounting and capacity.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-11.
-- **2.12.x – 2.15.x minors** each take one theme: they add features or change answers, compatibly. They go in order,
+- **2.13.x – 2.15.x minors** each take one theme: they add features or change answers, compatibly. They go in order,
   and nothing below them holds them up.
 - **Patches** fix things without changing what a client sees, and ship on whichever minor is current when ready.
 - **2.x.x** holds what waits on an upstream release or on demand, to be banded when it is ready.
 - **3.0.0** collects what would break a client or an operator's config. Nothing there ships in a 2.x.
-
----
-
-## 2.12.x — speech
-
-2.12.0 took the command line (cmdit, [ADR 015](../decisions/015-command-line-through-cmdit.md)), and 2.12.1 szál's MCP
-tools ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update). One item is left.
-
-### 2.12.x — speech: `POST /v1/audio/speech` through svara
-
-The AGNOS speech stack is ported to Cyrius, on hoosh's pin (checked 2026-11-11):
-- **shabda 3.1.1**, grapheme-to-phoneme. It takes text through normalizing, dictionary and rules, syllables and
-  prosody to svara phoneme events, in English, Spanish, German, Hindi, Arabic and Sanskrit, with an SSML subset. It
-  brings shabdakosh 3.1.1 (the dictionaries), varna 2.5.2 (the phoneme inventories) and svara.
-- **svara 3.6.3**, formant synthesis: phoneme events and a voice profile (male, female and child presets) become f64
-  samples, about 64× real time on one core. It brings hisab 3.4.1, naad 2.3.3 and goonj 2.3.1.
-
-svara does no text processing and no speech recognition (its ADR 0006). The line this replaces, "STT (Whisper) and
-TTS (Piper) are migrating from hoosh to svara", was wrong on both counts.
-
-- **The change:** a `type = "svara"` provider served in hoosh's process, as tentib is.
-  - `POST /v1/audio/speech` takes OpenAI's shape (`model`, `input`, `voice`, `response_format`, `speed`), runs
-    shabda then svara, and answers 16-bit PCM in a WAV container (`wav`, and `pcm` raw).
-  - MP3 and Opus need an encoder AGNOS does not have, and are refused with a 400.
-  - `voice` names one of svara's profiles; `speed` scales the phoneme durations.
-  - A new ADR records it, as ADR 014 did for tentib.
-- **Check before building it:**
-  1. **Names.** Seven bundles join the compile set. Check every function and global against hoosh, its vendored
-     bundles, tentib's and the stdlib set, as 2.11.0 did for tentib. svara and shabda prefix theirs (`svara_`,
-     `SVARA_`, `Sv*`, `shabda_`); hisab, naad, goonj, varna and shabdakosh are the ones to read.
-  2. **Memory.** svara's per-sample path allocates nothing. It has `_into` forms and reusable synthesis contexts
-     (`svara_synthctx_*`, `svara_pool_*`; its integration guide's *Real-time streaming*). But shabda's G2P, and a
-     render's sample vector, come from the default allocator, which never frees: a 10-second reply at 44.1 kHz is
-     3.5 MB of f64. Before serving it:
-     - render into a per-thread context;
-     - write the WAV out in chunks;
-     - get `_a` forms from shabda (file the issue there).
-
-     Otherwise the route keeps every reply's samples.
-  3. **Size.** Measure the bundles against the release build (2.7 MB), and offer a build without speech if they
-     double it.
-- **Out of scope:**
-  - **`POST /v1/audio/transcriptions`.** AGNOS has no speech-recognition engine in Cyrius. The `whisper` provider
-    type (`PROV_WHISPER`) names a server hoosh could forward to, and no endpoint uses it. Recognition gets an item
-    when there is an engine, or when someone asks for the forward.
-  - **Mixing, playback and capture** stay dhvani's.
 
 ---
 
@@ -126,7 +81,12 @@ TTS (Piper) are migrating from hoosh to svara", was wrong on both counts.
 ## Patches *(any release; none gates a minor)*
 
 Fixes that change nothing a client sees. Each ships as a patch on whatever minor is current when it is ready, and no
-band waits for one. Two of them wait on an upstream fix; the first is hoosh's own and can go at any time.
+band waits for one. Two of them wait on an upstream fix; the others are hoosh's own and can go at any time.
+
+- **szál 2.3.3 on AGNOS.** szál 2.3.3 builds `dist/szal-mcp.cyr` for AGNOS: `szal_exec` has an AGNOS path, and all 54
+  tools stay on both targets (szál's issue was archived 2026-11-11). Vendor it (`scripts/sync-szal.sh 2.3.3`, after
+  szál's `consumer-check.sh`), drop the `CYRIUS_TARGET_AGNOS` guards in `src/main.cyr` and `src/lib/mcp.cyr`
+  (`mcp_szal_built`), and build `--agnos`.
 
 - **ADR 013 — what is left.**
   - **The semantic index.** An insert keeps a 32-byte entry, the embedding vector and a scope string, and a removal
@@ -184,9 +144,18 @@ Each gets a band when its gate opens.
     decode cache per reply.
 - **The model-load seam stays in hoosh.** There is no murti port to adopt: the Rust repo was deleted 2026-11-10.
   Per agnosticos `docs/development/planning/murti.md`, the load → place → dispatch → pool seam grows inside hoosh's
-  local providers, and the tentib provider is its first piece (svara's would be the second). It moves to its own repo
+  local providers, and the tentib provider is its first piece, the svara provider (2.12.2) its second. It moves to its own repo
   only if a second consumer needs it outside hoosh. Whether ternary models would then move behind that repo is a new
   decision, not ADR 014's.
+- **Speech, beyond 2.12.2** (ADR 016).
+  - **Recognition** (`POST /v1/audio/transcriptions`). AGNOS has no speech-recognition engine in Cyrius. The
+    `whisper` provider type (`PROV_WHISPER`) names a server hoosh could forward to, and no endpoint uses it. It gets
+    an item when there is an engine, or when someone asks for the forward.
+  - **Other languages.** shabda converts Spanish, German, Hindi, Arabic and Sanskrit by rules alone (their
+    dictionaries are empty), and OpenAI's request names no language. A route key (`language`) when shabda has them.
+  - **Forwarding speech to a remote provider** (OpenAI's own `tts-1`) is not done: only svara routes serve it. On
+    demand.
+  - Mixing, playback and capture stay dhvani's.
 - **Split `tests/hoosh.tcyr` / `hoosh.bcyr` into per-topic units**, only if the suite keeps growing (2263 assertions
   in one file at 2.11.2).
 - **Threaded hardware detector** *(parked)*.
@@ -232,11 +201,24 @@ release.
     above and three constraints on the fix: a per-thread arena, the session cache kept out of it, and pooled
     connections owning their own allocations. hoosh meets the issue's own Critical bar (a server that fetches on
     every request) and has no workaround.
-- **szál — `dist/szal-mcp.cyr` does not build for AGNOS.** `szal_exec` uses fork, `dup2`, `execve` and a three-argument
-  `waitpid`, and AGNOS spawns processes another way, so the whole bundle fails to compile there. hoosh 2.12.1 leaves it
-  out of its AGNOS build and serves `bote_echo` alone there (`mcp_szal_built`). **Filed:**
-  `szal/docs/development/issues/2026-11-11-szal-mcp-does-not-build-for-agnos.md`, with a standalone repro. When a szál
-  release builds for AGNOS, drop the `CYRIUS_TARGET_AGNOS` guards in `src/main.cyr` and `src/lib/mcp.cyr`.
+- **shabda and svara — what a speech request keeps.** About 1 KB per input byte (9.8 KB a request at 6 bytes of
+  input, 62.6 KB at 60, 408 KB at 400; `scripts/memory-growth.py --speech`). hoosh's plan keeps nothing; the rest is
+  inside the libraries. For a 378-byte input:
+  - **shabda's conversion, 250,760 bytes.** It allocates on the default heap and has no allocator-taking forms.
+    Filed: `shabda/docs/development/issues/2026-11-11-conversion-allocates-on-the-default-heap.md`, asking for
+    `shabda_convert_a` / `shabda_convert_with_a`. When it ships, convert into the request arena.
+  - **svara's renders, 133,736 bytes:** a 1.9 KB context per request, and a formant filter or target for each phoneme
+    (up to about 1 KB for a consonant). Filed:
+    `svara/docs/development/issues/2026-11-11-a-server-render-keeps-what-each-phoneme-allocates.md`. It also asks
+    for a streaming sequence render, which would let hoosh drop its copy of svara's crossfade and plan
+    (`svara_local.cyr`'s `spk_xf_*` and `spk_plan_events_a`).
+
+  Until both ship, a gateway serving speech should rate-limit its svara routes.
+- **svara — module scratch makes concurrent renders unsafe.** `_sv_tract_target_scratch` and `_sv_glottal_rd_out` are
+  written and read back within one render, so two threads rendering at once sometimes render the wrong samples (2
+  to 4 of 4,000 in the repro). hoosh holds `_spk_lock` around every call into svara, one phoneme at a time. Filed:
+  `svara/docs/development/issues/2026-11-11-module-scratch-makes-concurrent-renders-unsafe.md`. When svara keeps its
+  scratch per object, the lock can narrow to shabda's engine, and renders can run in parallel.
 - **cyrius — `cyrius coverage` reports on the vendored stdlib, not the local repo.** Still open:
   `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`. hoosh gates on
   `scripts/coverage.sh` meanwhile.
@@ -252,7 +234,7 @@ release.
 - **Model storage** — hoosh doesn't manage model files.
 - **Direct GPU compute** — delegated to backends; ai-hwaccel handles detection.
 - **Web UI** — hoosh is an API gateway; a dashboard is separate.
-- **Audio DSP** — hoosh serves the speech API over the AGNOS libraries (2.12.x); synthesis is svara's, text to
+- **Audio DSP** — hoosh serves the speech API over the AGNOS libraries (2.12.2); synthesis is svara's, text to
   phonemes shabda's, and mixing, playback and capture dhvani's.
 - **WASM target** — Cyrius doesn't target WASM.
 

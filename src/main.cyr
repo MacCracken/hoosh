@@ -25,6 +25,17 @@ include "lib/tentib.cyr"
 # before any hoosh module: cli.cyr reads its CMDIT_* enums.
 include "lib/cmdit.cyr"
 
+# Speech (2.12.2, ADR 016) — shabda (text to phoneme events) over svara (formant synthesis), in the dependency order
+# shabda's README gives: svara's maths and DSP, svara, the phoneme inventories, the dictionaries, shabda. Before any
+# hoosh module: src/lib/svara_local.cyr reads their SVARA_* enums and struct accessors.
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/varna.cyr"
+include "lib/shabdakosh.cyr"
+include "lib/shabda.cyr"
+
 # MCP protocol core (bote 3.8.15) — self-contained JSON-RPC 2.0 registry/
 # dispatcher/codec bundle, committed under src/vendor/ rather than pulled
 # via [deps.bote] (bote's manifest declares libro/majra git sub-deps that
@@ -81,6 +92,7 @@ include "src/lib/provider_err.cyr"
 # 2.8.0: finish reasons + stream usage, mapped from each provider's own words. After jsonlite/provider_err.
 include "src/lib/outcome.cyr"
 include "src/lib/tentib_local.cyr"  # 2.11.0: in-process ternary inference (ADR 014); provider.cyr dispatches to it
+include "src/lib/svara_local.cyr"   # 2.12.2: in-process speech (ADR 016); handlers.cyr's handle_audio_speech serves it
 include "src/lib/provider.cyr"
 # 2.8.0: the live catalog's I/O half — asks each route for its models on a pool worker.
 include "src/lib/catalog_fetch.cyr"
@@ -308,6 +320,10 @@ fn http_route(cfd, method, path, buf, buf_len) {
         # 2.7.0: routed by model, local or remote, Ollama normalized
         # (handle_embeddings in handlers.cyr).
         return handle_embeddings(cfd, req_parse_body(buf, buf_len), req_body_len(buf, buf_len));
+    }
+    if (streq(path, "/v1/audio/speech") == 1) {
+        # 2.12.2: in-process speech through a svara route (handle_audio_speech in handlers.cyr, ADR 016).
+        return handle_audio_speech(cfd, req_parse_body(buf, buf_len), req_body_len(buf, buf_len));
     }
     if (streq(path, "/v1/chat/completions") == 1) {
         var body = req_parse_body(buf, buf_len);
@@ -625,6 +641,8 @@ fn cmd_health() {
             var up = 0;
             if (route_provider(r) == PROV_TENTIB) {
                 up = tnt_ready();          # 2.11.0: in-process; there is nothing to connect to
+            } elif (route_provider(r) == PROV_SVARA) {
+                up = spk_ready();          # 2.12.2: likewise
             } else {
                 var _sr_t, _sr_v = tcp_socket();
                 if (is_ok(_sr_t) == 1) {

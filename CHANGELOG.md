@@ -5,6 +5,136 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.12.2] — 2026-11-11
+
+**Speech: `POST /v1/audio/speech` through svara, in the gateway's process.** A `type = "svara"` provider renders
+OpenAI's speech request with AGNOS's own stack: shabda 3.1.1 turns the text into phoneme events, and svara 3.6.3
+renders them as formant synthesis. The reply is 16-bit mono PCM at 24 kHz, as WAV or raw `pcm`, streamed as it renders
+([ADR 016](docs/decisions/016-in-process-speech-through-svara.md)).
+
+**2456 assertions** in 195 groups. All gates are clean: fmt, lint, vet, deny, coverage (541/924, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test (91 checks, 14 of them new). The x86_64,
+aarch64 and AGNOS builds compile.
+
+⚠ **What changes on the wire.** Nothing without a svara route. With one, `POST /v1/audio/speech` answers, and
+`GET /v1/models` lists the route's literal model names, owned by `svara`. A svara route never takes a chat,
+completion or embeddings request, even one with no `models` (which matches every model) at the best priority.
+
+### Added — speech (`src/lib/svara_local.cyr`, `handlers.cyr`, `config.cyr`)
+
+- **The provider.** `[[providers]] type = "svara"`, with `models` naming what it answers to (`["tts-1", "svara"]`, say).
+  It needs no URL. The first enabled one builds the English G2P engine (6.1 MB, about 8 ms) and the three voices,
+  once per process, at startup or on the reload that adds one. Every svara route shares them, and the config log
+  states what was built.
+- **The request:**
+  - `model` routes it, among svara routes only;
+  - `input` is required: a string of 1 to 4096 bytes, decoded, with no NUL;
+  - `voice` is `male` (the default), `female` or `child`, svara's profiles. OpenAI's voice names are refused, with
+    the list;
+  - `response_format` is `wav` (the default) or `pcm`. `mp3`, `opus`, `aac` and `flac` need an encoder AGNOS does not
+    have, and are refused with a 400;
+  - `speed` is a number from 0.25 to 4.0, default 1;
+  - `stream_format` may be `audio`; `sse` is refused;
+  - `instructions` is ignored.
+- **The reply.** `audio/wav` (a 44-byte RIFF header, then the samples) or `audio/pcm` (the samples alone), 24 kHz,
+  16-bit, little-endian, mono, with a `Content-Length`. The level is svara's, peaking near −12 dBFS.
+- **The render is svara's sequence render, as a stream.** Its stress pitch, durations, nasalization, crossfade
+  lengths and sigmoid crossfade, in its order. Each phoneme is rendered on svara's reusable synthesis context, and
+  the output is written 8192 samples at a time once no later crossfade can reach it.
+  - A context is new for each request, so the same request answers the same bytes.
+  - `speed` divides the durations and svara's 50 ms transition window alike, so a reply's length scales by
+    1 / speed (4.57 s at 0.25, 1.14 s at 1 and 0.29 s at 4 for one phrase). A fixed window would overlap whole
+    phonemes at speed 4.
+- **Concurrency.** svara keeps scratch in module globals between the calls of one render, which corrupts concurrent
+  renders (2 to 4 of 4,000 in a repro). So every call into shabda or svara holds one lock, for one conversion or one
+  phoneme, never across a write to the client.
+- **The rest of hoosh.**
+  - A svara route is local and healthy once speech is loaded. `hoosh health` and the background prober say so.
+  - DLP applies as to chat, and confidential input may use the route.
+  - The route's `rate_limit` applies.
+  - A reply is counted in the metrics, with its latency under `svara`, and audited as `speech.request`.
+  - `/v1/models/catalog` (the chat catalog) and `/api/tags` list no speech model, and `/v1/cost/recommend` ranks
+    none.
+
+### Changed — the router (`router.cyr`, `route.cyr`, `models.cyr`)
+
+- **`router_new` keeps a second array, the routes that serve text** (`route_serves_text`: every provider but svara).
+  `router_select` and its remote, local and hardware variants, and the catalog's per-model `routes`, walk that one,
+  so a svara route costs a text request nothing. A check in the loop instead measured +15% on
+  `route_select_20_providers` and +48% on `route_round_robin_10`; with the array, alternated medians are 894 / 891 ns
+  and 137 / 141 ns against 2.12.1. `router_select_speech` picks a speech route.
+- The two router benchmark rows build their routes from the 18 text providers, as through 2.12.1 (`i % PROV_SVARA`),
+  so they rank the same set.
+
+### Memory (ADR 013)
+
+- **Samples never reach the heap.** Through `svara_sequence_render` a reply would keep about 88 bytes per sample
+  (4.5 MB for two seconds). Each worker thread keeps a synthesis buffer and a pending buffer, grown to the longest
+  phoneme it has rendered and never past 5 s of samples, and 16 KB of PCM. A reply of any length costs that.
+- **The plan is in the request arena** and keeps nothing. svara's sequence helpers would have kept four vectors (33 KB
+  for a 343-event input), and a `Nasalization` per nasalized vowel, where hoosh builds the table once.
+- **What a request still keeps is shabda's and svara's own**, about 1 KB per input byte (`scripts/memory-growth.py
+  --speech`, new). Per request, 300 each:
+
+  | input | kept |
+  |---|---:|
+  | 6 bytes | 9,788 |
+  | 60 bytes | 62,601 |
+  | 400 bytes | 408,102 |
+
+  For a 378-byte input, shabda's conversion keeps 250,760 bytes and svara's renders 133,736 (a 1.9 KB context and a
+  formant filter for each consonant). Both are filed upstream. Until they ship, rate-limit a gateway's svara routes.
+
+### Build
+
+- **Seven dependencies:** hisab 3.4.1, goonj 2.3.1, naad 2.3.3, svara 3.6.3, varna 2.5.2, shabdakosh 3.1.1 and shabda
+  3.1.1, as `[deps.*]` blocks in shabda's dependency order and included before any hoosh module. Their sidecars
+  bring the stdlib leaves ganita, result, simd and slice. `cyrius.lock` was regenerated from empty: it adds their 8
+  commit pins (sakshi 2.5.10 among them) and 8 bundle hashes, and changes nothing else.
+- **`cyrius deps` warns** "refusing to overwrite stdlib leaf 'sakshi'". hisab's git sakshi 2.5.10 is the stdlib
+  snapshot's file, byte for byte, so the warning is benign.
+- **Names.** Checked against hoosh, its vendored bundles, tentib's bundles and the stdlib set. The one shared name is
+  goonj's `var ERR_NONE = 0`, the same 0 as hoosh's enum member.
+- **Size.** The release build is 3.87 MB (2.97 MB in 2.12.1, +899 KB), whether or not a svara route is configured,
+  and a build takes 5.8 s (3.0 s). That is short of the doubling that would have called for a build without speech.
+- `PROV_SVARA = 18`, so `PROV_COUNT` is 19.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2339 → 2456), six new groups, `speech: …`:
+  - the request's fields, every default and every refusal, and the 4096-byte bound on the decoded input;
+  - PCM rounding, clamping and NaN, the WAV header byte for byte, and `http_respond_head`;
+  - the streamed crossfade against `svara_seq_crossfade` bit for bit, on one and two segments, typical runs,
+    crossfades longer than their segments, empty segments, none, and a full buffer;
+  - plans against svara's helpers (`svara_seq_durations`, `svara_detect_nasalization`) and their lengths against
+    `svara_sequence_render`, at speeds 1, 2 and 0.25; refusals of a zero duration, an unknown phoneme and a phoneme
+    past 5 s;
+  - a whole render against `svara_seq_crossfade` over fresh-context renders, to the bit, the same bytes on two
+    states, a failed write, speed 2 at half the length, and 4× the samples keeping the same heap as 1×;
+  - routes: chat passes an unscoped svara route by, speech picks it, and the model listings.
+- **Mutation-checked:** 9 mutants of the speech and routing code, and the suite kills all 9.
+- **`scripts/wire-smoke.py`**, a new `speech` run (14 checks): a WAV a strict reader opens, its frames filling the
+  body, not silence, `pcm` the WAV's samples, four concurrent requests answering the bytes one did, speed 2 at half
+  the length, six refusals as JSON, quotes and a backslash in the input, and chat reaching its Ollama route past an
+  unscoped, higher-priority svara route.
+- **`tests/hoosh.bcyr`** (43 → 45): `speech_plan_sentence`, 102 µs, and `speech_render_sentence`, 50.6 ms for a 2.4 s
+  sentence (about 48× real time). No other row moved past noise in alternated A/B runs.
+- **Live:** a gateway with a svara route answered a WAV of 51,624 samples for its first sentence, the count
+  `svara_sequence_render` gives for it.
+
+### Upstream (filed 2026-11-11)
+
+- **shabda:** `docs/development/issues/2026-11-11-conversion-allocates-on-the-default-heap.md`, asking for
+  allocator-taking conversion forms.
+- **svara:**
+  - `docs/development/issues/2026-11-11-a-server-render-keeps-what-each-phoneme-allocates.md`: a warmed context that
+    allocates nothing per phoneme, and a streaming sequence render, which would let hoosh drop its copy of the
+    crossfade;
+  - `docs/development/issues/2026-11-11-module-scratch-makes-concurrent-renders-unsafe.md`: scratch per object, or a
+    documented one-render-at-a-time rule.
+
+  Each has a standalone repro beside it.
+
 ## [2.12.1] — 2026-11-11
 
 **szál's MCP tools, behind an allow-list.** `/v1/tools/list` and `/v1/tools/call` serve szál 2.3.2's tools beside

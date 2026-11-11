@@ -35,6 +35,7 @@
 - [ADR-013: What a request's memory belongs to](decisions/013-request-memory.md) — the request arena, the boundary keepers copy across, recycling process memory (done for the request paths and bounded keepers in 2.11.2)
 - [ADR-014: In-process ternary inference through tentib](decisions/014-in-process-ternary-inference.md) — a `tentib` route, one model per process, bytes as tokens, reloads, the memory a model keeps; 2.11.1: the shared decode cache, the header peek, same-shape reloads; 2.11.2: the serving-only load
 - [ADR-015: The command line through cmdit](decisions/015-command-line-through-cmdit.md) — cmdit verb dispatch, one parse before setup, usage errors exit 2, what changed for scripts
+- [ADR-016: In-process speech through shabda and svara](decisions/016-in-process-speech-through-svara.md) — a `svara` route for `POST /v1/audio/speech`, svara's sequence render as a stream, one lock never across a write, a route that serves no text, what a request still keeps
 
 ## Reference
 

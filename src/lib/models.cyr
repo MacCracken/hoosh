@@ -86,6 +86,7 @@ fn _models_scan(a, sb, seen, r, body, len, key, keylen) {
 fn _models_live_local(a, sb, seen, r) {
     if (route_healthy(r) == 0) { return 0; }
     if (route_provider(r) == PROV_TENTIB) { return 0; }     # 2.11.0: in-process; its patterns are its list
+    if (route_provider(r) == PROV_SVARA) { return 0; }      # 2.12.2: likewise
     var path = "/v1/models";
     var key = "id";
     if (route_provider(r) == PROV_OLLAMA) { path = "/api/tags"; key = "name"; }
@@ -97,10 +98,12 @@ fn _models_live_local(a, sb, seen, r) {
 
 # The model ids route `r` can be offered for when nothing asked its provider live (2.8.0: a static route, or a
 # live one that has not answered yet): the compiled table's LISTED ids its patterns match, plus its literal
-# (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id.
+# (wildcard-free) patterns. 2.8.0: a family-prefix row (`claude-opus-4`) is no longer offered as an id. 2.12.2: the
+# table lists chat models, so a route that serves no text (svara) offers only its literal patterns.
 fn _models_from_table(a, sb, seen, r) {
     var owner = provider_name(route_provider(r));
     var n = metadata_count();
+    if (route_serves_text(r) == 0) { n = 0; }
     var i = 0;
     while (i < n) {
         var k = metadata_key(i);
@@ -191,11 +194,12 @@ fn models_list_json(rt) { return models_list_json_a(default_alloc(), rt); }
 # or the operator said about it: display_name, context_window, max_output_tokens, capabilities, pricing, and since
 # 2.10.2 tier and kind. metadata_lend fills in what the compiled table knows.
 
-# Every enabled route of `rt` whose patterns match `model`, in router (priority) order.
+# Every enabled route of `rt` whose patterns match `model`, in router (priority) order. 2.12.2: of the routes that
+# serve text, the ones router_select chooses among (a svara route is not).
 fn _cat_routes_for(rt, model) {
     var out = vec_new();
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
@@ -269,8 +273,9 @@ fn models_catalog_json(rt) {
             ci = ci + 1;
         }
     }
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    # 2.12.2: the catalog is of models to chat with, so it walks only the routes that serve text.
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);

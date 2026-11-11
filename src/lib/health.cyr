@@ -52,6 +52,7 @@ fn _health_probe_path(route) {
 fn health_probe(route) {
     # 2.11.0: an in-process tentib route is up exactly when its model is loaded; there is nothing to connect to.
     if (route_provider(route) == PROV_TENTIB) { return tnt_ready(); }
+    if (route_provider(route) == PROV_SVARA) { return spk_ready(); }     # 2.12.2: likewise, up once speech is loaded
     var base = route_base_url(route);
     if (base == 0) { return 0; }
     if (route_is_remote(route) == 1) {

@@ -47,3 +47,23 @@ Citations for the specifications and algorithms hoosh implements, by the module 
   one U+FFFD. <https://www.unicode.org/versions/Unicode15.0.0/>
 - **JSON strings**: RFC 8259 §7, for the escapes a reply's text is written with and a message's content is decoded from.
 - **SHA-256** (FIPS 180-4), from sigil: whether a reload's file holds the model already serving.
+
+## Speech — `src/lib/svara_local.cyr`
+
+- **The synthesis and its arithmetic are svara's** (3.6.3, `dist/svara.cyr`): `svara_sequence_render` and
+  `svara_seq_crossfade` (the stress pitch ×1.10 / ×1.05, the durations' stress and cluster scales, the crossfade
+  fractions `SV_SEQ_MIN_CF` / `SV_SEQ_MAX_CF` over the coarticulation resistances, the 50 ms transition window, the
+  sigmoid fade), and `svara_synthctx_synthesize` for each phoneme. svara cites its own sources (its ADR 0004, the
+  coarticulation model, and ADR 0005, the formant data). hoosh streams the crossfade: a fade-in reaches back at most
+  `min(cf_prev, len)` samples, so output older than the longest is final. The suite checks it against
+  `svara_seq_crossfade`, bit for bit. [ADR 016](decisions/016-in-process-speech-through-svara.md).
+- **Grapheme to phoneme is shabda's** (3.1.1): its dictionary (shabdakosh's, from CMUdict) and rules, syllables and
+  prosody.
+- **The request and the `pcm` format**: OpenAI's API reference, *Create speech* (`POST /v1/audio/speech`): `model`,
+  `input` (up to 4096 characters), `voice`, `response_format`, `speed` (0.25 to 4.0), `stream_format`,
+  `instructions`; `pcm` is 24 kHz, 16-bit signed, little-endian, with no header.
+- **WAV**: Microsoft and IBM, *Multimedia Programming Interface and Data Specifications 1.0* (1991), the RIFF `WAVE`
+  form: a `fmt ` chunk (format 1, PCM; channels, sample rate, byte rate, block align, bits per sample) and a `data`
+  chunk, little-endian, with 32-bit sizes (so a reply is at most 4 GiB).
+- **16-bit conversion**: clamped to [−1, 1] and scaled by 32767, so full scale is symmetric (±32767) and −32768 is not
+  produced; rounded half up (floor(x + 0.5)).

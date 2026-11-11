@@ -55,6 +55,52 @@ git = "https://github.com/MacCracken/cmdit"
 tag = "1.5.1"
 modules = ["dist/cmdit.cyr"]
 
+# Speech (2.12.2, ADR 016): POST /v1/audio/speech is served in this process by src/lib/svara_local.cyr, through
+# shabda (text to phoneme events) and svara (formant synthesis). Declared in dependency order, as shabda's README
+# asks: svara's maths and DSP (hisab, goonj, naad), svara, varna (phoneme inventories), shabdakosh (the
+# dictionaries), shabda. src/main.cyr includes them in this order. Their sidecars name the stdlib leaves they need
+# (ganita, result, simd, slice), which `cyrius deps` vendors without a line in [deps].stdlib above.
+# - hisab's manifest declares sakshi 2.5.10 as a git dep. The stdlib snapshot's lib/sakshi.cyr is that version, byte
+#   for byte, so `cyrius deps` keeps it and warns "refusing to overwrite stdlib leaf 'sakshi'"; the warning is benign.
+# - Names (checked 2026-11-11 against hoosh, its vendored bundles, tentib's bundles and the stdlib set): goonj's
+#   `var ERR_NONE = 0` is the one shared name, the same 0 as hoosh's enum member (and majra's alias).
+# - Size: the release build grows by 899 KB (2.97 to 3.87 MB). DCE pads what it drops, so that is the cost whether
+#   or not a svara route is configured.
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+tag = "3.4.1"
+modules = ["dist/hisab.cyr"]
+
+[deps.goonj]
+git = "https://github.com/MacCracken/goonj.git"
+tag = "2.3.1"
+modules = ["dist/goonj.cyr"]
+
+[deps.naad]
+git = "https://github.com/MacCracken/naad.git"
+tag = "2.3.3"
+modules = ["dist/naad.cyr"]
+
+[deps.svara]
+git = "https://github.com/MacCracken/svara.git"
+tag = "3.6.3"
+modules = ["dist/svara.cyr"]
+
+[deps.varna]
+git = "https://github.com/MacCracken/varna.git"
+tag = "2.5.2"
+modules = ["dist/varna.cyr"]
+
+[deps.shabdakosh]
+git = "https://github.com/MacCracken/shabdakosh.git"
+tag = "3.1.1"
+modules = ["dist/shabdakosh.cyr"]
+
+[deps.shabda]
+git = "https://github.com/MacCracken/shabda.git"
+tag = "3.1.1"
+modules = ["dist/shabda.cyr"]
+
 # MCP protocol core (bote) — JSON-RPC 2.0 registry/dispatcher, powers
 # /v1/tools/list + /v1/tools/call. We consume bote's **core** bundle
 # (`[lib.core]`, 12 transport-free modules: error/protocol/jsonx/registry/

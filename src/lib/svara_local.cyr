@@ -1,0 +1,787 @@
+# svara_local.cyr — speech in the gateway's process: POST /v1/audio/speech through shabda and svara (2.12.2, ADR 016).
+#
+# A `type = "svara"` provider renders speech in the gateway's own process, as a tentib provider decodes text: no socket
+# and no second server, so the input never leaves the host. shabda turns the text into svara phoneme events (English:
+# its dictionary, then its rules), and svara renders the events as formant synthesis. The reply is 16-bit mono PCM at
+# 24 kHz, the rate OpenAI's `pcm` format has, in a WAV container (`wav`) or raw (`pcm`).
+#
+# Requires: lib/shabda.cyr and its chain (hisab, goonj, naad, svara, varna, shabdakosh) included first; jsonlite.cyr
+# (_json_raw_value, _json_value_pos); lib/str.cyr (_str_json_unesc_into); lib/math.cyr (f64_parse_n); lib/sync
+# (mutex_*); lib/thread_local.cyr. It allocates per request only from the arena it is handed (handlers.cyr passes
+# req_arena()).
+#
+# THE CONTRACT WITH SHABDA AND SVARA
+# - One lock. svara keeps scratch in module globals between the calls of one render:
+#   svara_tract_set_formants_from_target writes a target's formants into a module vec and reads them back, and
+#   svara_glottal_apply_rd does the same with a triple. So two workers rendering at once would read each other's
+#   formants. And shabda's engine is one per process. Every call into shabda or svara holds _spk_lock, and it is held
+#   for one conversion (a request's whole input) or one phoneme's render, never across a write to the client: replies
+#   interleave phoneme by phoneme, and a client that reads slowly holds no one else up.
+# - The render is svara_sequence_render's, as a stream. The same stress pitch (x1.10 primary, x1.05 secondary), the
+#   same durations (svara_seq_durations: stress and consonant cluster), the same anticipatory nasalization
+#   (svara_detect_nasalization), the same crossfade lengths and the same sigmoid crossfade, sample for sample: the suite
+#   checks the durations and nasalizations against those svara helpers, this crossfade against svara_seq_crossfade,
+#   and a plan's length against svara_sequence_render's. One thing
+#   differs, the per-phoneme synthesis. svara_sequence_render builds a glottal source, a tract and a sample vector for
+#   each phoneme; this renders each phoneme with svara's reusable synthesis context (svara_synthctx_synthesize, the
+#   integration guide's real-time path), one per request, over a sample buffer the worker thread keeps. svara
+#   documents how its context differs: plosive and affricate timing, and glottal and noise state carried from phoneme
+#   to phoneme.
+# - A request renders exactly as it would on a fresh context: the context is new for each request, so the same input
+#   gives the same bytes, whatever the thread rendered before.
+# - `speed` divides every duration, after svara's stress and cluster scaling, and the sequence's transition window
+#   (the crossfade's floor), so a reply's length scales by 1 / speed. At 1.0 both are svara's, bit for bit.
+# - The level is svara's: its voices peak near 0.25 of full scale (about -12 dBFS), and nothing here normalizes.
+#   A sample is clamped to [-1, 1], scaled by 32767 and rounded half up; NaN becomes 0.
+#
+# MEMORY (ADR 013; measured with scripts/memory-growth.py --speech against a -D HOOSH_ALLOC_PROBE build)
+# - What the process keeps once: the English G2P engine (6.1 MB, built by spk_init for the first enabled svara route,
+#   at startup or on the reload that adds one), the three voices and a table of svara's nasalizations. Per worker
+#   thread, on its first speech request: a record, a scratch voice and a PCM buffer of SPK_CHUNK samples; and the
+#   synthesis buffer and the crossfade's pending buffer, each grown to the longest phoneme the thread has rendered,
+#   never past SPK_SEG_MAX samples.
+# - Samples never reach the heap per request. They are rendered into the thread's buffer, crossfaded in its pending
+#   buffer and written out SPK_CHUNK at a time, so a reply of any length costs the same. Through svara_sequence_render
+#   a reply would keep about 88 bytes per sample: 4.5 MB for two seconds of speech.
+# - The plan is laid out in the request arena and keeps nothing.
+# - What a request still keeps is shabda's and svara's own, about 1 KB per input byte in all (9.8 KB a request at 6
+#   bytes of input, 62.6 KB at 60, 408 KB at 400). For a 378-byte input: shabda's conversion, 250,760 bytes (it has no
+#   allocator-taking forms), and svara's renders, 133,736 (a context of 1.9 KB, and up to about 1 KB for each
+#   consonant, which builds a formant filter). Both are filed upstream (the roadmap's Upstream-gated section).
+
+# ---- policy ----------------------------------------------------------------------------------------------------
+
+# The sample rate of every reply: OpenAI's `pcm` rate. svara renders 24 kHz cleanly (and refuses 16 kHz).
+fn SPK_RATE() { return 24000; }
+# The longest input a request may have, in bytes once decoded (OpenAI's limit is 4096 characters).
+fn SPK_INPUT_MAX() { return 4096; }
+# The most samples one phoneme may render to (5 s). shabda's longest event is a 0.3 s pause, so this is reached only
+# far past the lowest speed; it bounds the buffers a thread keeps.
+fn SPK_SEG_MAX() { return 120000; }
+# Samples per write to the client (16 KB of PCM).
+fn SPK_CHUNK() { return 8192; }
+# The bytes of a WAV header.
+fn SPK_WAV_HEAD() { return 44; }
+
+enum SpkVoice {
+    SPK_VOICE_MALE   = 0;
+    SPK_VOICE_FEMALE = 1;
+    SPK_VOICE_CHILD  = 2;
+    SPK_VOICE_COUNT  = 3;
+}
+
+enum SpkFormat {
+    SPK_FMT_WAV = 0;
+    SPK_FMT_PCM = 1;
+}
+
+# spk_plan_a / spk_render status codes (0 or more is success).
+enum SpkErr {
+    SPK_ERR_NOT_READY = -1;     # no svara route configured: spk_init has not run
+    SPK_ERR_INPUT     = -2;     # shabda refused the input (spk_plan_a leaves its error in the plan)
+    SPK_ERR_RENDER    = -3;     # svara refused an event, or rendered a count the plan did not expect
+    SPK_ERR_TOO_LONG  = -4;     # a phoneme past SPK_SEG_MAX samples, or a reply past WAV's 4 GiB
+    SPK_ERR_MEMORY    = -5;     # a buffer could not be allocated
+    SPK_ERR_CLIENT    = -6;     # a write to the client failed: it is gone
+}
+
+# The request record spk_request_parse_a fills, in bytes.
+enum SpkReqField {
+    SPK_R_TEXT  = 0;    # the decoded input, NUL-terminated, in the request arena
+    SPK_R_TLEN  = 8;
+    SPK_R_VOICE = 16;   # SPK_VOICE_*
+    SPK_R_FMT   = 24;   # SPK_FMT_*
+    SPK_R_SPEED = 32;   # f64 bits, 0.25 to 4.0
+    SPK_R_SIZE  = 40;
+}
+
+# A plan (spk_plan_a): every event's phoneme, duration, nasalization, stress, sample count and crossfade, in the
+# request arena.
+enum SpkPlanField {
+    SPK_P_N      = 0;    # events
+    SPK_P_PH     = 8;    # i64[n] phonemes
+    SPK_P_DUR    = 16;   # f64[n] durations, scaled
+    SPK_P_NAS    = 24;   # [n] svara Nasalization pointers, or 0
+    SPK_P_STRESS = 32;   # i64[n] SVARA_STRESS_*
+    SPK_P_LEN    = 40;   # i64[n] samples each event renders to
+    SPK_P_CF     = 48;   # i64[n] crossfade between event i and i + 1 (cf[n - 1] = 0)
+    SPK_P_TOTAL  = 56;   # samples in the reply
+    SPK_P_HOLD   = 64;   # the longest fade-in: how far back a later event can reach into the output
+    SPK_P_MAXLEN = 72;   # the longest event, in samples
+    SPK_P_VOICE  = 80;   # the voice (a shared, read-only SvVoiceProfile)
+    SPK_P_ERR    = 88;   # shabda's packed error when spk_plan_a returned SPK_ERR_INPUT
+    SPK_P_SIZE   = 96;
+}
+
+# A worker thread's speech state (thread-local slot SPK_SLOT), on the heap once per thread.
+enum SpkThreadField {
+    SPK_T_BUF    = 0;    # the synthesis buffer: f64 samples, lent to each request's context
+    SPK_T_BUFCAP = 8;
+    SPK_T_PEND   = 16;   # the crossfade's pending samples
+    SPK_T_PCAP   = 24;
+    SPK_T_PCM    = 32;   # SPK_CHUNK 16-bit samples on their way to the client
+    SPK_T_VOICE  = 40;   # a scratch voice: the request's voice with an event's stress pitch
+    SPK_T_SIZE   = 48;
+}
+
+# The crossfade's state (spk_xf_*): pending output not yet final, and how much was taken before it.
+enum SpkXfField {
+    SPK_X_PEND    = 0;   # f64 samples
+    SPK_X_CAP     = 8;
+    SPK_X_LEN     = 16;  # samples pending
+    SPK_X_EMITTED = 24;  # samples taken from the front so far
+    SPK_X_SIZE    = 32;
+}
+
+# Thread-local slot 13 (0-15 are the application's; reqmem.cyr lists hoosh's 1-12).
+var SPK_SLOT = 13;
+
+var _spk_lock = 0;
+var _spk_ready = 0;
+var _spk_g2p = 0;          # shabda's English engine
+var _spk_voices = 0;       # SPK_VOICE_COUNT SvVoiceProfile pointers, read-only once built
+var _spk_nasal = 0;        # SVARA_PHONEME_COUNT entries: svara_nasalization_for_nasal(p), built once, read-only
+var _spk_window = 0;       # a new sequence's transition window (svara_sequence_new: 0.05 s), f64 bits
+var _spk_init_bytes = 0;   # what spk_init took from the heap (exact at startup; a reload's figure counts other threads)
+
+# ---- setup -------------------------------------------------------------------------------------------------------
+
+fn spk_ready() { return _spk_ready; }
+fn spk_init_bytes() { return _spk_init_bytes; }
+
+# Build the engine and the voices, once per process: config.cyr calls it for the first enabled svara route, at startup
+# or on the reload that adds one. 0, or SPK_ERR_MEMORY. A later call does nothing.
+fn spk_init() {
+    if (_spk_lock == 0) { _spk_lock = mutex_new(); }
+    mutex_lock(_spk_lock);
+    if (_spk_ready == 1) {
+        mutex_unlock(_spk_lock);
+        return 0;
+    }
+    var u0 = alloc_used();
+    var g = shabda_g2p_new(SHABDA_LANG_ENGLISH);
+    var vs = alloc(SPK_VOICE_COUNT * 8);
+    var seq = svara_sequence_new();
+    var nt = alloc(SVARA_PHONEME_COUNT * 8);
+    if (g == 0 || vs == 0 || seq == 0 || nt == 0) {
+        mutex_unlock(_spk_lock);
+        return SPK_ERR_MEMORY;
+    }
+    store64(vs + SPK_VOICE_MALE * 8, svara_voice_new_male());
+    store64(vs + SPK_VOICE_FEMALE * 8, svara_voice_new_female());
+    store64(vs + SPK_VOICE_CHILD * 8, svara_voice_new_child());
+    # svara_detect_nasalization's answer for a vowel before phoneme p, for every p: built once here, where svara
+    # builds one per vowel per render. The synthesis reads a Nasalization and never writes it.
+    var p = 0;
+    while (p < SVARA_PHONEME_COUNT) {
+        store64(nt + p * 8, svara_nasalization_for_nasal(p));
+        p = p + 1;
+    }
+    _spk_g2p = g;
+    _spk_voices = vs;
+    _spk_nasal = nt;
+    _spk_window = svara_sequence_transition_window(seq);
+    _spk_init_bytes = alloc_used() - u0;
+    _spk_ready = 1;
+    mutex_unlock(_spk_lock);
+    return 0;
+}
+
+# The voice for a SPK_VOICE_* id, or 0 before spk_init.
+fn spk_voice(id) {
+    if (_spk_voices == 0 || id < 0 || id >= SPK_VOICE_COUNT) { return 0; }
+    return load64(_spk_voices + id * 8);
+}
+
+fn spk_voice_parse(p, n) {
+    if (n == 4 && memeq(p, "male", 4) == 1) { return SPK_VOICE_MALE; }
+    if (n == 6 && memeq(p, "female", 6) == 1) { return SPK_VOICE_FEMALE; }
+    if (n == 5 && memeq(p, "child", 5) == 1) { return SPK_VOICE_CHILD; }
+    return 0 - 1;
+}
+
+fn spk_voice_name(id) {
+    if (id == SPK_VOICE_MALE) { return "male"; }
+    if (id == SPK_VOICE_FEMALE) { return "female"; }
+    if (id == SPK_VOICE_CHILD) { return "child"; }
+    return "unknown";
+}
+
+# SPK_FMT_*, -2 for a format that needs an encoder this gateway does not have, -1 for one OpenAI does not name.
+fn spk_format_parse(p, n) {
+    if (n == 3 && memeq(p, "wav", 3) == 1) { return SPK_FMT_WAV; }
+    if (n == 3 && memeq(p, "pcm", 3) == 1) { return SPK_FMT_PCM; }
+    if (n == 3 && memeq(p, "mp3", 3) == 1) { return 0 - 2; }
+    if (n == 4 && memeq(p, "opus", 4) == 1) { return 0 - 2; }
+    if (n == 3 && memeq(p, "aac", 3) == 1) { return 0 - 2; }
+    if (n == 4 && memeq(p, "flac", 4) == 1) { return 0 - 2; }
+    return 0 - 1;
+}
+
+fn spk_format_ctype(fmt) {
+    if (fmt == SPK_FMT_PCM) { return "audio/pcm"; }
+    return "audio/wav";
+}
+
+# ---- the request -------------------------------------------------------------------------------------------------
+
+# The JSON string field `key` decoded into `a` (NUL-terminated): its pointer to out[0], its length to out[8]. 1 when
+# present and a string, 0 when absent, -1 when present and not a string, -2 when it cannot be stored.
+fn _spk_str_field_a(a, body, len, key, keylen, out) {
+    var sp[16];
+    if (_json_raw_value(body, len, key, keylen, &sp) == 0) { return 0; }
+    var p = load64(&sp);
+    var n = load64(&sp + 8);
+    if (n < 2 || load8(p) != 34) { return 0 - 1; }
+    var d = alloc_via(a, n);                       # the decoded text is never longer than its escaped form
+    if (d == 0) { return 0 - 2; }
+    var dn = _str_json_unesc_into(d, p + 1, n - 2);
+    store8(d + dn, 0);
+    store64(out, d);
+    store64(out + 8, dn);
+    return 1;
+}
+
+# Read POST /v1/audio/speech's fields other than `model` into a request record in `a`. Returns 0, or the message of a
+# 400 (a constant), with the record at *outp on success.
+#   input            required, a string of 1 to SPK_INPUT_MAX bytes with no NUL
+#   voice            male (the default), female or child: svara's profiles
+#   response_format  wav (the default; OpenAI's is mp3) or pcm; mp3, opus, aac and flac need encoders hoosh lacks
+#   speed            0.25 to 4.0, default 1.0
+#   stream_format    audio, or absent: the audio streams as it renders, so OpenAI's "sse" is refused
+#   instructions     ignored: svara takes no style prompt
+fn spk_request_parse_a(a, body, len, outp) {
+    var r = alloc_via(a, SPK_R_SIZE);
+    if (r == 0) { return "request memory unavailable"; }
+    var fb[16];
+    var rc = _spk_str_field_a(a, body, len, "input", 5, &fb);
+    if (rc == 0) { return "input is required (a string)"; }
+    if (rc == 0 - 1) { return "input must be a string"; }
+    if (rc < 0) { return "request memory unavailable"; }
+    var t = load64(&fb);
+    var tl = load64(&fb + 8);
+    if (tl == 0) { return "input is empty"; }
+    if (tl > SPK_INPUT_MAX()) { return "input is longer than 4096 bytes"; }
+    if (strlen(t) != tl) { return "input contains a NUL character"; }
+    store64(r + SPK_R_TEXT, t);
+    store64(r + SPK_R_TLEN, tl);
+
+    store64(r + SPK_R_VOICE, SPK_VOICE_MALE);
+    rc = _spk_str_field_a(a, body, len, "voice", 5, &fb);
+    if (rc < 0) { return "voice must be male, female or child"; }
+    if (rc == 1) {
+        var vid = spk_voice_parse(load64(&fb), load64(&fb + 8));
+        if (vid < 0) { return "voice must be male, female or child"; }
+        store64(r + SPK_R_VOICE, vid);
+    }
+
+    store64(r + SPK_R_FMT, SPK_FMT_WAV);
+    rc = _spk_str_field_a(a, body, len, "response_format", 15, &fb);
+    if (rc < 0) { return "response_format must be wav or pcm"; }
+    if (rc == 1) {
+        var fid = spk_format_parse(load64(&fb), load64(&fb + 8));
+        if (fid == 0 - 2) { return "response_format needs an encoder this gateway does not have: use wav or pcm"; }
+        if (fid < 0) { return "response_format must be wav or pcm"; }
+        store64(r + SPK_R_FMT, fid);
+    }
+
+    rc = _spk_str_field_a(a, body, len, "stream_format", 13, &fb);
+    if (rc < 0) { return "stream_format must be audio"; }
+    if (rc == 1) {
+        if (load64(&fb + 8) != 5 || memeq(load64(&fb), "audio", 5) == 0) { return "stream_format must be audio"; }
+    }
+
+    store64(r + SPK_R_SPEED, F64_ONE);
+    var sp = _json_value_pos(body, len, "speed", 5);
+    if (sp >= 0) {
+        # _json_raw_value spans strings, arrays and objects; a number is the run of number bytes at the value.
+        var e = sp;
+        while (e < len && _spk_num_byte(load8(body + e)) == 1) { e = e + 1; }
+        var s = spk_speed_parse(body + sp, e - sp);
+        if (s == 0) { return "speed must be a number from 0.25 to 4.0"; }
+        store64(r + SPK_R_SPEED, s);
+    }
+    store64(outp, r);
+    return 0;
+}
+
+# 1 for a byte a JSON number is written with.
+fn _spk_num_byte(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    if (c == 45 || c == 43 || c == 46 || c == 101 || c == 69) { return 1; }
+    return 0;
+}
+
+# A JSON number from 0.25 to 4.0 as f64 bits, or 0 for anything else (a string, NaN, out of range).
+fn spk_speed_parse(p, n) {
+    if (n <= 0) { return 0; }
+    var c = load8(p);
+    if (c != 45 && c != 46 && (c < 48 || c > 57)) { return 0; }
+    var s = f64_parse_n(p, n);
+    if (f64_ge(s, 0.25) == 1 && f64_le(s, 4.0) == 1) { return s; }
+    return 0;
+}
+
+# ---- the plan ----------------------------------------------------------------------------------------------------
+
+# An empty plan for `voice` in `a`, or 0.
+fn spk_plan_new_a(a, voice) {
+    var pl = alloc_via(a, SPK_P_SIZE);
+    if (pl == 0) { return 0; }
+    memset(pl, 0, SPK_P_SIZE);
+    store64(pl + SPK_P_VOICE, voice);
+    return pl;
+}
+
+# Convert the text and lay out the reply: every event's duration, sample count and crossfade, and the reply's length.
+# The plan in `a` goes to *outp. Returns 0, or SPK_ERR_* (SPK_ERR_INPUT with shabda's error in the plan's SPK_P_ERR,
+# readable through spk_plan_err when the plan pointer was written).
+fn spk_plan_a(a, text, voice_id, speed, outp) {
+    if (_spk_ready == 0) { return SPK_ERR_NOT_READY; }
+    var voice = spk_voice(voice_id);
+    if (voice == 0) { return SPK_ERR_RENDER; }
+    var pl = spk_plan_new_a(a, voice);
+    if (pl == 0) { return SPK_ERR_MEMORY; }
+    store64(outp, pl);
+    var slot[8];
+    mutex_lock(_spk_lock);
+    var cerr = shabda_convert(_spk_g2p, text, &slot);
+    if (shabda_is_err(cerr) == 1) {
+        mutex_unlock(_spk_lock);
+        store64(pl + SPK_P_ERR, cerr);
+        return SPK_ERR_INPUT;
+    }
+    mutex_unlock(_spk_lock);
+    var evs = load64(&slot);
+    return spk_plan_events_a(a, pl, evs, speed);
+}
+
+# The rest of a plan, from shabda's events (a vec of svara PhonemeEvents): svara_sequence_render's arithmetic, in its
+# order, in `a`. svara_seq_detect_clusters, svara_seq_durations and svara_detect_nasalization would allocate four
+# vectors on the heap for it (33 KB for a 343-event input); the suite checks these against them. Nothing here holds
+# state in shabda or svara, so it runs without the lock.
+fn spk_plan_events_a(a, pl, evs, speed) {
+    var n = vec_len(evs);
+    var cap = n;
+    if (cap < 1) { cap = 1; }
+    var ph = alloc_via(a, cap * 8);
+    var du = alloc_via(a, cap * 8);
+    var na = alloc_via(a, cap * 8);
+    var stv = alloc_via(a, cap * 8);
+    var ln = alloc_via(a, cap * 8);
+    var cf = alloc_via(a, cap * 8);
+    if (ph == 0 || du == 0 || na == 0 || stv == 0 || ln == 0 || cf == 0) { return SPK_ERR_MEMORY; }
+    store64(pl + SPK_P_N, n);
+    store64(pl + SPK_P_PH, ph);
+    store64(pl + SPK_P_DUR, du);
+    store64(pl + SPK_P_NAS, na);
+    store64(pl + SPK_P_STRESS, stv);
+    store64(pl + SPK_P_LEN, ln);
+    store64(pl + SPK_P_CF, cf);
+    var sr = f64_from(SPK_RATE());
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(evs, i);
+        var p = SvPhonemeEvent_phoneme(e);
+        if (svara_phoneme_is_valid(p) == 0) { return SPK_ERR_RENDER; }
+        store64(ph + i * 8, p);
+        store64(stv + i * 8, SvPhonemeEvent_stress(e));
+        store64(cf + i * 8, 0);      # svara_seq_detect_clusters' flag, until the durations below read it
+        i = i + 1;
+    }
+    # Consonant clusters: a run of two or more phonemes that are not vowels, diphthongs or silence.
+    var run = 0 - 1;
+    i = 0;
+    while (i <= n) {
+        var cons = 0;
+        if (i < n) {
+            var pc = svara_phoneme_class(load64(ph + i * 8));
+            if (pc != SVARA_CLASS_VOWEL && pc != SVARA_CLASS_DIPHTHONG && pc != SVARA_CLASS_SILENCE) { cons = 1; }
+        }
+        if (cons == 1 && run < 0) {
+            run = i;
+        } elif (cons == 0 && run >= 0) {
+            if (i - run >= 2) {
+                var k = run;
+                while (k < i) { store64(cf + k * 8, 1); k = k + 1; }
+            }
+            run = 0 - 1;
+        }
+        i = i + 1;
+    }
+    var maxlen = 0;
+    i = 0;
+    while (i < n) {
+        # svara_seq_durations: duration x stress scale x cluster scale.
+        var ss = 0.9;
+        var st = load64(stv + i * 8);
+        if (st == SVARA_STRESS_PRIMARY) { ss = 1.15; }
+        elif (st == SVARA_STRESS_SECONDARY) { ss = 1.05; }
+        var cs = F64_ONE;
+        if (load64(cf + i * 8) == 1) { cs = SV_SEQ_CLUSTER; }
+        var sd = f64_mul(f64_mul(SvPhonemeEvent_duration(vec_get(evs, i)), ss), cs);
+        # svara_detect_nasalization: a vowel or diphthong before a nasal takes that nasal's nasalization.
+        var nas = 0;
+        var vc = svara_phoneme_class(load64(ph + i * 8));
+        if ((vc == SVARA_CLASS_VOWEL || vc == SVARA_CLASS_DIPHTHONG) && i + 1 < n) {
+            nas = load64(_spk_nasal + load64(ph + (i + 1) * 8) * 8);
+        }
+        var d = f64_div(sd, speed);
+        # svara refuses a duration that is not positive and finite; refuse it here, before the reply begins.
+        if (f64_le(d, 0) == 1 || svara_is_finite(d) == 0) { return SPK_ERR_RENDER; }
+        var l = svara_count_from_f64(f64_mul(d, sr));
+        if (l > SPK_SEG_MAX()) { return SPK_ERR_TOO_LONG; }
+        if (l > maxlen) { maxlen = l; }
+        store64(du + i * 8, d);
+        store64(na + i * 8, nas);
+        store64(ln + i * 8, l);
+        i = i + 1;
+    }
+    # The crossfade between events i and i + 1, as svara_sequence_render computes it. Its floor is the sequence's
+    # transition window, which `speed` divides as it divides the durations: a fixed 50 ms floor would overlap whole
+    # phonemes at speed 4 (an 0.7 s phrase rendered to 22 ms) and too little at 0.25.
+    var min_cf = svara_count_from_f64(f64_mul(f64_div(_spk_window, speed), sr));
+    i = 0;
+    while (i < n - 1) {
+        var rl = svara_phoneme_coarticulation_resistance(load64(ph + i * 8));
+        var rr = svara_phoneme_coarticulation_resistance(load64(ph + (i + 1) * 8));
+        var avg = f64_mul(f64_add(rl, rr), F64_HALF);
+        var frac = f64_sub(SV_SEQ_MAX_CF, f64_mul(avg, f64_sub(SV_SEQ_MAX_CF, SV_SEQ_MIN_CF)));
+        var sl = load64(ln + i * 8);
+        var sl2 = load64(ln + (i + 1) * 8);
+        if (sl2 < sl) { sl = sl2; }
+        var c = f64_to(f64_mul(frac, f64_from(sl)));
+        if (c < min_cf) { c = min_cf; }
+        store64(cf + i * 8, c);
+        i = i + 1;
+    }
+    if (n > 0) { store64(cf + (n - 1) * 8, 0); }
+    # The reply's length: every event's samples, less each fade-in, which overlaps the output already there. The
+    # longest fade-in is how far back a later event can reach, so what is older than that is final.
+    var total = 0;
+    var hold = 0;
+    i = 0;
+    while (i < n) {
+        var li = load64(ln + i * 8);
+        total = total + li;
+        if (i > 0) {
+            var fl = load64(cf + (i - 1) * 8);
+            if (fl > li) { fl = li; }
+            total = total - fl;
+            if (fl > hold) { hold = fl; }
+        }
+        i = i + 1;
+    }
+    # WAV's sizes are 32-bit: the data and the 36 bytes of header after the RIFF size must fit.
+    if (total * 2 + 36 > 4294967295) { return SPK_ERR_TOO_LONG; }
+    store64(pl + SPK_P_TOTAL, total);
+    store64(pl + SPK_P_HOLD, hold);
+    store64(pl + SPK_P_MAXLEN, maxlen);
+    return 0;
+}
+
+fn spk_plan_err(pl) { return load64(pl + SPK_P_ERR); }
+fn spk_plan_events(pl) { return load64(pl + SPK_P_N); }
+fn spk_plan_total(pl) { return load64(pl + SPK_P_TOTAL); }
+
+# The body's bytes for a plan: two per sample, and the header for wav.
+fn spk_body_len(pl, fmt) {
+    var b = spk_plan_total(pl) * 2;
+    if (fmt == SPK_FMT_WAV) { b = b + SPK_WAV_HEAD(); }
+    return b;
+}
+
+# ---- the crossfade -----------------------------------------------------------------------------------------------
+#
+# svara_seq_crossfade, one segment at a time. The output is kept as a front that is final (taken by the caller) and a
+# pending tail that a later segment's fade-in may still add to. A fade-in reaches back at most the plan's hold, so
+# whatever is older than that is final (spk_xf_ready).
+
+fn spk_xf_init(x, pend, cap) {
+    store64(x + SPK_X_PEND, pend);
+    store64(x + SPK_X_CAP, cap);
+    store64(x + SPK_X_LEN, 0);
+    store64(x + SPK_X_EMITTED, 0);
+    return x;
+}
+
+fn _spk_xf_push(x, v) {
+    var len = load64(x + SPK_X_LEN);
+    store64(load64(x + SPK_X_PEND) + len * 8, v);
+    store64(x + SPK_X_LEN, len + 1);
+    return 0;
+}
+
+# Add segment i of n (`seg`, `len` samples) to the output. cf_prev is the crossfade before it, cf_next the one after
+# (0 for the last). Returns 0, or -1 when the pending buffer has no room for it (the caller sizes it: hold + the
+# longest segment).
+fn spk_xf_step(x, seg, len, i, n, cf_prev, cf_next) {
+    var fade_len = 0;
+    if (i > 0) {
+        fade_len = cf_prev;
+        if (fade_len > len) { fade_len = len; }
+    }
+    if (load64(x + SPK_X_LEN) + len - fade_len > load64(x + SPK_X_CAP)) { return 0 - 1; }
+    var cfn1 = cf_next;
+    if (cfn1 < 1) { cfn1 = 1; }
+    if (i == 0) {
+        if (len > cf_next) {
+            var j = 0;
+            var stop = len - cf_next;
+            while (j < stop) { _spk_xf_push(x, load64(seg + j * 8)); j = j + 1; }
+        }
+        var fs = len - cf_next;
+        if (fs < 0) { fs = 0; }
+        var k = fs;
+        var jj = 0;
+        while (k < len) {
+            var w = f64_sub(F64_ONE, svara_seq_sigmoid_fade(f64_div(f64_from(jj), f64_from(cfn1))));
+            _spk_xf_push(x, f64_mul(load64(seg + k * 8), w));
+            jj = jj + 1;
+            k = k + 1;
+        }
+        return 0;
+    }
+    var fl1 = fade_len;
+    if (fl1 < 1) { fl1 = 1; }
+    var pend = load64(x + SPK_X_PEND);
+    var emitted = load64(x + SPK_X_EMITTED);
+    var olen = emitted + load64(x + SPK_X_LEN);
+    var q = 0;
+    while (q < fade_len) {
+        var idx = olen - (fade_len - q);
+        if (idx >= 0) {
+            var at = pend + (idx - emitted) * 8;
+            var add = f64_mul(load64(seg + q * 8), svara_seq_sigmoid_fade(f64_div(f64_from(q), f64_from(fl1))));
+            store64(at, f64_add(load64(at), add));
+        }
+        q = q + 1;
+    }
+    if (len > fade_len) {
+        if (i < n - 1 && len > fade_len + cf_next) {
+            var m = fade_len;
+            var stop2 = len - cf_next;
+            while (m < stop2) { _spk_xf_push(x, load64(seg + m * 8)); m = m + 1; }
+            var kk = len - cf_next;
+            var j2 = 0;
+            while (kk < len) {
+                var w2 = f64_sub(F64_ONE, svara_seq_sigmoid_fade(f64_div(f64_from(j2), f64_from(cfn1))));
+                _spk_xf_push(x, f64_mul(load64(seg + kk * 8), w2));
+                j2 = j2 + 1;
+                kk = kk + 1;
+            }
+        } else {
+            var m2 = fade_len;
+            while (m2 < len) { _spk_xf_push(x, load64(seg + m2 * 8)); m2 = m2 + 1; }
+        }
+    }
+    return 0;
+}
+
+# How many samples at the front of the pending tail are final, with `hold` kept back (0 once the last segment is in).
+fn spk_xf_ready(x, hold) {
+    var r = load64(x + SPK_X_LEN) - hold;
+    if (r < 0) { return 0; }
+    return r;
+}
+
+fn spk_xf_pending(x) { return load64(x + SPK_X_PEND); }
+
+# Drop k samples from the front, once the caller has taken them.
+fn spk_xf_consume(x, k) {
+    var pend = load64(x + SPK_X_PEND);
+    var left = load64(x + SPK_X_LEN) - k;
+    var i = 0;
+    while (i < left) {
+        store64(pend + i * 8, load64(pend + (i + k) * 8));
+        i = i + 1;
+    }
+    store64(x + SPK_X_LEN, left);
+    store64(x + SPK_X_EMITTED, load64(x + SPK_X_EMITTED) + k);
+    return 0;
+}
+
+# ---- output ------------------------------------------------------------------------------------------------------
+
+# One sample as 16-bit PCM: clamped to [-1, 1], scaled by 32767, rounded half up. NaN is 0.
+fn spk_pcm16(v) {
+    if (f64_eq(v, v) == 0) { return 0; }
+    var x = v;
+    if (f64_gt(x, F64_ONE) == 1) { x = F64_ONE; }
+    if (f64_lt(x, f64_neg(F64_ONE)) == 1) { x = f64_neg(F64_ONE); }
+    return f64_to(f64_floor(f64_add(f64_mul(x, 32767.0), F64_HALF)));
+}
+
+fn _spk_put16(p, v) {
+    store8(p, v & 255);
+    store8(p + 1, (v >> 8) & 255);
+    return 0;
+}
+
+fn _spk_put32(p, v) {
+    store8(p, v & 255);
+    store8(p + 1, (v >> 8) & 255);
+    store8(p + 2, (v >> 16) & 255);
+    store8(p + 3, (v >> 24) & 255);
+    return 0;
+}
+
+# The 44-byte header of a 16-bit mono PCM WAV of `samples` samples at SPK_RATE.
+fn spk_wav_header(p, samples) {
+    var data = samples * 2;
+    memcpy(p, "RIFF", 4);
+    _spk_put32(p + 4, 36 + data);
+    memcpy(p + 8, "WAVEfmt ", 8);
+    _spk_put32(p + 16, 16);           # the fmt chunk's size
+    _spk_put16(p + 20, 1);            # PCM
+    _spk_put16(p + 22, 1);            # mono
+    _spk_put32(p + 24, SPK_RATE());
+    _spk_put32(p + 28, SPK_RATE() * 2);   # bytes per second
+    _spk_put16(p + 32, 2);            # bytes per frame
+    _spk_put16(p + 34, 16);           # bits per sample
+    memcpy(p + 36, "data", 4);
+    _spk_put32(p + 40, data);
+    return p;
+}
+
+# Write p[0..n) to fd, through partial writes. 0, or -1 once the peer is gone.
+fn spk_write_all(fd, p, n) {
+    var off = 0;
+    while (off < n) {
+        var w = sys_write(fd, p + off, n - off);
+        if (w <= 0) { return 0 - 1; }
+        off = off + w;
+    }
+    return 0;
+}
+
+# ---- the render --------------------------------------------------------------------------------------------------
+
+# This thread's speech state, built on its first speech request. 0 when it cannot be allocated.
+fn _spk_thread() {
+    var st = thread_local_get(SPK_SLOT);
+    if (st != 0) { return st; }
+    st = spk_state_new();
+    if (st != 0) { thread_local_set(SPK_SLOT, st); }
+    return st;
+}
+
+# A speech state of its own (a thread's; the tests and the bench build theirs).
+fn spk_state_new() {
+    var st = alloc(SPK_T_SIZE);
+    var pcm = alloc(SPK_CHUNK() * 2);
+    var v = alloc(sizeof(SvVoiceProfile));
+    if (st == 0 || pcm == 0 || v == 0) { return 0; }
+    store64(st + SPK_T_BUF, 0);
+    store64(st + SPK_T_BUFCAP, 0);
+    store64(st + SPK_T_PEND, 0);
+    store64(st + SPK_T_PCAP, 0);
+    store64(st + SPK_T_PCM, pcm);
+    store64(st + SPK_T_VOICE, v);
+    return st;
+}
+
+# The pending buffer, grown (never shrunk) to `need` samples. 0 when it cannot be.
+fn _spk_pend_ensure(st, need) {
+    if (load64(st + SPK_T_PCAP) >= need) { return load64(st + SPK_T_PEND); }
+    var cap = load64(st + SPK_T_PCAP) * 2;
+    if (cap < need) { cap = need; }
+    var p = alloc(cap * 8);
+    if (p == 0) { return 0; }
+    store64(st + SPK_T_PEND, p);
+    store64(st + SPK_T_PCAP, cap);
+    return p;
+}
+
+# Render a plan to fd as 16-bit PCM, after whatever head the caller wrote. Returns the samples written, or SPK_ERR_*:
+# SPK_ERR_CLIENT when the client went away, the others when svara failed after the reply began (the caller can only
+# close: the length is promised). spk_render_with renders on a given state; this on the thread's.
+fn spk_render(pl, fd) {
+    var st = _spk_thread();
+    if (st == 0) { return SPK_ERR_MEMORY; }
+    return spk_render_with(st, pl, fd);
+}
+
+fn spk_render_with(st, pl, fd) {
+    var n = load64(pl + SPK_P_N);
+    var hold = load64(pl + SPK_P_HOLD);
+    var pend = _spk_pend_ensure(st, hold + load64(pl + SPK_P_MAXLEN) + 1);
+    if (pend == 0) { return SPK_ERR_MEMORY; }
+    var x[32];
+    spk_xf_init(&x, pend, load64(st + SPK_T_PCAP));
+    var voice = load64(pl + SPK_P_VOICE);
+    var ev = load64(st + SPK_T_VOICE);
+    var ph = load64(pl + SPK_P_PH);
+    var du = load64(pl + SPK_P_DUR);
+    var na = load64(pl + SPK_P_NAS);
+    var stv = load64(pl + SPK_P_STRESS);
+    var ln = load64(pl + SPK_P_LEN);
+    var cf = load64(pl + SPK_P_CF);
+    var pcm = load64(st + SPK_T_PCM);
+    var fill = 0;
+    var written = 0;
+    # A context of its own for each request, over the thread's buffer: the same input renders the same bytes.
+    mutex_lock(_spk_lock);
+    var ctx = svara_synthctx_new(voice, f64_from(SPK_RATE()));
+    if (svara_is_err(ctx) == 0) {
+        SvSynthCtx_set_buffer(ctx, load64(st + SPK_T_BUF));
+        SvSynthCtx_set_buffer_cap(ctx, load64(st + SPK_T_BUFCAP));
+    }
+    mutex_unlock(_spk_lock);
+    if (svara_is_err(ctx) == 1) { return SPK_ERR_RENDER; }
+    var i = 0;
+    while (i < n) {
+        var want = load64(ln + i * 8);
+        memcpy(ev, voice, sizeof(SvVoiceProfile));
+        var s = load64(stv + i * 8);
+        if (s == SVARA_STRESS_PRIMARY) {
+            SvVoiceProfile_set_base_f0(ev, f64_mul(SvVoiceProfile_base_f0(ev), 1.10));
+        } elif (s == SVARA_STRESS_SECONDARY) {
+            SvVoiceProfile_set_base_f0(ev, f64_mul(SvVoiceProfile_base_f0(ev), 1.05));
+        }
+        mutex_lock(_spk_lock);
+        var got = svara_synthctx_synthesize(ctx, load64(ph + i * 8), ev, load64(du + i * 8), load64(na + i * 8));
+        mutex_unlock(_spk_lock);
+        # The context's buffer may have grown: the thread keeps the larger one.
+        store64(st + SPK_T_BUF, SvSynthCtx_buffer(ctx));
+        store64(st + SPK_T_BUFCAP, SvSynthCtx_buffer_cap(ctx));
+        if (svara_is_err(got) == 1 || got != want) { return SPK_ERR_RENDER; }
+        var cprev = 0;
+        if (i > 0) { cprev = load64(cf + (i - 1) * 8); }
+        if (spk_xf_step(&x, SvSynthCtx_buffer(ctx), got, i, n, cprev, load64(cf + i * 8)) < 0) {
+            return SPK_ERR_MEMORY;
+        }
+        var keep = hold;
+        if (i == n - 1) { keep = 0; }
+        var r = spk_xf_ready(&x, keep);
+        var k = 0;
+        while (k < r) {
+            _spk_put16(pcm + fill * 2, spk_pcm16(load64(pend + k * 8)));
+            fill = fill + 1;
+            if (fill == SPK_CHUNK()) {
+                if (spk_write_all(fd, pcm, fill * 2) < 0) { return SPK_ERR_CLIENT; }
+                written = written + fill;
+                fill = 0;
+            }
+            k = k + 1;
+        }
+        spk_xf_consume(&x, r);
+        i = i + 1;
+    }
+    if (fill > 0) {
+        if (spk_write_all(fd, pcm, fill * 2) < 0) { return SPK_ERR_CLIENT; }
+        written = written + fill;
+    }
+    return written;
+}
+
+# A status code's text, for the log and for a 500.
+fn spk_status_text(rc) {
+    if (rc == SPK_ERR_NOT_READY) { return "speech is not configured"; }
+    if (rc == SPK_ERR_INPUT) { return "shabda could not convert the input"; }
+    if (rc == SPK_ERR_RENDER) { return "svara refused the phoneme sequence"; }
+    if (rc == SPK_ERR_TOO_LONG) { return "the input renders past the reply limit"; }
+    if (rc == SPK_ERR_MEMORY) { return "speech memory unavailable"; }
+    if (rc == SPK_ERR_CLIENT) { return "the client went away"; }
+    return "ok";
+}

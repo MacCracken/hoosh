@@ -62,9 +62,22 @@ Background threads: health prober │ hardware re-detect │ coarse clock │ OT
 ai-hwaccel: hardware detection for placement / simulate / telemetry / cost
 ```
 
+Speech (2.12.2, [ADR 016](../decisions/016-in-process-speech-through-svara.md)) takes its own path:
+
+```
+POST /v1/audio/speech ── handlers.cyr handle_audio_speech
+    ├─ router_select_speech: svara routes only (a svara route serves no text) ── router.cyr
+    ├─ DLP, the route's rate limit ── dlp.cyr / ratelimit.cyr
+    ▼
+svara_local.cyr ── one lock around every call into shabda or svara
+    ├─ shabda: text → phoneme events (English G2P, one engine per process)
+    ├─ the plan, in the request arena: svara's durations, nasalization, crossfades, the reply's length
+    ├─ svara: each phoneme on a fresh synthesis context, over the thread's sample buffer
+    └─ the crossfade, streamed: 16-bit PCM written 8192 samples at a time (WAV or raw, 24 kHz)
+```
+
 (The `whisper` provider type exists, but no endpoint uses it: AGNOS has no speech-recognition
-engine in Cyrius yet. Speech synthesis through **shabda** and **svara**, served in-process as
-tentib is, is the roadmap's 2.12.x item.)
+engine in Cyrius yet.)
 
 ---
 
@@ -77,11 +90,11 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | Module | Role |
 |--------|------|
 | `types.cyr` | Provider enum (`PROV_*`), `provider_name`, error codes, `HOOSH_VERSION` |
-| `router.cyr` / `route.cyr` | Provider selection (4 strategies), the first enabled route of a provider type (2.9.21) + route records |
+| `router.cyr` / `route.cyr` | Provider selection (4 strategies) over the routes that serve text (2.12.2: a second array, so a speech route costs text selection nothing), speech selection (`router_select_speech`), the first enabled route of a provider type (2.9.21) + route records |
 | `jsonlite.cyr` | Byte-level JSON field readers (2.6.5): value position, string/int extraction, object and span ends, raw values, JSON escaping (2.9.22 gathered the last three here) |
 | `provider.cyr` | Forward to backends (local raw socket / remote sandhi), request shaping (Anthropic/Gemini) + response extraction + tool-call surfacing; Ollama's embeddings answer as OpenAI's list (2.9.22) |
 | `http_client.cyr` / `http_server.cyr` | Raw HTTP request/response, header building; per-thread scratch blocks for local responses and local streams (2.10.0); a local stream's keep-alive step (`sse_idle_next`, 2.9.22); the error envelope's writers and the deferred response descriptor (`_resp_*`, 2.10.2), and a response head on the stack |
-| `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, health, models, tokens, cost, metrics |
+| `handlers.cyr` | Request handlers — chat (`_chat_prep`/`_chat_forward`/`_chat_assemble`), streaming, speech (2.12.2), health, models, tokens, cost, metrics |
 | `models.cyr` | The model listings (2.9.22 split from `handlers.cyr`): `/v1/models`' body (`models_list_json_a`), one entry per id, a local backend's own list, the catalog and table fallbacks, `_cat_literal`; since 2.10.2 `/v1/models/catalog`'s body too, built once per change and held (`models_catalog_body`, [ADR 013](../decisions/013-request-memory.md)) |
 | `reqparse.cyr` | Pure request helpers (2.9.16/17 splits): body fields, the cache key and warming body, the hardware inputs, `/v1/batch`'s body, the POST-only path list (2.9.21, from `main.cyr`), `add_devices`' sizes (2.9.22) |
 | `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, the job constructors, `/v1/queue/status`'s body (2.9.26), and `job_begin` (2.10.3: each job's trace context and a released request arena) |
@@ -110,6 +123,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `hardware.cyr` | ai-hwaccel planning endpoints (placement, cost, training estimate, model-format, requirement-match, simulate, telemetry); available-VRAM accounting + periodic re-detection |
 | `config.cyr` | `hoosh.cyml` (TOML) loading: `load_config` and the per-section readers |
 | `tentib_local.cyr` | In-process ternary inference (2.11.0, [ADR 014](../decisions/014-in-process-ternary-inference.md)): a `tentib` route's packed model loaded through tentib's library bundle (bounded, header-peeked, validated, skipped when unchanged, a same-shape reload reusing the model's memory since 2.11.1, loaded for serving only since 2.11.2), byte-token greedy decoding one locked step at a time (one cached decode step per token until the window slides, since 2.11.1), buffered replies and per-character streams, UTF-8 assembly with U+FFFD |
+| `svara_local.cyr` | In-process speech (2.12.2, [ADR 016](../decisions/016-in-process-speech-through-svara.md)): the request's fields, the English G2P engine and three voices (built once), the plan in the request arena (svara's durations, nasalization and crossfades), the render on a fresh synthesis context per request with svara's crossfade streamed out as 16-bit PCM, the WAV header; one lock around every call into shabda or svara |
 | `cfgparse.cyr` | config.cyr's self-contained helpers (2.9.18 split): strategy names, `$ENV` expansion, TOML string lists (read with bayan's array parser since 2.9.23), a provider's TLS policy and rate limit |
 | `cli.cyr` | The command line through cmdit (2.12.0, [ADR 015](../decisions/015-command-line-through-cmdit.md)): the global and per-verb handles, and `cli_parse_argv`, a pure parse of the whole argv into a record `main()` acts on (help, version and usage errors before setup; exit 2 for a usage error) |
 | `storage.cyr` | Optional patra persistence (audit chain + budgets) |
@@ -134,6 +148,8 @@ distlibs:
 |-----------|------|-------------|
 | **ai-hwaccel** | Hardware detection for model placement / cost | `[deps.ai-hwaccel]` → `lib/ai-hwaccel.cyr` |
 | **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0), its incremental decoder (1.4.0, since 2.11.1), and its serving-only load (1.5.0, since 2.11.2) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
+| **shabda**, **shabdakosh**, **varna** | Speech (2.12.2): text to svara phoneme events, through the dictionaries and the phoneme inventories | `[deps.shabda]`, `[deps.shabdakosh]`, `[deps.varna]` → `lib/*.cyr` |
+| **svara**, **hisab**, **naad**, **goonj** | Speech (2.12.2): formant synthesis, and its maths and DSP | `[deps.svara]`, `[deps.hisab]`, `[deps.naad]`, `[deps.goonj]` → `lib/*.cyr` |
 | **cmdit** | The command line (2.12.0): getopt-long flags, verb dispatch, generated per-verb help, cmdit's exit codes | `[deps.cmdit]` → `lib/cmdit.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
 | **szál** | MCP tools (2.12.1): 54 tools in 15 groups, registered into hoosh's own dispatcher | vendored `src/vendor/szal-mcp.cyr` (`scripts/sync-szal.sh`); not on AGNOS |

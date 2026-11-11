@@ -22,6 +22,9 @@ on the raw bytes, which also refuses a body that is not UTF-8.
   trace     (2.10.3) hoosh's span is the caller's child: the provider is sent hoosh's span id, and the exported span
             names the caller's as its parentSpanId. A batch item is a span of its own under the request's caller.
             docs/development/issues/archived/2026-11-07-agnosai-inference-span-takes-the-callers-span-id.md
+  speech    (2.12.2) POST /v1/audio/speech through a svara route: a WAV a strict reader opens, its length as promised,
+            `pcm` the same samples, the same bytes for the same request (several at once included), `speed` scaling
+            the length, refusals as JSON, and chat still reaching its own route past an unscoped svara route.
 
 Exits non-zero on the first run with a failed check. No network beyond 127.0.0.1.
 
@@ -582,6 +585,79 @@ def run_stream(binary):
     stub.shutdown()
 
 
+def wav_frames(raw):
+    """(channels, sample width, rate, frames, peak) of a WAV body, or None when a strict reader refuses it."""
+    import io
+    import struct
+    import wave
+    try:
+        with wave.open(io.BytesIO(raw)) as w:
+            data = w.readframes(w.getnframes())
+            peak = max((abs(v) for v in struct.unpack(f"<{len(data) // 2}h", data)), default=0)
+            return w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes(), peak
+    except (wave.Error, EOFError, struct.error):
+        return None
+
+
+def run_speech(binary):
+    print("speech")
+    stub = serve(StreamStub)
+    # An unscoped svara route (no `models`, so it matches every model) ahead of an Ollama route: speech goes to the
+    # svara route and chat to Ollama, by what each serves, not by priority.
+    gw = Gateway(binary, f'[[providers]]\ntype = "svara"\npriority = 1\n\n[[providers]]\ntype = "ollama"\n'
+                         f'base_url = "http://127.0.0.1:{stub.server_address[1]}"\n'
+                         'priority = 2\nmodels = ["llama*"]\n')
+    try:
+        text = "Hello from the gateway. This is rendered in its own process, one phoneme at a time."
+        body = {"model": "tts-1", "input": text, "voice": "female"}
+        st, wav = gw.req("/v1/audio/speech", body)
+        info = wav_frames(wav) if st == 200 else None
+        check(info is not None and info[:3] == (1, 2, 24000),
+              "speech: a 24 kHz 16-bit mono WAV a strict reader opens")
+        check(info is not None and info[3] * 2 + 44 == len(wav) and info[3] > 24000,
+              "speech: its frames fill the body, over a second of audio")
+        check(info is not None and info[4] > 1000, "speech: it is not silence")
+        st, pcm = gw.req("/v1/audio/speech", dict(body, response_format="pcm"))
+        check(st == 200 and pcm == wav[44:], "speech: pcm is the WAV's samples, headerless")
+        got = []
+
+        def one():
+            got.append(gw.req("/v1/audio/speech", body))
+        ts = [threading.Thread(target=one) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        check(len(got) == 4 and all(g == (200, wav) for g in got),
+              "speech: four at once answer the bytes one alone did (one lock, a context per request)")
+        st, fast = gw.req("/v1/audio/speech", dict(body, speed=2.0))
+        fi = wav_frames(fast) if st == 200 else None
+        check(fi is not None and info is not None and abs(fi[3] * 2 - info[3]) <= info[3] // 100,
+              "speech: speed 2 halves the length")
+        for b, code, says in (
+            (dict(body, response_format="mp3"), 400, "encoder"),
+            (dict(body, voice="alloy"), 400, "male, female or child"),
+            (dict(body, speed=5), 400, "0.25 to 4.0"),
+            (dict(body, input=""), 400, "input is empty"),
+            ({"model": "tts-1"}, 400, "input is required"),
+            ({"input": "hi"}, 400, "model field is required"),
+            (dict(body, input='a "quoted" \\ word'), 200, None),
+        ):
+            st, raw = gw.req("/v1/audio/speech", b)
+            if says is None:
+                check(st == code and wav_frames(raw) is not None, "speech: quotes and a backslash in the input")
+                continue
+            doc = strict(raw)
+            msg = (doc or {}).get("error", {}).get("message", "")
+            check(st == code and doc is not None and says in msg, f"speech: refused as JSON ({says})")
+        st, raw = gw.req("/v1/chat/completions", chat("still chat", stream=True))
+        check(st == 200 and sse_events(raw)[-1:] == [b"[DONE]"],
+              "speech: chat reaches its own route past the svara one")
+    finally:
+        gw.stop()
+    stub.shutdown()
+
+
 def run_events(binary):
     print("events")
     stub = serve(ErrorStub)
@@ -813,6 +889,7 @@ if __name__ == "__main__":
     run_stream(bin_path)
     run_events(bin_path)
     run_trace(bin_path)
+    run_speech(bin_path)
     if FAILS:
         print(f"\n{len(FAILS)} failed:")
         for f in FAILS:

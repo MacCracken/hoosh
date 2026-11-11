@@ -7,7 +7,7 @@
 - **Type**: Single-binary Cyrius project (server, port 8088)
 - **License**: GPL-3.0-only
 - **Toolchain**: Cyrius (pinned in `cyrius.cyml`, currently 6.7.18)
-- **Version**: SemVer 2.12.1 stable
+- **Version**: SemVer 2.12.2 stable
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -16,7 +16,7 @@
 
 All AGNOS apps (LLM inference), daimon (inference routing)
 
-**Note**: 18 LLM providers, tentib served in-process since 2.11.0 (ADR 014). There is no murti to adopt: its Rust repo was deleted 2026-11-10, and the model-load seam it was planned as lives in hoosh's local providers (agnosticos `docs/development/planning/murti.md`; ADR 014's 2026-11-10 update). OpenAI-compatible API.
+**Note**: 18 LLM providers, tentib served in-process since 2.11.0 (ADR 014), and speech (`POST /v1/audio/speech`) rendered in-process through shabda + svara since 2.12.2 (ADR 016). There is no murti to adopt: its Rust repo was deleted 2026-11-10, and the model-load seam it was planned as lives in hoosh's local providers (agnosticos `docs/development/planning/murti.md`; ADR 014's 2026-11-10 update). OpenAI-compatible API.
 
 **Data files**: `data/cloud_pricing.json` + `data/models.json` are vendored from
 ai-hwaccel (power `/v1/hardware/cost` + `/compatible-models`). Re-sync them when

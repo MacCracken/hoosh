@@ -222,6 +222,17 @@ models = ["ornith*", "llama*", "mistral*", "qwen*", "nemotron*", "phi*", "gemma*
 # priority = 1
 # models = ["tentib-small"]
 
+# In-process speech (2.12.2, ADR 016): POST /v1/audio/speech rendered in this process, through shabda (text to
+# phonemes, English) and svara (formant synthesis), with no socket. `voice` is male (the default), female or child;
+# `response_format` wav (the default) or pcm, 16-bit mono at 24 kHz; `speed` 0.25 to 4. A svara route serves no
+# chat, completion or embeddings request, even with no `models`; list the names clients send, and /v1/models lists
+# the literal ones. The first enabled one builds the G2P engine (6.1 MB), once. A request keeps about 1 KB per input
+# byte inside shabda and svara (filed upstream), so give the route a rate limit.
+#[[providers]]
+# type = "svara"
+# models = ["tts-1", "svara"]
+# rate_limit = 120
+
 # --- Remote providers ---
 # Set API keys via environment variables for security.
 

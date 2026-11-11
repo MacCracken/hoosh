@@ -32,6 +32,14 @@ include "lib/ai-hwaccel.cyr"
 include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
 include "lib/tentib.cyr"
+# 2.12.2: the speech chain (shabda over svara), in src/main.cyr's order, for svara_local.cyr below.
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/varna.cyr"
+include "lib/shabdakosh.cyr"
+include "lib/shabda.cyr"
 include "src/vendor/bote-core.cyr"
 # 2.9.8: majra's pub/sub, which src/lib/events.cyr publishes to, at the same point src/main.cyr includes it.
 # It shares one name with types.cyr, the enum member ERR_NONE, which is 0 in both (see cyrius.cyml).
@@ -61,6 +69,7 @@ include "src/lib/provider_err.cyr"
 include "src/lib/catalog.cyr"
 include "src/lib/outcome.cyr"
 include "src/lib/tentib_local.cyr"   # 2.11.0: in-process ternary inference, for real
+include "src/lib/svara_local.cyr"    # 2.12.2: in-process speech, for real (the handler is wire-smoke.py's)
 include "src/lib/urlparse.cyr"
 # 2.9.2: the MCP wiring (tool registration, the echo handler) is tested against the REAL module; its
 # needs (bote-core, http_server, logging) are all included above. It replaced the _mcp_echo mirror.
@@ -3928,6 +3937,488 @@ fn _t211_tentib_local() {
     return 0;
 }
 
+# ── 2.12.2: speech through svara (svara_local.cyr, ADR 016) ──────────────────────────────────────────────────────
+
+# The request record spk_request_parse_a makes of a JSON body, or 0 when it refuses it; its message to *msgp.
+fn _t2122_req(body, msgp) {
+    var a = req_arena_begin();
+    var out[8];
+    store64(&out, 0);
+    var m = spk_request_parse_a(a, body, strlen(body), &out);
+    store64(msgp, m);
+    if (m != 0) { return 0; }
+    return load64(&out);
+}
+
+# 1 when the body is refused with a message containing `says`.
+fn _t2122_refused(body, says) {
+    var m[8];
+    var r = _t2122_req(body, &m);
+    var msg = load64(&m);
+    if (r != 0 || msg == 0) { return 0; }
+    if (_cmp_substr(msg, strlen(msg), says, strlen(says)) < 0) { return 0; }
+    return 1;
+}
+
+fn _t2122_request() {
+    test_group("speech: the request's fields (2.12.2)");
+    assert_eq(spk_voice_parse("male", 4), SPK_VOICE_MALE, "voice: male");
+    assert_eq(spk_voice_parse("female", 6), SPK_VOICE_FEMALE, "voice: female");
+    assert_eq(spk_voice_parse("child", 5), SPK_VOICE_CHILD, "voice: child");
+    assert_eq(spk_voice_parse("Male", 4) + spk_voice_parse("alloy", 5) + spk_voice_parse("mal", 3), 0 - 3,
+      "voice: case, OpenAI's names and a prefix are unknown");
+    assert_eq(spk_format_parse("wav", 3), SPK_FMT_WAV, "format: wav");
+    assert_eq(spk_format_parse("pcm", 3), SPK_FMT_PCM, "format: pcm");
+    assert_eq(spk_format_parse("mp3", 3) + spk_format_parse("opus", 4) + spk_format_parse("aac", 3)
+      + spk_format_parse("flac", 4), 0 - 8, "format: mp3, opus, aac and flac need an encoder (-2 each)");
+    assert_eq(spk_format_parse("ogg", 3), 0 - 1, "format: one OpenAI does not name is unknown");
+    assert_streq(spk_format_ctype(SPK_FMT_WAV), "audio/wav", "format: wav's type");
+    assert_streq(spk_format_ctype(SPK_FMT_PCM), "audio/pcm", "format: pcm's type");
+    assert_eq(spk_speed_parse("1", 1), F64_ONE, "speed: 1");
+    assert_eq(spk_speed_parse("0.25", 4), 0.25, "speed: the floor, 0.25");
+    assert_eq(spk_speed_parse("4", 1), 4.0, "speed: the ceiling, 4");
+    assert_eq(spk_speed_parse("2.5e0", 5), 2.5, "speed: an exponent");
+    assert_eq(spk_speed_parse("4.01", 4) + spk_speed_parse("0.2", 3) + spk_speed_parse("-1", 2), 0,
+      "speed: past either end is refused");
+    assert_eq(spk_speed_parse("\"2\"", 3) + spk_speed_parse("nan", 3) + spk_speed_parse("", 0), 0,
+      "speed: a string, NaN and nothing are refused");
+
+    var m[8];
+    var r = _t2122_req("{\"model\":\"tts-1\",\"input\":\"hello\"}", &m);
+    assert(r != 0, "request: input alone is a request");
+    assert_streq(load64(r + SPK_R_TEXT), "hello", "request: the input");
+    assert_eq(load64(r + SPK_R_VOICE), SPK_VOICE_MALE, "request: male by default");
+    assert_eq(load64(r + SPK_R_FMT), SPK_FMT_WAV, "request: wav by default (OpenAI's mp3 needs an encoder)");
+    assert_eq(load64(r + SPK_R_SPEED), F64_ONE, "request: speed 1 by default");
+    r = _t2122_req("{\"input\":\"a \\\"b\\\" \\\\ caf\\u00e9\",\"voice\":\"child\",\"response_format\":\"pcm\",\"speed\":2,\"stream_format\":\"audio\",\"instructions\":\"cheerful\"}", &m);
+    assert(r != 0, "request: every field at once");
+    var rt0 = load64(r + SPK_R_TEXT);
+    assert(memeq(rt0, "a \"b\" \\ caf", 11) == 1 && load8(rt0 + 11) == 0xC3 && load8(rt0 + 12) == 0xA9,
+      "request: the input is decoded, escapes and a \\u00e9 (as UTF-8) all");
+    assert_eq(load64(r + SPK_R_TLEN), 13, "request: its decoded length");
+    assert_eq(load64(r + SPK_R_VOICE) * 10 + load64(r + SPK_R_FMT), SPK_VOICE_CHILD * 10 + SPK_FMT_PCM,
+      "request: child, pcm");
+    assert_eq(load64(r + SPK_R_SPEED), 2.0, "request: speed is read as a number");
+    assert_eq(_t2122_refused("{\"model\":\"x\"}", "input is required"), 1, "refused: no input");
+    assert_eq(_t2122_refused("{\"input\":[\"a\"]}", "input must be a string"), 1, "refused: an array input");
+    assert_eq(_t2122_refused("{\"input\":\"\"}", "input is empty"), 1, "refused: an empty input");
+    assert_eq(_t2122_refused("{\"input\":\"a\\u0000b\"}", "NUL"), 1, "refused: a NUL in the input");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"voice\":\"alloy\"}", "male, female or child"), 1,
+      "refused: OpenAI's voice names");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"voice\":{\"id\":\"v\"}}", "male, female or child"), 1,
+      "refused: a custom voice object");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"response_format\":\"mp3\"}", "encoder"), 1, "refused: mp3");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"response_format\":\"ogg\"}", "wav or pcm"), 1, "refused: ogg");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"speed\":5}", "0.25 to 4.0"), 1, "refused: speed 5");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"speed\":\"2\"}", "0.25 to 4.0"), 1, "refused: speed as a string");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"speed\":null}", "0.25 to 4.0"), 1, "refused: speed null");
+    assert_eq(_t2122_refused("{\"input\":\"hi\",\"stream_format\":\"sse\"}", "stream_format"), 1,
+      "refused: OpenAI's sse stream format");
+    # The input's bound is on the decoded bytes: 4096 pass, 4097 do not.
+    var big = alloc(4200);
+    memcpy(big, "{\"input\":\"", 10);
+    memset(big + 10, 97, 4096);
+    memcpy(big + 4106, "\"}", 3);
+    r = _t2122_req(big, &m);
+    assert(r != 0 && load64(r + SPK_R_TLEN) == 4096, "request: 4096 bytes of input are accepted");
+    memset(big + 10, 97, 4097);
+    memcpy(big + 4107, "\"}", 3);
+    assert_eq(_t2122_refused(big, "longer than 4096"), 1, "refused: 4097 bytes of input");
+}
+
+fn _t2122_pcm_wav() {
+    test_group("speech: PCM and the WAV header (2.12.2)");
+    assert_eq(spk_pcm16(0), 0, "pcm: 0");
+    assert_eq(spk_pcm16(F64_ONE), 32767, "pcm: full scale");
+    assert_eq(spk_pcm16(f64_neg(F64_ONE)), 0 - 32767, "pcm: negative full scale (symmetric)");
+    assert_eq(spk_pcm16(2.0) - spk_pcm16(f64_neg(2.0)), 65534, "pcm: past full scale is clamped");
+    assert_eq(spk_pcm16(F64_HALF), 16384, "pcm: 16383.5 rounds half up");
+    assert_eq(spk_pcm16(f64_neg(F64_HALF)), 0 - 16383, "pcm: -16383.5 rounds half up too");
+    assert_eq(spk_pcm16(0x7FF8000000000000), 0, "pcm: NaN is silence");
+    assert_eq(spk_pcm16(0.00000001), 0, "pcm: below half a step is 0");
+    var h = alloc(48);
+    spk_wav_header(h, 1000);
+    assert_eq(memeq(h, "RIFF", 4) & memeq(h + 8, "WAVEfmt ", 8) & memeq(h + 36, "data", 4), 1, "wav: the chunk ids");
+    assert_eq(load32(h + 4), 2036, "wav: RIFF size is 36 + data");
+    assert_eq(load32(h + 16), 16, "wav: fmt is 16 bytes");
+    assert_eq(load16(h + 20) * 100 + load16(h + 22), 101, "wav: PCM, mono");
+    assert_eq(load32(h + 24), 24000, "wav: 24 kHz");
+    assert_eq(load32(h + 28), 48000, "wav: 48000 bytes a second");
+    assert_eq(load16(h + 32) * 100 + load16(h + 34), 216, "wav: 2-byte frames of 16 bits");
+    assert_eq(load32(h + 40), 2000, "wav: the data's bytes");
+    var fds = alloc(8);
+    sys_pipe(fds);
+    http_respond_head(load32(fds + 4), "200", "OK", "audio/wav", 1044);
+    sys_close(load32(fds + 4));
+    var hb = alloc(1024);
+    var hn = sys_read(load32(fds), hb, 1023);
+    sys_close(load32(fds));
+    store8(hb + hn, 0);
+    assert_streq(hb, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: 1044\r\n\r\n",
+      "http_respond_head: the head alone, with the body's type and length");
+}
+
+# A pseudo-random f64 in [-1, 1) from a counter, for synthetic segments.
+fn _t2122_val(k) {
+    return f64_div(f64_from((k * 7919 + 13) % 2001 - 1000), f64_from(1000));
+}
+
+# Run segments (a vec of f64 vecs) with crossfades (a vec of n - 1) through spk_xf_* and compare with
+# svara_seq_crossfade, sample for sample. 1 when every bit matches.
+fn _t2122_xf_same(segs, cfs) {
+    var n = vec_len(segs);
+    var want = svara_seq_crossfade(segs, cfs);
+    var hold = 0;
+    var maxl = 0;
+    var i = 0;
+    while (i < n) {
+        var li = vec_len(vec_get(segs, i));
+        if (li > maxl) { maxl = li; }
+        if (i > 0) {
+            var fl = vec_get(cfs, i - 1);
+            if (fl > li) { fl = li; }
+            if (fl > hold) { hold = fl; }
+        }
+        i = i + 1;
+    }
+    var cap = hold + maxl + 1;
+    var x = alloc(SPK_X_SIZE);
+    spk_xf_init(x, alloc(cap * 8), cap);
+    var got = vec_new();
+    i = 0;
+    while (i < n) {
+        var seg = vec_get(segs, i);
+        var cp = 0;
+        if (i > 0) { cp = vec_get(cfs, i - 1); }
+        var cn = 0;
+        if (i < n - 1) { cn = vec_get(cfs, i); }
+        if (spk_xf_step(x, load64(seg), vec_len(seg), i, n, cp, cn) < 0) { return 0; }
+        var keep = hold;
+        if (i == n - 1) { keep = 0; }
+        var r = spk_xf_ready(x, keep);
+        var k = 0;
+        while (k < r) { vec_push(got, load64(spk_xf_pending(x) + k * 8)); k = k + 1; }
+        spk_xf_consume(x, r);
+        i = i + 1;
+    }
+    if (vec_len(got) != vec_len(want)) { return 0; }
+    i = 0;
+    while (i < vec_len(got)) {
+        if (vec_get(got, i) != vec_get(want, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A vec of nl segments, segment i of load64(lens + i * 8) samples of _t2122_val.
+fn _t2122_segs(lens, nl, seed) {
+    var segs = vec_new();
+    var i = 0;
+    while (i < nl) {
+        var v = vec_new();
+        var j = 0;
+        while (j < load64(lens + i * 8)) { vec_push(v, _t2122_val(seed + i * 1009 + j)); j = j + 1; }
+        vec_push(segs, v);
+        i = i + 1;
+    }
+    return segs;
+}
+
+fn _t2122_vec(p, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, load64(p + i * 8)); i = i + 1; }
+    return v;
+}
+
+fn _t2122_crossfade() {
+    test_group("speech: the crossfade is svara_seq_crossfade's, streamed (2.12.2)");
+    var L = alloc(16 * 8);
+    var C = alloc(16 * 8);
+    # One segment: svara answers it unchanged.
+    store64(L, 300);
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 1, 1), vec_new()), 1, "crossfade: one segment");
+    # Two, and a typical run: crossfades shorter than either side.
+    store64(L, 400); store64(L + 8, 500); store64(C, 120);
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 2, 2), _t2122_vec(C, 1)), 1, "crossfade: two segments");
+    var i = 0;
+    while (i < 8) { store64(L + i * 8, 200 + (i * 137) % 400); i = i + 1; }
+    i = 0;
+    while (i < 7) { store64(C + i * 8, 40 + (i * 53) % 90); i = i + 1; }
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 8, 3), _t2122_vec(C, 7)), 1, "crossfade: eight, shorter crossfades");
+    # The floor past the segments (svara's 50 ms min_cf over short phonemes): fade-ins that cover a whole segment and
+    # reach back into the ones before it, which is what the hold is for.
+    i = 0;
+    while (i < 8) { store64(L + i * 8, 60 + (i * 37) % 90); i = i + 1; }
+    i = 0;
+    while (i < 7) { store64(C + i * 8, 200); i = i + 1; }
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 8, 4), _t2122_vec(C, 7)), 1,
+      "crossfade: crossfades longer than the segments");
+    # A segment of no samples in the middle, and one at the start.
+    store64(L, 0); store64(L + 8, 300); store64(L + 16, 0); store64(L + 24, 250); store64(L + 32, 10);
+    store64(C, 50); store64(C + 8, 50); store64(C + 16, 80); store64(C + 24, 40);
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 5, 5), _t2122_vec(C, 4)), 1, "crossfade: empty segments");
+    # Zero crossfades: a plain concatenation.
+    i = 0;
+    while (i < 4) { store64(L + i * 8, 100); store64(C + i * 8, 0); i = i + 1; }
+    assert_eq(_t2122_xf_same(_t2122_segs(L, 4, 6), _t2122_vec(C, 3)), 1, "crossfade: none");
+    assert_eq(_t2122_xf_same(vec_new(), vec_new()), 1, "crossfade: no segments, no samples");
+    # No room: the step refuses rather than writing past the buffer.
+    var x = alloc(SPK_X_SIZE);
+    spk_xf_init(x, alloc(80), 10);
+    var seg = alloc(11 * 8);
+    assert_eq(spk_xf_step(x, seg, 11, 0, 1, 0, 0), 0 - 1, "crossfade: a segment past the buffer is refused");
+    assert_eq(spk_xf_step(x, seg, 10, 0, 1, 0, 0), 0, "crossfade: one that fits is taken");
+}
+
+# shabda's events for `text`, converted by the gateway's engine.
+fn _t2122_events(text) {
+    var slot[8];
+    var e = shabda_convert(_spk_g2p, text, &slot);
+    if (shabda_is_err(e) == 1) { return 0; }
+    return load64(&slot);
+}
+
+# A sequence holding copies of `evs`, as shabda_speak builds one.
+fn _t2122_seq(evs) {
+    var seq = svara_sequence_new();
+    var i = 0;
+    while (i < vec_len(evs)) { svara_sequence_push(seq, vec_get(evs, i)); i = i + 1; }
+    return seq;
+}
+
+# 1 when a plan's durations and nasalizations are svara's helpers' for the same events, its durations divided by
+# `speed`, and (at speed 1) its length is svara_sequence_render's.
+fn _t2122_plan_same(text, speed, check_len) {
+    var evs = _t2122_events(text);
+    if (evs == 0) { return 0; }
+    var a = req_arena_begin();
+    var pl = spk_plan_new_a(a, spk_voice(SPK_VOICE_MALE));
+    if (spk_plan_events_a(a, pl, evs, speed) != 0) { return 0; }
+    var seq = _t2122_seq(evs);
+    var durs = svara_seq_durations(seq, svara_seq_detect_clusters(svara_sequence_events(seq)));
+    var nas = svara_detect_nasalization(svara_seq_phoneme_list(seq));
+    var n = vec_len(evs);
+    if (spk_plan_events(pl) != n || n == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load64(load64(pl + SPK_P_DUR) + i * 8) != f64_div(vec_get(durs, i), speed)) { return 0; }
+        var mine = load64(load64(pl + SPK_P_NAS) + i * 8);
+        var theirs = vec_get(nas, i);
+        if ((mine == 0) != (theirs == 0)) { return 0; }
+        if (mine != 0) {
+            if (SvNasalization_place(mine) != SvNasalization_place(theirs)) { return 0; }
+            if (SvNasalization_onset(mine) != SvNasalization_onset(theirs)) { return 0; }
+            if (SvNasalization_peak_coupling(mine) != SvNasalization_peak_coupling(theirs)) { return 0; }
+        }
+        i = i + 1;
+    }
+    if (check_len == 1) {
+        var full = svara_sequence_render(seq, spk_voice(SPK_VOICE_MALE), f64_from(SPK_RATE()));
+        if (svara_is_err(full) == 1) { return 0; }
+        if (vec_len(full) != spk_plan_total(pl)) { return 0; }
+    }
+    return 1;
+}
+
+fn _t2122_plan() {
+    test_group("speech: a plan is svara_sequence_render's (2.12.2)");
+    assert_eq(spk_init(), 0, "init: the engine and the voices build");
+    assert_eq(spk_ready(), 1, "init: speech is ready");
+    var ib = spk_init_bytes();
+    assert_eq(spk_init(), 0, "init: a second call does nothing");
+    assert_eq(spk_init_bytes(), ib, "init: ... and builds nothing");
+    assert(spk_voice(SPK_VOICE_FEMALE) != 0 && spk_voice(3) == 0 && spk_voice(0 - 1) == 0, "init: three voices");
+    assert_eq(_t2122_plan_same("Hello, world.", F64_ONE, 1), 1, "plan: a greeting, as svara would render it");
+    assert_eq(_t2122_plan_same("The quick brown fox jumps over the lazy dog. Then it ran home!", F64_ONE, 1), 1,
+      "plan: two sentences, clusters and nasals among them");
+    assert_eq(_t2122_plan_same("Strengths, sixths and twelfths: synthesis in the gateway?", F64_ONE, 1), 1,
+      "plan: long consonant clusters");
+    assert_eq(_t2122_plan_same("A long way down, and then a little further.", 2.0, 0), 1,
+      "plan: speed 2 halves every duration");
+    assert_eq(_t2122_plan_same("A long way down, and then a little further.", 0.25, 0), 1,
+      "plan: speed 0.25 quadruples them");
+    # The input comes back as shabda's error.
+    var a = req_arena_begin();
+    var ps[8];
+    store64(&ps, 0);
+    assert_eq(spk_plan_a(a, "   ", SPK_VOICE_MALE, F64_ONE, &ps), SPK_ERR_INPUT, "plan: whitespace is shabda's to refuse");
+    assert(load64(&ps) != 0 && shabda_is_err(spk_plan_err(load64(&ps))) == 1, "plan: ... with shabda's error");
+    assert_eq(spk_plan_a(a, "hi", 7, F64_ONE, &ps), SPK_ERR_RENDER, "plan: an unknown voice id");
+    # Events svara would refuse are refused before a reply begins.
+    var evs = vec_new();
+    vec_push(evs, svara_phoneme_event_new(SVARA_PH_VOWEL_A, 0.1, SVARA_STRESS_PRIMARY));
+    var pl = spk_plan_new_a(a, spk_voice(SPK_VOICE_MALE));
+    assert_eq(spk_plan_events_a(a, pl, evs, F64_ONE), 0, "plan: one vowel");
+    assert_eq(spk_plan_total(pl), 2760, "plan: 0.1 s x 1.15 (primary stress) at 24 kHz");
+    assert_eq(spk_body_len(pl, SPK_FMT_WAV) - spk_body_len(pl, SPK_FMT_PCM), 44, "plan: wav is pcm and a header");
+    vec_push(evs, svara_phoneme_event_new(SVARA_PH_VOWEL_A, 0, SVARA_STRESS_PRIMARY));
+    assert_eq(spk_plan_events_a(a, pl, evs, F64_ONE), SPK_ERR_RENDER, "plan: a zero duration is refused");
+    vec_set(evs, 1, svara_phoneme_event_new(999, 0.1, SVARA_STRESS_PRIMARY));
+    assert_eq(spk_plan_events_a(a, pl, evs, F64_ONE), SPK_ERR_RENDER, "plan: an unknown phoneme is refused");
+    vec_set(evs, 1, svara_phoneme_event_new(SVARA_PH_VOWEL_A, 6.0, SVARA_STRESS_UNSTRESSED));
+    assert_eq(spk_plan_events_a(a, pl, evs, F64_ONE), SPK_ERR_TOO_LONG, "plan: a phoneme past 5 s is refused");
+    assert_eq(spk_plan_events_a(a, pl, vec_new(), F64_ONE), 0, "plan: no events");
+    assert_eq(spk_plan_total(pl) + spk_plan_events(pl), 0, "plan: ... is an empty reply");
+}
+
+# What spk_render_with wrote for `pl`, through a file (a pipe would fill): the bytes, their count to *np.
+fn _t2122_render_bytes(st, pl, np) {
+    var path = "/tmp/hoosh-test-speech.pcm";
+    var fd = sys_open(path, 578, 384);           # O_RDWR | O_CREAT | O_TRUNC, 0600
+    var w = spk_render_with(st, pl, fd);
+    sys_close(fd);
+    store64(np, w);
+    if (w < 0) { return 0; }
+    var buf = alloc(w * 2 + 16);
+    fd = sys_open(path, 0, 0);
+    var got = 0;
+    while (got < w * 2) {
+        var r = sys_read(fd, buf + got, w * 2 - got);
+        if (r <= 0) { break; }
+        got = got + r;
+    }
+    sys_close(fd);
+    sys_unlink(path);
+    if (got != w * 2) { store64(np, 0 - 100); }
+    return buf;
+}
+
+# The reply a plan should be: each event rendered on a fresh context of the voice, with its stress pitch, the
+# segments crossfaded by svara_seq_crossfade, each sample as spk_pcm16 writes it. 1 when the bytes match.
+fn _t2122_render_same(pl, bytes, n) {
+    var voice = load64(pl + SPK_P_VOICE);
+    var ctx = svara_synthctx_new(voice, f64_from(SPK_RATE()));
+    var ev = alloc(sizeof(SvVoiceProfile));
+    var segs = vec_new();
+    var cfs = vec_new();
+    var ne = spk_plan_events(pl);
+    var i = 0;
+    while (i < ne) {
+        memcpy(ev, voice, sizeof(SvVoiceProfile));
+        var s = load64(load64(pl + SPK_P_STRESS) + i * 8);
+        if (s == SVARA_STRESS_PRIMARY) { SvVoiceProfile_set_base_f0(ev, f64_mul(SvVoiceProfile_base_f0(ev), 1.10)); }
+        if (s == SVARA_STRESS_SECONDARY) { SvVoiceProfile_set_base_f0(ev, f64_mul(SvVoiceProfile_base_f0(ev), 1.05)); }
+        var c = svara_synthctx_synthesize(ctx, load64(load64(pl + SPK_P_PH) + i * 8), ev,
+          load64(load64(pl + SPK_P_DUR) + i * 8), load64(load64(pl + SPK_P_NAS) + i * 8));
+        if (c < 0) { return 0; }
+        var v = vec_new();
+        var j = 0;
+        while (j < c) { vec_push(v, load64(svara_synthctx_buffer(ctx) + j * 8)); j = j + 1; }
+        vec_push(segs, v);
+        if (i < ne - 1) { vec_push(cfs, load64(load64(pl + SPK_P_CF) + i * 8)); }
+        i = i + 1;
+    }
+    var want = svara_seq_crossfade(segs, cfs);
+    if (vec_len(want) != n) { return 0; }
+    i = 0;
+    while (i < n) {
+        var p = spk_pcm16(vec_get(want, i));
+        if (load16(bytes + i * 2) != (p & 65535)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _t2122_render() {
+    test_group("speech: the render, sample for sample (2.12.2)");
+    var a = req_arena_begin();
+    var ps[8];
+    var text = "Speech in the gateway: one phoneme at a time, and the same bytes every time.";
+    assert_eq(spk_plan_a(a, text, SPK_VOICE_FEMALE, F64_ONE, &ps), 0, "render: a plan");
+    var pl = load64(&ps);
+    var st = spk_state_new();
+    var n1[8];
+    var b1 = _t2122_render_bytes(st, pl, &n1);
+    assert_eq(load64(&n1), spk_plan_total(pl), "render: it writes the samples the plan promised");
+    assert_eq(_t2122_render_same(pl, b1, load64(&n1)), 1,
+      "render: svara_seq_crossfade over fresh-context renders, to the bit");
+    var n2[8];
+    var b2 = _t2122_render_bytes(st, pl, &n2);
+    assert(load64(&n2) == load64(&n1) && memeq(b1, b2, load64(&n1) * 2) == 1,
+      "render: a second render on the same thread's state gives the same bytes");
+    var b3 = _t2122_render_bytes(_spk_thread(), pl, &n2);
+    assert(load64(&n2) == load64(&n1) && memeq(b1, b3, load64(&n1) * 2) == 1, "render: ... and on another state");
+    # Every chunk boundary: a reply longer than SPK_CHUNK samples crosses several.
+    assert(spk_plan_total(pl) > SPK_CHUNK() * 2, "render: the reply spans chunks");
+    assert_eq(spk_render_with(st, pl, 0 - 1), SPK_ERR_CLIENT, "render: a write that fails stops it");
+    var ps2[8];
+    assert_eq(spk_plan_a(a, text, SPK_VOICE_MALE, 2.0, &ps2), 0, "render: the same text at speed 2");
+    var n4[8];
+    var b4 = _t2122_render_bytes(st, load64(&ps2), &n4);
+    assert(load64(&n4) * 2 >= load64(&n1) - 100 && load64(&n4) * 2 <= load64(&n1) + 100,
+      "render: speed 2 is half the length (the transition window scales too)");
+    assert_eq(_t2122_render_same(load64(&ps2), b4, load64(&n4)), 1, "render: ... and still svara's crossfade");
+    # The samples never reach the heap: four times the samples keep what one does (the heap grows only by what
+    # shabda and svara allocate per phoneme). Warm the state's buffers first, at the slowest speed.
+    var ps3[8];
+    spk_plan_a(a, "Hello there, and goodbye.", SPK_VOICE_MALE, 0.25, &ps3);
+    var dn = sys_open("/dev/null", 1, 0);
+    spk_render_with(st, load64(&ps3), dn);
+    var u0 = alloc_used();
+    spk_render_with(st, load64(&ps3), dn);
+    var slow = alloc_used() - u0;
+    var ps4[8];
+    spk_plan_a(a, "Hello there, and goodbye.", SPK_VOICE_MALE, F64_ONE, &ps4);
+    u0 = alloc_used();
+    spk_render_with(st, load64(&ps4), dn);
+    var fast = alloc_used() - u0;
+    sys_close(dn);
+    assert(spk_plan_total(load64(&ps3)) > spk_plan_total(load64(&ps4)) * 3, "render: the slow plan has 4x the samples");
+    assert_eq(slow, fast, "render: ... and keeps the same heap as the fast one");
+    assert(fast < 16384, "render: a short phrase keeps under 16 KB (svara's context and filters)");
+}
+
+fn _t2122_routes() {
+    test_group("speech: routes (2.12.2)");
+    assert_eq(provider_parse("svara"), PROV_SVARA, "svara: [[providers]] type = \"svara\" parses");
+    assert_streq(provider_name(PROV_SVARA), "svara", "svara: its name");
+    assert_eq(provider_is_local(PROV_SVARA), 1, "svara: local (in-process)");
+    assert_eq(route_catalog_default(PROV_SVARA), 0, "svara: a static catalog");
+    assert_eq(strlen(provider_default_url(PROV_SVARA)), 0, "svara: no URL");
+    assert_eq(_requires_post("/v1/audio/speech"), 1, "svara: POST /v1/audio/speech takes a body");
+    var sv = route_new(PROV_SVARA, 1, "");
+    var ol = route_new(PROV_OLLAMA, 2, "http://127.0.0.1:1");
+    var pats = alloc(8);
+    store64(pats, "llama*");
+    route_set_patterns(ol, pats, 1);
+    assert_eq(route_serves_text(sv) * 10 + route_serves_text(ol), 1, "route: a svara route serves no text");
+    var rs = alloc(16);
+    store64(rs, sv);
+    store64(rs + 8, ol);
+    var rt = router_new(rs, 2, STRAT_PRIORITY);
+    # The svara route has no `models`, so it matches every model, at a better priority.
+    assert_eq(router_select(rt, "llama3"), ol, "router: chat passes an unscoped svara route by");
+    assert_eq(router_select(rt, "tts-1"), 0, "router: a model only svara matches has no chat route");
+    assert_eq(router_select_local(rt, "llama3"), ol, "router: ... nor does local-only selection pick it");
+    assert_eq(router_select_speech(rt, "tts-1"), sv, "router: speech picks the svara route");
+    assert_eq(router_select_speech(rt, "llama3"), sv, "router: ... for any model it matches");
+    route_set_enabled(sv, 0);
+    assert_eq(router_select_speech(rt, "tts-1"), 0, "router: not a disabled one");
+    route_set_enabled(sv, 1);
+    var rs2 = alloc(8);
+    store64(rs2, ol);
+    assert_eq(router_select_speech(router_new(rs2, 1, STRAT_PRIORITY), "llama3"), 0,
+      "router: no speech route, no speech");
+    assert_eq(health_probe(sv), spk_ready(), "health: a svara route is up when speech is loaded");
+    # Listings: /v1/models offers a svara route's literal names and nothing from the chat table; the catalog, which
+    # is of models to chat with, offers none of them.
+    var sv2 = route_new(PROV_SVARA, 2, "");
+    var sp2 = alloc(16);
+    store64(sp2, "tts-1");
+    store64(sp2 + 8, "svara*");
+    route_set_patterns(sv2, sp2, 2);
+    var rs3 = alloc(16);
+    store64(rs3, sv);
+    store64(rs3 + 8, sv2);
+    var lrt = router_new(rs3, 2, STRAT_PRIORITY);
+    var lj = to_cstr(models_list_json(lrt));
+    assert_streq(lj, "{\"object\":\"list\",\"data\":[{\"id\":\"tts-1\",\"object\":\"model\",\"owned_by\":\"svara\"}]}",
+      "models: a svara route lists its literal names alone");
+    var cj = to_cstr(models_catalog_json(lrt));
+    assert_eq(_cmp_substr(cj, strlen(cj), "\"id\"", 4), 0 - 1, "catalog: no speech route's model is a chat model");
+}
+
 fn main() {
     alloc_init();
 
@@ -3981,8 +4472,8 @@ fn main() {
         if (provider_parse(provider_name(tpi)) != tpi) { tp_rt = 0; }
         var tpu = provider_default_url(tpi);
         var tp_https = memeq(tpu, "https://", 8);
-        if (tpi == PROV_TENTIB) {
-            if (strlen(tpu) != 0) { tp_url = 0; }      # 2.11.0: in-process, no URL (its base is the model file)
+        if (tpi == PROV_TENTIB || tpi == PROV_SVARA) {
+            if (strlen(tpu) != 0) { tp_url = 0; }      # in-process (2.11.0, 2.12.2): no URL
         } elif (provider_is_local(tpi) == 1) {
             if (memeq(tpu, "http://localhost:", 17) == 0) { tp_url = 0; }
         } else {
@@ -3990,8 +4481,8 @@ fn main() {
         }
         tpi = tpi + 1;
     }
-    assert_eq(tp_rt, 1, "types: provider_parse(provider_name(p)) == p for all 18");
-    assert_eq(tp_url, 1, "types: default URL is https for remote, http://localhost for local, none for tentib");
+    assert_eq(tp_rt, 1, "types: provider_parse(provider_name(p)) == p for all 19");
+    assert_eq(tp_url, 1, "types: default URL is https for remote, http://localhost for local, none in-process");
     assert_eq(provider_parse("OpenAi"), PROV_OPENAI, "types: provider names are case-insensitive");
     assert_eq(provider_parse("TensorRT-LLM"), PROV_TENSORRT, "types: tensorrt-llm alias");
     assert_eq(provider_parse("trtllm"), PROV_TENSORRT, "types: trtllm alias");
@@ -4016,7 +4507,7 @@ fn main() {
     # ── Provider types ───────────────────────────────────────────
     test_group("provider_types");
 
-    assert_eq(PROV_COUNT, 18, "18 provider types");
+    assert_eq(PROV_COUNT, 19, "19 provider types");
     assert(provider_is_local(PROV_OLLAMA) == 1, "ollama is local");
     assert(provider_is_local(PROV_LLAMACPP) == 1, "llamacpp is local");
     assert(provider_is_local(PROV_SYNAPSE) == 1, "synapse is local");
@@ -8597,6 +9088,12 @@ fn main() {
     _t2112_provider_paths();
     _t2112_audit_recycle();
     _t2121_mcp_groups();
+    _t2122_request();
+    _t2122_pcm_wav();
+    _t2122_crossfade();
+    _t2122_plan();
+    _t2122_render();
+    _t2122_routes();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

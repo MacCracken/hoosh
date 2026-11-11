@@ -38,6 +38,14 @@ include "lib/tyche.cyr"
 include "lib/rosnet.cyr"
 include "lib/tentib.cyr"
 include "lib/cmdit.cyr"
+# 2.12.2: the speech chain, in src/main.cyr's order, for svara_local.cyr.
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/varna.cyr"
+include "lib/shabdakosh.cyr"
+include "lib/shabda.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
 # 2.12.1: szál's MCP tools bundle, after bote-core and majra as src/main.cyr has it (mcp.cyr registers its groups).
@@ -56,6 +64,7 @@ include "src/lib/provider_err.cyr"
 include "src/lib/catalog.cyr"
 include "src/lib/outcome.cyr"
 include "src/lib/tentib_local.cyr"
+include "src/lib/svara_local.cyr"
 include "src/lib/urlparse.cyr"
 include "src/lib/mcp.cyr"
 include "src/lib/compression.cyr"
@@ -119,7 +128,9 @@ fn main() {
     var routes = alloc(20 * 8);
     var i = 0;
     while (i < 20) {
-        var prov = i % PROV_COUNT;
+        # The 18 text providers, as through 2.12.1: since 2.12.2 a svara route is skipped by text selection, so
+        # i % PROV_COUNT would hand this row one route fewer to rank.
+        var prov = i % PROV_SVARA;
         var r = route_new(prov, i + 1, _b_s("http://localhost"));
         var pats = alloc(8);
         store64(pats, _b_s("llama*"));
@@ -145,7 +156,7 @@ fn main() {
     var rr_routes = alloc(10 * 8);
     i = 0;
     while (i < 10) {
-        var r = route_new(i % PROV_COUNT, 1, _b_s("http://localhost"));
+        var r = route_new(i % PROV_SVARA, 1, _b_s("http://localhost"));     # text providers only (2.12.2)
         store64(rr_routes + i * 8, r);
         i = i + 1;
     }
@@ -857,6 +868,37 @@ fn main() {
     bench_batch_stop(b, 200);
     bench_report(b);
     sys_unlink(tb_path); sys_unlink(tb_apath); sys_unlink(tb_spath);
+
+    # ── 2.12.2: speech (svara_local.cyr) ──────────────────────────
+    # A plan: shabda's conversion of one sentence and the layout of its reply. A render: that reply's 2.4 s of
+    # 24 kHz audio, phoneme by phoneme, crossfaded and written as 16-bit PCM (to /dev/null).
+    spk_init();
+    var sp_text = _b_s("The quick brown fox jumps over the lazy dog, and then it runs home.");
+    var sp_st = spk_state_new();
+    var sp_ps = alloc(8);
+    var sp_dn = sys_open("/dev/null", 1, 0);
+    spk_plan_a(req_arena_begin(), sp_text, SPK_VOICE_MALE, F64_ONE, sp_ps);
+    spk_render_with(sp_st, load64(sp_ps), sp_dn);      # warm the state's buffers
+    b = bench_new("speech_plan_sentence");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 200) {
+        spk_plan_a(req_arena_begin(), sp_text, SPK_VOICE_MALE, F64_ONE, sp_ps);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 200);
+    bench_report(b);
+    spk_plan_a(req_arena_begin(), sp_text, SPK_VOICE_MALE, F64_ONE, sp_ps);
+    b = bench_new("speech_render_sentence");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 20) {
+        spk_render_with(sp_st, load64(sp_ps), sp_dn);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 20);
+    bench_report(b);
+    sys_close(sp_dn);
 
     println("");
     println("done");

@@ -2,12 +2,14 @@
 # Requires: types.cyr, route.cyr
 
 enum RouterField {
-    ROUTER_SIZE      = 40;
+    ROUTER_SIZE      = 56;
     ROUTER_ROUTES    = 0;
     ROUTER_COUNT     = 8;
     ROUTER_STRATEGY  = 16;
     ROUTER_RR_IDX    = 24;
     ROUTER_LATENCIES = 32;
+    ROUTER_TEXT      = 40;    # 2.12.2: the routes that serve text (route_serves_text), in priority order
+    ROUTER_TEXT_N    = 48;
 }
 
 # Guards the lowest-latency EMA map (read in router_select, written per-request
@@ -48,6 +50,22 @@ fn router_new(routes, count, strategy) {
         store64(routes + (j + 1) * 8, key);
         i = i + 1;
     }
+    # 2.12.2: the text selections (router_select and its remote, local and hardware variants) walk only the routes
+    # that serve text, so a svara route costs them nothing per request. A route's provider never changes, and a
+    # reload builds a new router.
+    var text = alloc((count + 1) * 8);
+    var tn = 0;
+    i = 0;
+    while (i < count) {
+        var tr = load64(routes + i * 8);
+        if (route_serves_text(tr) == 1) {
+            store64(text + tn * 8, tr);
+            tn = tn + 1;
+        }
+        i = i + 1;
+    }
+    store64(rt + ROUTER_TEXT, text);
+    store64(rt + ROUTER_TEXT_N, tn);
     return rt;
 }
 
@@ -69,8 +87,8 @@ fn router_find_provider(rt, prov) {
 }
 
 fn router_select(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var strategy = load64(rt + ROUTER_STRATEGY);
     var cand_buf: i64[ROUTER_STACK_CANDIDATES];
     var cand = &cand_buf;
@@ -173,8 +191,8 @@ fn router_select_hw(rt, model, model_params) {
     if (hw_fits_available(needed) == 1) { return router_select(rt, model); }
 
     # Model does not fit what is free. Prefer any remote route that serves it.
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var remote_ok = 0;
     var i = 0;
     while (i < count) {
@@ -198,8 +216,8 @@ fn router_select_hw(rt, model, model_params) {
 
 # Selection restricted to remote routes, honoring the configured strategy.
 fn _router_select_remote(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var strategy = load64(rt + ROUTER_STRATEGY);
     var cand_buf: i64[ROUTER_STACK_CANDIDATES];
     var cand = &cand_buf;
@@ -231,8 +249,8 @@ fn _router_select_remote(rt, model) {
 # must not leave the machine. Same strategy/priority order as router_select,
 # but candidates are filtered to local backends. Returns 0 if none serve model.
 fn router_select_local(rt, model) {
-    var routes = load64(rt + ROUTER_ROUTES);
-    var count = load64(rt + ROUTER_COUNT);
+    var routes = load64(rt + ROUTER_TEXT);
+    var count = load64(rt + ROUTER_TEXT_N);
     var strategy = load64(rt + ROUTER_STRATEGY);
     var cand_buf: i64[ROUTER_STACK_CANDIDATES];
     var cand = &cand_buf;
@@ -257,6 +275,22 @@ fn router_select_local(rt, model) {
     }
     # Priority/direct/lowest-latency all fall back to the top priority local.
     return load64(cand);
+}
+
+# 2.12.2: the route for POST /v1/audio/speech: the first enabled svara route whose patterns match `model`, in
+# priority order, or 0. Health is not consulted: a svara route is in-process, up exactly when speech is loaded.
+fn router_select_speech(rt, model) {
+    var routes = load64(rt + ROUTER_ROUTES);
+    var count = load64(rt + ROUTER_COUNT);
+    var i = 0;
+    while (i < count) {
+        var r = load64(routes + i * 8);
+        if (route_enabled(r) == 1 && route_provider(r) == PROV_SVARA) {
+            if (route_matches_model(r, model) == 1) { return r; }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # Record a forward's latency into the EMA (3:7 new:old). Called per-request from

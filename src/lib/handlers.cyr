@@ -138,6 +138,86 @@ fn handle_embeddings(cfd, body_ptr, body_len) {
     return http_error(cfd, "502", "Bad Gateway", "embeddings backend unavailable");
 }
 
+# POST /v1/audio/speech (2.12.2, ADR 016): OpenAI's speech request, served in this process by a svara route
+# (svara_local.cyr). Routed by `model` among svara routes only; DLP as for chat (a svara route is local, so
+# confidential input may use it). The reply streams as it renders, with its length known before the first sample:
+# a failure after the head can only close the connection, short of the promised length.
+fn handle_audio_speech(cfd, body_ptr, body_len) {
+    if (body_len == 0) { return http_bad_request(cfd, "empty body"); }
+    var a = req_arena();
+    var mfb[16];
+    var mf = _json_obj_str_field_in(body_ptr, body_len, "model", 5, &mfb);
+    if (mf == 0 || load64(mf + 8) == 0) { return http_bad_request(cfd, "model field is required"); }
+    var model = alloc_via(a, load64(mf + 8) + 1);
+    if (model == 0) { return http_error(cfd, "503", "Service Unavailable", "request memory unavailable"); }
+    memcpy(model, load64(mf), load64(mf + 8));
+    store8(model + load64(mf + 8), 0);
+    var route = router_select_speech(_router, model);
+    if (route == 0) {
+        var nsb = sb_room_a(a, 96 + strlen(model));
+        str_builder_add_cstr(nsb, "No speech provider configured for model '");
+        str_builder_add_cstr(nsb, _json_text(model));      # text: http_error escapes, once
+        str_builder_add_cstr(nsb, "'");
+        return http_error(cfd, "404", "Not Found", sb_cstr(nsb));
+    }
+    if (dlp_is_enabled() == 1) {
+        if (dlp_scan_level_json(body_ptr, body_len) == CLASS_RESTRICTED) {
+            hlog_warn("dlp: restricted content blocked (speech)");
+            return http_error(cfd, "403", "Forbidden", "request blocked: restricted content detected");
+        }
+    }
+    var rqs[8];
+    var perr = spk_request_parse_a(a, body_ptr, body_len, &rqs);
+    if (perr != 0) { return http_bad_request(cfd, perr); }
+    var req = load64(&rqs);
+    var srl = route_rate_limiter(route);
+    if (srl != 0 && hoosh_ratelimit_check(srl) == 0) {
+        return http_error(cfd, "429", "Too Many Requests", "rate limit exceeded");
+    }
+    if (spk_ready() == 0) { return http_error(cfd, "503", "Service Unavailable", "svara: speech is not loaded"); }
+    var t0 = clock_now_ms();
+    var pls[8];
+    store64(&pls, 0);
+    var rc = spk_plan_a(a, load64(req + SPK_R_TEXT), load64(req + SPK_R_VOICE), load64(req + SPK_R_SPEED), &pls);
+    var pl = load64(&pls);
+    if (rc == SPK_ERR_INPUT) {
+        var isb = sb_room_a(a, 96);
+        str_builder_add_cstr(isb, "input could not be converted to speech: ");
+        str_builder_add_cstr(isb, shabda_err_name(spk_plan_err(pl)));
+        return http_bad_request(cfd, sb_cstr(isb));
+    }
+    if (rc == SPK_ERR_TOO_LONG) { return http_bad_request(cfd, spk_status_text(rc)); }
+    if (rc == SPK_ERR_MEMORY) { return http_error(cfd, "503", "Service Unavailable", spk_status_text(rc)); }
+    if (rc < 0) {
+        hlog_error(spk_status_text(rc));
+        return http_error(cfd, "500", "Internal Server Error", spk_status_text(rc));
+    }
+    var fmt = load64(req + SPK_R_FMT);
+    if (http_respond_head(cfd, "200", "OK", spk_format_ctype(fmt), spk_body_len(pl, fmt)) < 0) { return 0; }
+    if (fmt == SPK_FMT_WAV) {
+        var wh[48];
+        spk_wav_header(&wh, spk_plan_total(pl));
+        if (spk_write_all(cfd, &wh, SPK_WAV_HEAD()) < 0) { return 0; }
+    }
+    var wrote = spk_render(pl, cfd);
+    if (wrote < 0) {
+        # The head promised the length: all that is left is to stop. A client that left is not an error.
+        if (wrote == SPK_ERR_CLIENT) {
+            hlog_info("speech: the client went away mid-reply");
+        } else {
+            hlog_error(spk_status_text(wrote));
+        }
+        return 0;
+    }
+    metrics_record(0, 0);
+    metrics_record_latency(PROV_SVARA, clock_now_ms() - t0);
+    if (_audit_chain != 0) {
+        audit_record(_audit_chain, "speech.request", "info", "speech synthesized (in-process)",
+          provider_name(PROV_SVARA), model);
+    }
+    return 0;
+}
+
 # GET /v1/models. The listing is models.cyr's (2.9.22: models_list_json and its helpers), so the tests run it.
 # 2.10.2: built in this thread's scratch arena (provider.cyr _remote_arena), and written before the next use of it.
 fn handle_models(cfd) {
@@ -197,7 +277,7 @@ fn handle_ollama_tags(cfd) {
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
+        if (route_enabled(r) == 1 && route_serves_text(r) == 1) {      # 2.12.2: Ollama's tags are chat models
             var pats = load64(r + ROUTE_PATTERNS);
             var pn = load64(r + ROUTE_PATTERNS_N);
             var j = 0;
@@ -624,7 +704,7 @@ fn handle_cost_recommend(cfd, body_ptr, body_len) {
     var i = 0;
     while (i < count) {
         var r = load64(routes + i * 8);
-        if (route_enabled(r) == 1) {
+        if (route_enabled(r) == 1 && route_serves_text(r) == 1) {      # 2.12.2: a speech route is not a candidate
             var pats = load64(r + ROUTE_PATTERNS);
             var pn = load64(r + ROUTE_PATTERNS_N);
             var j = 0;
