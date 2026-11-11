@@ -39,8 +39,8 @@ include "src/vendor/majra.cyr"
 
 # szál's MCP tools (szál 2.3.2, 2.12.1) — its `[lib.mcp]` bundle, committed under src/vendor/ (same rationale;
 # scripts/sync-szal.sh). It must follow bote-core and majra. src/lib/mcp.cyr registers the groups `[mcp] tools`
-# allows. Not on AGNOS: its process tools need fork, execve, dup2 and a three-argument waitpid, which AGNOS's
-# syscall layer does not have, so mcp.cyr serves bote_echo alone there.
+# allows. Not on AGNOS: its process tools need Linux's fork / exec / dup2 calls and a three-argument waitpid, which
+# AGNOS's syscall layer does not have, so mcp.cyr serves bote_echo alone there.
 #ifndef CYRIUS_TARGET_AGNOS
 include "src/vendor/szal-mcp.cyr"
 #endif
