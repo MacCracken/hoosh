@@ -561,5 +561,34 @@ fn load_config(path) {
         }
     }
 
+    # [mcp] tools (2.12.1): the szál tool groups /v1/tools/* serves (mcp.cyr). Read after [[auth]], since a group that
+    # reaches the host needs bearer tokens. Absent or empty: none, bote_echo only, as through 2.12.0; so a reload that
+    # drops the section turns them off.
+    var mcp_secs = bayan_toml_get_sections_by_cstr(sections, "mcp");
+    var mgroups = alloc(MCP_G_COUNT * 8);
+    var mcount = 0;
+    if (vec_len(mcp_secs) > 0) {
+        var mcp_p = toml_section_pairs(vec_get(mcp_secs, 0));
+        mcount = _config_str_array(mcp_p, "tools", mgroups, MCP_G_COUNT);
+    }
+    var mmask = mcp_configure(mgroups, mcount, vec_len(_auth_tokens) > 0);
+    if (mmask != 0) { _config_log_mcp(mmask); }
+
     return 1;
+}
+
+# Log the szál tool groups a load enabled.
+fn _config_log_mcp(mask) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "config: MCP tool groups:");
+    var g = 0;
+    while (g < MCP_G_COUNT) {
+        if ((mask & (1 << g)) != 0) {
+            str_builder_add_cstr(sb, " ");
+            str_builder_add_cstr(sb, mcp_group_name(g));
+        }
+        g = g + 1;
+    }
+    hlog_info(str_data(str_builder_build(sb)));
+    return 0;
 }

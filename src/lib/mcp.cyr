@@ -5,30 +5,162 @@
 #   GET  /v1/tools/list  — list registered MCP tools (bote ToolRegistry)
 #   POST /v1/tools/call  — invoke a tool by name   (bote Dispatcher)
 #
-# The dispatcher is built once at startup (mcp_init, called from cmd_serve)
-# with a single bote_echo smoke tool registered so the endpoints are
-# live-verifiable end-to-end. szál's tool implementations (58 built-ins)
-# plug in here once they ship as a Cyrius distlib — register them in
-# mcp_init alongside bote_echo and they appear in tools/list + dispatch
-# through tools/call with no transport changes (the registry currently
-# holds echo only).
+# The dispatcher always holds a bote_echo smoke tool, so the endpoints are live-verifiable end to end.
 #
-# Requires: vendor/bote-core.cyr (registry/dispatcher/codec) and
-# src/lib/http_server.cyr (http_ok/http_bad_request) — both included
-# before this module in src/main.cyr.
+# 2.12.1: szál's tools (vendor/szal-mcp.cyr, szál 2.3.2: 54 tools in 15 groups) are registered beside it, the groups
+# `[mcp] tools` names and no others. None is on by default. The transport does not change (ADR 005).
+# - **Groups that reach the host** (file, git, net, process, system; hash and template, which read a file given a
+#   path; engine, flow and step, which run steps) are registered only when `[[auth]]` has bearer tokens, so
+#   /v1/tools/* is authenticated before any of them is reachable. A host group named without tokens is logged and
+#   left out.
+# - **The pure groups** (conversion, encoding, json, math, state) touch nothing outside their arguments.
+# - szál keeps a process-global last-error buffer that is not thread-safe, so every dispatch holds _mcp_lock.
+# - A reload (mcp_configure) marks the dispatcher stale, and the next call builds a new one with the new groups.
+#   The old one is never freed, so a call in flight finishes on it.
+#
+# Requires: vendor/bote-core.cyr (registry/dispatcher/codec), vendor/szal-mcp.cyr (the tool groups),
+# src/lib/http_server.cyr (http_ok/http_bad_request), logging.cyr, reqmem.cyr (req_arena), lib/sync (mutex_*) — all
+# included before this module in src/main.cyr.
 
 var _mcp_dispatcher = 0;
+var _mcp_lock = 0;
+var _mcp_allowed = 0;    # bit i: szál group i is registered (MCP_G_*)
+var _mcp_stale = 1;      # the dispatcher must be rebuilt before its next use
+var _mcp_tools = 0;      # tools the current dispatcher holds, bote_echo included
+
+# szál's tool groups, the pure ones first (MCP_G_FIRST_HOST and later reach the host).
+enum McpGroup {
+    MCP_G_CONVERSION = 0; MCP_G_ENCODING = 1; MCP_G_JSON = 2; MCP_G_MATH = 3; MCP_G_STATE = 4;
+    MCP_G_ENGINE = 5; MCP_G_FILE = 6; MCP_G_FLOW = 7; MCP_G_GIT = 8; MCP_G_HASH = 9; MCP_G_NET = 10;
+    MCP_G_PROCESS = 11; MCP_G_STEP = 12; MCP_G_SYSTEM = 13; MCP_G_TEMPLATE = 14;
+    MCP_G_COUNT = 15;
+    MCP_G_FIRST_HOST = 5;
+}
+
+# The `[mcp] tools` name of group i, or 0.
+fn mcp_group_name(i) {
+    if (i == MCP_G_CONVERSION) { return "conversion"; }
+    if (i == MCP_G_ENCODING) { return "encoding"; }
+    if (i == MCP_G_JSON) { return "json"; }
+    if (i == MCP_G_MATH) { return "math"; }
+    if (i == MCP_G_STATE) { return "state"; }
+    if (i == MCP_G_ENGINE) { return "engine"; }
+    if (i == MCP_G_FILE) { return "file"; }
+    if (i == MCP_G_FLOW) { return "flow"; }
+    if (i == MCP_G_GIT) { return "git"; }
+    if (i == MCP_G_HASH) { return "hash"; }
+    if (i == MCP_G_NET) { return "net"; }
+    if (i == MCP_G_PROCESS) { return "process"; }
+    if (i == MCP_G_STEP) { return "step"; }
+    if (i == MCP_G_SYSTEM) { return "system"; }
+    if (i == MCP_G_TEMPLATE) { return "template"; }
+    return 0;
+}
+
+# The group named `name`, or -1.
+fn mcp_group_index(name) {
+    if (name == 0) { return 0 - 1; }
+    var i = 0;
+    while (i < MCP_G_COUNT) {
+        if (streq(mcp_group_name(i), name) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# 1 when group i acts on the host (files, programs, the network, the environment, or steps that may).
+fn mcp_group_reaches_host(i) { return i >= MCP_G_FIRST_HOST; }
+
+# 1 when szál's bundle is in this build: everywhere but AGNOS (src/main.cyr leaves it out there).
+fn mcp_szal_built() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    return 1;
+}
+
+# Group i's (ToolDef, handler) pairs, szál's own collector (a fresh vec each call). Never called on AGNOS.
+fn _mcp_group_tools(i) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return vec_new();
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (i == MCP_G_CONVERSION) { return szal_conversion_tools(); }
+    if (i == MCP_G_ENCODING) { return szal_encoding_tools(); }
+    if (i == MCP_G_JSON) { return szal_json_tools(); }
+    if (i == MCP_G_MATH) { return szal_math_tools(); }
+    if (i == MCP_G_STATE) { return szal_state_tools(); }
+    if (i == MCP_G_ENGINE) { return szal_engine_tools(); }
+    if (i == MCP_G_FILE) { return szal_file_tools(); }
+    if (i == MCP_G_FLOW) { return szal_flow_tools(); }
+    if (i == MCP_G_GIT) { return szal_git_tools(); }
+    if (i == MCP_G_HASH) { return szal_hash_tools(); }
+    if (i == MCP_G_NET) { return szal_net_tools(); }
+    if (i == MCP_G_PROCESS) { return szal_process_tools(); }
+    if (i == MCP_G_STEP) { return szal_step_tools(); }
+    if (i == MCP_G_SYSTEM) { return szal_system_tools(); }
+    return szal_template_tools();
+    #endif
+}
+
+# The groups to register, from `[mcp] tools`' n names (names[0..n), cstrs) and whether `[[auth]]` has tokens. An
+# unknown name, and a host group without tokens, is logged and left out. Returns the bitmask; marks the dispatcher
+# stale so the next call registers it. Called by load_config, at startup and on every reload.
+fn mcp_configure(names, n, has_auth) {
+    var mask = 0;
+    var i = 0;
+    if (n > 0 && mcp_szal_built() == 0) {
+        hlog_warn("mcp: [mcp] tools is ignored: szal's tools are not built for this target");
+        n = 0;
+    }
+    while (i < n) {
+        var nm = load64(names + i * 8);
+        var g = mcp_group_index(nm);
+        if (g < 0) {
+            _mcp_warn2("mcp: [mcp] tools names no szal tool group: ", nm);
+        } else {
+            if (mcp_group_reaches_host(g) == 1 && has_auth == 0) {
+                _mcp_warn2("mcp: left out (it reaches the host, and [[auth]] has no tokens): ", nm);
+            } else {
+                mask = mask | (1 << g);
+            }
+        }
+        i = i + 1;
+    }
+    if (_mcp_lock == 0) { _mcp_lock = mutex_new(); }
+    mutex_lock(_mcp_lock);
+    _mcp_allowed = mask;
+    _mcp_stale = 1;
+    mutex_unlock(_mcp_lock);
+    return mask;
+}
+
+fn _mcp_warn2(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    if (b != 0) { str_builder_add_cstr(sb, b); }
+    hlog_warn(str_data(str_builder_build(sb)));
+    return 0;
+}
+
+# The groups registered now (a bitmask of MCP_G_*), and the tools the dispatcher holds.
+fn mcp_allowed() { return _mcp_allowed; }
+fn mcp_tool_count() { return _mcp_tools; }
 
 # bote_echo — smoke tool. Echoes its JSON arguments back as MCP text
 # content. Handler ABI (bote 2.0): fn(args_cstr, claims) -> result_cstr,
 # where the returned cstr becomes the JSON-RPC `result` body. claims is
 # always 0 today (populated in a future bote 2.x auth pass).
+# 2.12.1: the result is built in the request arena, as bote's response is (mcp_dispatch), and read before the job
+# ends.
 fn _hoosh_tool_echo(args, claims) {
-    var sb = str_builder_new();
+    var room = 64;
+    if (args != 0) { room = room + strlen(args) * 6; }   # _json_emit_escaped writes a control byte as \u00XX
+    var sb = sb_room_a(req_arena(), room);
     str_builder_add_cstr(sb, "{\"content\":[{\"type\":\"text\",\"text\":\"");
     if (args != 0) { _json_emit_escaped(sb, args); }
     str_builder_add_cstr(sb, "\"}],\"isError\":false}");
-    return str_data(str_builder_build(sb));
+    return sb_cstr(sb);
 }
 
 # Register one tool on `disp`. Returns 1 when it registered, 0 when bote refused it.
@@ -55,9 +187,8 @@ fn mcp_register_tool(disp, td, handler_fp) {
     return 0;
 }
 
-# Build the registry + dispatcher and register the built-in tools.
-# Idempotent: a second call rebuilds (only invoked once from cmd_serve).
-fn mcp_init() {
+# A dispatcher with bote_echo and the groups in `mask` registered. Sets _mcp_tools to the tools it holds.
+fn mcp_build(mask) {
     # bote 2.7.6 renamed the registry constructor to tool_registry_new
     # (ai-hwaccel's own constructor is hw_registry_new — no name overlap).
     var reg = tool_registry_new();
@@ -67,17 +198,57 @@ fn mcp_init() {
     var td = tool_def_new("bote_echo",
       "Echo the provided arguments back as text content",
       schema);
-    mcp_register_tool(disp, td, &_hoosh_tool_echo);
-    _mcp_dispatcher = disp;
+    var count = mcp_register_tool(disp, td, &_hoosh_tool_echo);
+    var g = 0;
+    while (g < MCP_G_COUNT) {
+        if ((mask & (1 << g)) != 0) {
+            #ifndef CYRIUS_TARGET_AGNOS
+            var tools = _mcp_group_tools(g);
+            var k = 0;
+            while (k < vec_len(tools)) {
+                var t = vec_get(tools, k);
+                count = count + mcp_register_tool(disp, szal_tool_def_of(t), szal_tool_handler_of(t));
+                k = k + 1;
+            }
+            #endif
+        }
+        g = g + 1;
+    }
+    _mcp_tools = count;
     return disp;
 }
 
+# Build the dispatcher for the configured groups. Called from cmd_serve before the workers start, and by a call that
+# finds the dispatcher stale (under _mcp_lock).
+fn mcp_init() {
+    if (_mcp_lock == 0) { _mcp_lock = mutex_new(); }
+    var disp = mcp_build(_mcp_allowed);
+    _mcp_dispatcher = disp;
+    _mcp_stale = 0;
+    return disp;
+}
+
+# A JSON-RPC message through the dispatcher: bote's serialized response, or 0 for a notification (no id).
+# - Under _mcp_lock. szál's tools share process-global state, and so does bote's per-request state block, which a
+#   threaded server must make per thread (bote's `_bote_req_state_fp`) and hoosh does not: through 2.12.0 up to
+#   seven workers ran the codec on the one block at once.
+# - It rebuilds first if a reload changed the groups.
+# - 2.12.1 (ADR 013): every byte bote owns for the message, the response included, is on this thread's request arena
+#   (`codec_process_message_a`), which the caller writes from before its job ends. Through 2.12.0 they stayed on the
+#   heap: 7.1 KB per GET /v1/tools/list and 2.3 KB per tools/call. What a handler allocates is szál's and stays.
+fn mcp_dispatch(input) {
+    if (_mcp_lock == 0) { _mcp_lock = mutex_new(); }
+    mutex_lock(_mcp_lock);
+    if (_mcp_dispatcher == 0 || _mcp_stale == 1) { mcp_init(); }
+    var out = codec_process_message_a(req_arena(), input, _mcp_dispatcher, 0);
+    mutex_unlock(_mcp_lock);
+    return out;
+}
+
 # Run a JSON-RPC message through the dispatcher and write the response.
-# codec_process_message returns a serialized JSON-RPC response cstr, or 0
-# for a notification (no id) — which carries no response body.
+# A notification carries no response body.
 fn _mcp_respond(cfd, input) {
-    if (_mcp_dispatcher == 0) { mcp_init(); }
-    var out = codec_process_message(input, _mcp_dispatcher, 0);
+    var out = mcp_dispatch(input);
     if (out == 0) { return http_respond(cfd, "204", "No Content", "", 0); }
     return http_ok(cfd, out, strlen(out));
 }
@@ -97,6 +268,7 @@ fn handle_tools_list(cfd) {
 # `tools/list` are also accepted here for full MCP-client compatibility.
 fn handle_tools_call(cfd, body_ptr, body_len) {
     if (body_len == 0) { return http_bad_request(cfd, "empty request body"); }
-    var input = to_cstr(str_new(body_ptr, body_len));
+    var input = _mem_keep_a(req_arena(), body_ptr, body_len);   # 2.12.1: in the request arena, not two heap copies
+    if (input == 0) { return http_error(cfd, "503", "Service Unavailable", "request memory unavailable"); }
     return _mcp_respond(cfd, input);
 }

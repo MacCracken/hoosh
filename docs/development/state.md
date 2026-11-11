@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Version** | **2.12.0** (the command line through cmdit 1.5.1: one parse before anything runs, `-c` on either side of the command, usage errors exit 2, [ADR 015](../decisions/015-command-line-through-cmdit.md)). 2.11.2: the rest of [ADR 013](../decisions/013-request-memory.md), a request keeps nothing and the keepers recycle, and tentib 1.5.1's serving-only load; 2.11.0–2.11.1: the `type = "tentib"` provider, [ADR 014](../decisions/014-in-process-ternary-inference.md) |
-| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.5.1** (since 2.11.2; brings `rosnet` 1.4.1 and `tyche` 1.2.2); `cmdit` **1.5.1** (since 2.12.0); vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0**; every one the latest tag on 2026-11-11 |
-| **Binary** (x86_64 static ELF) | ~2.8 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~4.3 MB without |
-| **Source** | ~18,800 lines / 48 files (`src/main.cyr` + 47 `src/lib/*.cyr`) + 2 vendored distlib bundles |
-| **Tests** | 2316 assertions, 187 groups (`tests/hoosh.tcyr`); 41 of 47 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does; `scripts/memory-growth.py` measures what each path and keeper keeps per request |
-| **Benchmarks** | 42 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3, a tentib reply, load and unchanged reload since 2.11.0, a 22-token reply and a same-shape load since 2.11.1, a whole command-line parse since 2.12.0); CSV history + `benchmarks.md` (release gate) |
+| **Version** | **2.12.1** (szál 2.3.2's MCP tools on `/v1/tools/*`, behind `[mcp] tools` and, for the groups that reach the host, `[[auth]]`; locked dispatch on the request arena: [ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update). 2.12.0: the command line through cmdit 1.5.1 ([ADR 015](../decisions/015-command-line-through-cmdit.md)); 2.11.2: the rest of [ADR 013](../decisions/013-request-memory.md) and tentib 1.5.1's serving-only load |
+| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.5.1** (since 2.11.2; brings `rosnet` 1.4.1 and `tyche` 1.2.2); `cmdit` **1.5.1** (since 2.12.0); vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0**, `szal-mcp` **2.3.2** (since 2.12.1); every one the latest tag on 2026-11-11 |
+| **Binary** (x86_64 static ELF) | ~3.0 MB under `CYRIUS_DCE=1` (the release build; DCE compacts dead code out since cyrius 6.6.20), ~4.5 MB without |
+| **Source** | ~19,000 lines / 48 files (`src/main.cyr` + 47 `src/lib/*.cyr`) + 3 vendored distlib bundles |
+| **Tests** | 2339 assertions, 189 groups (`tests/hoosh.tcyr`); 41 of 47 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does; `scripts/memory-growth.py` measures what each path and keeper keeps per request |
+| **Benchmarks** | 43 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3, a tentib reply, load and unchanged reload since 2.11.0, a 22-token reply and a same-shape load since 2.11.1, a whole command-line parse since 2.12.0, a szál tool call since 2.12.1); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract (on the real `trace.cyr` since 2.10.3), inference request, message content |
-| **Coverage** | symbol coverage 58% (504/867; `scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 58% (510/878; `scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 18 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper, a type no endpoint uses yet; 1 in-process: tentib since 2.11.0; 8 remote) |
 | **ADRs** | 15 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
@@ -83,8 +83,8 @@ is unguarded and is the top structural item in the roadmap.
 ## Open
 
 See [roadmap.md](roadmap.md), banded by release (re-checked 2026-11-11):
-- **2.12.x, next:** speech (`POST /v1/audio/speech`) through shabda and svara, served in-process, and szál 2.3.2's MCP
-  tools behind an allow-list. 2.12.0 took the command line (cmdit).
+- **2.12.x, next:** speech (`POST /v1/audio/speech`) through shabda and svara, served in-process. 2.12.0 took the
+  command line (cmdit), and 2.12.1 szál's MCP tools.
 - **2.13.x – 2.15.x:** accounting and capacity (cache tokens, cost recommendations over the live catalog, a
   configurable worker pool), requests for current models (thinking on Gemini and Ollama, multimodal parts, the
   Responses API, sampling on a tentib route), observability (nested spans, OTLP/protobuf, an AGNOS CI lane).

@@ -36,6 +36,8 @@ include "src/vendor/bote-core.cyr"
 # 2.9.8: majra's pub/sub, which src/lib/events.cyr publishes to, at the same point src/main.cyr includes it.
 # It shares one name with types.cyr, the enum member ERR_NONE, which is 0 in both (see cyrius.cyml).
 include "src/vendor/majra.cyr"
+# 2.12.1: szál's MCP tools bundle, after bote-core and majra as src/main.cyr has it (mcp.cyr registers its groups).
+include "src/vendor/szal-mcp.cyr"
 # 2.9.6: the shared types, for real, first among hoosh modules as src/main.cyr orders them: the HooshErr /
 # Provider / Strategy enums, error and provider helpers, generation options, _sb_add_milli / _sb_add_sampling,
 # status_retryable. They replaced the test file's own copies of all of it.
@@ -3677,6 +3679,106 @@ fn _t2112_audit_recycle() {
     assert_eq(load64(e0 + 48), 0, "audit: no model stays no model (the hash leaves it out)");
     assert_eq(audit_verify(ch), 1, "audit: ... and verifies");
     REQ_ARENA_POISON = 0;
+    return 0;
+}
+
+# ── 2.12.1: szál's MCP tools behind `[mcp] tools` (src/lib/mcp.cyr, vendor/szal-mcp.cyr) ──
+
+var _t2121_bad = 0;      # concurrent calls that did not answer 1036
+
+fn _t2121_bump() {
+    var old = load64(&_t2121_bad);
+    while (atomic_cas(&_t2121_bad, old, old + 1) == 0) { old = load64(&_t2121_bad); }
+    return 0;
+}
+
+# 50 math evaluations through the locked dispatch, from another thread.
+fn _t2121_mcp_worker(arg) {
+    var q = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"szal_math_eval\",\"arguments\":{\"expression\":\"2*512 + 3*4\"}}}";
+    var i = 0;
+    while (i < 50) {
+        var r = mcp_dispatch(q);
+        if (r == 0 || _cmp_substr(r, strlen(r), "\"text\":\"1036\"", 13) < 0) { _t2121_bump(); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when the dispatcher's tools/list names `tool`.
+fn _t2121_lists(tool) {
+    var l = mcp_dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    var q = _t_cat(_t_cat("\"name\":\"", tool), "\"");
+    return _cmp_substr(l, strlen(l), q, strlen(q)) >= 0;
+}
+
+fn _t2121_mcp_groups() {
+    test_group("mcp: szál's tool groups behind [mcp] tools (2.12.1)");
+    assert_eq(mcp_group_index("json"), MCP_G_JSON, "groups: a name finds its group");
+    assert_eq(mcp_group_index("nope"), 0 - 1, "groups: an unknown name finds none");
+    assert_eq(mcp_group_index(0), 0 - 1, "groups: nor does no name");
+    var gi = 0; var gok = 1;
+    while (gi < MCP_G_COUNT) { if (mcp_group_index(mcp_group_name(gi)) != gi) { gok = 0; } gi = gi + 1; }
+    assert_eq(gok, 1, "groups: all 15 names round-trip");
+    assert_eq(mcp_group_reaches_host(MCP_G_STATE) + mcp_group_reaches_host(MCP_G_MATH), 0, "groups: state and math are pure");
+    assert_eq(mcp_group_reaches_host(MCP_G_FILE) & mcp_group_reaches_host(MCP_G_HASH) & mcp_group_reaches_host(MCP_G_STEP),
+      1, "groups: file, hash (reads a file) and step (runs one) reach the host");
+    # Nothing configured: bote_echo alone, as through 2.12.0.
+    mcp_configure(0, 0, 0);
+    assert_eq(_t2121_lists("bote_echo"), 1, "mcp: echo is always there");
+    assert_eq(mcp_tool_count(), 1, "mcp: ... and alone by default");
+    # Two pure groups, no tokens: registered.
+    var nm = alloc(4 * 8);
+    store64(nm, "math"); store64(nm + 8, "json"); store64(nm + 16, "file"); store64(nm + 24, "nope");
+    var m1 = mcp_configure(nm, 4, 0);
+    assert_eq(m1, (1 << MCP_G_MATH) | (1 << MCP_G_JSON), "mcp: math and json; file left out without tokens; nope unknown");
+    assert_eq(_t2121_lists("szal_math_eval") & _t2121_lists("szal_json_path"), 1, "mcp: their tools are listed");
+    assert_eq(mcp_tool_count(), 5, "mcp: ... echo, json's three and math's one");
+    assert_eq(_t2121_lists("szal_file_read"), 0, "mcp: no file tool without tokens");
+    var r1 = mcp_dispatch("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"szal_math_eval\",\"arguments\":{\"expression\":\"2*512 + 3*4\"}}}");
+    assert_eq(_cmp_substr(r1, strlen(r1), "\"text\":\"1036\"", 13) >= 0, 1, "mcp: szal_math_eval answers through the dispatcher");
+    var r2 = mcp_dispatch("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"szal_file_read\",\"arguments\":{\"path\":\"x\"}}}");
+    assert_eq(_cmp_substr(r2, strlen(r2), "tool not found", 14) >= 0, 1, "mcp: a group left out is not callable");
+    # With tokens the host group is in; a reconfigure rebuilds on the next call.
+    var m2 = mcp_configure(nm + 16, 1, 1);
+    assert_eq(m2, 1 << MCP_G_FILE, "mcp: with tokens, file is registered");
+    assert_eq(_t2121_lists("szal_file_stat"), 1, "mcp: ... its tools listed after the rebuild");
+    assert_eq(_t2121_lists("szal_math_eval"), 0, "mcp: ... and math, no longer named, is gone");
+    # Every group, with tokens: szál's 54 and echo.
+    var all = alloc(MCP_G_COUNT * 8);
+    gi = 0;
+    while (gi < MCP_G_COUNT) { store64(all + gi * 8, mcp_group_name(gi)); gi = gi + 1; }
+    mcp_configure(all, MCP_G_COUNT, 1);
+    _t2121_lists("bote_echo");
+    assert_eq(mcp_tool_count(), 55, "mcp: all 15 groups register szál's 54 tools beside echo");
+    # Concurrent calls hold _mcp_lock (szál's tools share process-global state): four threads, 200 calls, all right.
+    mcp_configure(nm, 1, 0);
+    _t2121_bad = 0;
+    var th = alloc(32);
+    gi = 0;
+    while (gi < 4) { store64(th + gi * 8, thread_create(&_t2121_mcp_worker, gi)); gi = gi + 1; }
+    gi = 0;
+    while (gi < 4) { thread_join(load64(th + gi * 8)); gi = gi + 1; }
+    assert_eq(_t2121_bad, 0, "mcp: 200 concurrent calls from four threads all answer 1036");
+    # Memory (ADR 013): bote's bytes for a message, the response included, are on the request arena
+    # (codec_process_message_a), and so is echo's result. What szál's handlers allocate is szál's.
+    var lq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+    req_arena_begin();
+    mcp_dispatch(lq);
+    req_arena_begin();
+    var mu0 = alloc_used();
+    var ml = mcp_dispatch(lq);
+    assert_eq(alloc_used() - mu0, 0, "mcp: a tools/list takes nothing from the heap (2.12.0: 7.1 KB)");
+    assert_eq(_cmp_substr(ml, strlen(ml), "szal_math_eval", 14) >= 0, 1, "mcp: ... and lists the tools");
+    var eq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{}}}";
+    req_arena_begin();
+    mcp_dispatch(eq);
+    req_arena_begin();
+    mu0 = alloc_used();
+    var me = mcp_dispatch(eq);
+    assert_lt(alloc_used() - mu0, 64, "mcp: an echo call keeps only bote's copy of its arguments");
+    assert_eq(_cmp_substr(me, strlen(me), "\"isError\":false", 15) >= 0, 1, "mcp: ... and answers");
+    mcp_configure(0, 0, 0);
+    mcp_init();
     return 0;
 }
 
@@ -8494,6 +8596,7 @@ fn main() {
     _t2112_request_paths();
     _t2112_provider_paths();
     _t2112_audit_recycle();
+    _t2121_mcp_groups();
 
     # ── Summary ───────────────────────────────────────────────────
     var total_failures = assert_summary();

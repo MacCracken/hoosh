@@ -40,6 +40,8 @@ include "lib/tentib.cyr"
 include "lib/cmdit.cyr"
 include "src/vendor/bote-core.cyr"
 include "src/vendor/majra.cyr"
+# 2.12.1: szál's MCP tools bundle, after bote-core and majra as src/main.cyr has it (mcp.cyr registers its groups).
+include "src/vendor/szal-mcp.cyr"
 include "src/lib/types.cyr"
 include "src/lib/reqmem.cyr"
 include "src/lib/keep.cyr"   # 2.11.2: for real, as the cache recycles through it
@@ -100,6 +102,9 @@ fn _b_s(lit) {
 
 fn main() {
     alloc_init();
+    # main's thread-local block, as the gateway installs it at startup (2.12.1: first, since the MCP rows reach the
+    # request arena; through 2.12.0 it was installed later, before the provider-refusal row).
+    crypto_tls_main_init();
 
     # The gateway reads time from a coarse ticker (logging.cyr's hoosh_now_ms; 2.5.11): clock_now_ms is a 1.35 us
     # syscall here, which was ~98% of a cache hit and ~96% of a rate-limit check. One reading stands in for the
@@ -303,7 +308,8 @@ fn main() {
 
     # ── Benchmark: mcp_tools_list (bote dispatch) ─────────────────
     # Full JSON-RPC parse → dispatch → tools/list result serialize, the per-request cost behind GET /v1/tools/list,
-    # on the dispatcher mcp_init builds for the gateway (its bote_echo tool).
+    # on the dispatcher mcp_init builds for the gateway (its bote_echo tool). 2.12.1: through mcp_dispatch, the
+    # gateway's path: _mcp_lock, and bote's bytes on the request arena, released each iteration as a job would.
     var mcp_disp = mcp_init();
     var b_mlist = _b_s("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
     var b_mcall = _b_s("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bote_echo\",\"arguments\":{\"k\":\"v\"}}}");
@@ -312,7 +318,8 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        codec_process_message(b_mlist, mcp_disp, 0);
+        req_arena_begin();
+        mcp_dispatch(b_mlist);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -323,7 +330,25 @@ fn main() {
     bench_batch_start(b);
     i = 0;
     while (i < 10000) {
-        codec_process_message(b_mcall, mcp_disp, 0);
+        req_arena_begin();
+        mcp_dispatch(b_mcall);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10000);
+    bench_report(b);
+
+    # ── Benchmark: mcp_szal_math_eval (2.12.1) ────────────────────
+    # One szál tool through the gateway's dispatch: `[mcp] tools = ["math"]`, szal_math_eval on "2*512 + 3*4".
+    var b_mgroups = alloc(8);
+    store64(b_mgroups, _b_s("math"));
+    mcp_configure(b_mgroups, 1, 0);
+    var b_mmath = _b_s("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"szal_math_eval\",\"arguments\":{\"expression\":\"2*512 + 3*4\"}}}");
+    b = bench_new("mcp_szal_math_eval");
+    bench_batch_start(b);
+    i = 0;
+    while (i < 10000) {
+        req_arena_begin();
+        mcp_dispatch(b_mmath);
         i = i + 1;
     }
     bench_batch_stop(b, 10000);
@@ -635,9 +660,8 @@ fn main() {
     bench_batch_stop(b, 100000);
     bench_report(b);
 
-    # 2.10.2: a provider's refusal, clipped to whole characters: 511 bytes of three-byte UTF-8, the slow branch. Last,
-    # with main's thread-local block installed here as the gateway does at startup: provider_err's state is per thread.
-    crypto_tls_main_init();
+    # 2.10.2: a provider's refusal, clipped to whole characters: 511 bytes of three-byte UTF-8, the slow branch.
+    # provider_err's state is per thread, in the thread-local block main installs first.
     var pe_sb = str_builder_new();
     i = 0;
     while (i < 400) {

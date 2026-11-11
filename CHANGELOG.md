@@ -5,6 +5,121 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.12.1] — 2026-11-11
+
+**szál's MCP tools, behind an allow-list.** `/v1/tools/list` and `/v1/tools/call` serve szál 2.3.2's tools beside
+`bote_echo` ([ADR 005](docs/decisions/005-mcp-via-bote.md)'s 2.12.1 update):
+- the groups `[mcp] tools` names, and none by default;
+- a group that reaches the host only when `[[auth]]` has bearer tokens.
+
+MCP dispatch also holds a lock now, and puts bote's bytes on the request arena: `GET /v1/tools/list` keeps nothing
+(7.1 KB through 2.12.0).
+
+**2339 assertions** in 189 groups. All gates are clean: fmt, lint, vet, deny, coverage (510/878, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test.
+
+⚠ **What changes on the wire.** Nothing unless `[mcp] tools` is set: without it the dispatcher holds `bote_echo`
+alone, as through 2.12.0, and answers the same bytes. With it, `tools/list` lists the allowed groups' tools and
+`tools/call` runs them. A call to a tool of a group that is not allowed answers bote's `tool not found` (-32602).
+
+### Added — szál's tools (`src/vendor/szal-mcp.cyr`, `src/lib/mcp.cyr`, `config.cyr`)
+
+- **The bundle.** szál's `dist/szal-mcp.cyr` at 2.3.2 (its `[lib.mcp]` profile: 54 tools in 15 groups, with no
+  bote-core, majra, ai-hwaccel or stdlib inside), vendored at `src/vendor/szal-mcp.cyr` and byte-identical to the
+  tag. `scripts/sync-szal.sh <tag>` re-syncs it, as `sync-bote.sh` does bote-core.
+- **`[mcp] tools = [...]`** (or `[[mcp]]`) names the groups:
+  - pure: `conversion`, `encoding`, `json`, `math`, `state`;
+  - reaching the host: `engine`, `file`, `flow`, `git`, `hash`, `net`, `process`, `step`, `system`, `template`.
+
+  `hash` and `template` read a file when given a path, and engine, flow and step run steps. An unknown name is logged
+  and ignored. Read after `[[auth]]` on every load, startup and reload.
+- **The auth rule.** A host group is registered only when `[[auth]]` has tokens, so `/v1/tools/*` answers 401
+  without one. Named without tokens, it is logged ("left out (it reaches the host, and [[auth]] has no tokens)") and
+  not registered. The config log names the groups enabled.
+- **Registration.** `mcp_build(mask)` registers `bote_echo` and each allowed group's tools through szál's own
+  collectors (`szal_<group>_tools()`) and hoosh's `mcp_register_tool`, which logs any refusal. All 54 register with
+  hoosh's bote-core 3.8.15.
+- **A reload applies the new groups.** `mcp_configure` marks the dispatcher stale and the next call rebuilds it; the
+  old one is never freed, so a call in flight finishes on it. A reload that drops `[mcp]` turns the tools off.
+- **Not on AGNOS.** The bundle does not compile there (`szal_exec` uses fork, `dup2`, `execve` and a three-argument
+  `waitpid`).
+  - `src/main.cyr` leaves it out under `CYRIUS_TARGET_AGNOS`, and `mcp.cyr` serves `bote_echo` alone there
+    (`mcp_szal_built`), with a warning if `[mcp] tools` is set.
+  - Filed upstream with a standalone repro: szál's
+    `docs/development/issues/2026-11-11-szal-mcp-does-not-build-for-agnos.md`.
+
+### Fixed — MCP dispatch under concurrency
+
+- **One call at a time.** Through 2.12.0 up to seven workers ran bote's codec at once. bote keeps one per-request
+  state block per process unless a threaded server installs a per-thread one, which hoosh does not, and szál's tools
+  share a last-error buffer. `mcp_dispatch` now holds `_mcp_lock` around the codec. A tool call is short, and a slow
+  host tool holds up only other MCP calls.
+
+### Memory (ADR 013)
+
+- **bote's bytes for a message, the response included, are on the request arena** (`codec_process_message_a`), and
+  so are `bote_echo`'s result and a call's body. Measured against a `-D HOOSH_ALLOC_PROBE` build, 500 calls each:
+
+  | per call | 2.12.0 | 2.12.1 |
+  |---|---:|---:|
+  | `GET /v1/tools/list` (5 tools) | 7,112 | 0 |
+  | `tools/call szal_math_eval` | 2,272 | 1,656 |
+  | `tools/call bote_echo` | — | 320 |
+
+- **What stays is upstream.** A szál handler allocates on the heap, and bote keeps its copy of a call's arguments,
+  since a handler may keep it. The roadmap's "what is left of ADR 013" has it.
+
+### Changed — the build
+
+- **`math`** joins `[deps].stdlib`; the bundle's `# Requires` block names it. tentib's bundle already included it,
+  so `lib/` had the file.
+- **szál's scan.** `scripts/consumer-check.sh` (in szál's repo) passes against hoosh 2.12.0:
+  - one shared name, the enum member `REQ_NONE` (0 in szál and in ai-hwaccel), which it allow-lists;
+  - no new duplicate warning;
+  - tools/list = 55 after `szal_register_into`.
+- **16 compiler warnings** of the "assigning non-pointer to typed pointer" family come with the bundle. szál's
+  `state.md` records them as known and harmless.
+- `scripts/security-scan.sh` covers hoosh's own code, as before. szál's `process` group runs a program, without a
+  shell, only when it is allowed and `[[auth]]` has tokens.
+
+### Tests
+
+- **`tests/hoosh.tcyr`** (2316 → 2339), a new group `mcp: szál's tool groups behind [mcp] tools`:
+  - the 15 names round-trip, and which reach the host;
+  - nothing configured means echo alone;
+  - math and json with no tokens: 5 tools, file left out, `nope` ignored;
+  - `szal_math_eval` answers `1036` for `2*512 + 3*4`, and a left-out tool is not found;
+  - with tokens file is in, and a reconfigure rebuilds;
+  - all 15 groups give 55 tools;
+  - 200 concurrent calls from four threads all answer;
+  - a `tools/list` takes nothing from the heap, and an echo call keeps only bote's copy of its arguments.
+- **Mutation-checked:** 6 mutants of `mcp.cyr`, and the suite kills 5. The survivor drops the lock. Math evaluations
+  do not touch szál's shared error buffer on success, so concurrent ones come out right without it. The lock guards
+  state szál and bote document as not thread-safe, and no test here races it deterministically.
+- **`tests/hoosh.bcyr`** (42 → 43): `mcp_tools_list` and `mcp_tools_call` now time the gateway's path
+  (`mcp_dispatch`: the lock and the arena, released each iteration as a job would) at 3.70 and 5.25 µs (2.12.0's heap
+  codec: 3.72 and 5.52). The new row is `mcp_szal_math_eval`, 10.2 µs. The bench installs main's thread-local block
+  first now, since the MCP rows reach the request arena.
+- **Live:** a gateway with `tools = ["math", "json", "file", "nope"]` and no tokens served:
+  - echo plus the json and math tools;
+  - `1036` from `szal_math_eval`;
+  - "tool not found" for a file tool;
+  - one warning each for `file` and `nope`.
+
+  With tokens, an unauthenticated `tools/list` was 401, and the authorized one listed the five `szal_file_*` tools.
+
+### Sizes
+
+| | 2.12.0 | 2.12.1 | |
+|---|---:|---:|---:|
+| x86_64 | 4,284,536 | 4,469,136 | +4.3% |
+| x86_64, `CYRIUS_DCE=1` (the release build) | 2,769,016 | 2,965,904 | +7.1% |
+| aarch64 | 4,992,792 | 5,214,264 | +4.4% |
+| AGNOS, `CYRIUS_DCE=1` (no szál) | 2,733,336 | 2,737,880 | +0.2% |
+
+szál's tools are registered through function pointers, so the release build keeps all 54 whether or not a config
+names them.
+
 ## [2.12.0] — 2026-11-11
 
 **The command line goes through cmdit.** hoosh's command line is a cmdit 1.5.1 verb tool
@@ -14,7 +129,7 @@ runs, so:
 - `-c` binds on either side of the command;
 - what 2.11.x ignored is now a usage error, exit 2.
 
-**2316 assertions** in 187 groups. All gates are clean: fmt, lint, vet, deny, coverage (504/867, 58%), the security
+**2316 assertions** in 188 groups (2.11.2's entry says 187: the count read the test output, where one heading follows a warning line that has no newline). All gates are clean: fmt, lint, vet, deny, coverage (504/867, 58%), the security
 scan, the four fuzz targets, the shutdown smoke test and the wire smoke test.
 
 ⚠ **What changes for a script that runs hoosh.** The gateway's API does not change. 41 command lines were captured

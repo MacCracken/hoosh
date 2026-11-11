@@ -22,7 +22,7 @@ output = "build/hoosh"
 # leaves (lib/sys.cyr, lib/bayan.cyr, …) and takes uname_release from
 # lib/sys.cyr, so the old benign `duplicate fn 'uname_release'` is gone. The
 # order above is kept: include-once makes the repeats no-ops.
-stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sys", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "io", "fs", "args", "hashmap", "freelist", "bayan", "ct", "keccak", "random", "sys", "sigil", "tagged", "http", "net", "chrono", "syscalls", "process", "atomic", "sync", "thread", "thread_local", "sakshi", "patra", "fnptr", "mmap", "dynlib", "fdlopen", "async", "tls", "sandhi", "assert", "bench", "math"]
 
 # Hardware accelerator detection — consumed as the single-file distlib
 # bundle (cyrius deps vendors dist/ai-hwaccel.cyr → lib/ai-hwaccel.cyr,
@@ -91,3 +91,10 @@ modules = ["dist/cmdit.cyr"]
 # the enum member ERR_NONE (= 0 in both majra and src/lib/types.cyr; majra
 # 2.8.0 renamed its codes MAJRA_ERR_* and keeps ERR_* as aliases until 3.0.0).
 # Powers src/lib/events.cyr.
+#
+# szál's MCP tools (2.12.1) are vendored the same way, at src/vendor/szal-mcp.cyr: szál 2.3.2's `[lib.mcp]`
+# profile, 54 tools with no bote-core, majra, ai-hwaccel or stdlib inside. Its `# Requires` block names stdlib
+# leaves hoosh lists above, and `math`, added to [deps].stdlib for it (tentib's bundle included it too, so lib/
+# already had the file). Its one name in common with hoosh's compile set is the enum member REQ_NONE (= 0 in both
+# szál and ai-hwaccel); szál's scripts/consumer-check.sh allow-lists it and passes against hoosh 2.12.0 and its
+# bote-core 3.8.15. Re-sync with `./scripts/sync-szal.sh <tag>`. Powers src/lib/mcp.cyr's tool groups.

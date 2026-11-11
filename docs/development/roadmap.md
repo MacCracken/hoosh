@@ -8,11 +8,12 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.12.0 (cyrius 6.7.18). The command line goes through cmdit 1.5.1
+**Current**: v2.12.1 (cyrius 6.7.18). szál's MCP tools are served behind an allow-list
+([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); the command line goes through cmdit 1.5.1
 ([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary model is served in hoosh's own process
 through tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a request keeps nothing on the
 heap that never frees ([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
-**Next**: the rest of 2.12.x, speech and tools.
+**Next**: the rest of 2.12.x, speech.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-11.
 - **2.12.x – 2.15.x minors** each take one theme: they add features or change answers, compatibly. They go in order,
@@ -23,10 +24,10 @@ The bands are a plan, not a promise. Every item was checked against the code and
 
 ---
 
-## 2.12.x — speech and tools
+## 2.12.x — speech
 
-2.12.0 took the command line (cmdit, [ADR 015](../decisions/015-command-line-through-cmdit.md)). Two items are left,
-each its own release.
+2.12.0 took the command line (cmdit, [ADR 015](../decisions/015-command-line-through-cmdit.md)), and 2.12.1 szál's MCP
+tools ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update). One item is left.
 
 ### 2.12.x — speech: `POST /v1/audio/speech` through svara
 
@@ -66,36 +67,6 @@ TTS (Piper) are migrating from hoosh to svara", was wrong on both counts.
     type (`PROV_WHISPER`) names a server hoosh could forward to, and no endpoint uses it. Recognition gets an item
     when there is an engine, or when someone asks for the forward.
   - **Mixing, playback and capture** stay dhvani's.
-
-### 2.12.x — szál's MCP tools
-
-No longer upstream-gated.
-- **What szál delivered:**
-  - szál 2.2.0 (2026-09-25) shipped everything hoosh filed for: `szal_` renames, a consumer bundle
-    (`dist/szal-mcp.cyr`) with no vendored libraries inside, and `szal_register_into(dispatcher)`.
-  - szál 2.3.2 (2026-11-04) is on cyrius 6.7.18, so the toolchain wait is over. The bundle registers 54 tools in 15
-    groups, and its `scripts/consumer-check.sh` passed against hoosh 2.9.14 with no collision and no duplicate
-    warning.
-- **What is left:**
-  1. **bote-core.** szál 2.3.2 builds and tests against bote-core 3.8.9; hoosh vendors 3.8.15, whose registration
-     checks judge more schema (`allOf` / `anyOf` / `oneOf`, a per-document budget). Run szál's consumer check
-     against hoosh 2.11.2 and its bote-core first.
-  2. **An allow-list.** The groups are conversion, encoding, engine, file, flow, git, hash, json, math, net, process,
-     state, step, system and template. A gateway must not expose the ones that reach the host by default:
-     - `file`, `git`, `net`, `process` and `system` reach it directly;
-     - `hash` and `template` read a file when given a path (a file's digest, `wc`);
-     - the workflow groups (engine, flow, step) can run their steps.
-
-     Add a per-group allow-list (`[mcp] tools = [...]`, empty by default), and require `[[auth]]` for anything beyond
-     the pure groups (conversion, encoding, json, math, state).
-  3. **The wiring.** Vendor the bundle at `src/vendor/szal-mcp.cyr`, with a sync script like `scripts/sync-bote.sh`,
-     and call `szal_register_into` in `mcp_init` with the allowed groups. The transport does not change
-     ([ADR 005](../decisions/005-mcp-via-bote.md)).
-  4. **Tests:**
-     - `tools/list` per allow-list;
-     - a call to a group that is not allowed refused as unknown;
-     - a host group refused without `[[auth]]`;
-     - a pure tool answering through `POST /v1/tools/call`.
 
 ---
 
@@ -162,9 +133,13 @@ band waits for one. Two of them wait on an upstream fix; the first is hoosh's ow
     frees none of them; a lookup that inserts nothing leaves its query vector and scope string on the heap. It is
     opt-in (`[semantic]`, an embedding model). Recycle the entries and vectors as the cache does (`keep.cyr`), and
     build the lookup's in the request arena.
-  - **Paths not measured yet:** the hardware endpoints (ai-hwaccel allocates for each answer), `POST /v1/tools/call`
-    (bote), the token-pool endpoints and the batch handler's own bodies. Measure each with `scripts/memory-growth.py`
-    (`--get`, or a POST mode to add) before converting it.
+  - **Paths not measured yet:** the hardware endpoints (ai-hwaccel allocates for each answer), the token-pool
+    endpoints and the batch handler's own bodies. Measure each with `scripts/memory-growth.py` (`--get`, or a POST
+    mode to add) before converting it.
+  - **An MCP tool's own allocations.** Since 2.12.1 bote's bytes for a message are on the request arena, so
+    `GET /v1/tools/list` keeps nothing. A szál tool allocates on the heap: `szal_math_eval` keeps about 1.6 KB a call,
+    and bote keeps its copy of a call's arguments, since a handler may keep it. Both are upstream: szál would need
+    allocator-taking handlers, which bote's handler ABI (`fn(args, claims)`) does not pass.
   - **A remote request's TLS state** (~179 KB each) is sandhi's; see *Upstream-gated*.
 - **Layout-dependent string costs: waiting on upstream.** 2.9.11 found why 2.9.10's version string moved three
   bench rows, and made the bench time aligned heap copies (CHANGELOG 2.9.11). The causes are filed upstream
@@ -257,6 +232,11 @@ release.
     above and three constraints on the fix: a per-thread arena, the session cache kept out of it, and pooled
     connections owning their own allocations. hoosh meets the issue's own Critical bar (a server that fetches on
     every request) and has no workaround.
+- **szál — `dist/szal-mcp.cyr` does not build for AGNOS.** `szal_exec` uses fork, `dup2`, `execve` and a three-argument
+  `waitpid`, and AGNOS spawns processes another way, so the whole bundle fails to compile there. hoosh 2.12.1 leaves it
+  out of its AGNOS build and serves `bote_echo` alone there (`mcp_szal_built`). **Filed:**
+  `szal/docs/development/issues/2026-11-11-szal-mcp-does-not-build-for-agnos.md`, with a standalone repro. When a szál
+  release builds for AGNOS, drop the `CYRIUS_TARGET_AGNOS` guards in `src/main.cyr` and `src/lib/mcp.cyr`.
 - **cyrius — `cyrius coverage` reports on the vendored stdlib, not the local repo.** Still open:
   `cyrius/docs/development/issues/2026-07-23-hoosh-coverage-reports-stdlib-not-local-repo.md`. hoosh gates on
   `scripts/coverage.sh` meanwhile.

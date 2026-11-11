@@ -110,6 +110,12 @@ health_check_interval_secs = 30
 # [[auth]]
 # tokens = ["consumer-a-key", "consumer-b-key"]
 
+# MCP tools (2.12.1, ADR 005): szál's tool groups /v1/tools/list and /v1/tools/call serve, beside bote_echo. None
+# by default. Pure groups: conversion, encoding, json, math, state. Groups that reach the host (file, git, net,
+# process, system, hash, template, engine, flow, step) are registered only when [[auth]] has tokens above.
+# [[mcp]]
+# tools = ["json", "math"]
+
 # Operational logging (stderr). Levels: fatal, error, warn, info, debug, trace.
 # Default is info. The CLI banner / `info` / `help` output stays on stdout.
 # NOTE: double-bracket form — the parser only honors [[table]] sections today

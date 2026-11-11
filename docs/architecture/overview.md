@@ -87,7 +87,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `wq.cyr` | The work queue (2.9.20 split from `pool.cyr`): a bounded ring of job pointers under one mutex, the in-flight count the shutdown drain waits on, the job constructors, `/v1/queue/status`'s body (2.9.26), and `job_begin` (2.10.3: each job's trace context and a released request arena) |
 | `pool.cyr` | Unified worker pool (v2.4.0; on a target with no second thread the accept loop serves instead, [ADR 011](../decisions/011-multithreaded-accept-loop.md)'s 2.10.1 addendum) — 7 workers draining `wq.cyr`'s queue (crypto lanes come from sigil's pool of 64 since 2.9.1); the accept loop enqueues, workers run every request concurrently |
 | `batch.cyr` | `/v1/batch` sync + async — items enqueued as pool jobs; batch registry |
-| `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core |
+| `mcp.cyr` | `/v1/tools/*` via the vendored bote MCP core: `bote_echo`, and since 2.12.1 szál's tool groups that `[mcp] tools` allows (the host-reaching ones only with `[[auth]]` tokens), dispatched one call at a time on the request arena |
 | `events.cyr` | Provider event bus (majra pubsub) + recent-events ring: 128 slots each event is copied into and reused as the ring wraps, events built on the stack (2.10.3) |
 | `otlp.cyr` | OpenTelemetry OTLP/JSON spans (opt-in), the pure half: settings, the span ring (slots reused as it wraps since 2.11.2), span and batch JSON |
 | `otlp_export.cyr` | The I/O half (2.9.14 split): the exporter thread and the POST — local `http` + remote `https` (worker-routed TLS) |
@@ -119,7 +119,7 @@ shutdown, SIGHUP reload), and the `cmd_serve` accept loop + startup init.
 | `logging.cyr` | Structured operational logging (sakshi) + the coarse clock ticker (`hoosh_now_ms`) |
 
 `src/vendor/` — committed single-file distlib bundles: `bote-core.cyr` (MCP
-JSON-RPC core) and `majra.cyr` (pub/sub). Vendored rather than `[deps]` because
+JSON-RPC core), `majra.cyr` (pub/sub) and `szal-mcp.cyr` (szál's MCP tools, 2.12.1). Vendored rather than `[deps]` because
 their manifests pull colliding transitive git deps; see
 [ADR 005](../decisions/005-mcp-via-bote.md) / [ADR 010](../decisions/010-observability.md).
 
@@ -136,6 +136,7 @@ distlibs:
 | **tentib** | In-process ternary (1.58-bit) inference: the packed-model loader and kernel (2.11.0), its incremental decoder (1.4.0, since 2.11.1), and its serving-only load (1.5.0, since 2.11.2) | `[deps.tentib]` → `lib/tentib.cyr`, with its `lib/rosnet.cyr` + `lib/tyche.cyr` |
 | **cmdit** | The command line (2.12.0): getopt-long flags, verb dispatch, generated per-verb help, cmdit's exit codes | `[deps.cmdit]` → `lib/cmdit.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
+| **szál** | MCP tools (2.12.1): 54 tools in 15 groups, registered into hoosh's own dispatcher | vendored `src/vendor/szal-mcp.cyr` (`scripts/sync-szal.sh`); not on AGNOS |
 | **majra** | Provider event bus (pub/sub) | vendored `src/vendor/majra.cyr` |
 | cyrius **sandhi** | HTTPS client (URL parse + DNS + TLS) for remote providers | stdlib |
 | cyrius **sigil** | sha256 / HMAC / native TLS | stdlib |

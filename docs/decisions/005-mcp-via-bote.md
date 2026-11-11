@@ -1,6 +1,6 @@
 # ADR-005: MCP Integration via Bote + Szál
 
-**Status:** Accepted (protocol layer shipped in 2.3.0; szál + kavach pending)
+**Status:** Accepted (protocol layer shipped in 2.3.0; szál's tools in 2.12.1, below; kavach pending)
 **Date:** 2026-03-21 (proposed) · 2026-06-10 (protocol layer accepted/shipped)
 
 > **Update 2026-06-10 (2.3.0):** the bote protocol layer shipped. See
@@ -124,3 +124,41 @@ the generated bundle is excluded from those gates. Re-sync with
 list / call / unknown-tool) and `mcp_tools_list` / `mcp_tools_call` benches
 (full JSON-RPC parse → dispatch → serialize, ~4 µs / ~9 µs). Live-verified
 end-to-end against the running gateway.
+
+## Update (2.12.1): szál's tools, behind an allow-list
+
+szál 2.3.2 ships its tools as a consumer bundle (`dist/szal-mcp.cyr`, its `[lib.mcp]` profile: 54 tools in 15 groups,
+no bote-core, majra, ai-hwaccel or stdlib inside), and hoosh registers them into its own dispatcher. The transport
+does not change.
+
+- **Vendored, as bote-core is,** at `src/vendor/szal-mcp.cyr` (`./scripts/sync-szal.sh <tag>`). szál's manifest
+  declares bote, majra and ai-hwaccel as git sub-deps, which `[deps.szal]` would resolve beside hoosh's own copies.
+  szál's `scripts/consumer-check.sh` passes against hoosh 2.12.0: one shared name, the enum member `REQ_NONE` (0 in
+  both szál and ai-hwaccel), no new duplicate warning, and all 54 tools register beside `bote_echo` with hoosh's
+  bote-core 3.8.15.
+- **Nothing is on by default.** `[mcp] tools = [...]` names the groups (`src/lib/mcp.cyr`'s `MCP_G_*`); an unknown
+  name is logged and ignored. Through 2.12.0, and still with no `[mcp]` section, the dispatcher holds `bote_echo`
+  alone.
+- **A group that reaches the host needs `[[auth]]` tokens.** file, git, net, process and system act on the host;
+  hash and template read a file given a path; engine, flow and step run steps. Each is registered only when the
+  gateway has bearer tokens, so `/v1/tools/*` is authenticated first. Named without tokens, it is logged and left
+  out. The pure groups (conversion, encoding, json, math, state) need nothing.
+- **One call at a time.** szál keeps a process-global last-error buffer that is not thread-safe, and bote's
+  per-request state block is per process unless a threaded server installs a per-thread one, which hoosh does not.
+  So `mcp_dispatch` holds a lock around the codec. Through 2.12.0 up to seven workers ran the codec on the one block
+  at once.
+- **A reload applies the new groups.** `load_config` calls `mcp_configure` on every load. The dispatcher is marked
+  stale and rebuilt on the next call; the old one is never freed, so a call in flight finishes on it.
+- **Memory (ADR 013).** bote's bytes for a message, its response included, go on the request arena
+  (`codec_process_message_a`), as does `bote_echo`'s result. `GET /v1/tools/list` keeps nothing (7.1 KB through
+  2.12.0). A tool's own allocations are szál's: `szal_math_eval` keeps about 1.6 KB a call on the heap.
+- **Not on AGNOS.** The bundle does not compile there: `szal_exec` uses fork, `dup2`, `execve` and a three-argument
+  `waitpid`, and AGNOS spawns processes another way. hoosh's AGNOS build leaves the bundle out and serves `bote_echo`
+  alone (`mcp_szal_built`). Filed upstream: szál's
+  `docs/development/issues/2026-11-11-szal-mcp-does-not-build-for-agnos.md`.
+- **What this leaves to kavach:** szál's own confinement holds:
+  - file tools stay in the working directory;
+  - `szal_exec` runs no shell and refuses `/` and `..` in a program's name;
+  - `szal_http` refuses loopback, link-local and RFC 1918 addresses.
+
+  A sandbox around the host groups is still kavach's (ADR 006).
