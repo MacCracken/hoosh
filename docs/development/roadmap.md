@@ -8,12 +8,13 @@ live in [CHANGELOG.md](../../CHANGELOG.md), one entry each; design decisions liv
 in [ADRs](../decisions/). Nothing here is a record of what was done — if an item
 ships, it moves to the CHANGELOG and leaves this file.
 
-**Current**: v2.12.2 (cyrius 6.7.18). `POST /v1/audio/speech` is rendered in hoosh's own process through shabda 3.1.1
+**Current**: v2.12.3 (cyrius 6.7.18). `POST /v1/audio/speech` is rendered in hoosh's own process through shabda 3.1.1
 and svara 3.6.3 ([ADR 016](../decisions/016-in-process-speech-through-svara.md)); szál's MCP tools are served behind
-an allow-list ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); the command line goes through cmdit 1.5.1
-([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary model is served in process through
-tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a request's own data is released
-when its thread's next request starts ([ADR 013](../decisions/013-request-memory.md)). See the CHANGELOG.
+an allow-list, on AGNOS too since szál 2.3.3 ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); the
+command line goes through cmdit 1.5.1 ([ADR 015](../decisions/015-command-line-through-cmdit.md)); a packed ternary
+model is served in process through tentib 1.5.1 ([ADR 014](../decisions/014-in-process-ternary-inference.md)); and a
+request's own data is released when its thread's next request starts ([ADR 013](../decisions/013-request-memory.md)).
+See the CHANGELOG.
 **Next**: 2.13.x, accounting and capacity.
 
 The bands are a plan, not a promise. Every item was checked against the code and its upstream on 2026-11-11.
@@ -81,12 +82,7 @@ The bands are a plan, not a promise. Every item was checked against the code and
 ## Patches *(any release; none gates a minor)*
 
 Fixes that change nothing a client sees. Each ships as a patch on whatever minor is current when it is ready, and no
-band waits for one. Two of them wait on an upstream fix; the others are hoosh's own and can go at any time.
-
-- **szál 2.3.3 on AGNOS.** szál 2.3.3 builds `dist/szal-mcp.cyr` for AGNOS: `szal_exec` has an AGNOS path, and all 54
-  tools stay on both targets (szál's issue was archived 2026-11-11). Vendor it (`scripts/sync-szal.sh 2.3.3`, after
-  szál's `consumer-check.sh`), drop the `CYRIUS_TARGET_AGNOS` guards in `src/main.cyr` and `src/lib/mcp.cyr`
-  (`mcp_szal_built`), and build `--agnos`.
+band waits for one. Two of them wait on an upstream fix; the first is hoosh's own and can go at any time.
 
 - **ADR 013 — what is left.**
   - **The semantic index.** An insert keeps a 32-byte entry, the embedding vector and a scope string, and a removal

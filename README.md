@@ -258,7 +258,7 @@ tokens = "your-secret-token"
 # MCP tools (2.12.1): szál's tool groups on /v1/tools/*, beside bote_echo; none by default.
 # Pure: conversion, encoding, json, math, state. A group that reaches the host (file, git, net,
 # process, system, hash, template, engine, flow, step) is registered only with [[auth]] tokens.
-# Not on AGNOS (szál's bundle does not build there yet).
+# On AGNOS too since 2.12.3 (szál 2.3.3), where szál refuses the tools that take a path.
 # [[mcp]]
 # tools = ["json", "math"]
 

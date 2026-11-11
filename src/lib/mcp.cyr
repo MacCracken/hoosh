@@ -7,8 +7,9 @@
 #
 # The dispatcher always holds a bote_echo smoke tool, so the endpoints are live-verifiable end to end.
 #
-# 2.12.1: szál's tools (vendor/szal-mcp.cyr, szál 2.3.2: 54 tools in 15 groups) are registered beside it, the groups
-# `[mcp] tools` names and no others. None is on by default. The transport does not change (ADR 005).
+# 2.12.1: szál's tools (vendor/szal-mcp.cyr, szál 2.3.3 since 2.12.3: 54 tools in 15 groups) are registered beside it,
+# the groups `[mcp] tools` names and no others. None is on by default. The transport does not change (ADR 005).
+# Since 2.12.3 (szál 2.3.3) on AGNOS too, where szál refuses every tool that takes a path (AGNOS has no getcwd).
 # - **Groups that reach the host** (file, git, net, process, system; hash and template, which read a file given a
 #   path; engine, flow and step, which run steps) are registered only when `[[auth]]` has bearer tokens, so
 #   /v1/tools/* is authenticated before any of them is reachable. A host group named without tokens is logged and
@@ -71,20 +72,8 @@ fn mcp_group_index(name) {
 # 1 when group i acts on the host (files, programs, the network, the environment, or steps that may).
 fn mcp_group_reaches_host(i) { return i >= MCP_G_FIRST_HOST; }
 
-# 1 when szál's bundle is in this build: everywhere but AGNOS (src/main.cyr leaves it out there).
-fn mcp_szal_built() {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return 0;
-    #endif
-    return 1;
-}
-
-# Group i's (ToolDef, handler) pairs, szál's own collector (a fresh vec each call). Never called on AGNOS.
+# Group i's (ToolDef, handler) pairs, szál's own collector (a fresh vec each call).
 fn _mcp_group_tools(i) {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return vec_new();
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
     if (i == MCP_G_CONVERSION) { return szal_conversion_tools(); }
     if (i == MCP_G_ENCODING) { return szal_encoding_tools(); }
     if (i == MCP_G_JSON) { return szal_json_tools(); }
@@ -100,7 +89,6 @@ fn _mcp_group_tools(i) {
     if (i == MCP_G_STEP) { return szal_step_tools(); }
     if (i == MCP_G_SYSTEM) { return szal_system_tools(); }
     return szal_template_tools();
-    #endif
 }
 
 # The groups to register, from `[mcp] tools`' n names (names[0..n), cstrs) and whether `[[auth]]` has tokens. An
@@ -109,10 +97,6 @@ fn _mcp_group_tools(i) {
 fn mcp_configure(names, n, has_auth) {
     var mask = 0;
     var i = 0;
-    if (n > 0 && mcp_szal_built() == 0) {
-        hlog_warn("mcp: [mcp] tools is ignored: szal's tools are not built for this target");
-        n = 0;
-    }
     while (i < n) {
         var nm = load64(names + i * 8);
         var g = mcp_group_index(nm);
@@ -202,7 +186,6 @@ fn mcp_build(mask) {
     var g = 0;
     while (g < MCP_G_COUNT) {
         if ((mask & (1 << g)) != 0) {
-            #ifndef CYRIUS_TARGET_AGNOS
             var tools = _mcp_group_tools(g);
             var k = 0;
             while (k < vec_len(tools)) {
@@ -210,7 +193,6 @@ fn mcp_build(mask) {
                 count = count + mcp_register_tool(disp, szal_tool_def_of(t), szal_tool_handler_of(t));
                 k = k + 1;
             }
-            #endif
         }
         g = g + 1;
     }

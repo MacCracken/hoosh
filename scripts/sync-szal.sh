@@ -12,10 +12,10 @@
 # It scans the bundle's names against hoosh's compile set, builds hoosh with the bundle, and registers the 54 tools
 # into a dispatcher that already holds one. Then bump the tag here, in src/lib/mcp.cyr's header and in the CHANGELOG.
 #
-# Usage: ./scripts/sync-szal.sh [tag]   (default: 2.3.2)
+# Usage: ./scripts/sync-szal.sh [tag]   (default: 2.3.3)
 set -euo pipefail
 
-TAG="${1:-2.3.2}"
+TAG="${1:-2.3.3}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$REPO_ROOT/src/vendor/szal-mcp.cyr"
 URL="https://raw.githubusercontent.com/MacCracken/szal/${TAG}/dist/szal-mcp.cyr"

@@ -5,6 +5,48 @@ All notable changes to hoosh are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [2.12.3] — 2026-11-11
+
+**szál's MCP tools on AGNOS too.** szál 2.3.3 builds its tools bundle for AGNOS, fixing the issue 2.12.1 filed, so
+hoosh vendors it and drops the AGNOS exclusion ([ADR 005](docs/decisions/005-mcp-via-bote.md)'s 2.12.1 update).
+
+**2456 assertions** in 195 groups. All gates are clean: fmt, lint, vet, deny, coverage (541/923, 58%), the security
+scan, the four fuzz targets, the shutdown smoke test and the wire smoke test (91 checks). The x86_64, aarch64 and
+AGNOS builds compile.
+
+⚠ **What changes on the wire.** Nothing on Linux. On AGNOS, `[mcp] tools` now registers its groups, where 2.12.1 and
+2.12.2 logged a warning and served `bote_echo` alone.
+
+### Changed — szál 2.3.3 (`src/vendor/szal-mcp.cyr`, `src/main.cyr`, `src/lib/mcp.cyr`)
+
+- **The bundle is szál 2.3.3's** `dist/szal-mcp.cyr`, byte-identical to the tag (`scripts/sync-szal.sh`, whose
+  default is now 2.3.3). `szal_exec` has an AGNOS path: the program is spawned from disk with `sys_spawn_argv`, and
+  its stdout and stderr come back through two pipes read in turn. Five Linux syscall numbers became the stdlib's
+  per-target calls. Linux behaviour is unchanged, and the bundle is built against the bote-core hoosh already vendors
+  (3.8.15). Its `# Requires` block names no leaf `[deps].stdlib` lacks.
+- **The AGNOS exclusion is gone:**
+  - the `CYRIUS_TARGET_AGNOS` guard around the include in `src/main.cyr`;
+  - the guards in `mcp.cyr`;
+  - `mcp_szal_built` and its warning.
+
+  On AGNOS szál refuses every tool that takes a path, since AGNOS's syscall layer has no getcwd to confine to; the
+  rest answer as on Linux. The AGNOS build is 3.83 MB (3.64 MB without the tools). It compiles; nothing here boots it
+  (the roadmap's 2.15.x AGNOS CI item).
+- **szál's `consumer-check.sh` passes.** It assumes a consumer without szál, so it was run on a copy of this tree with
+  the 2.3.2 bundle taken out (the code AGNOS built through 2.12.2):
+  - 16,858 symbols scanned, the speech libraries included, and `REQ_NONE` is still the one shared name;
+  - the bundle adds no duplicate warning;
+  - 55 tools register.
+- **Live.** A gateway with `[mcp] tools = ["math", "json", "file"]` and no tokens served:
+  - echo with the json and math tools;
+  - `1036` from `szal_math_eval`;
+  - and left file out, as in 2.12.1.
+
+### Benchmarks
+
+- The MCP rows did not move: `mcp_tools_list` 3.58 µs, `mcp_tools_call` 5.01 µs, `mcp_szal_math_eval` 9.65 µs
+  (2.12.2's run: 3.52, 5.02, 9.57). The other 42 rows are within noise of 2.12.2's.
+
 ## [2.12.2] — 2026-11-11
 
 **Speech: `POST /v1/audio/speech` through svara, in the gateway's process.** A `type = "svara"` provider renders

@@ -152,7 +152,7 @@ distlibs:
 | **svara**, **hisab**, **naad**, **goonj** | Speech (2.12.2): formant synthesis, and its maths and DSP | `[deps.svara]`, `[deps.hisab]`, `[deps.naad]`, `[deps.goonj]` → `lib/*.cyr` |
 | **cmdit** | The command line (2.12.0): getopt-long flags, verb dispatch, generated per-verb help, cmdit's exit codes | `[deps.cmdit]` → `lib/cmdit.cyr` |
 | **bote** | MCP JSON-RPC 2.0 core (registry/dispatcher/codec) | vendored `src/vendor/bote-core.cyr` |
-| **szál** | MCP tools (2.12.1): 54 tools in 15 groups, registered into hoosh's own dispatcher | vendored `src/vendor/szal-mcp.cyr` (`scripts/sync-szal.sh`); not on AGNOS |
+| **szál** | MCP tools (2.12.1): 54 tools in 15 groups, registered into hoosh's own dispatcher | vendored `src/vendor/szal-mcp.cyr` (`scripts/sync-szal.sh`); szál 2.3.3 since 2.12.3, on AGNOS too |
 | **majra** | Provider event bus (pub/sub) | vendored `src/vendor/majra.cyr` |
 | cyrius **sandhi** | HTTPS client (URL parse + DNS + TLS) for remote providers | stdlib |
 | cyrius **sigil** | sha256 / HMAC / native TLS | stdlib |

@@ -9,14 +9,14 @@
 
 | | |
 |---|---|
-| **Version** | **2.12.2** (`POST /v1/audio/speech` through shabda 3.1.1 and svara 3.6.3, rendered in process by a `type = "svara"` route and streamed as 24 kHz 16-bit WAV or PCM: [ADR 016](../decisions/016-in-process-speech-through-svara.md)). 2.12.1: szál 2.3.2's MCP tools behind `[mcp] tools` ([ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update); 2.12.0: the command line through cmdit 1.5.1 ([ADR 015](../decisions/015-command-line-through-cmdit.md)) |
-| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.5.1** (since 2.11.2; brings `rosnet` 1.4.1 and `tyche` 1.2.2); `cmdit` **1.5.1** (since 2.12.0); speech since 2.12.2: `shabda` **3.1.1**, `shabdakosh` **3.1.1**, `varna` **2.5.2**, `svara` **3.6.3**, `hisab` **3.4.1**, `naad` **2.3.3**, `goonj` **2.3.1**; vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0**, `szal-mcp` **2.3.2** (since 2.12.1; szál 2.3.3, which builds for AGNOS, is the roadmap's next patch); the rest the latest tag on 2026-11-11 |
+| **Version** | **2.12.3** (szál 2.3.3's MCP tools, on AGNOS too: [ADR 005](../decisions/005-mcp-via-bote.md)'s 2.12.1 update). 2.12.2: `POST /v1/audio/speech` through shabda 3.1.1 and svara 3.6.3, rendered in process by a `type = "svara"` route and streamed as 24 kHz 16-bit WAV or PCM ([ADR 016](../decisions/016-in-process-speech-through-svara.md)); 2.12.1: szál's MCP tools behind `[mcp] tools`; 2.12.0: the command line through cmdit 1.5.1 ([ADR 015](../decisions/015-command-line-through-cmdit.md)) |
+| **Toolchain** | Cyrius pin **6.7.18** (`cyrius.cyml`); `ai-hwaccel` **2.5.6**; `tentib` **1.5.1** (since 2.11.2; brings `rosnet` 1.4.1 and `tyche` 1.2.2); `cmdit` **1.5.1** (since 2.12.0); speech since 2.12.2: `shabda` **3.1.1**, `shabdakosh` **3.1.1**, `varna` **2.5.2**, `svara` **3.6.3**, `hisab` **3.4.1**, `naad` **2.3.3**, `goonj` **2.3.1**; vendored `bote-core` **3.8.15** (since 2.10.1), `majra` **2.13.0**, `szal-mcp` **2.3.3** (since 2.12.3, on AGNOS too; 2.3.2 in 2.12.1 and 2.12.2); the rest the latest tag on 2026-11-11 |
 | **Binary** (x86_64 static ELF) | ~3.9 MB under `CYRIUS_DCE=1` (the release build; 3.0 MB through 2.12.1, before the speech libraries) |
 | **Source** | ~20,000 lines / 49 files (`src/main.cyr` + 48 `src/lib/*.cyr`) + 3 vendored distlib bundles |
 | **Tests** | 2456 assertions, 195 groups (`tests/hoosh.tcyr`); 42 of 48 `src/lib` modules are included for real (`scripts/coverage.sh` lists them); no copies of `src/` code remain; `scripts/wire-smoke.py` reads a real gateway as a strict client does (91 checks, speech among them since 2.12.2); `scripts/memory-growth.py` measures what each path and keeper keeps per request (`--speech` since 2.12.2) |
 | **Benchmarks** | 45 (`tests/hoosh.bcyr`, on the real `src/` code since 2.9.24; two live-catalog rows since 2.9.25, `cache_insert_full` since 2.10.0, the listings and `provider_err_set` since 2.10.2, the trace context, the request arena's builders, a stream chunk and a built event since 2.10.3, a tentib reply, load and unchanged reload since 2.11.0, a 22-token reply and a same-shape load since 2.11.1, a whole command-line parse since 2.12.0, a szál tool call since 2.12.1, a speech plan and render since 2.12.2); CSV history + `benchmarks.md` (release gate) |
 | **Fuzz** | 4 targets (`fuzz/*.fcyr`) — batch split, trace extract (on the real `trace.cyr` since 2.10.3), inference request, message content |
-| **Coverage** | symbol coverage 58% (541/924; `scripts/coverage.sh`, CI floor 30%) |
+| **Coverage** | symbol coverage 58% (541/923; `scripts/coverage.sh`, CI floor 30%) |
 | **Providers** | 19 (9 local incl. vLLM/TensorRT-LLM/ONNX + Whisper, a type no endpoint uses yet; 2 in-process: tentib since 2.11.0, svara (speech only) since 2.12.2; 8 remote) |
 | **ADRs** | 16 (`docs/decisions/`) |
 | **Model catalog** | live per route (Anthropic / Gemini / OpenAI-compatible / Ollama lists), refreshed at startup, on reload, on `POST /v1/models/refresh` and every 6 h; compiled fallback table refreshed 2026-10-09 (107 metadata rows, 81 price rows) |
@@ -88,8 +88,7 @@ See [roadmap.md](roadmap.md), banded by release (re-checked 2026-11-11):
 - **2.13.x – 2.15.x, next:** accounting and capacity (cache tokens, cost recommendations over the live catalog, a
   configurable worker pool), requests for current models (thinking on Gemini and Ollama, multimodal parts, the
   Responses API, sampling on a tentib route), observability (nested spans, OTLP/protobuf, an AGNOS CI lane).
-- **Patches, on whichever minor is current (none gates a band):** szál 2.3.3, which builds for AGNOS (vendor it and
-  drop the guards); what is left of ADR 013 (the semantic index; the
+- **Patches, on whichever minor is current (none gates a band):** what is left of ADR 013 (the semantic index; the
   hardware, MCP, token-pool and batch paths, not measured yet), the layout-dependent string costs waiting on cyrius
   and ai-hwaccel, and remote TLS connection pooling, measured at −33 ms per request and waiting on two sandhi
   preconditions.

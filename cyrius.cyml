@@ -138,9 +138,10 @@ modules = ["dist/shabda.cyr"]
 # 2.8.0 renamed its codes MAJRA_ERR_* and keeps ERR_* as aliases until 3.0.0).
 # Powers src/lib/events.cyr.
 #
-# szál's MCP tools (2.12.1) are vendored the same way, at src/vendor/szal-mcp.cyr: szál 2.3.2's `[lib.mcp]`
-# profile, 54 tools with no bote-core, majra, ai-hwaccel or stdlib inside. Its `# Requires` block names stdlib
-# leaves hoosh lists above, and `math`, added to [deps].stdlib for it (tentib's bundle included it too, so lib/
-# already had the file). Its one name in common with hoosh's compile set is the enum member REQ_NONE (= 0 in both
-# szál and ai-hwaccel); szál's scripts/consumer-check.sh allow-lists it and passes against hoosh 2.12.0 and its
-# bote-core 3.8.15. Re-sync with `./scripts/sync-szal.sh <tag>`. Powers src/lib/mcp.cyr's tool groups.
+# szál's MCP tools (2.12.1) are vendored the same way, at src/vendor/szal-mcp.cyr: szál 2.3.3's `[lib.mcp]` profile
+# (since 2.12.3; it builds for AGNOS too), 54 tools with no bote-core, majra, ai-hwaccel or stdlib inside. Its
+# `# Requires` block names stdlib leaves hoosh lists above, and `math`, added to [deps].stdlib for it (tentib's bundle
+# included it too, so lib/ already had the file). Its one name in common with hoosh's compile set is the enum member
+# REQ_NONE (= 0 in both szál and ai-hwaccel); szál's scripts/consumer-check.sh allow-lists it and passes against hoosh
+# 2.12.3 (its speech libraries included) and its bote-core 3.8.15. Re-sync with `./scripts/sync-szal.sh <tag>`. Powers
+# src/lib/mcp.cyr's tool groups.

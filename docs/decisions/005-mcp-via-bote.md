@@ -156,6 +156,11 @@ does not change.
   `waitpid`, and AGNOS spawns processes another way. hoosh's AGNOS build leaves the bundle out and serves `bote_echo`
   alone (`mcp_szal_built`). Filed upstream: szál's
   `docs/development/issues/2026-11-11-szal-mcp-does-not-build-for-agnos.md`.
+  - **2.12.3: on AGNOS too.** szál 2.3.3 fixed it (the issue is archived there): `szal_exec` has an AGNOS path
+    (`sys_spawn_argv`, its output through two pipes read in turn), and all 54 tools build on both targets. hoosh
+    vendors 2.3.3 and drops the exclusion and `mcp_szal_built`. On AGNOS szál refuses every tool that takes a path,
+    since AGNOS's syscall layer has no getcwd to confine to. szál's `consumer-check.sh` passes against hoosh 2.12.3,
+    speech libraries included: `REQ_NONE` is still the one shared name.
 - **What this leaves to kavach:** szál's own confinement holds:
   - file tools stay in the working directory;
   - `szal_exec` runs no shell and refuses `/` and `..` in a program's name;
